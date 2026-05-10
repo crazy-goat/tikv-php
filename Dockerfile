@@ -1,32 +1,16 @@
-FROM alpine:edge
+FROM php:8.4-cli-alpine
 
-# Add Alpine Edge repositories
-RUN echo "https://dl-cdn.alpinelinux.org/alpine/edge/main" > /etc/apk/repositories && \
-    echo "https://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
+# Install grpc extension via pecl
+RUN apk add --no-cache linux-headers && \
+    pecl install grpc && \
+    docker-php-ext-enable grpc
 
-# Install PHP 8.4 + pre-built grpc extension + protoc + grpc_php_plugin
-RUN apk add --no-cache \
-    php84 \
-    php84-pecl-grpc \
-    php84-phar \
-    php84-mbstring \
-    php84-openssl \
-    php84-curl \
-    php84-ctype \
-    php84-dom \
-    php84-xml \
-    php84-simplexml \
-    php84-xmlwriter \
-    php84-tokenizer \
-    php84-iconv \
-    php84-zip \
-    composer \
-    protobuf \
-    protobuf-dev \
-    grpc-plugins
+# Install protobuf tools and composer
+RUN apk add --no-cache protobuf protobuf-dev grpc-plugins composer
 
-# Create symlink for php command
-RUN ln -sf /usr/bin/php84 /usr/bin/php
+# Install zip extension (needed by composer)
+RUN apk add --no-cache zip unzip libzip-dev && \
+    docker-php-ext-install zip
 
 # Set working directory
 WORKDIR /app
