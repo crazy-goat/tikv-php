@@ -200,7 +200,7 @@ jobs:
         run: |
           docker compose run --rm \
             -e PD_ENDPOINTS=pd:2379 \
-            php-client vendor/bin/phpunit --testsuite E2E --testdox
+            php-client vendor/bin/phpunit --testsuite E2E --testdox --no-coverage
         timeout-minutes: 10
 
       - name: Cleanup
