@@ -264,7 +264,7 @@ jobs:
 
       - name: Run TxnKV E2E tests
         run: |
-          docker compose run --rm \
+          docker compose run --rm --no-deps \
             -e PD_ENDPOINTS=pd:2379 \
             php-client vendor/bin/phpunit --testsuite E2E-TxnKV --testdox --no-coverage
         timeout-minutes: 10
