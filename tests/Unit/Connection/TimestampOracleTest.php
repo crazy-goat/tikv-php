@@ -4,12 +4,11 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Connection;
 
-use CrazyGoat\TiKV\Client\Connection\PdClient;
+use CrazyGoat\Proto\Pdpb\Timestamp;
+use CrazyGoat\Proto\Pdpb\TsoResponse;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
-use CrazyGoat\Proto\Pdpb\Timestamp;
-use CrazyGoat\Proto\Pdpb\TsoResponse;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 
