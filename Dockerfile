@@ -1,16 +1,28 @@
-FROM php:8.4-cli-alpine
+FROM alpine:3.21
 
-# Install grpc extension via pecl
-RUN apk add --no-cache $PHPIZE_DEPS && \
-    pecl install grpc && \
-    docker-php-ext-enable grpc
+# Install PHP 8.3 + pre-built grpc extension + protoc + grpc_php_plugin
+RUN apk add --no-cache \
+    php83 \
+    php83-pecl-grpc \
+    php83-phar \
+    php83-mbstring \
+    php83-openssl \
+    php83-curl \
+    php83-ctype \
+    php83-dom \
+    php83-xml \
+    php83-simplexml \
+    php83-xmlwriter \
+    php83-tokenizer \
+    php83-iconv \
+    php83-zip \
+    composer \
+    protobuf \
+    protobuf-dev \
+    grpc-plugins
 
-# Install protobuf tools and composer
-RUN apk add --no-cache protobuf protobuf-dev grpc-plugins composer
-
-# Install zip extension (needed by composer)
-RUN apk add --no-cache zip unzip libzip-dev && \
-    docker-php-ext-install zip
+# Create symlink for php command
+RUN ln -sf /usr/bin/php83 /usr/bin/php
 
 # Set working directory
 WORKDIR /app
