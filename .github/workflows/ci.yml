@@ -141,11 +141,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Increase file descriptor limits
+        run: |
+          sudo sysctl -w fs.file-max=100000
+          ulimit -n 100000
+          echo "ulimit -n: $(ulimit -n)"
+
       - name: Build Docker images
         run: docker compose build
 
       - name: Start TiKV cluster
         run: |
+          ulimit -n 100000
           docker compose up -d tikv1 tikv2 tikv3
           echo "=== docker compose ps ==="
           docker compose ps
@@ -176,15 +183,18 @@ jobs:
               echo "All 3 TiKV stores registered!"
               break
             fi
-            # Log progress every 15 iterations
             if [ $((i % 15)) -eq 0 ]; then
-              echo "[$i/150] Stores: $STORE_COUNT, response: $RESP"
+              echo "[$i/150] Stores: $STORE_COUNT"
+              echo "tikv1 last log:"
+              docker compose logs --tail 3 tikv1 2>&1 || true
             fi
             if [ "$i" -eq 150 ]; then
               echo "Timeout waiting for stores (count=$STORE_COUNT)"
               docker compose ps
-              echo "=== tikv1 logs (last 20 lines) ==="
-              docker compose logs tikv1 2>&1 | tail -20 || true
+              echo "=== tikv1 logs ==="
+              docker compose logs tikv1 2>&1 | tail -30 || true
+              echo "=== tikv2 logs ==="
+              docker compose logs tikv2 2>&1 | tail -10 || true
               exit 1
             fi
             sleep 2
