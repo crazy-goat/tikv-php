@@ -15,6 +15,13 @@
         <testsuite name="E2E">
             <directory>tests/E2E</directory>
         </testsuite>
+        <testsuite name="E2E-RawKV">
+            <directory>tests/E2E</directory>
+            <exclude>tests/E2E/TxnKvE2ETest.php</exclude>
+        </testsuite>
+        <testsuite name="E2E-TxnKV">
+            <file>tests/E2E/TxnKvE2ETest.php</file>
+        </testsuite>
     </testsuites>
     <source>
         <include>

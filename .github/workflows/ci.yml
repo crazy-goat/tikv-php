@@ -144,13 +144,16 @@ jobs:
       - name: Build Docker images
         run: docker compose build
 
-      - name: Start TiKV cluster
+      #
+      # RawKV E2E tests (V1ttl mode with enable-ttl)
+      #
+      - name: Start TiKV cluster (V1ttl)
         run: |
           docker compose up -d tikv1 tikv2 tikv3
           echo "=== docker compose ps ==="
           docker compose ps
 
-      - name: Wait for PD health
+      - name: Wait for PD health (V1ttl)
         run: |
           echo "Waiting for PD to be healthy..."
           for i in $(seq 1 30); do
@@ -166,7 +169,7 @@ jobs:
             sleep 2
           done
 
-      - name: Wait for TiKV stores
+      - name: Wait for TiKV stores (V1ttl)
         run: |
           echo "Waiting for TiKV stores to register with PD (up to 5 min)..."
           for i in $(seq 1 150); do
@@ -196,13 +199,76 @@ jobs:
       - name: Install dependencies
         run: docker compose run --rm php-client composer install --no-interaction --prefer-dist --no-progress
 
-      - name: Run E2E tests
+      - name: Run RawKV E2E tests
         run: |
           docker compose run --rm \
             -e PD_ENDPOINTS=pd:2379 \
-            php-client vendor/bin/phpunit --testsuite E2E --testdox --no-coverage
+            php-client vendor/bin/phpunit --testsuite E2E-RawKV --testdox --no-coverage
         timeout-minutes: 10
 
-      - name: Cleanup
+      - name: Cleanup V1ttl cluster
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+      #
+      # TxnKV E2E tests (V1 mode without enable-ttl)
+      #
+      - name: Start TiKV cluster (V1)
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.txnkv.yml up -d tikv1 tikv2 tikv3
+          echo "=== docker compose ps ==="
+          docker compose ps
+
+      - name: Wait for PD health (V1)
+        run: |
+          echo "Waiting for PD to be healthy..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:2379/pd/api/v1/health > /dev/null 2>&1; then
+              echo "PD is healthy!"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Timeout waiting for PD"
+              docker compose ps
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Wait for TiKV stores (V1)
+        run: |
+          echo "Waiting for TiKV stores to register with PD (up to 5 min)..."
+          for i in $(seq 1 150); do
+            RESP=$(curl -s http://localhost:2379/pd/api/v1/stores 2>/dev/null || echo "")
+            STORE_COUNT=$(echo "$RESP" | jq -r '.stores | length // 0' 2>/dev/null || echo "0")
+            if [ "$STORE_COUNT" -ge 3 ] 2>/dev/null; then
+              echo "All 3 TiKV stores registered!"
+              break
+            fi
+            if [ $((i % 15)) -eq 0 ]; then
+              echo "[$i/150] Stores: $STORE_COUNT"
+              echo "tikv1 last log:"
+              docker compose logs --tail 3 tikv1 2>&1 || true
+            fi
+            if [ "$i" -eq 150 ]; then
+              echo "Timeout waiting for stores (count=$STORE_COUNT)"
+              docker compose ps
+              echo "=== tikv1 logs ==="
+              docker compose logs tikv1 2>&1 | tail -30 || true
+              echo "=== tikv2 logs ==="
+              docker compose logs tikv2 2>&1 | tail -10 || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Run TxnKV E2E tests
+        run: |
+          docker compose run --rm \
+            -e PD_ENDPOINTS=pd:2379 \
+            php-client vendor/bin/phpunit --testsuite E2E-TxnKV --testdox --no-coverage
+        timeout-minutes: 10
+
+      - name: Cleanup V1 cluster
         if: always()
         run: docker compose down -v --remove-orphans
