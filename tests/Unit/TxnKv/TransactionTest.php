@@ -16,9 +16,9 @@ use PHPUnit\Framework\TestCase;
 
 class TransactionTest extends TestCase
 {
-    private PdClientInterface $pdClient;
-    private GrpcClientInterface $grpc;
-    private RegionCacheInterface $regionCache;
+    private \PHPUnit\Framework\MockObject\MockObject $pdClient;
+    private \PHPUnit\Framework\MockObject\MockObject $grpc;
+    private \PHPUnit\Framework\MockObject\MockObject $regionCache;
     private LockResolver $lockResolver;
     private RegionInfo $testRegion;
 

@@ -100,11 +100,7 @@ final class Transaction
         $this->ensureActive();
 
         if (array_key_exists($key, $this->writeSet)) {
-            $value = $this->writeSet[$key];
-            if ($value === null) {
-                return null;
-            }
-            return $value;
+            return $this->writeSet[$key];
         }
 
         return $this->executeWithRetry($key, function () use ($key): ?string {
@@ -229,7 +225,7 @@ final class Transaction
                 continue;
             }
 
-            $regionLimit = $remaining === 0 ? 0 : $remaining;
+            $regionLimit = $remaining;
             $regionResults = $this->executeScanForRegion(
                 $region,
                 $scanStart,
@@ -368,7 +364,7 @@ final class Transaction
         $allKeys = array_keys($this->writeSet);
         $firstRegionKeys = null;
 
-        foreach ($keysByRegion as $regionId => $regionData) {
+        foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionMutations = $regionData['mutations'];
             $isPrimaryRegion = $firstRegionKeys === null;
@@ -380,7 +376,7 @@ final class Transaction
                 );
             }
 
-            $this->prewriteForRegion($region, $regionMutations, $primary, $isPrimaryRegion);
+            $this->prewriteForRegion($region, $regionMutations, $primary);
         }
 
         $this->commitTs = $this->pdClient->getTimestamp();
@@ -397,10 +393,10 @@ final class Transaction
         $keysByRegion = $this->groupMutationsByRegion($mutations);
         $allKeys = array_keys($this->writeSet);
 
-        foreach ($keysByRegion as $regionId => $regionData) {
+        foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionMutations = $regionData['mutations'];
-            $this->prewriteForRegion($region, $regionMutations, $primary, true);
+            $this->prewriteForRegion($region, $regionMutations, $primary);
         }
 
         $this->commitTs = $this->pdClient->getTimestamp();
@@ -417,7 +413,6 @@ final class Transaction
         RegionInfo $region,
         array $mutations,
         string $primary,
-        bool $isPrimaryRegion,
     ): void {
         $address = $this->resolveStoreAddress($region->leaderStoreId);
 
@@ -512,7 +507,7 @@ final class Transaction
 
         $keysByRegion = $this->groupStringsByRegion($keys);
 
-        foreach ($keysByRegion as $regionId => $regionData) {
+        foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
             $this->commitForRegion($region, $regionKeys);
@@ -562,7 +557,7 @@ final class Transaction
     {
         $keysByRegion = $this->groupStringsByRegion($keys);
 
-        foreach ($keysByRegion as $regionId => $regionData) {
+        foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
             $address = $this->resolveStoreAddress($region->leaderStoreId);
@@ -654,18 +649,14 @@ final class Transaction
 
     private function pessimisticRollbackAll(): void
     {
-        $pessimisticKeys = [];
-        foreach ($this->writeSet as $key => $value) {
-            $pessimisticKeys[] = $key;
-        }
-
+        $pessimisticKeys = array_keys($this->writeSet);
         if ($pessimisticKeys === []) {
             return;
         }
 
         $keysByRegion = $this->groupStringsByRegion($pessimisticKeys);
 
-        foreach ($keysByRegion as $regionId => $regionData) {
+        foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
             $address = $this->resolveStoreAddress($region->leaderStoreId);
@@ -700,7 +691,7 @@ final class Transaction
         $results = [];
         $keysByRegion = $this->groupStringsByRegion($keys);
 
-        foreach ($keysByRegion as $regionId => $regionData) {
+        foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
             $address = $this->resolveStoreAddress($region->leaderStoreId);
@@ -795,7 +786,7 @@ final class Transaction
 
     private function getPrimaryKey(): string
     {
-        foreach ($this->writeSet as $key => $value) {
+        foreach (array_keys($this->writeSet) as $key) {
             return $key;
         }
         throw new \LogicException('Write set is empty, no primary key');

@@ -37,7 +37,7 @@ final class PdClient implements PdClientInterface
 
     public function getTimestamp(): int
     {
-        if ($this->tso === null) {
+        if (!$this->tso instanceof TimestampOracle) {
             $this->tso = new TimestampOracle(
                 $this->grpc,
                 $this->pdAddress,
