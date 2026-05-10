@@ -1,7 +1,7 @@
 FROM php:8.4-cli-alpine
 
 # Install grpc extension via pecl
-RUN apk add --no-cache linux-headers && \
+RUN apk add --no-cache $PHPIZE_DEPS && \
     pecl install grpc && \
     docker-php-ext-enable grpc
 
