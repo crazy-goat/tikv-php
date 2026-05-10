@@ -164,7 +164,7 @@ jobs:
         run: |
           echo "Waiting for all 3 TiKV stores to register with PD..."
           for i in $(seq 1 30); do
-            RESP=$(curl -sf http://localhost:2379/pd/api/v1/stores 2>/dev/null || true)
+            RESP=$(curl -s http://localhost:2379/pd/api/v1/stores 2>/dev/null || true)
             if [ -n "$RESP" ]; then
               STORE_COUNT=$(echo "$RESP" | jq '.stores | length' 2>/dev/null || echo "0")
               if [ "$STORE_COUNT" -ge 3 ] 2>/dev/null; then
