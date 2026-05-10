@@ -595,7 +595,7 @@ final class Transaction
         $request = new PessimisticLockRequest();
         $request->setContext($this->createContext($region));
         $request->setMutations([$mutation]);
-        $request->setPrimaryLock($this->getPrimaryKey());
+        $request->setPrimaryLock(count($this->writeSet) === 0 ? $key : $this->getPrimaryKey());
         $request->setStartVersion($this->startTs);
         $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
         $request->setForUpdateTs($this->startTs);
