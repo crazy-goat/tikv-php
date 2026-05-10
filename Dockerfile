@@ -1,32 +1,28 @@
-FROM alpine:edge
+FROM alpine:3.21
 
-# Add Alpine Edge repositories
-RUN echo "https://dl-cdn.alpinelinux.org/alpine/edge/main" > /etc/apk/repositories && \
-    echo "https://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
-
-# Install PHP 8.4 + pre-built grpc extension + protoc + grpc_php_plugin
+# Install PHP 8.3 + pre-built grpc extension + protoc + grpc_php_plugin
 RUN apk add --no-cache \
-    php84 \
-    php84-pecl-grpc \
-    php84-phar \
-    php84-mbstring \
-    php84-openssl \
-    php84-curl \
-    php84-ctype \
-    php84-dom \
-    php84-xml \
-    php84-simplexml \
-    php84-xmlwriter \
-    php84-tokenizer \
-    php84-iconv \
-    php84-zip \
+    php83 \
+    php83-pecl-grpc \
+    php83-phar \
+    php83-mbstring \
+    php83-openssl \
+    php83-curl \
+    php83-ctype \
+    php83-dom \
+    php83-xml \
+    php83-simplexml \
+    php83-xmlwriter \
+    php83-tokenizer \
+    php83-iconv \
+    php83-zip \
     composer \
     protobuf \
     protobuf-dev \
     grpc-plugins
 
 # Create symlink for php command
-RUN ln -sf /usr/bin/php84 /usr/bin/php
+RUN ln -sf /usr/bin/php83 /usr/bin/php
 
 # Set working directory
 WORKDIR /app

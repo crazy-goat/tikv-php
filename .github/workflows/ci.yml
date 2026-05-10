@@ -41,6 +41,28 @@ jobs:
               core.warning(`Could not determine permissions for "${actor}": ${e.message}`);
             }
 
+  changes:
+    name: Detect changed paths
+    needs: check-actor
+    if: needs.check-actor.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            e2e:
+              - 'src/**'
+              - 'tests/E2E/**'
+              - 'docker-compose.yml'
+              - 'Dockerfile'
+              - 'composer.json'
+              - '.github/workflows/ci.yml'
+
   lint:
     name: Lint (PHPCS + Rector + PHPStan)
     needs: check-actor
@@ -111,36 +133,76 @@ jobs:
         run: ./vendor/bin/phpunit --testsuite Unit --testdox --no-coverage
         timeout-minutes: 5
 
-  integration-tests:
-    name: Integration Tests
-    needs: [check-actor, lint]
-    if: needs.check-actor.outputs.allowed == 'true'
+  e2e-tests:
+    name: E2E Tests
+    needs: [check-actor, lint, changes]
+    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: true  # Allow failure - requires TiKV cluster
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.4"
-          # Note: grpc extension compilation takes too long, skip for now
-          # Integration tests require actual TiKV cluster anyway
-          coverage: none
+      - name: Build Docker images
+        run: docker compose build
 
-      - name: Cache Composer dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.composer/cache
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-composer-
+      - name: Start TiKV cluster
+        run: |
+          docker compose up -d tikv1 tikv2 tikv3
+          echo "=== docker compose ps ==="
+          docker compose ps
+
+      - name: Wait for PD health
+        run: |
+          echo "Waiting for PD to be healthy..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:2379/pd/api/v1/health > /dev/null 2>&1; then
+              echo "PD is healthy!"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Timeout waiting for PD"
+              docker compose ps
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Wait for TiKV stores
+        run: |
+          echo "Waiting for TiKV stores to register with PD (up to 5 min)..."
+          for i in $(seq 1 150); do
+            RESP=$(curl -s http://localhost:2379/pd/api/v1/stores 2>/dev/null || echo "")
+            STORE_COUNT=$(echo "$RESP" | jq -r '.stores | length // 0' 2>/dev/null || echo "0")
+            if [ "$STORE_COUNT" -ge 3 ] 2>/dev/null; then
+              echo "All 3 TiKV stores registered!"
+              break
+            fi
+            if [ $((i % 15)) -eq 0 ]; then
+              echo "[$i/150] Stores: $STORE_COUNT"
+              echo "tikv1 last log:"
+              docker compose logs --tail 3 tikv1 2>&1 || true
+            fi
+            if [ "$i" -eq 150 ]; then
+              echo "Timeout waiting for stores (count=$STORE_COUNT)"
+              docker compose ps
+              echo "=== tikv1 logs ==="
+              docker compose logs tikv1 2>&1 | tail -30 || true
+              echo "=== tikv2 logs ==="
+              docker compose logs tikv2 2>&1 | tail -10 || true
+              exit 1
+            fi
+            sleep 2
+          done
 
       - name: Install dependencies
-        run: composer install --no-interaction --prefer-dist --no-progress
+        run: docker compose run --rm php-client composer install --no-interaction --prefer-dist --no-progress
 
-      - name: Run integration tests
-        run: ./vendor/bin/phpunit --testsuite Integration --testdox || true
-        timeout-minutes: 2
-        env:
-          TIKV_TEST_ENABLED: "false"  # Skip if no cluster available
+      - name: Run E2E tests
+        run: |
+          docker compose run --rm \
+            -e PD_ENDPOINTS=pd:2379 \
+            php-client vendor/bin/phpunit --testsuite E2E --testdox --no-coverage
+        timeout-minutes: 10
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v --remove-orphans
