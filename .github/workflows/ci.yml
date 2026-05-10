@@ -141,9 +141,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Docker images
-        run: docker compose build
-
       - name: Start TiKV cluster
         run: docker compose up -d pd tikv1 tikv2 tikv3
 
@@ -163,14 +160,33 @@ jobs:
             sleep 2
           done
 
+      - name: Add TiKV hosts
+        run: |
+          echo "127.0.0.1 pd tikv1 tikv2 tikv3" | sudo tee -a /etc/hosts
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: grpc, protobuf, dom, simplexml, xml, xmlwriter, tokenizer, mbstring, curl, ctype, iconv, zip, json, openssl, phar
+          coverage: none
+          tools: composer:v2
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
       - name: Install dependencies
-        run: docker compose run --rm php-client composer install --no-interaction --prefer-dist --no-progress
+        run: composer install --no-interaction --prefer-dist --no-progress
 
       - name: Run E2E tests
-        run: |
-          docker compose run --rm \
-            -e PD_ENDPOINTS=pd:2379 \
-            php-client vendor/bin/phpunit --testsuite E2E --testdox
+        run: ./vendor/bin/phpunit --testsuite E2E --testdox
+        env:
+          PD_ENDPOINTS: 127.0.0.1:2379
         timeout-minutes: 10
 
       - name: Cleanup
