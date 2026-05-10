@@ -12,13 +12,14 @@ use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
+use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
 class TransactionTest extends TestCase
 {
-    private \PHPUnit\Framework\MockObject\MockObject $pdClient;
-    private \PHPUnit\Framework\MockObject\MockObject $grpc;
-    private \PHPUnit\Framework\MockObject\MockObject $regionCache;
+    private PdClientInterface&MockObject $pdClient;
+    private GrpcClientInterface&MockObject $grpc;
+    private RegionCacheInterface&MockObject $regionCache;
     private LockResolver $lockResolver;
     private RegionInfo $testRegion;
 
@@ -46,6 +47,9 @@ class TransactionTest extends TestCase
         );
     }
 
+    /**
+     * @param array{txnId?: string, startTs?: int, pessimistic?: bool, priority?: int} $options
+     */
     private function createTransaction(array $options = []): Transaction
     {
         return new Transaction(
