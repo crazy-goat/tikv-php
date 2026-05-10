@@ -145,7 +145,7 @@ jobs:
         run: docker compose build
 
       - name: Start TiKV cluster
-        run: docker compose up -d pd tikv1 tikv2 tikv3
+        run: docker compose up -d tikv1 tikv2 tikv3
 
       - name: Wait for TiKV cluster
         run: |
