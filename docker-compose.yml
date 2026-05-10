@@ -31,10 +31,6 @@ services:
       --pd-endpoints=pd:2379
       --data-dir=/data/tikv1
       --config=/etc/tikv/tikv.toml
-    ulimits:
-      nofile:
-        soft: 100000
-        hard: 100000
     volumes:
       - tikv1-data:/data/tikv1
       - ./tikv.toml:/etc/tikv/tikv.toml:ro
@@ -52,10 +48,6 @@ services:
       --pd-endpoints=pd:2379
       --data-dir=/data/tikv2
       --config=/etc/tikv/tikv.toml
-    ulimits:
-      nofile:
-        soft: 100000
-        hard: 100000
     volumes:
       - tikv2-data:/data/tikv2
       - ./tikv.toml:/etc/tikv/tikv.toml:ro
@@ -73,10 +65,6 @@ services:
       --pd-endpoints=pd:2379
       --data-dir=/data/tikv3
       --config=/etc/tikv/tikv.toml
-    ulimits:
-      nofile:
-        soft: 100000
-        hard: 100000
     volumes:
       - tikv3-data:/data/tikv3
       - ./tikv.toml:/etc/tikv/tikv.toml:ro
