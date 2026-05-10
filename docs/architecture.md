@@ -14,12 +14,14 @@ System architecture and design of the TiKV PHP Client.
 
 ## Overview
 
-The TiKV PHP Client is a high-performance client library for TiKV's RawKV API. It provides:
+The TiKV PHP Client is a high-performance client library for TiKV's RawKV and TxnKV APIs. It provides:
 
 - **Synchronous API**: Simple, blocking operations
 - **Region-aware routing**: Automatic routing to correct TiKV nodes
 - **Intelligent caching**: Region and store metadata caching
 - **Automatic retries**: Exponential backoff with error classification
+- **ACID Transactions**: Full TxnKV support with 2-phase commit
+- **Pessimistic & Optimistic**: Both transaction modes supported
 - **Production features**: TLS, PSR-3 logging, batch optimization
 
 ### High-Level Architecture
@@ -34,25 +36,26 @@ The TiKV PHP Client is a high-performance client library for TiKV's RawKV API. I
           │                 │                 │
           └─────────────────┴─────────────────┘
                             │
-┌───────────────────────────▼───────────────────────────────┐
-│                    RawKvClient Layer                       │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │              RawKvClient (Public API)                 │  │
-│  │  • get(), put(), delete()                            │  │
-│  │  • batchGet(), batchPut(), batchDelete()             │  │
-│  │  • scan(), scanPrefix(), reverseScan()               │  │
-│  │  • compareAndSwap(), putIfAbsent()                   │  │
-│  └────────────────────┬───────────────────────────────────┘  │
-└─────────────────────┼──────────────────────────────────────┘
-                      │
-┌─────────────────────▼──────────────────────────────────────┐
-│                   Retry & Routing Layer                      │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────┐ │
-│  │  Retry Logic    │  │ Region Routing  │  │ Batch Exec │ │
-│  │  • BackoffType  │  │  • RegionCache   │  │  • Async   │ │
-│  │  • Classify     │  │  • StoreCache    │  │  • Parallel│ │
-│  └─────────────────┘  └─────────────────┘  └──────────────┘ │
-└─────────────────────┼──────────────────────────────────────┘
+┌───────────────────────────┼───────────────────────────────┐
+│                    Client Layer                             │
+│  ┌───────────────────┐  ┌──────────────────────────────┐  │
+│  │  RawKvClient      │  │  TxnKvClient                │  │
+│  │  • get/put/delete │  │  • begin() → Transaction     │  │
+│  │  • batch ops      │  │  • 2PC commit/rollback       │  │
+│  │  • scan           │  │  • pessimistic locks          │  │
+│  │  • CAS, TTL       │  │  • heartbeat, lock resolve   │  │
+│  └────────┬──────────┘  └──────────┬───────────────────┘  │
+└───────────┼─────────────────────────┼────────────────────┘
+            │                         │
+┌───────────▼─────────────────────────▼────────────────────┐
+│                   Retry & Routing Layer                    │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌──────────┐ │
+│  │  Retry Logic    │  │ Region Routing  │  │LockResolve│ │
+│  │  • BackoffType  │  │  • RegionCache   │  │ • Status  │ │
+│  │  • Classify     │  │  • StoreCache    │  │ • Resolve │ │
+│  └─────────────────┘  └─────────────────┘  └──────────┘ │
+└─────────────────────────┬────────────────────────────────┘
+                          │
                       │
 ┌─────────────────────▼──────────────────────────────────────┐
 │                  Communication Layer                         │
@@ -125,7 +128,109 @@ final class RawKvClient
 }
 ```
 
-### 2. PdClient
+### 2. TxnKvClient & Transaction
+
+**Location**: `src/Client/TxnKv/TxnKvClient.php`, `src/Client/TxnKv/Transaction.php`
+
+**Responsibilities**:
+- ACID transaction management via two-phase commit (2PC)
+- MVCC reads at transaction start timestamp
+- Pessimistic and optimistic transaction modes
+- Lock resolution for concurrent conflicts
+- Heartbeat to extend lock TTL for long-running transactions
+
+**Key Design Patterns**:
+- **Unit of Work**: Transaction tracks write set and read set
+- **Two-Phase Commit**: Prewrite → Commit protocol
+- **Factory Pattern**: `TxnKvClient::begin()` creates Transaction instances
+- **Strategy Pattern**: Optimistic vs pessimistic mode selection
+
+**Public Interface**:
+```php
+final class TxnKvClient
+{
+    public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self;
+    
+    // Transaction lifecycle
+    public function begin(array $options = []): Transaction;  // options: pessimistic (bool), priority (int)
+    public function close(): void;
+}
+
+final class Transaction
+{
+    // Read operations (MVCC snapshot at startTs)
+    public function get(string $key): ?string;
+    public function batchGet(array $keys): array;
+    public function scan(string $startKey, string $endKey, int $limit = 0): array;
+    
+    // Write operations (buffered until commit)
+    public function set(string $key, string $value): void;
+    public function delete(string $key): void;
+    
+    // Transaction control
+    public function commit(): void;           // 2PC: prewrite + commit
+    public function rollback(): void;
+    public function heartbeat(int $adviseLockTtlMs = 10000): int;
+    
+    // Inspection
+    public function getTxnId(): string;
+    public function getStartTs(): int;
+    public function getCommitTs(): ?int;
+    public function getStatus(): TransactionStatus;
+    public function isPessimistic(): bool;
+    public function getWriteSet(): array;
+    public function getReadSet(): array;
+}
+```
+
+**Transaction Flow**:
+```
+Optimistic Transaction                   Pessimistic Transaction
+┌──────────────────────┐                ┌──────────────────────┐
+│  begin()              │                │  begin(pessimistic)  │
+│  startTs = TSO        │                │  startTs = TSO        │
+└──────────┬───────────┘                └──────────┬───────────┘
+           │                                       │
+┌──────────▼───────────┐                ┌──────────▼───────────┐
+│  set(k, v)           │                │  set(k, v)            │
+│  Buffered in writeset│                │  → pessimisticLock(k) │
+│                      │                │  → buffer in writeset │
+└──────────┬───────────┘                └──────────┬───────────┘
+           │                                       │
+┌──────────▼───────────┐                ┌──────────▼───────────┐
+│  commit()             │                │  commit()              │
+│  1. Prewrite all keys │                │  1. Prewrite all keys  │
+│     (lock + data)     │                │     (data only)       │
+│  2. commitTs = TSO   │                │  2. commitTs = TSO    │
+│  3. Commit all keys   │                │  3. Commit all keys   │
+└──────────┬───────────┘                └──────────┬───────────┘
+           │                                       │
+┌──────────▼───────────┐                ┌──────────▼───────────┐
+│  Committed            │                │  Committed            │
+│  or rollback()        │                │  or rollback()         │
+│  (pessimisticRollback)│                └──────────────────────┘
+└──────────────────────┘
+```
+
+### 3. TimestampOracle
+
+**Location**: `src/Client/Connection/TimestampOracle.php`
+
+**Responsibilities**:
+- Provides monotonically increasing timestamps (TSO) from PD
+- Critical for MVCC: every transaction needs a unique startTs and commitTs
+- Uses unary gRPC call (not bidirectional streaming, since PHP processes are short-lived)
+
+**Key Methods**:
+```php
+class TimestampOracle
+{
+    public function getTimestamp(): int;
+    // Returns a 64-bit timestamp: (physical << 18) | logical
+}
+```
+
+### 4. PdClient
 
 **Location**: `src/Client/Connection/PdClient.php`
 
@@ -134,6 +239,7 @@ final class RawKvClient
 - Cluster topology discovery
 - Region information queries
 - Store information queries
+- Timestamp Oracle integration
 
 **Design Patterns**:
 - **Singleton-like**: Single PD connection per client
@@ -146,6 +252,8 @@ interface PdClientInterface
     public function getRegion(string $key): RegionInfo;
     public function scanRegions(string $startKey, string $endKey, int $limit): array;
     public function getStore(int $storeId): ?Store;
+    public function getTimestamp(): int;
+    public function getClusterId(): int;
     public function close(): void;
 }
 ```
@@ -167,7 +275,7 @@ Cache in RegionCache
 Return RegionInfo
 ```
 
-### 3. GrpcClient
+### 5. GrpcClient
 
 **Location**: `src/Client/Grpc/GrpcClient.php`
 
@@ -197,7 +305,7 @@ class GrpcClient
 }
 ```
 
-### 4. RegionCache
+### 6. RegionCache
 
 **Location**: `src/Client/Cache/RegionCache.php`
 
@@ -222,7 +330,46 @@ class RegionCache
 - **NotLeader**: Update leader info or invalidate
 - **RegionNotFound**: Invalidate and retry
 
-### 5. Retry System
+### 7. LockResolver
+
+**Location**: `src/Client/TxnKv/LockResolver.php`
+
+**Responsibilities**:
+- Resolve locks encountered during MVCC reads
+- Check transaction status (committed, rolled back, active)
+- Resolve locks by committing or rolling back stale transactions
+- Handle both optimistic and pessimistic lock conflicts
+
+**Key Methods**:
+```php
+class LockResolver
+{
+    public function resolveLock(string $key, int $lockTs, int $callerStartTs): void;
+}
+```
+
+**Lock Resolution Flow**:
+```
+Transaction encounters lock on key
+       │
+       ▼
+┌─────────────────────┐
+│ CheckTxnStatus      │  Check the lock owner's transaction
+│ (primary key,       │  status at PD timestamp
+│  lockTs,            │
+│  callerStartTs)     │
+└────────┬───────────┘
+         │
+    ┌────┴────┐
+    │ Status? │
+    ├─────────┤
+    │ Locked  │──Wait and retry
+    │ Committed│──ResolveLock with commitTs
+    │ RolledBack│──ResolveLock (cleanup)
+    └─────────┘
+```
+
+### 8. Retry System
 
 **Location**: `src/Client/Retry/BackoffType.php`, `RawKvClient::executeWithRetry()`
 
@@ -735,6 +882,7 @@ $sensitiveData = decrypt($encrypted, $key);
 3. **Metrics**: Built-in Prometheus/OpenTelemetry metrics
 4. **Async API**: Optional async/await support (PHP 8.1+)
 5. **Streaming**: Streaming scan for very large datasets
+6. **TxnHeartBeat**: Automatic heartbeat for long-running transactions
 
 ### Research Areas
 
@@ -742,6 +890,7 @@ $sensitiveData = decrypt($encrypted, $key);
 2. **Read Replicas**: Read from followers for load distribution
 3. **Compression**: Compress large values
 4. **Batching**: Automatic request batching
+5. **API V2 & Keyspace**: TiKV API V2 and keyspace support (issue #25)
 
 ## See Also
 

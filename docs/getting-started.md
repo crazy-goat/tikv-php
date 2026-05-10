@@ -227,6 +227,93 @@ $client->close();
 
 This closes gRPC connections and releases resources.
 
+## Transactional Operations (TxnKV)
+
+The client also supports ACID transactions via the TxnKV API. This is useful when you need strong consistency guarantees.
+
+### Creating a Transaction
+
+```php
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+
+$txnClient = TxnKvClient::create(['127.0.0.1:2379']);
+
+try {
+    // Pessimistic transaction (default) — acquires locks on write
+    $txn = $txnClient->begin(['pessimistic' => true]);
+    
+    // Optimistic transaction — locks only on commit
+    // $txn = $txnClient->begin(['pessimistic' => false]);
+    
+    // ... use the transaction ...
+    
+} finally {
+    $txnClient->close();
+}
+```
+
+### Basic Transaction Operations
+
+```php
+// Start a transaction
+$txn = $txnClient->begin();
+
+// Read (snapshot at startTs)
+$value = $txn->get('account:1');
+
+// Write (buffered until commit)
+$txn->set('account:1', '1000');
+$txn->delete('account:2');
+
+// Batch read
+$values = $txn->batchGet(['account:1', 'account:2']);
+
+// Scan within transaction
+$results = $txn->scan('account:', 'account;');
+
+// Commit (2-phase: prewrite + commit)
+$txn->commit();
+
+// Or rollback if something went wrong
+// $txn->rollback();
+```
+
+### Transfer Example (ACID Guarantee)
+
+```php
+$txn = $txnClient->begin(['pessimistic' => true]);
+
+try {
+    $fromBalance = (int) $txn->get('account:alice');
+    $toBalance = (int) $txn->get('account:bob');
+    
+    $amount = 100;
+    if ($fromBalance < $amount) {
+        throw new RuntimeException('Insufficient funds');
+    }
+    
+    $txn->set('account:alice', (string) ($fromBalance - $amount));
+    $txn->set('account:bob', (string) ($toBalance + $amount));
+    
+    $txn->commit();
+    echo "Transfer committed!\n";
+    
+} catch (Exception $e) {
+    $txn->rollback();
+    echo "Transfer rolled back: " . $e->getMessage() . "\n";
+}
+```
+
+### Pessimistic vs Optimistic
+
+| Feature | Pessimistic | Optimistic |
+|---------|-----------|------------|
+| Lock timing | On write (`set`/`delete`) | On commit (prewrite) |
+| Conflicts | Detected early | Detected at commit |
+| Best for | High contention | Low contention |
+| Default lock TTL | 30 seconds | 3 seconds |
+| Use case | Financial transfers | Caching, config |
+
 ## Next Steps
 
 Now that you have the basics working, explore more features:
@@ -328,9 +415,11 @@ php examples/logging.php
 You've learned:
 - ✅ How to install the TiKV PHP Client
 - ✅ How to connect to a TiKV cluster
-- ✅ Basic CRUD operations
+- ✅ Basic CRUD operations (RawKV)
 - ✅ Batch operations for efficiency
 - ✅ Scanning for data retrieval
+- ✅ ACID transactions (TxnKV)
+- ✅ Pessimistic vs optimistic transaction modes
 - ✅ Proper resource cleanup
 
 Ready to dive deeper? Continue with the [Operations Guide](operations.md)!

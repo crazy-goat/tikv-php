@@ -13,6 +13,7 @@ use CrazyGoat\Proto\Pdpb\RequestHeader;
 use CrazyGoat\Proto\Pdpb\ScanRegionsRequest;
 use CrazyGoat\Proto\Pdpb\ScanRegionsResponse;
 use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
+use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\PeerInfo;
@@ -24,6 +25,7 @@ use Psr\Log\NullLogger;
 final class PdClient implements PdClientInterface
 {
     private ?int $clusterId = null;
+    private ?TimestampOracle $tso = null;
 
     public function __construct(
         private readonly GrpcClientInterface $grpc,
@@ -31,6 +33,20 @@ final class PdClient implements PdClientInterface
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly ?StoreCacheInterface $storeCache = null,
     ) {
+    }
+
+    public function getTimestamp(): int
+    {
+        if ($this->tso === null) {
+            $this->tso = new TimestampOracle(
+                $this->grpc,
+                $this->pdAddress,
+                $this,
+                $this->logger,
+            );
+        }
+
+        return $this->tso->getTimestamp();
     }
 
     public function getRegion(string $key): RegionInfo
@@ -148,6 +164,11 @@ final class PdClient implements PdClientInterface
         }
 
         return $regions;
+    }
+
+    public function getClusterId(): ?int
+    {
+        return $this->clusterId;
     }
 
     public function close(): void
