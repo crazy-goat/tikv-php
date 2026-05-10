@@ -149,15 +149,38 @@ jobs:
 
       - name: Wait for TiKV cluster
         run: |
-          echo "Waiting for TiKV cluster to be healthy..."
+          echo "Waiting for PD to be healthy..."
           for i in $(seq 1 30); do
-            if docker compose ps --status running 2>/dev/null | grep -q "healthy"; then
-              echo "TiKV cluster is ready!"
+            if curl -sf http://localhost:2379/pd/api/v1/health > /dev/null 2>&1; then
+              echo "PD is healthy!"
               break
             fi
             if [ "$i" -eq 30 ]; then
-              echo "Timeout waiting for TiKV cluster"
+              echo "Timeout waiting for PD"
               docker compose ps
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Wait for TiKV stores
+        run: |
+          echo "Waiting for all 3 TiKV stores to register..."
+          for i in $(seq 1 60); do
+            RESP=$(curl -s http://localhost:2379/pd/api/v1/stores 2>/dev/null || echo "")
+            STORE_COUNT=$(echo "$RESP" | jq -r '.stores | length // 0' 2>/dev/null || echo "0")
+            if [ "$STORE_COUNT" -ge 3 ] 2>/dev/null; then
+              echo "All 3 TiKV stores registered!"
+              break
+            fi
+            # Log the response on each attempt for debugging
+            if [ "$i" -eq 1 ] || [ "$i" -eq 30 ]; then
+              echo "PD stores response: $RESP"
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Timeout waiting for stores (count=$STORE_COUNT)"
+              echo "Final PD stores response: $RESP"
+              docker compose logs pd tikv1
               exit 1
             fi
             sleep 2
