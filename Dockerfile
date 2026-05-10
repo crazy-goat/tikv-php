@@ -1,8 +1,4 @@
-FROM alpine:edge
-
-# Add Alpine Edge repositories
-RUN echo "https://dl-cdn.alpinelinux.org/alpine/edge/main" > /etc/apk/repositories && \
-    echo "https://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
+FROM alpine:3.21
 
 # Install PHP 8.4 + pre-built grpc extension + protoc + grpc_php_plugin
 RUN apk add --no-cache \
