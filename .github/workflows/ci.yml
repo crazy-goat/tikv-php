@@ -149,12 +149,29 @@ jobs:
           echo "Waiting for TiKV cluster to be healthy..."
           for i in $(seq 1 30); do
             if curl -sf http://localhost:2379/pd/api/v1/health > /dev/null 2>&1; then
-              echo "TiKV cluster is ready!"
+              echo "PD is healthy!"
               break
             fi
             if [ "$i" -eq 30 ]; then
               echo "Timeout waiting for TiKV cluster"
               docker compose ps
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Wait for TiKV stores
+        run: |
+          echo "Waiting for all 3 TiKV stores to register with PD..."
+          for i in $(seq 1 30); do
+            STORES=$(curl -sf http://localhost:2379/pd/api/v1/stores 2>/dev/null | jq '.stores | length' 2>/dev/null || echo "0")
+            if [ "$STORES" -ge 3 ]; then
+              echo "All 3 TiKV stores registered!"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Timeout waiting for stores (got $STORES)"
+              curl -sf http://localhost:2379/pd/api/v1/stores || true
               exit 1
             fi
             sleep 2
