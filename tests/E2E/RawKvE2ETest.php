@@ -1380,7 +1380,11 @@ class RawKvE2ETest extends TestCase
         sleep(3);
 
         $this->assertNull($this->testClient->get('ttl-pos-a'), 'Positional TTL: first key (2s) should expire');
-        $this->assertEquals('long', $this->testClient->get('ttl-pos-b'), 'Positional TTL: second key (60s) should persist');
+        $this->assertEquals(
+            'long',
+            $this->testClient->get('ttl-pos-b'),
+            'Positional TTL: second key (60s) should persist',
+        );
     }
 
     public function testScanIncludesKeysWithTtl(): void
