@@ -31,6 +31,7 @@ interface GrpcClientInterface
      * @param string $method Method name (e.g., "GetRegion")
      * @param Message $request Protobuf request message
      * @param class-string<T> $responseClass Response message class name
+     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
      * @return T Response message
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException On gRPC error
      */
@@ -40,6 +41,7 @@ interface GrpcClientInterface
         string $method,
         Message $request,
         string $responseClass,
+        ?int $timeoutMs = null,
     ): Message;
 
     /**

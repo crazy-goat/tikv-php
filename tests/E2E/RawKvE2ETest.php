@@ -2196,4 +2196,139 @@ class RawKvE2ETest extends TestCase
         $this->assertEquals('alpha', $resultMap['bs-val-a']);
         $this->assertEquals('bravo', $resultMap['bs-val-b']);
     }
+
+    // ========================================================================
+    // Configurable timeouts (Issue #30)
+    // ========================================================================
+
+    public function testDefaultTimeoutConfigOperationsSucceed(): void
+    {
+        $key = 'to-default-' . uniqid();
+        $this->putOneAndTrack($key, 'value');
+
+        $this->assertEquals('value', $this->testClient->get($key));
+        $this->assertNull($this->testClient->get('to-default-nonexistent-' . uniqid()));
+    }
+
+    public function testCustomTimeoutConfigReadSucceeds(): void
+    {
+        $client = RawKvClient::create(
+            getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
+            options: [
+                'timeout' => [
+                    'readTimeoutMs' => 15000,
+                    'writeTimeoutMs' => 15000,
+                ],
+            ],
+        );
+
+        $key = 'to-custom-read-' . uniqid();
+        $client->put($key, 'hello');
+        $this->assertEquals('hello', $client->get($key));
+
+        $client->delete($key);
+        $client->close();
+    }
+
+    public function testCustomScanTimeoutSucceeds(): void
+    {
+        $client = RawKvClient::create(
+            getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
+            options: [
+                'timeout' => [
+                    'scanTimeoutMs' => 30000,
+                    'writeTimeoutMs' => 15000,
+                ],
+            ],
+        );
+
+        $prefix = 'to-scan-timeout-' . uniqid() . '-';
+        $keys = [
+            $prefix . 'a' => '1',
+            $prefix . 'b' => '2',
+            $prefix . 'c' => '3',
+        ];
+        $client->batchPut($keys);
+
+        $results = $client->scan($prefix, $prefix . 'z', 10);
+        $this->assertCount(3, $results);
+
+        foreach (array_keys($keys) as $key) {
+            $client->delete($key);
+        }
+        $client->close();
+    }
+
+    public function testCustomBatchTimeoutSucceeds(): void
+    {
+        $client = RawKvClient::create(
+            getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
+            options: [
+                'timeout' => [
+                    'batchReadTimeoutMs' => 30000,
+                    'batchWriteTimeoutMs' => 30000,
+                ],
+            ],
+        );
+
+        $prefix = 'to-batch-' . uniqid() . '-';
+        $keys = [
+            $prefix . 'x' => '10',
+            $prefix . 'y' => '20',
+        ];
+        $client->batchPut($keys);
+
+        $result = $client->batchGet(array_keys($keys));
+        $this->assertCount(2, $result);
+        $this->assertEquals('10', $result[$prefix . 'x']);
+
+        $client->batchDelete(array_keys($keys));
+        $client->close();
+    }
+
+    public function testCustomDeleteRangeTimeoutSucceeds(): void
+    {
+        $client = RawKvClient::create(
+            getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
+            options: [
+                'timeout' => [
+                    'deleteRangeTimeoutMs' => 60000,
+                    'writeTimeoutMs' => 15000,
+                ],
+            ],
+        );
+
+        $prefix = 'to-deleterange-' . uniqid() . '-';
+        $client->put($prefix . 'a', '1');
+        $client->put($prefix . 'b', '2');
+
+        $client->deleteRange($prefix, $prefix . 'z');
+        $result = $client->scan($prefix, $prefix . 'z', 10);
+        $this->assertCount(0, $result);
+
+        $client->close();
+    }
+
+    public function testMixedTimeoutConfig(): void
+    {
+        $client = RawKvClient::create(
+            getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
+            options: [
+                'timeout' => [
+                    'readTimeoutMs' => 5000,
+                    'writeTimeoutMs' => 5000,
+                    'batchReadTimeoutMs' => 10000,
+                    'batchWriteTimeoutMs' => 10000,
+                    'scanTimeoutMs' => 20000,
+                    'deleteRangeTimeoutMs' => 30000,
+                ],
+            ],
+        );
+
+        $key = 'to-mixed-' . uniqid();
+        $client->put($key, 'test');
+        $this->assertEquals('test', $client->get($key));
+        $client->delete($key);
+        $client->close();
+    }
 }
