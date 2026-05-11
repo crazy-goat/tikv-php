@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-11
+
 ### Added
+- TxnKV client with full ACID transaction support (begin/commit/rollback, snapshot reads, pessimistic locking)
+- Lazy auto-paginating `ScanIterator` for RawKV scans — fetches next pages transparently on iteration
+- Auto-split large batches by key count and total byte size — prevents oversized gRPC requests
+- Configurable per-operation gRPC timeouts via `GrpcClient::setTimeout()`
+- Scan limit guard (`MAX_RAW_SCAN_LIMIT = 10240`) — prevents accidental unbounded scans
 - Per-key TTL support in `batchPut()` — accepts `int|array $ttl` for individual key expiration times
+- E2E tests running against a real TiKV cluster in CI via GitHub Actions
+
+### Removed
+- `docs/superpowers/` — all implementation plans migrated to GitHub issues
 
 ## [0.1.0] - 2026-03-30
 
@@ -45,4 +56,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Branch protection rules requiring CI checks and approvals
 - PHP 8.2, 8.3, 8.4 support
 
+[0.2.0]: https://github.com/crazy-goat/tikv-php/releases/tag/v0.2.0
 [0.1.0]: https://github.com/crazy-goat/tikv-php/releases/tag/v0.1.0
