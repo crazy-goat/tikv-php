@@ -31,13 +31,18 @@ final class GrpcClient implements GrpcClientInterface
         string $method,
         Message $request,
         string $responseClass,
+        ?int $timeoutMs = null,
     ): Message {
         $channel = $this->getChannel($address);
+
+        $deadline = $timeoutMs !== null && $timeoutMs > 0
+            ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
+            : Timeval::infFuture();
 
         $call = new Call(
             $channel,
             "/{$service}/{$method}",
-            Timeval::infFuture(),
+            $deadline,
         );
 
         $call->startBatch([

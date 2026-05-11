@@ -44,6 +44,7 @@ use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
@@ -55,6 +56,15 @@ use Psr\Log\NullLogger;
 final class RawKvClient
 {
     public const MAX_SCAN_LIMIT = 10240;
+
+    public const OP_READ = 'read';
+    public const OP_WRITE = 'write';
+    public const OP_BATCH_READ = 'batch_read';
+    public const OP_BATCH_WRITE = 'batch_write';
+    public const OP_SCAN = 'scan';
+    public const OP_DELETE_RANGE = 'delete_range';
+
+    public const OPT_TIMEOUT = 'timeout';
 
     private bool $closed = false;
 
@@ -90,7 +100,33 @@ final class RawKvClient
         $grpc = new GrpcClient($resolvedLogger, $tlsConfig);
         $pdClient = new PdClient($grpc, $pdEndpoints[0], $resolvedLogger);
 
-        return new self($pdClient, $grpc, new RegionCache(logger: $resolvedLogger), logger: $resolvedLogger);
+        $timeoutConfig = new TimeoutConfig();
+
+        if (isset($options[self::OPT_TIMEOUT]) && is_array($options[self::OPT_TIMEOUT])) {
+            $t = $options[self::OPT_TIMEOUT];
+            $timeoutConfig = new TimeoutConfig(
+                readTimeoutMs: isset($t['readTimeoutMs']) && is_int($t['readTimeoutMs'])
+                    ? $t['readTimeoutMs'] : $timeoutConfig->readTimeoutMs,
+                writeTimeoutMs: isset($t['writeTimeoutMs']) && is_int($t['writeTimeoutMs'])
+                    ? $t['writeTimeoutMs'] : $timeoutConfig->writeTimeoutMs,
+                batchReadTimeoutMs: isset($t['batchReadTimeoutMs']) && is_int($t['batchReadTimeoutMs'])
+                    ? $t['batchReadTimeoutMs'] : $timeoutConfig->batchReadTimeoutMs,
+                batchWriteTimeoutMs: isset($t['batchWriteTimeoutMs']) && is_int($t['batchWriteTimeoutMs'])
+                    ? $t['batchWriteTimeoutMs'] : $timeoutConfig->batchWriteTimeoutMs,
+                scanTimeoutMs: isset($t['scanTimeoutMs']) && is_int($t['scanTimeoutMs'])
+                    ? $t['scanTimeoutMs'] : $timeoutConfig->scanTimeoutMs,
+                deleteRangeTimeoutMs: isset($t['deleteRangeTimeoutMs']) && is_int($t['deleteRangeTimeoutMs'])
+                    ? $t['deleteRangeTimeoutMs'] : $timeoutConfig->deleteRangeTimeoutMs,
+            );
+        }
+
+        return new self(
+            $pdClient,
+            $grpc,
+            new RegionCache(logger: $resolvedLogger),
+            logger: $resolvedLogger,
+            timeoutConfig: $timeoutConfig,
+        );
     }
 
     public function __construct(
@@ -100,6 +136,7 @@ final class RawKvClient
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly int $serverBusyBudgetMs = 600000, // 10 minutes separate budget
+        private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
     ) {
     }
 
@@ -120,7 +157,14 @@ final class RawKvClient
             $request->setKey($key);
 
             /** @var RawGetResponse $response */
-            $response = $this->grpc->call($address, 'tikvpb.Tikv', 'RawGet', $request, RawGetResponse::class);
+            $response = $this->grpc->call(
+                $address,
+                'tikvpb.Tikv',
+                'RawGet',
+                $request,
+                RawGetResponse::class,
+                $this->timeoutMs(self::OP_READ),
+            );
             RegionErrorHandler::check($response);
 
             $value = $response->getValue();
@@ -149,7 +193,14 @@ final class RawKvClient
                 $request->setTtl($ttl);
             }
 
-            $response = $this->grpc->call($address, 'tikvpb.Tikv', 'RawPut', $request, RawPutResponse::class);
+            $response = $this->grpc->call(
+                $address,
+                'tikvpb.Tikv',
+                'RawPut',
+                $request,
+                RawPutResponse::class,
+                $this->timeoutMs(self::OP_WRITE),
+            );
             RegionErrorHandler::check($response);
             return null;
         });
@@ -167,7 +218,14 @@ final class RawKvClient
             $request->setContext(RegionContext::fromRegionInfo($region));
             $request->setKey($key);
 
-            $response = $this->grpc->call($address, 'tikvpb.Tikv', 'RawDelete', $request, RawDeleteResponse::class);
+            $response = $this->grpc->call(
+                $address,
+                'tikvpb.Tikv',
+                'RawDelete',
+                $request,
+                RawDeleteResponse::class,
+                $this->timeoutMs(self::OP_WRITE),
+            );
             RegionErrorHandler::check($response);
             return null;
         });
@@ -197,6 +255,7 @@ final class RawKvClient
                 'RawGetKeyTTL',
                 $request,
                 RawGetKeyTTLResponse::class,
+                $this->timeoutMs(self::OP_READ),
             );
             RegionErrorHandler::check($response);
 
@@ -256,6 +315,7 @@ final class RawKvClient
                     'RawCompareAndSwap',
                     $request,
                     RawCASResponse::class,
+                    $this->timeoutMs(self::OP_WRITE),
                 );
                 RegionErrorHandler::check($response);
 
@@ -665,6 +725,19 @@ final class RawKvClient
     // Private helpers
     // ========================================================================
 
+    private function timeoutMs(string $operationType): ?int
+    {
+        return match ($operationType) {
+            'read' => $this->timeoutConfig->readTimeoutMs,
+            'write' => $this->timeoutConfig->writeTimeoutMs,
+            'batch_read' => $this->timeoutConfig->batchReadTimeoutMs,
+            'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
+            'scan' => $this->timeoutConfig->scanTimeoutMs,
+            'delete_range' => $this->timeoutConfig->deleteRangeTimeoutMs,
+            default => null,
+        };
+    }
+
     private function ensureOpen(): void
     {
         if ($this->closed) {
@@ -957,10 +1030,15 @@ final class RawKvClient
             $request->setContext(RegionContext::fromRegionInfo($region));
             $request->setKeys($keys);
 
+            $batchReadTimeout = $this->timeoutMs(self::OP_BATCH_READ);
+            $deadline = $batchReadTimeout !== null
+                ? Timeval::now()->add(new Timeval($batchReadTimeout * 1000))
+                : Timeval::infFuture();
+
             $call = new Call(
                 $this->grpc->getChannel($address),
                 '/tikvpb.Tikv/RawBatchGet',
-                Timeval::infFuture(),
+                $deadline,
             );
 
             $call->startBatch([
@@ -1003,10 +1081,15 @@ final class RawKvClient
                 $request->setTtls([$ttl]);
             }
 
+            $batchWriteTimeout = $this->timeoutMs(self::OP_BATCH_WRITE);
+            $deadline = $batchWriteTimeout !== null
+                ? Timeval::now()->add(new Timeval($batchWriteTimeout * 1000))
+                : Timeval::infFuture();
+
             $call = new Call(
                 $this->grpc->getChannel($address),
                 '/tikvpb.Tikv/RawBatchPut',
-                Timeval::infFuture(),
+                $deadline,
             );
 
             $call->startBatch([
@@ -1031,10 +1114,15 @@ final class RawKvClient
             $request->setContext(RegionContext::fromRegionInfo($region));
             $request->setKeys($keys);
 
+            $batchWriteTimeout = $this->timeoutMs(self::OP_BATCH_WRITE);
+            $deadline = $batchWriteTimeout !== null
+                ? Timeval::now()->add(new Timeval($batchWriteTimeout * 1000))
+                : Timeval::infFuture();
+
             $call = new Call(
                 $this->grpc->getChannel($address),
                 '/tikvpb.Tikv/RawBatchDelete',
-                Timeval::infFuture(),
+                $deadline,
             );
 
             $call->startBatch([
@@ -1074,7 +1162,14 @@ final class RawKvClient
             $request->setReverse($reverse);
 
             /** @var RawScanResponse $response */
-            $response = $this->grpc->call($address, 'tikvpb.Tikv', 'RawScan', $request, RawScanResponse::class);
+            $response = $this->grpc->call(
+                $address,
+                'tikvpb.Tikv',
+                'RawScan',
+                $request,
+                RawScanResponse::class,
+                $this->timeoutMs(self::OP_SCAN),
+            );
             RegionErrorHandler::check($response);
 
             $results = [];
@@ -1108,6 +1203,7 @@ final class RawKvClient
                 'RawDeleteRange',
                 $request,
                 RawDeleteRangeResponse::class,
+                $this->timeoutMs(self::OP_DELETE_RANGE),
             );
             RegionErrorHandler::check($response);
 
@@ -1137,7 +1233,14 @@ final class RawKvClient
             $request->setRanges([$range]);
 
             /** @var RawChecksumResponse $response */
-            $response = $this->grpc->call($address, 'tikvpb.Tikv', 'RawChecksum', $request, RawChecksumResponse::class);
+            $response = $this->grpc->call(
+                $address,
+                'tikvpb.Tikv',
+                'RawChecksum',
+                $request,
+                RawChecksumResponse::class,
+                $this->timeoutMs(self::OP_DELETE_RANGE),
+            );
             RegionErrorHandler::check($response);
 
             $error = $response->getError();
