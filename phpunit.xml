@@ -12,9 +12,6 @@
         <testsuite name="Integration">
             <directory>tests/Integration</directory>
         </testsuite>
-        <testsuite name="E2E">
-            <directory>tests/E2E</directory>
-        </testsuite>
         <testsuite name="E2E-RawKV">
             <directory>tests/E2E</directory>
             <exclude>tests/E2E/TxnKvE2ETest.php</exclude>

@@ -20,6 +20,7 @@ use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\PessimisticAction;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
@@ -50,6 +51,8 @@ final class Transaction
 
     private const OPTIMISTIC_LOCK_TTL_MS = 3000;
     private const PESSIMISTIC_LOCK_TTL_MS = 30000;
+    /** TiKV KvScan treats limit=0 as "return 0 results"; use uint32 max for "unlimited" */
+    private const DEFAULT_SCAN_LIMIT = 4294967295;
 
     public function __construct(
         private readonly string $txnId,
@@ -426,6 +429,12 @@ final class Transaction
         if ($this->pessimistic) {
             $forUpdateTs = $this->startTs;
             $request->setForUpdateTs($forUpdateTs);
+            $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
+            $actions = [];
+            foreach ($mutations as $mutation) {
+                $actions[] = PessimisticAction::DO_PESSIMISTIC_CHECK;
+            }
+            $request->setPessimisticActions($actions);
         }
 
         $this->logger->debug('Prewrite', [
@@ -744,9 +753,7 @@ final class Transaction
             if ($endKey !== '') {
                 $request->setEndKey($endKey);
             }
-            if ($limit > 0) {
-                $request->setLimit($limit);
-            }
+            $request->setLimit($limit > 0 ? $limit : self::DEFAULT_SCAN_LIMIT);
             $request->setVersion($this->startTs);
 
             /** @var ScanResponse $response */
