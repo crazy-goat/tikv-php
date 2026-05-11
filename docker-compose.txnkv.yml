@@ -1,0 +1,14 @@
+# Override for TxnKV E2E tests — TiKV in V1 mode (no enable-ttl)
+# Usage: docker compose -f docker-compose.yml -f docker-compose.txnkv.yml up -d pd tikv1 tikv2 tikv3
+services:
+  tikv1:
+    volumes:
+      - ./tikv-v1.toml:/etc/tikv/tikv.toml:ro
+
+  tikv2:
+    volumes:
+      - ./tikv-v1.toml:/etc/tikv/tikv.toml:ro
+
+  tikv3:
+    volumes:
+      - ./tikv-v1.toml:/etc/tikv/tikv.toml:ro
