@@ -462,7 +462,7 @@ Always use strict types:
 ```php
 // Good
 public function get(string $key): ?string;
-public function batchPut(array $pairs, int $ttl = 0): void;
+public function batchPut(array $pairs, int|array $ttl = 0): void;
 
 // Bad
 public function get($key);

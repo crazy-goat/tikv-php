@@ -481,7 +481,21 @@ Apply TTL to batch operations:
 $client->batchPut(['k1' => 'v1', 'k2' => 'v2'], ttl: 3600);
 ```
 
-**Note:** All keys in the batch receive the same TTL. Per-key TTL is planned (see [Issue #16](superpowers/plans/16-per-key-ttl-batch-put.md)).
+Per-key TTL is also supported — pass an array of TTLs indexed by key name or positional:
+
+```php
+// Per-key TTL (associative array by key name)
+$client->batchPut([
+    'cache:hot' => 'frequently-accessed',
+    'cache:cold' => 'rarely-accessed',
+], ttl: ['cache:hot' => 3600, 'cache:cold' => 60]);
+
+// Per-key TTL (positional array — order must match pairs)
+$client->batchPut(['k1' => 'v1', 'k2' => 'v2'], ttl: [3600, 60]);
+
+// Mix of TTL=0 (no expiry) and TTL>0 in the same batch
+$client->batchPut(['perm' => 'permanent', 'temp' => 'temporary'], ttl: [0, 300]);
+```
 
 ## Atomic Operations
 

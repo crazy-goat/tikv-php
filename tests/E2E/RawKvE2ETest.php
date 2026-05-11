@@ -1320,6 +1320,73 @@ class RawKvE2ETest extends TestCase
         $this->assertNull($ttl, 'batchPut without TTL should not set expiration');
     }
 
+    public function testBatchPutWithPerKeyTtls(): void
+    {
+        $pairs = [
+            'ttl-pk-a' => 'short-lived',
+            'ttl-pk-b' => 'long-lived',
+        ];
+        $this->testClient->batchPut($pairs, ['ttl-pk-a' => 2, 'ttl-pk-b' => 60]);
+        $this->keysToCleanup[] = 'ttl-pk-a';
+        $this->keysToCleanup[] = 'ttl-pk-b';
+
+        // Both values readable immediately
+        $this->assertEquals('short-lived', $this->testClient->get('ttl-pk-a'));
+        $this->assertEquals('long-lived', $this->testClient->get('ttl-pk-b'));
+
+        // Short-lived key expires, long-lived persists
+        sleep(3);
+
+        $this->assertNull($this->testClient->get('ttl-pk-a'), 'Per-key TTL: 2s key should expire');
+        $this->assertEquals('long-lived', $this->testClient->get('ttl-pk-b'), 'Per-key TTL: 60s key should persist');
+    }
+
+    public function testBatchPutWithMixedTtlZeroAndNonZero(): void
+    {
+        $pairs = [
+            'ttl-mix-a' => 'no-expiry',
+            'ttl-mix-b' => 'with-ttl',
+        ];
+        $this->testClient->batchPut($pairs, ['ttl-mix-a' => 0, 'ttl-mix-b' => 2]);
+        $this->keysToCleanup[] = 'ttl-mix-a';
+        $this->keysToCleanup[] = 'ttl-mix-b';
+
+        // TTL=0 key should have no expiration
+        $ttlA = $this->testClient->getKeyTTL('ttl-mix-a');
+        $this->assertNull($ttlA, 'TTL=0 key should have no expiration');
+
+        // Wait for the 2s TTL key to expire
+        sleep(3);
+
+        $this->assertEquals('no-expiry', $this->testClient->get('ttl-mix-a'), 'TTL=0 key should survive');
+        $this->assertNull($this->testClient->get('ttl-mix-b'), 'TTL=2 key should expire');
+    }
+
+    public function testBatchPutWithPositionalArrayTtl(): void
+    {
+        $pairs = [
+            'ttl-pos-a' => 'short',
+            'ttl-pos-b' => 'long',
+        ];
+        $this->testClient->batchPut($pairs, [2, 60]);
+        $this->keysToCleanup[] = 'ttl-pos-a';
+        $this->keysToCleanup[] = 'ttl-pos-b';
+
+        // Both readable immediately
+        $this->assertEquals('short', $this->testClient->get('ttl-pos-a'));
+        $this->assertEquals('long', $this->testClient->get('ttl-pos-b'));
+
+        // Wait for first key to expire
+        sleep(3);
+
+        $this->assertNull($this->testClient->get('ttl-pos-a'), 'Positional TTL: first key (2s) should expire');
+        $this->assertEquals(
+            'long',
+            $this->testClient->get('ttl-pos-b'),
+            'Positional TTL: second key (60s) should persist',
+        );
+    }
+
     public function testScanIncludesKeysWithTtl(): void
     {
         $this->testClient->put('ttl-scan-a', 'va', 60);

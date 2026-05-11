@@ -337,14 +337,28 @@ final class RawKvClient
      * Batch put multiple key-value pairs to TiKV.
      *
      * @param array<string, string> $keyValuePairs
-     * @param int $ttl Time-to-live in seconds applied to all keys (0 = no expiration)
+     * @param int|array<array-key, int> $ttl Time-to-live in seconds per key or uniformly applied (0 = no expiration)
      */
-    public function batchPut(array $keyValuePairs, int $ttl = 0): void
+    public function batchPut(array $keyValuePairs, int|array $ttl = 0): void
     {
         $this->ensureOpen();
 
         if ($keyValuePairs === []) {
             return;
+        }
+
+        if (is_array($ttl)) {
+            $count = count($keyValuePairs);
+            if (count($ttl) !== $count) {
+                throw new InvalidArgumentException(sprintf(
+                    'TTL array count (%d) must match key-value pairs count (%d)',
+                    count($ttl),
+                    $count,
+                ));
+            }
+            if (array_is_list($ttl)) {
+                $ttl = array_combine(array_keys($keyValuePairs), $ttl);
+            }
         }
 
         $pairsByRegion = [];
@@ -353,11 +367,17 @@ final class RawKvClient
             $regionId = $region->regionId;
             if (!isset($pairsByRegion[$regionId])) {
                 $pairsByRegion[$regionId] = ['region' => $region, 'pairs' => []];
+                if (is_array($ttl)) {
+                    $pairsByRegion[$regionId]['ttls'] = [];
+                }
             }
             $pair = new KvPair();
             $pair->setKey($key);
             $pair->setValue($value);
             $pairsByRegion[$regionId]['pairs'][] = $pair;
+            if (is_array($ttl)) {
+                $pairsByRegion[$regionId]['ttls'][] = $ttl[$key];
+            }
         }
 
         // Execute all regions in parallel
@@ -366,7 +386,7 @@ final class RawKvClient
             $regionCalls[$regionId] = (fn(): GrpcFuture => $this->executeBatchPutForRegionAsync(
                 $regionData['region'],
                 $regionData['pairs'],
-                $ttl,
+                $regionData['ttls'] ?? $ttl,
             ));
         }
 
@@ -932,8 +952,9 @@ final class RawKvClient
 
     /**
      * @param KvPair[] $pairs
+     * @param int|int[] $ttl
      */
-    private function executeBatchPutForRegionAsync(RegionInfo $region, array $pairs, int $ttl): GrpcFuture
+    private function executeBatchPutForRegionAsync(RegionInfo $region, array $pairs, int|array $ttl): GrpcFuture
     {
         return $this->executeWithRetryAsync(function () use ($region, $pairs, $ttl): GrpcFuture {
             $address = $this->resolveStoreAddress($region->leaderStoreId);
@@ -941,7 +962,9 @@ final class RawKvClient
             $request = new RawBatchPutRequest();
             $request->setContext(RegionContext::fromRegionInfo($region));
             $request->setPairs($pairs);
-            if ($ttl > 0) {
+            if (is_array($ttl)) {
+                $request->setTtls($ttl);
+            } elseif ($ttl > 0) {
                 $request->setTtls([$ttl]);
             }
 
