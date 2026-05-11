@@ -952,7 +952,7 @@ class RawKvE2ETest extends TestCase
         $this->putAndTrack($pairs);
 
         // scan() with limit 2 returns first 2
-        $expected = $this->testClient->scan('sit-lim-', 'sit-lim.', 2);
+        $this->testClient->scan('sit-lim-', 'sit-lim.', 2);
 
         $iteratorResults = [];
         $count = 0;
@@ -1051,7 +1051,7 @@ class RawKvE2ETest extends TestCase
 
         $iterator = $this->testClient->scanIterator('sit-brk-', 'sit-brk.', 5);
         $count = 0;
-        foreach ($iterator as $key => $value) {
+        foreach ($iterator as $value) {
             $count++;
             if ($count >= 3) {
                 break;

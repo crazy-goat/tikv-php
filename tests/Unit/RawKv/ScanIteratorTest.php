@@ -125,7 +125,7 @@ class ScanIteratorTest extends TestCase
 
         $iterator = new ScanIterator($scanFn, 'a', 'z', 2);
         $count = 0;
-        foreach ($iterator as $key => $value) {
+        foreach ($iterator as $value) {
             $count++;
             break;
         }

@@ -506,7 +506,7 @@ final class RawKvClient
         $this->ensureOpen();
 
         return new ScanIterator(
-            \Closure::fromCallable([$this, 'scan']),
+            $this->scan(...),
             $startKey,
             $endKey,
             $batchSize,
@@ -527,7 +527,7 @@ final class RawKvClient
         $this->ensureOpen();
 
         return new ScanIterator(
-            \Closure::fromCallable([$this, 'scan']),
+            $this->scan(...),
             $prefix,
             $this->calculatePrefixEndKey($prefix),
             $batchSize,

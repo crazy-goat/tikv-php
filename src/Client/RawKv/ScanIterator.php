@@ -22,7 +22,7 @@ use Iterator;
  */
 final class ScanIterator implements Iterator
 {
-    /** @var list<array{key: string, value: ?string}> */
+    /** @var array<array{key: string, value: ?string}> */
     private array $buffer = [];
 
     private int $bufferIndex = 0;
@@ -31,10 +31,10 @@ final class ScanIterator implements Iterator
 
     private bool $exhausted = false;
 
-    private \Closure $scanFn;
+    private readonly \Closure $scanFn;
 
     /**
-     * @param callable(string, string, int, bool): list<array{key: string, value: ?string}> $scanFn
+     * @param callable(string, string, int, bool): array<array{key: string, value: ?string}> $scanFn
      */
     public function __construct(
         callable $scanFn,
