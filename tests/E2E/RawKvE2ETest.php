@@ -898,6 +898,170 @@ class RawKvE2ETest extends TestCase
     }
 
     // ========================================================================
+    // ScanIterator
+    // ========================================================================
+
+    public function testScanIteratorReturnsSameResultsAsScan(): void
+    {
+        $pairs = ['sit-a' => 'va', 'sit-b' => 'vb', 'sit-c' => 'vc'];
+        $this->putAndTrack($pairs);
+
+        $scanResults = $this->testClient->scan('sit-', 'sit.', 0);
+        $iteratorResults = [];
+        foreach ($this->testClient->scanIterator('sit-', 'sit.', 10) as $key => $value) {
+            $iteratorResults[$key] = $value;
+        }
+
+        $expected = [];
+        foreach ($scanResults as $r) {
+            $expected[$r['key']] = $r['value'];
+        }
+
+        $this->assertSame($expected, $iteratorResults);
+    }
+
+    public function testScanIteratorWithSmallBatchSize(): void
+    {
+        $pairs = [];
+        for ($i = 0; $i < 10; $i++) {
+            $pairs[sprintf('sit-small-%03d', $i)] = "value-$i";
+        }
+        $this->putAndTrack($pairs);
+
+        $iterator = $this->testClient->scanIterator('sit-small-', 'sit-small.', 2);
+        $results = iterator_to_array($iterator);
+
+        $this->assertCount(10, $results);
+        $this->assertArrayHasKey('sit-small-000', $results);
+        $this->assertSame('value-0', $results['sit-small-000']);
+        $this->assertArrayHasKey('sit-small-009', $results);
+        $this->assertSame('value-9', $results['sit-small-009']);
+    }
+
+    public function testScanIteratorEmptyRange(): void
+    {
+        $iterator = $this->testClient->scanIterator('sit-empty-zzz', 'sit-empty-zzzz', 10);
+        $results = iterator_to_array($iterator);
+
+        $this->assertCount(0, $results);
+    }
+
+    public function testScanIteratorWithLimit(): void
+    {
+        $pairs = ['sit-lim-a' => 'va', 'sit-lim-b' => 'vb', 'sit-lim-c' => 'vc'];
+        $this->putAndTrack($pairs);
+
+        // scan() with limit 2 returns first 2
+        $expected = $this->testClient->scan('sit-lim-', 'sit-lim.', 2);
+
+        $iteratorResults = [];
+        $count = 0;
+        foreach ($this->testClient->scanIterator('sit-lim-', 'sit-lim.', 2) as $key => $value) {
+            $iteratorResults[$key] = $value;
+            $count++;
+            // The iterator internally fetches using scan() with batchSize as limit,
+            // but it should still respect the range boundaries
+        }
+
+        $this->assertCount(2, $iteratorResults);
+    }
+
+    public function testScanIteratorPrefix(): void
+    {
+        $pairs = [
+            'sit-pref:alice' => 'Alice',
+            'sit-pref:bob' => 'Bob',
+            'other:data' => 'Other',
+        ];
+        $this->putAndTrack($pairs);
+
+        $iterator = $this->testClient->scanPrefixIterator('sit-pref:', 10);
+        $results = iterator_to_array($iterator);
+
+        $this->assertCount(2, $results);
+        $this->assertArrayHasKey('sit-pref:alice', $results);
+        $this->assertArrayHasKey('sit-pref:bob', $results);
+        $this->assertArrayNotHasKey('other:data', $results);
+    }
+
+    public function testScanIteratorKeyOnly(): void
+    {
+        $this->testClient->put('sit-ko-a', 'secret-a');
+        $this->keysToCleanup[] = 'sit-ko-a';
+        $this->testClient->put('sit-ko-b', 'secret-b');
+        $this->keysToCleanup[] = 'sit-ko-b';
+
+        $results = [];
+        foreach ($this->testClient->scanIterator('sit-ko-', 'sit-ko.', 10, true) as $key => $value) {
+            $results[$key] = $value;
+        }
+
+        $this->assertCount(2, $results);
+        $this->assertNull($results['sit-ko-a']);
+        $this->assertNull($results['sit-ko-b']);
+    }
+
+    public function testScanIteratorMultipleBatchesAcrossRegions(): void
+    {
+        // Insert enough keys to span multiple batches
+        $pairs = [];
+        for ($i = 0; $i < 50; $i++) {
+            $pairs[sprintf('sit-reg-%03d', $i)] = "value-$i";
+        }
+        $this->putAndTrack($pairs);
+
+        $iterator = $this->testClient->scanIterator('sit-reg-', 'sit-reg.', 10);
+        $results = iterator_to_array($iterator);
+
+        $this->assertCount(50, $results);
+
+        // Verify all values are correct
+        for ($i = 0; $i < 50; $i++) {
+            $key = sprintf('sit-reg-%03d', $i);
+            $this->assertArrayHasKey($key, $results);
+            $this->assertSame("value-$i", $results[$key]);
+        }
+    }
+
+    public function testScanIteratorRewind(): void
+    {
+        $pairs = ['sit-rew-a' => 'va', 'sit-rew-b' => 'vb'];
+        $this->putAndTrack($pairs);
+
+        $iterator = $this->testClient->scanIterator('sit-rew-', 'sit-rew.', 10);
+
+        // First pass
+        $first = iterator_to_array($iterator);
+        $this->assertCount(2, $first);
+
+        // Rewind
+        $iterator->rewind();
+        $second = iterator_to_array($iterator);
+
+        $this->assertSame($first, $second);
+    }
+
+    public function testScanIteratorEarlyBreak(): void
+    {
+        $pairs = [];
+        for ($i = 0; $i < 20; $i++) {
+            $pairs[sprintf('sit-brk-%03d', $i)] = "value-$i";
+        }
+        $this->putAndTrack($pairs);
+
+        $iterator = $this->testClient->scanIterator('sit-brk-', 'sit-brk.', 5);
+        $count = 0;
+        foreach ($iterator as $key => $value) {
+            $count++;
+            if ($count >= 3) {
+                break;
+            }
+        }
+
+        $this->assertSame(3, $count);
+    }
+
+    // ========================================================================
     // DeleteRange
     // ========================================================================
 

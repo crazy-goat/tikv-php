@@ -489,6 +489,53 @@ final class RawKvClient
     // ========================================================================
 
     /**
+     * Create a lazy scan iterator over [startKey, endKey).
+     *
+     * Fetches results in batches of `batchSize` on demand, keeping only
+     * one page in memory at a time. Use instead of scan() for large
+     * datasets to avoid OOM.
+     *
+     * @return ScanIterator<string, ?string>
+     */
+    public function scanIterator(
+        string $startKey,
+        string $endKey,
+        int $batchSize = 256,
+        bool $keyOnly = false,
+    ): ScanIterator {
+        $this->ensureOpen();
+
+        return new ScanIterator(
+            \Closure::fromCallable([$this, 'scan']),
+            $startKey,
+            $endKey,
+            $batchSize,
+            $keyOnly,
+        );
+    }
+
+    /**
+     * Create a lazy scan iterator over keys with the given prefix.
+     *
+     * @return ScanIterator<string, ?string>
+     */
+    public function scanPrefixIterator(
+        string $prefix,
+        int $batchSize = 256,
+        bool $keyOnly = false,
+    ): ScanIterator {
+        $this->ensureOpen();
+
+        return new ScanIterator(
+            \Closure::fromCallable([$this, 'scan']),
+            $prefix,
+            $this->calculatePrefixEndKey($prefix),
+            $batchSize,
+            $keyOnly,
+        );
+    }
+
+    /**
      * Scan a range of keys [startKey, endKey).
      *
      * @param int $limit Maximum results (0 = unlimited)

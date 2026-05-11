@@ -124,6 +124,8 @@ class RawKvClientTest extends TestCase
         yield 'putIfAbsent' => ['putIfAbsent', ['key', 'value']];
         yield 'checksum' => ['checksum', ['start', 'end']];
         yield 'batchScan' => ['batchScan', [[['a', 'b']], 10]];
+        yield 'scanIterator' => ['scanIterator', ['start', 'end']];
+        yield 'scanPrefixIterator' => ['scanPrefixIterator', ['prefix']];
     }
 
     // ========================================================================
