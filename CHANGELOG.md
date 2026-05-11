@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-11
+
 ### Added
 - TxnKV client with full ACID transaction support (begin/commit/rollback, snapshot reads, pessimistic locking)
 - Lazy auto-paginating `ScanIterator` for RawKV scans — fetches next pages transparently on iteration
@@ -54,4 +56,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Branch protection rules requiring CI checks and approvals
 - PHP 8.2, 8.3, 8.4 support
 
+[0.2.0]: https://github.com/crazy-goat/tikv-php/releases/tag/v0.2.0
 [0.1.0]: https://github.com/crazy-goat/tikv-php/releases/tag/v0.1.0
