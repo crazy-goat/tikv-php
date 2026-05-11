@@ -111,7 +111,7 @@ final class RawKvClient
     
     // Batch operations
     public function batchGet(array $keys): array;
-    public function batchPut(array $pairs, int $ttl = 0): void;
+    public function batchPut(array $pairs, int|array $ttl = 0): void;
     public function batchDelete(array $keys): void;
     
     // Scan operations
