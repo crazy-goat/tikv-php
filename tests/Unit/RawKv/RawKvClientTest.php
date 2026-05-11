@@ -258,6 +258,47 @@ class RawKvClientTest extends TestCase
     // scan()
     // ========================================================================
 
+    public function testScanLimitZeroIsCappedToMax(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pairs = [];
+        for ($i = 0; $i < RawKvClient::MAX_SCAN_LIMIT; $i++) {
+            $pair = new KvPair();
+            $pair->setKey('k' . $i);
+            $pair->setValue('v' . $i);
+            $pairs[] = $pair;
+        }
+
+        $response = new RawScanResponse();
+        $response->setKvs($pairs);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $result = $this->client->scan('k', 'l', 0);
+
+        $this->assertCount(RawKvClient::MAX_SCAN_LIMIT, $result);
+    }
+
+    public function testScanLimitExceedingMaxThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit (10241) exceeds maximum allowed scan limit of 10240');
+
+        $this->client->scan('k', 'l', RawKvClient::MAX_SCAN_LIMIT + 1);
+    }
+
+    public function testReverseScanLimitExceedingMaxThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit (99999) exceeds maximum allowed scan limit of 10240');
+
+        $this->client->reverseScan('k', 'l', 99999);
+    }
+
     public function testScanReturnsResults(): void
     {
         $this->regionCache->method('getByKey')->willReturn(null);
@@ -299,6 +340,14 @@ class RawKvClientTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         $this->client->batchScan([['a', 'b']], 0);
+    }
+
+    public function testBatchScanThrowsOnEachLimitExceedingMax(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('eachLimit (10241) exceeds maximum allowed scan limit of 10240');
+
+        $this->client->batchScan([['a', 'b']], RawKvClient::MAX_SCAN_LIMIT + 1);
     }
 
     public function testBatchScanThrowsOnInvalidRangeFormat(): void

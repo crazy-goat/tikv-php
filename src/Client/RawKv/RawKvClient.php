@@ -54,6 +54,8 @@ use Psr\Log\NullLogger;
 
 final class RawKvClient
 {
+    public const MAX_SCAN_LIMIT = 10240;
+
     private bool $closed = false;
 
     /**
@@ -435,6 +437,7 @@ final class RawKvClient
     public function scan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {
         $this->ensureOpen();
+        $limit = $this->validateScanLimit($limit);
 
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         $results = [];
@@ -487,6 +490,7 @@ final class RawKvClient
     public function reverseScan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {
         $this->ensureOpen();
+        $limit = $this->validateScanLimit($limit);
 
         $regions = $this->pdClient->scanRegions($endKey, $startKey, 0);
         $regions = array_reverse($regions);
@@ -540,6 +544,14 @@ final class RawKvClient
 
         if ($eachLimit <= 0) {
             throw new InvalidArgumentException('eachLimit must be greater than 0');
+        }
+
+        if ($eachLimit > self::MAX_SCAN_LIMIT) {
+            throw new InvalidArgumentException(sprintf(
+                'eachLimit (%d) exceeds maximum allowed scan limit of %d',
+                $eachLimit,
+                self::MAX_SCAN_LIMIT,
+            ));
         }
 
         $results = [];
@@ -658,6 +670,29 @@ final class RawKvClient
         if ($this->closed) {
             throw new ClientClosedException();
         }
+    }
+
+    /**
+     * Validate and normalize scan limit.
+     *
+     * - 0 (unlimited) is capped to MAX_SCAN_LIMIT
+     * - > MAX_SCAN_LIMIT throws InvalidArgumentException
+     */
+    private function validateScanLimit(int $limit): int
+    {
+        if ($limit === 0) {
+            return self::MAX_SCAN_LIMIT;
+        }
+
+        if ($limit > self::MAX_SCAN_LIMIT) {
+            throw new InvalidArgumentException(sprintf(
+                'Scan limit (%d) exceeds maximum allowed scan limit of %d',
+                $limit,
+                self::MAX_SCAN_LIMIT,
+            ));
+        }
+
+        return $limit;
     }
 
     private function getRegionInfo(string $key): RegionInfo
