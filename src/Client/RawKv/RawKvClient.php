@@ -57,6 +57,14 @@ final class RawKvClient
 {
     public const MAX_SCAN_LIMIT = 10240;
 
+    public const MAX_BATCH_LIMIT = 512;
+
+    public const MAX_BATCH_PUT_SIZE = 16384;
+
+    public const MAX_BATCH_GET_SIZE = 16384;
+
+    public const MAX_BATCH_DELETE_SIZE = 16384;
+
     public const OP_READ = 'read';
     public const OP_WRITE = 'write';
     public const OP_BATCH_READ = 'batch_read';
@@ -364,20 +372,28 @@ final class RawKvClient
 
         $keysByRegion = $this->groupKeysByRegion($keys);
 
-        // Execute all regions in parallel
+        // Split each region's keys into sub-batches by count and size, then execute all in parallel
         $regionCalls = [];
-        foreach ($keysByRegion as $regionId => $regionData) {
-            $regionCalls[$regionId] = (fn(): GrpcFuture => $this->executeBatchGetForRegionAsync(
-                $regionData['region'],
+        foreach ($keysByRegion as $regionData) {
+            $subBatches = $this->splitIntoBatches(
                 $regionData['keys'],
-            ));
+                self::MAX_BATCH_LIMIT,
+                self::MAX_BATCH_GET_SIZE,
+                strlen(...),
+            );
+            foreach ($subBatches as $subBatch) {
+                $regionCalls[] = (fn(): GrpcFuture => $this->executeBatchGetForRegionAsync(
+                    $regionData['region'],
+                    $subBatch,
+                ));
+            }
         }
 
         $executor = new BatchAsyncExecutor($this->logger);
 
         $regionResults = $executor->executeParallel($regionCalls);
 
-        // Merge results from all regions
+        // Merge results from all regions and sub-batches
         $results = [];
         foreach ($regionResults as $regionResult) {
             /** @var RawBatchGetResponse $response */
@@ -442,14 +458,27 @@ final class RawKvClient
             }
         }
 
-        // Execute all regions in parallel
+        // Split pairs in each region into sub-batches by count and size, then execute all in parallel
         $regionCalls = [];
-        foreach ($pairsByRegion as $regionId => $regionData) {
-            $regionCalls[$regionId] = (fn(): GrpcFuture => $this->executeBatchPutForRegionAsync(
-                $regionData['region'],
-                $regionData['pairs'],
-                $regionData['ttls'] ?? $ttl,
-            ));
+        foreach ($pairsByRegion as $regionData) {
+            $regionPairs = $regionData['pairs'];
+            $regionTtls = $regionData['ttls'] ?? [];
+
+            $subBatches = $this->splitPairsIntoBatches(
+                $regionPairs,
+                self::MAX_BATCH_LIMIT,
+                self::MAX_BATCH_PUT_SIZE,
+                $regionTtls,
+            );
+
+            foreach ($subBatches as $subBatch) {
+                $batchTtls = $subBatch['ttls'];
+                $regionCalls[] = (fn(): GrpcFuture => $this->executeBatchPutForRegionAsync(
+                    $regionData['region'],
+                    $subBatch['pairs'],
+                    $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0),
+                ));
+            }
         }
 
         $executor = new BatchAsyncExecutor($this->logger);
@@ -471,13 +500,21 @@ final class RawKvClient
 
         $keysByRegion = $this->groupKeysByRegion($keys);
 
-        // Execute all regions in parallel
+        // Split each region's keys into sub-batches by count and size, then execute all in parallel
         $regionCalls = [];
-        foreach ($keysByRegion as $regionId => $regionData) {
-            $regionCalls[$regionId] = (fn(): GrpcFuture => $this->executeBatchDeleteForRegionAsync(
-                $regionData['region'],
+        foreach ($keysByRegion as $regionData) {
+            $subBatches = $this->splitIntoBatches(
                 $regionData['keys'],
-            ));
+                self::MAX_BATCH_LIMIT,
+                self::MAX_BATCH_DELETE_SIZE,
+                strlen(...),
+            );
+            foreach ($subBatches as $subBatch) {
+                $regionCalls[] = (fn(): GrpcFuture => $this->executeBatchDeleteForRegionAsync(
+                    $regionData['region'],
+                    $subBatch,
+                ));
+            }
         }
 
         $executor = new BatchAsyncExecutor($this->logger);
@@ -1045,6 +1082,80 @@ final class RawKvClient
         return $grouped;
     }
 
+    /**
+     * @template T
+     * @param T[] $items
+     * @param callable(T): int $sizeFn
+     * @return T[][]
+     */
+    private function splitIntoBatches(array $items, int $maxCount, int $maxBytes, callable $sizeFn): array
+    {
+        $batches = [];
+        $current = [];
+        $currentCount = 0;
+        $currentBytes = 0;
+
+        foreach ($items as $item) {
+            $size = $sizeFn($item);
+
+            if ($currentCount > 0 && ($currentCount >= $maxCount || $currentBytes + $size > $maxBytes)) {
+                $batches[] = $current;
+                $current = [];
+                $currentCount = 0;
+                $currentBytes = 0;
+            }
+
+            $current[] = $item;
+            $currentCount++;
+            $currentBytes += $size;
+        }
+
+        if ($currentCount > 0) {
+            $batches[] = $current;
+        }
+
+        return $batches;
+    }
+
+    /**
+     * @param KvPair[] $pairs
+     * @param int[] $ttls
+     * @return array<array{pairs: KvPair[], ttls: int[]}>
+     */
+    private function splitPairsIntoBatches(array $pairs, int $maxCount, int $maxBytes, array $ttls = []): array
+    {
+        $batches = [];
+        $currentPairs = [];
+        $currentTtls = [];
+        $currentCount = 0;
+        $currentBytes = 0;
+
+        foreach ($pairs as $i => $pair) {
+            $size = strlen($pair->getKey()) + strlen($pair->getValue());
+
+            if ($currentCount > 0 && ($currentCount >= $maxCount || $currentBytes + $size > $maxBytes)) {
+                $batches[] = ['pairs' => $currentPairs, 'ttls' => $currentTtls];
+                $currentPairs = [];
+                $currentTtls = [];
+                $currentCount = 0;
+                $currentBytes = 0;
+            }
+
+            $currentPairs[] = $pair;
+            if ($ttls !== []) {
+                $currentTtls[] = $ttls[$i];
+            }
+            $currentCount++;
+            $currentBytes += $size;
+        }
+
+        if ($currentCount > 0) {
+            $batches[] = ['pairs' => $currentPairs, 'ttls' => $currentTtls];
+        }
+
+        return $batches;
+    }
+
     private function calculatePrefixEndKey(string $prefix): string
     {
         if ($prefix === '') {
@@ -1059,6 +1170,9 @@ final class RawKvClient
                 return '';
             }
             $lastByte = ord($trimmed[strlen($trimmed) - 1]);
+            if ($lastByte === 255) {
+                return '';
+            }
             return substr($trimmed, 0, -1) . chr($lastByte + 1);
         }
 

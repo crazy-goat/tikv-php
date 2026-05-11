@@ -2492,4 +2492,219 @@ class RawKvE2ETest extends TestCase
         $client->delete($key);
         $client->close();
     }
+
+    // ========================================================================
+    // Batch auto-splitting (by count and byte size)
+    // ========================================================================
+
+    public function testBatchPutSplitByCount(): void
+    {
+        // Generate enough keys to exceed MAX_BATCH_LIMIT (512)
+        $pairs = [];
+        for ($i = 0; $i < 600; $i++) {
+            $key = sprintf('split-cnt-%03d-%s', $i, uniqid());
+            $pairs[$key] = 'v' . $i;
+        }
+        $this->putAndTrack($pairs);
+
+        $results = $this->testClient->batchGet(array_keys($pairs));
+        $this->assertCount(600, $results);
+        foreach ($pairs as $key => $value) {
+            $this->assertArrayHasKey($key, $results);
+            $this->assertSame($value, $results[$key]);
+        }
+    }
+
+    public function testBatchGetSplitByCountReturnsOrdered(): void
+    {
+        // Put keys first
+        $pairs = [];
+        for ($i = 0; $i < 600; $i++) {
+            $key = sprintf('bg-order-%03d-%s', $i, uniqid());
+            $pairs[$key] = 'val-' . $i;
+        }
+        $this->putAndTrack($pairs);
+
+        // Request in specific (non-sequential) order
+        $keys = array_keys($pairs);
+        $reversed = array_reverse($keys);
+        $results = $this->testClient->batchGet($reversed);
+
+        $this->assertCount(600, $results);
+
+        // Verify input order is preserved in results
+        $expected = [];
+        foreach ($reversed as $k) {
+            $expected[$k] = $pairs[$k];
+        }
+        $this->assertSame($expected, $results);
+    }
+
+    public function testBatchPutSplitBySize(): void
+    {
+        // Generate pairs with large keys/values so total exceeds MAX_BATCH_PUT_SIZE (16KB)
+        // Each key is ~100 bytes, each value is ~200 bytes => ~300 bytes per pair
+        // 60 pairs => ~18KB, forcing at least one split
+        $pairs = [];
+        for ($i = 0; $i < 60; $i++) {
+            $key = str_repeat('k', 100) . $i . '-' . uniqid();
+            $pairs[$key] = str_repeat('v', 200) . $i;
+        }
+        $this->putAndTrack($pairs);
+
+        $results = $this->testClient->batchGet(array_keys($pairs));
+        $this->assertCount(60, $results);
+        foreach ($pairs as $key => $value) {
+            $this->assertArrayHasKey($key, $results);
+            $this->assertSame($value, $results[$key]);
+        }
+    }
+
+    public function testBatchGetSplitBySizeCorrectResults(): void
+    {
+        // Create keys where the keys themselves are large to exceed MAX_BATCH_GET_SIZE (16KB)
+        // Each key is ~300 bytes, 60 keys => ~18KB total, forcing split
+        $pairs = [];
+        for ($i = 0; $i < 60; $i++) {
+            $key = str_repeat('k', 300) . 'bg-size-' . $i . '-' . uniqid();
+            $pairs[$key] = 'vs-' . $i;
+        }
+        $this->putAndTrack($pairs);
+
+        // batchGet with same keys should return all values correctly
+        $results = $this->testClient->batchGet(array_keys($pairs));
+        $this->assertCount(60, $results);
+        foreach ($pairs as $key => $value) {
+            $this->assertSame($value, $results[$key]);
+        }
+    }
+
+    public function testBatchDeleteSplitByCount(): void
+    {
+        // Put many keys, then delete them all in one batchDelete call
+        $pairs = [];
+        for ($i = 0; $i < 600; $i++) {
+            $key = sprintf('del-cnt-%03d-%s', $i, uniqid());
+            $pairs[$key] = 'd' . $i;
+        }
+        $this->putAndTrack($pairs);
+
+        // Verify they exist
+        $this->assertCount(600, $this->testClient->batchGet(array_keys($pairs)));
+
+        // Delete all at once (this will split into sub-batches)
+        $this->testClient->batchDelete(array_keys($pairs));
+
+        // Verify all deleted
+        $results = $this->testClient->batchGet(array_keys($pairs));
+        foreach (array_keys($pairs) as $key) {
+            $this->assertNull($results[$key], "Key '$key' should be null after batchDelete");
+        }
+
+        // Remove from cleanup since they're already deleted
+        $this->keysToCleanup = array_diff($this->keysToCleanup, array_keys($pairs));
+    }
+
+    public function testBatchPutSplitWithPerKeyTtl(): void
+    {
+        // Per-key TTL with enough keys to force splitting
+        $pairs = [];
+        $ttls = [];
+        for ($i = 0; $i < 600; $i++) {
+            $key = sprintf('ttl-split-%03d-%s', $i, uniqid());
+            $pairs[$key] = 't' . $i;
+            $ttls[$key] = $i % 2 === 0 ? 60 : 120;
+        }
+        $this->testClient->batchPut($pairs, $ttls);
+        foreach (array_keys($pairs) as $key) {
+            $this->keysToCleanup[] = $key;
+        }
+
+        // Verify all written correctly
+        $results = $this->testClient->batchGet(array_keys($pairs));
+        $this->assertCount(600, $results);
+        foreach ($pairs as $key => $value) {
+            $this->assertSame($value, $results[$key]);
+        }
+
+        // Verify TTLs were set (keys should still exist)
+        foreach (array_slice(array_keys($pairs), 0, 10) as $key) {
+            $ttl = $this->testClient->getKeyTTL($key);
+            $this->assertNotNull($ttl, "TTL should be set for key '$key'");
+        }
+    }
+
+    public function testBatchFullCycleWithSplitting(): void
+    {
+        // Full write-read-delete cycle with enough data to cause splitting
+        $pairs = [];
+        for ($i = 0; $i < 600; $i++) {
+            $key = sprintf('cycle-%03d-%s', $i, uniqid());
+            $pairs[$key] = str_repeat('x', 50) . $i;
+        }
+        $this->putAndTrack($pairs);
+
+        // Read all
+        $results = $this->testClient->batchGet(array_keys($pairs));
+        $this->assertSame($pairs, $results);
+
+        // Delete all
+        $this->testClient->batchDelete(array_keys($pairs));
+
+        // Verify gone
+        $afterDelete = $this->testClient->batchGet(array_keys($pairs));
+        foreach (array_keys($pairs) as $key) {
+            $this->assertNull($afterDelete[$key]);
+        }
+
+        $this->keysToCleanup = array_diff($this->keysToCleanup, array_keys($pairs));
+    }
+
+    public function testBatchPutSplitWithLargeValues(): void
+    {
+        // Each value is ~1KB, 100 pairs => ~100KB total, well over 16KB limit
+        $pairs = [];
+        for ($i = 0; $i < 100; $i++) {
+            $key = sprintf('big-val-%03d-%s', $i, uniqid());
+            $pairs[$key] = str_repeat('v', 1000) . $i;
+        }
+        $this->putAndTrack($pairs);
+
+        // Verify all written by reading each individually
+        foreach ($pairs as $key => $expected) {
+            $actual = $this->testClient->get($key);
+            $this->assertSame($expected, $actual, "Mismatch for key '$key'");
+        }
+    }
+
+    public function testBatchOperationsAcrossManyRegionsWithSplitting(): void
+    {
+        // Keys with different prefixes should land in different regions
+        // This tests both region-level parallelism AND sub-batch splitting
+        $pairs = [];
+        $prefixes = ['a-', 'b-', 'c-', 'd-', 'e-', 'f-', 'g-', 'h-', 'i-', 'j-'];
+        foreach ($prefixes as $prefix) {
+            for ($i = 0; $i < 100; $i++) {
+                $key = $prefix . sprintf('rgn-splt-%03d-%s', $i, uniqid());
+                $pairs[$key] = 'r' . $i;
+            }
+        }
+        $this->putAndTrack($pairs);
+
+        $this->assertCount(1000, $pairs);
+
+        // batchGet all
+        $results = $this->testClient->batchGet(array_keys($pairs));
+        $this->assertSame($pairs, $results);
+
+        // batchDelete all
+        $this->testClient->batchDelete(array_keys($pairs));
+
+        $afterDelete = $this->testClient->batchGet(array_keys($pairs));
+        foreach (array_keys($pairs) as $key) {
+            $this->assertNull($afterDelete[$key]);
+        }
+
+        $this->keysToCleanup = array_diff($this->keysToCleanup, array_keys($pairs));
+    }
 }
