@@ -946,24 +946,21 @@ class RawKvE2ETest extends TestCase
         $this->assertCount(0, $results);
     }
 
-    public function testScanIteratorWithLimit(): void
+    public function testScanIteratorWithSmallBatchReturnsAllResults(): void
     {
         $pairs = ['sit-lim-a' => 'va', 'sit-lim-b' => 'vb', 'sit-lim-c' => 'vc'];
         $this->putAndTrack($pairs);
 
-        // scan() with limit 2 returns first 2
-        $this->testClient->scan('sit-lim-', 'sit-lim.', 2);
-
+        // batchSize=2 means 2 per page, but all 3 keys should be returned
         $iteratorResults = [];
-        $count = 0;
         foreach ($this->testClient->scanIterator('sit-lim-', 'sit-lim.', 2) as $key => $value) {
             $iteratorResults[$key] = $value;
-            $count++;
-            // The iterator internally fetches using scan() with batchSize as limit,
-            // but it should still respect the range boundaries
         }
 
-        $this->assertCount(2, $iteratorResults);
+        $this->assertCount(3, $iteratorResults);
+        $this->assertSame('va', $iteratorResults['sit-lim-a']);
+        $this->assertSame('vb', $iteratorResults['sit-lim-b']);
+        $this->assertSame('vc', $iteratorResults['sit-lim-c']);
     }
 
     public function testScanIteratorPrefix(): void
