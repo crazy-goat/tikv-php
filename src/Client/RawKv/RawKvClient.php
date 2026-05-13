@@ -34,6 +34,7 @@ use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCache;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
@@ -76,6 +77,8 @@ final class RawKvClient
 
     private bool $closed = false;
 
+    private readonly BatchAsyncExecutor $batchExecutor;
+
     /**
      * Create a client connected to a PD cluster.
      *
@@ -110,7 +113,8 @@ final class RawKvClient
         }
 
         $grpc = new GrpcClient($resolvedLogger, $tlsConfig);
-        $pdClient = new PdClient($grpc, $pdEndpoints[0], $resolvedLogger);
+        $storeCache = new StoreCache(logger: $resolvedLogger);
+        $pdClient = new PdClient($grpc, $pdEndpoints[0], $resolvedLogger, $storeCache);
 
         $timeoutConfig = new TimeoutConfig();
 
@@ -150,6 +154,7 @@ final class RawKvClient
         private readonly int $serverBusyBudgetMs = 600000, // 10 minutes separate budget
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
     ) {
+        $this->batchExecutor = new BatchAsyncExecutor($this->logger);
     }
 
     // ========================================================================
@@ -393,9 +398,7 @@ final class RawKvClient
             }
         }
 
-        $executor = new BatchAsyncExecutor($this->logger);
-
-        $regionResults = $executor->executeParallel($regionCalls);
+        $regionResults = $this->batchExecutor->executeParallel($regionCalls);
 
         // Merge results from all regions and sub-batches
         $results = [];
@@ -485,8 +488,7 @@ final class RawKvClient
             }
         }
 
-        $executor = new BatchAsyncExecutor($this->logger);
-        $executor->executeParallel($regionCalls);
+        $this->batchExecutor->executeParallel($regionCalls);
     }
 
     /**
@@ -521,8 +523,7 @@ final class RawKvClient
             }
         }
 
-        $executor = new BatchAsyncExecutor($this->logger);
-        $executor->executeParallel($regionCalls);
+        $this->batchExecutor->executeParallel($regionCalls);
     }
 
     // ========================================================================

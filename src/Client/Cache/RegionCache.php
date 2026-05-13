@@ -13,6 +13,9 @@ class RegionCache implements RegionCacheInterface
     /** @var RegionEntry[] */
     private array $entries = [];
 
+    /** @var array<int, int> regionId => index */
+    private array $idToIndex = [];
+
     public function __construct(
         private readonly int $ttlSeconds = 600,
         private readonly int $jitterSeconds = 60,
@@ -53,6 +56,7 @@ class RegionCache implements RegionCacheInterface
         $position = $this->findInsertPosition($region->startKey);
         $entry = new RegionEntry($region, $this->now() + $this->ttlSeconds + $this->jitter());
         array_splice($this->entries, $position, 0, [$entry]);
+        $this->rebuildIdToIndex();
 
         $this->logger->debug('Region cached', [
             'regionId' => $region->regionId,
@@ -70,25 +74,26 @@ class RegionCache implements RegionCacheInterface
 
     public function switchLeader(int $regionId, int $leaderStoreId): bool
     {
-        foreach ($this->entries as $entry) {
-            if ($entry->region->regionId === $regionId) {
-                $result = $entry->switchLeader($leaderStoreId);
-                if ($result) {
-                    $this->logger->info('Region leader switched', [
-                        'regionId' => $regionId,
-                        'newLeaderStoreId' => $leaderStoreId,
-                    ]);
-                }
-                return $result;
-            }
+        $index = $this->idToIndex[$regionId] ?? null;
+        if ($index === null) {
+            return false;
         }
 
-        return false;
+        $entry = $this->entries[$index];
+        $result = $entry->switchLeader($leaderStoreId);
+        if ($result) {
+            $this->logger->info('Region leader switched', [
+                'regionId' => $regionId,
+                'newLeaderStoreId' => $leaderStoreId,
+            ]);
+        }
+        return $result;
     }
 
     public function clear(): void
     {
         $this->entries = [];
+        $this->idToIndex = [];
     }
 
     protected function now(): int
@@ -136,11 +141,9 @@ class RegionCache implements RegionCacheInterface
 
     private function removeById(int $regionId): void
     {
-        foreach ($this->entries as $index => $entry) {
-            if ($entry->region->regionId === $regionId) {
-                $this->removeByIndex($index);
-                return;
-            }
+        $index = $this->idToIndex[$regionId] ?? null;
+        if ($index !== null) {
+            $this->removeByIndex($index);
         }
     }
 
@@ -148,6 +151,15 @@ class RegionCache implements RegionCacheInterface
     {
         if (isset($this->entries[$index])) {
             array_splice($this->entries, $index, 1);
+            $this->rebuildIdToIndex();
+        }
+    }
+
+    private function rebuildIdToIndex(): void
+    {
+        $this->idToIndex = [];
+        foreach ($this->entries as $index => $entry) {
+            $this->idToIndex[$entry->region->regionId] = $index;
         }
     }
 
