@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
@@ -14,6 +15,13 @@ use PHPUnit\Framework\TestCase;
 
 class TxnKvClientTest extends TestCase
 {
+    public function testCreateThrowsOnEmptyPdEndpoints(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('PD endpoints array must not be empty');
+        TxnKvClient::create([]);
+    }
+
     public function testConstruction(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);

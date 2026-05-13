@@ -9,6 +9,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
@@ -25,6 +26,10 @@ final class TxnKvClient
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
+        if ($pdEndpoints === []) {
+            throw new InvalidArgumentException('PD endpoints array must not be empty');
+        }
+
         $resolvedLogger = $logger ?? new NullLogger();
 
         $tlsConfig = null;
@@ -47,7 +52,7 @@ final class TxnKvClient
         }
 
         $grpc = new GrpcClient($resolvedLogger, $tlsConfig);
-        $pdAddress = $pdEndpoints[0] ?? '127.0.0.1:2379';
+        $pdAddress = $pdEndpoints[0];
         $pdClient = new PdClient($grpc, $pdAddress, $resolvedLogger);
 
         return new self($pdClient, $grpc, logger: $resolvedLogger);
