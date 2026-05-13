@@ -80,6 +80,13 @@ class RawKvClientTest extends TestCase
         $this->assertTrue(method_exists(RawKvClient::class, 'create')); // @phpstan-ignore function.alreadyNarrowedType
     }
 
+    public function testCreateThrowsOnEmptyPdEndpoints(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('PD endpoints array must not be empty');
+        RawKvClient::create([]);
+    }
+
     public function testCloseIsIdempotent(): void
     {
         $this->client->close();

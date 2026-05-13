@@ -84,6 +84,10 @@ final class RawKvClient
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
+        if ($pdEndpoints === []) {
+            throw new InvalidArgumentException('PD endpoints array must not be empty');
+        }
+
         $resolvedLogger = $logger ?? new NullLogger();
 
         $tlsConfig = null;
