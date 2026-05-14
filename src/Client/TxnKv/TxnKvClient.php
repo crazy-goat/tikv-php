@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCache;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
@@ -53,7 +54,8 @@ final class TxnKvClient
 
         $grpc = new GrpcClient($resolvedLogger, $tlsConfig);
         $pdAddress = $pdEndpoints[0];
-        $pdClient = new PdClient($grpc, $pdAddress, $resolvedLogger);
+        $storeCache = new StoreCache(logger: $resolvedLogger);
+        $pdClient = new PdClient($grpc, $pdAddress, $resolvedLogger, $storeCache);
 
         return new self($pdClient, $grpc, logger: $resolvedLogger);
     }

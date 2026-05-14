@@ -43,14 +43,15 @@ class StoreCache implements StoreCacheInterface
         $storeId = (int) $store->getId();
         unset($this->entries[$storeId]);
 
+        $jitter = $this->jitter();
         $this->entries[$storeId] = new StoreEntry(
             $store,
-            $this->now() + $this->ttlSeconds + $this->jitter(),
+            $this->now() + $this->ttlSeconds + $jitter,
         );
 
         $this->logger->debug('Store cached', [
             'storeId' => $storeId,
-            'ttl' => $this->ttlSeconds + $this->jitter(),
+            'ttl' => $this->ttlSeconds + $jitter,
         ]);
     }
 
