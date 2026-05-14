@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Tls;
 
-final readonly class TlsConfig
+final class TlsConfig
 {
     public function __construct(
         public ?string $caCert = null,
@@ -16,5 +16,16 @@ final readonly class TlsConfig
     public function isEnabled(): bool
     {
         return $this->caCert !== null;
+    }
+
+    /**
+     * Zero-out sensitive credential data.
+     * Call this after credentials have been consumed by gRPC channel creation.
+     */
+    public function close(): void
+    {
+        if ($this->clientKey !== null) {
+            $this->clientKey = str_repeat("\0", strlen($this->clientKey));
+        }
     }
 }

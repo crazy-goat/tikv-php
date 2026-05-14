@@ -66,6 +66,11 @@ final class RawKvClient
 
     public const MAX_BATCH_DELETE_SIZE = 16384;
 
+    // Input validation limits
+    public const MAX_KEY_SIZE = 8388608; // 8 MB TiKV hard limit (RaftEntryMaxSize)
+    public const MAX_VALUE_SIZE = 4194304; // 4 MB practical limit
+    public const MIN_KEY_SIZE = 1;
+
     public const OP_READ = 'read';
     public const OP_WRITE = 'write';
     public const OP_BATCH_READ = 'batch_read';
@@ -157,6 +162,39 @@ final class RawKvClient
         $this->batchExecutor = new BatchAsyncExecutor($this->logger);
     }
 
+    private function validateKeyNotEmpty(string $key, string $method): void
+    {
+        if ($key === '') {
+            throw new InvalidArgumentException("Key must not be empty in {$method}");
+        }
+    }
+
+    private function validateKeySize(string $key, string $method): void
+    {
+        $len = strlen($key);
+        if ($len > self::MAX_KEY_SIZE) {
+            throw new InvalidArgumentException(sprintf(
+                'Key size (%d) exceeds maximum allowed size (%d) in %s',
+                $len,
+                self::MAX_KEY_SIZE,
+                $method,
+            ));
+        }
+    }
+
+    private function validateValueSize(string $value, string $method): void
+    {
+        $len = strlen($value);
+        if ($len > self::MAX_VALUE_SIZE) {
+            throw new InvalidArgumentException(sprintf(
+                'Value size (%d) exceeds maximum allowed size (%d) in %s',
+                $len,
+                self::MAX_VALUE_SIZE,
+                $method,
+            ));
+        }
+    }
+
     // ========================================================================
     // Single-key operations
     // ========================================================================
@@ -164,6 +202,8 @@ final class RawKvClient
     public function get(string $key): ?string
     {
         $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'get');
+        $this->validateKeySize($key, 'get');
 
         return $this->executeWithRetry($key, function () use ($key): ?string {
             $region = $this->getRegionInfo($key);
@@ -197,6 +237,9 @@ final class RawKvClient
     public function put(string $key, string $value, int $ttl = 0): void
     {
         $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'put');
+        $this->validateKeySize($key, 'put');
+        $this->validateValueSize($value, 'put');
 
         $this->executeWithRetry($key, function () use ($key, $value, $ttl): null {
             $region = $this->getRegionInfo($key);
@@ -226,6 +269,8 @@ final class RawKvClient
     public function delete(string $key): void
     {
         $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'delete');
+        $this->validateKeySize($key, 'delete');
 
         $this->executeWithRetry($key, function () use ($key): null {
             $region = $this->getRegionInfo($key);
@@ -302,6 +347,9 @@ final class RawKvClient
     public function compareAndSwap(string $key, ?string $expectedValue, string $newValue, int $ttl = 0): CasResult
     {
         $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'compareAndSwap');
+        $this->validateKeySize($key, 'compareAndSwap');
+        $this->validateValueSize($newValue, 'compareAndSwap');
 
         return $this->executeWithRetry(
             $key,
@@ -379,6 +427,11 @@ final class RawKvClient
             return [];
         }
 
+        foreach ($keys as $key) {
+            $this->validateKeyNotEmpty($key, 'batchGet');
+            $this->validateKeySize($key, 'batchGet');
+        }
+
         $keysByRegion = $this->groupKeysByRegion($keys);
 
         // Split each region's keys into sub-batches by count and size, then execute all in parallel
@@ -448,6 +501,9 @@ final class RawKvClient
 
         $pairsByRegion = [];
         foreach ($keyValuePairs as $key => $value) {
+            $this->validateKeyNotEmpty($key, 'batchPut');
+            $this->validateKeySize($key, 'batchPut');
+            $this->validateValueSize($value, 'batchPut');
             $region = $this->getRegionInfo($key);
             $regionId = $region->regionId;
             if (!isset($pairsByRegion[$regionId])) {
@@ -498,13 +554,18 @@ final class RawKvClient
      */
     public function batchDelete(array $keys): void
     {
-        $this->ensureOpen();
+         $this->ensureOpen();
 
         if ($keys === []) {
             return;
         }
 
-        $keysByRegion = $this->groupKeysByRegion($keys);
+        foreach ($keys as $key) {
+            $this->validateKeyNotEmpty($key, 'batchDelete');
+            $this->validateKeySize($key, 'batchDelete');
+        }
+
+         $keysByRegion = $this->groupKeysByRegion($keys);
 
         // Split each region's keys into sub-batches by count and size, then execute all in parallel
         $regionCalls = [];
@@ -587,6 +648,10 @@ final class RawKvClient
     {
         $this->ensureOpen();
         $limit = $this->validateScanLimit($limit);
+        $this->validateKeySize($startKey, 'scan');
+        if ($endKey !== '') {
+            $this->validateKeySize($endKey, 'scan');
+        }
 
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         $results = [];
@@ -638,8 +703,12 @@ final class RawKvClient
      */
     public function reverseScan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {
-        $this->ensureOpen();
-        $limit = $this->validateScanLimit($limit);
+         $this->ensureOpen();
+         $limit = $this->validateScanLimit($limit);
+         $this->validateKeySize($startKey, 'reverseScan');
+        if ($endKey !== '') {
+            $this->validateKeySize($endKey, 'reverseScan');
+        }
 
         $regions = $this->pdClient->scanRegions($endKey, $startKey, 0);
         $regions = array_reverse($regions);
