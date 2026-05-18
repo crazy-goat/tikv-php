@@ -91,8 +91,8 @@ class RawKvBatchTest extends TestCase
 
     public function testBatchPutWithIntTtl(): void
     {
-        if (!class_exists('Grpc\Timeval')) {
-            $this->markTestSkipped('Requires grpc extension (Grpc\Timeval)');
+        if (!class_exists(\Grpc\Timeval::class)) {
+            $this->markTestSkipped('Requires grpc extension');
         }
 
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
@@ -105,8 +105,8 @@ class RawKvBatchTest extends TestCase
 
     public function testBatchPutWithAssociativeTtlArray(): void
     {
-        if (!class_exists('Grpc\Timeval')) {
-            $this->markTestSkipped('Requires grpc extension (Grpc\Timeval)');
+        if (!class_exists(\Grpc\Timeval::class)) {
+            $this->markTestSkipped('Requires grpc extension');
         }
 
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());

@@ -190,6 +190,10 @@ final readonly class RawKvBatch
         $batchExecutor->executeParallel($regionCalls);
     }
 
+    // ========================================================================
+    // Async per-region methods
+    // ========================================================================
+
     /**
      * @param string[] $keys
      */
@@ -298,14 +302,23 @@ final readonly class RawKvBatch
         };
     }
 
+    // ========================================================================
+    // Retry wrappers
+    // ========================================================================
+
+    /**
+     * @param string[] $keys
+     */
     private function batchGetWithRetry(
         RegionInfo $region,
         array $keys,
         RetryExecutor $retryExecutor,
     ): RawBatchGetResponse {
-        return $retryExecutor->execute($keys[0] ?? '', function () use ($region, $keys): RawBatchGetResponse {
-            $fresh = $this->resolveRegion($region, $keys[0] ?? '');
+        $key = $keys[0] ?? '';
+        return $retryExecutor->execute($key, function () use ($region, $keys, $key): RawBatchGetResponse {
+            $fresh = $this->resolveRegion($region, $key);
             $future = $this->executeBatchGetForRegionAsync($fresh, $keys);
+            /** @var RawBatchGetResponse $response */
             $response = $future->wait();
             RegionErrorHandler::check($response);
             return $response;
@@ -322,9 +335,9 @@ final readonly class RawKvBatch
         int|array $ttl,
         RetryExecutor $retryExecutor,
     ): null {
-        $firstKey = $pairs[0]?->getKey() ?? '';
-        return $retryExecutor->execute($firstKey, function () use ($region, $pairs, $ttl): null {
-            $fresh = $this->resolveRegion($region, $pairs[0]?->getKey() ?? '');
+        $firstKey = $pairs !== [] ? $pairs[0]->getKey() : '';
+        return $retryExecutor->execute($firstKey, function () use ($region, $pairs, $ttl, $firstKey): null {
+            $fresh = $this->resolveRegion($region, $firstKey);
             $future = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl);
             $response = $future->wait();
             RegionErrorHandler::check($response);
@@ -332,10 +345,17 @@ final readonly class RawKvBatch
         });
     }
 
-    private function batchDeleteWithRetry(RegionInfo $region, array $keys, RetryExecutor $retryExecutor): null
-    {
-        return $retryExecutor->execute($keys[0] ?? '', function () use ($region, $keys): null {
-            $fresh = $this->resolveRegion($region, $keys[0] ?? '');
+    /**
+     * @param string[] $keys
+     */
+    private function batchDeleteWithRetry(
+        RegionInfo $region,
+        array $keys,
+        RetryExecutor $retryExecutor,
+    ): null {
+        $key = $keys[0] ?? '';
+        return $retryExecutor->execute($key, function () use ($region, $keys, $key): null {
+            $fresh = $this->resolveRegion($region, $key);
             $future = $this->executeBatchDeleteForRegionAsync($fresh, $keys);
             $response = $future->wait();
             RegionErrorHandler::check($response);
@@ -343,9 +363,6 @@ final readonly class RawKvBatch
         });
     }
 
-    /**
-     * Re-resolve region leader to handle stale cache after a NotLeader retry.
-     */
     private function resolveRegion(RegionInfo $original, string $key): RegionInfo
     {
         $current = $this->regionResolver->getRegionInfo($key);
