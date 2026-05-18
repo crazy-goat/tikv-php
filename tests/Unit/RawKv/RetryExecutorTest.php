@@ -173,5 +173,4 @@ class RetryExecutorTest extends TestCase
         $this->assertSame('resolved', $result);
         $this->assertSame(2, $callCount);
     }
-
 }

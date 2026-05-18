@@ -34,7 +34,7 @@ final class RetryExecutor
     /**
      * @template T
      * @param callable(): T $operation
-     * @param (callable(TiKvException): ?BackoffType)|null $classifier Custom error classifier (e.g., for transaction-specific errors)
+     * @param (callable(TiKvException): ?BackoffType)|null $classifier Custom error classifier
      * @return T
      */
     public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
