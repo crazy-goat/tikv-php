@@ -10,6 +10,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -63,9 +64,11 @@ class LockResolverTest extends TestCase
 
     private function createResolver(): LockResolver
     {
+        $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
+
         return new LockResolver(
             $this->grpc,
-            $this->pdClient,
+            $regionResolver,
             $this->regionCache,
             20000,
             $this->logger,

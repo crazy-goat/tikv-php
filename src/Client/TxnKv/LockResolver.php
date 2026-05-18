@@ -9,10 +9,11 @@ use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
-use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -20,7 +21,7 @@ final readonly class LockResolver
 {
     public function __construct(
         private GrpcClientInterface $grpc,
-        private PdClientInterface $pdClient,
+        private RegionResolver $regionResolver,
         private RegionCacheInterface $regionCache,
         private int $maxBackoffMs = 20000,
         private LoggerInterface $logger = new NullLogger(),
@@ -81,11 +82,11 @@ final readonly class LockResolver
      */
     private function checkTxnStatus(string $primaryLock, int $lockTs, int $callerStartTs): array
     {
-        $region = $this->getRegionInfo($primaryLock);
-        $address = $this->resolveStoreAddress($region->leaderStoreId);
+        $region = $this->regionResolver->getRegionInfo($primaryLock);
+        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new CheckTxnStatusRequest();
-        $request->setContext($this->createContext($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setPrimaryKey($primaryLock);
         $request->setLockTs($lockTs);
         $request->setCallerStartTs($callerStartTs);
@@ -141,11 +142,11 @@ final readonly class LockResolver
             'commitTs' => $commitTs,
         ]);
 
-        $region = $this->getRegionInfo($key);
-        $address = $this->resolveStoreAddress($region->leaderStoreId);
+        $region = $this->regionResolver->getRegionInfo($key);
+        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new ResolveLockRequest();
-        $request->setContext($this->createContext($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setStartVersion($lockTs);
         $request->setCommitVersion($commitTs);
 
@@ -159,62 +160,15 @@ final readonly class LockResolver
             'lockTs' => $lockTs,
         ]);
 
-        $region = $this->getRegionInfo($key);
-        $address = $this->resolveStoreAddress($region->leaderStoreId);
+        $region = $this->regionResolver->getRegionInfo($key);
+        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new ResolveLockRequest();
-        $request->setContext($this->createContext($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setStartVersion($lockTs);
         $request->setCommitVersion(0);
 
         $this->grpc->call($address, 'tikvpb.Tikv', 'KvResolveLock', $request, ResolveLockResponse::class);
-    }
-
-    private function getRegionInfo(string $key): RegionInfo
-    {
-        $region = $this->regionCache->getByKey($key);
-        if ($region instanceof RegionInfo) {
-            return $region;
-        }
-
-        $region = $this->pdClient->getRegion($key);
-        $this->regionCache->put($region);
-
-        return $region;
-    }
-
-    private function resolveStoreAddress(int $storeId): string
-    {
-        $store = $this->pdClient->getStore($storeId);
-        if (!$store instanceof \CrazyGoat\Proto\Metapb\Store) {
-            throw new \RuntimeException("Store not found: {$storeId}");
-        }
-
-        $address = $store->getAddress();
-        if ($address === '') {
-            throw new \RuntimeException("Store {$storeId} has no address");
-        }
-
-        return $address;
-    }
-
-    private function createContext(RegionInfo $region): \CrazyGoat\Proto\Kvrpcpb\Context
-    {
-        $context = new \CrazyGoat\Proto\Kvrpcpb\Context();
-
-        $peer = new \CrazyGoat\Proto\Metapb\Peer();
-        $peer->setId($region->leaderPeerId);
-        $peer->setStoreId($region->leaderStoreId);
-
-        $context->setRegionId($region->regionId);
-        $context->setPeer($peer);
-
-        $regionEpoch = new \CrazyGoat\Proto\Metapb\RegionEpoch();
-        $regionEpoch->setConfVer($region->epochConfVer);
-        $regionEpoch->setVersion($region->epochVersion);
-        $context->setRegionEpoch($regionEpoch);
-
-        return $context;
     }
 
     private function invalidateRegionFor(string $key): void

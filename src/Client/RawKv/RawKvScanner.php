@@ -12,6 +12,9 @@ use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
 
 final readonly class RawKvScanner
@@ -205,7 +208,7 @@ final readonly class RawKvScanner
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawScanRequest();
-            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setStartKey($startKey);
             if ($endKey !== '') {
                 $request->setEndKey($endKey);

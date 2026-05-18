@@ -13,6 +13,7 @@ use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -20,6 +21,7 @@ use Psr\Log\NullLogger;
 final class TxnKvClient
 {
     private bool $closed = false;
+    private readonly RegionResolver $regionResolver;
 
     /**
      * @param string[] $pdEndpoints PD addresses (currently only the first is used)
@@ -64,9 +66,11 @@ final class TxnKvClient
         private readonly PdClientInterface $pdClient,
         private readonly GrpcClientInterface $grpc,
         private readonly RegionCacheInterface $regionCache = new RegionCache(),
+        ?RegionResolver $regionResolver = null,
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
     ) {
+        $this->regionResolver = $regionResolver ?? new RegionResolver($this->pdClient, $this->regionCache);
     }
 
     /**
@@ -91,7 +95,7 @@ final class TxnKvClient
 
         $lockResolver = new LockResolver(
             $this->grpc,
-            $this->pdClient,
+            $this->regionResolver,
             $this->regionCache,
             $this->maxBackoffMs,
             $this->logger,
@@ -106,6 +110,7 @@ final class TxnKvClient
             grpc: $this->grpc,
             regionCache: $this->regionCache,
             lockResolver: $lockResolver,
+            regionResolver: $this->regionResolver,
             maxBackoffMs: $this->maxBackoffMs,
             logger: $this->logger,
         );

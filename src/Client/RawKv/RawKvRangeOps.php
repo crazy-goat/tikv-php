@@ -16,6 +16,9 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
 
 final readonly class RawKvRangeOps
@@ -105,7 +108,7 @@ final readonly class RawKvRangeOps
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRangeRequest();
-            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setStartKey($startKey);
             $request->setEndKey($endKey);
 
@@ -150,7 +153,7 @@ final readonly class RawKvRangeOps
             }
 
             $request = new RawChecksumRequest();
-            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setAlgorithm(ChecksumAlgorithm::Crc64_Xor);
             $request->setRanges([$range]);
 

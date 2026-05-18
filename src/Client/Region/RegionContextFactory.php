@@ -2,18 +2,15 @@
 
 declare(strict_types=1);
 
-namespace CrazyGoat\TiKV\Client\RawKv;
+namespace CrazyGoat\TiKV\Client\Region;
 
 use CrazyGoat\Proto\Kvrpcpb\Context;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 
-final class RegionContext
+final class RegionContextFactory
 {
-    /**
-     * Build a protobuf Context from a RegionInfo DTO.
-     */
     public static function fromRegionInfo(RegionInfo $region): Context
     {
         $epoch = new RegionEpoch();

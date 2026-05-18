@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace CrazyGoat\TiKV\Client\RawKv;
+namespace CrazyGoat\TiKV\Client\Retry;
 
 use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -12,8 +12,7 @@ use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
-use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use Psr\Log\LoggerInterface;
 
 final class RetryExecutor
@@ -35,9 +34,10 @@ final class RetryExecutor
     /**
      * @template T
      * @param callable(): T $operation
+     * @param (callable(TiKvException): ?BackoffType)|null $classifier Custom error classifier (e.g., for transaction-specific errors)
      * @return T
      */
-    public function execute(string $key, callable $operation): mixed
+    public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
     {
         $this->totalBackoffMs = 0;
         $this->serverBusyBackoffMs = 0;
@@ -50,7 +50,13 @@ final class RetryExecutor
                 $backoffType = $this->handleNotLeader($e, $key);
 
                 if (!$backoffType instanceof BackoffType) {
-                    $backoffType = $this->classifyError($e);
+                    if ($classifier !== null) {
+                        $backoffType = $classifier($e);
+                    }
+
+                    if (!$backoffType instanceof BackoffType) {
+                        $backoffType = $this->classifyError($e);
+                    }
 
                     if (!$backoffType instanceof BackoffType) {
                         $this->logger->error('Fatal error, not retrying', ['key' => $key, 'error' => $e->getMessage()]);
@@ -77,7 +83,6 @@ final class RetryExecutor
 
                 $sleepMs = $backoffType->sleepMs($this->attempt);
 
-                // ServerBusy uses separate budget
                 if ($backoffType === BackoffType::ServerBusy) {
                     $this->serverBusyBackoffMs += $sleepMs;
                     if ($this->serverBusyBackoffMs > $this->serverBusyBudgetMs) {
