@@ -84,4 +84,67 @@ class TxnKvClientTest extends TestCase
 
         $this->assertFalse($txn->isPessimistic());
     }
+
+    // ========================================================================
+    // close()
+    // ========================================================================
+
+    public function testCloseCallsGrpcAndPdClientClose(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->expects($this->once())->method('close');
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('close');
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+    }
+
+    public function testCloseIdempotent(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->expects($this->once())->method('close');
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('close');
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+        $client->close(); // second close must not throw or call close again
+    }
+
+    // ========================================================================
+    // begin() — priority propagation
+    // ========================================================================
+
+    public function testBeginWithPriorityPropagatesToTransaction(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(4000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->begin(['priority' => 5]);
+
+        $this->assertSame(5, $txn->getPriority());
+    }
+
+    public function testBeginWithoutPriorityDefaultsToZero(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(5000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->begin();
+
+        $this->assertSame(0, $txn->getPriority());
+    }
 }
