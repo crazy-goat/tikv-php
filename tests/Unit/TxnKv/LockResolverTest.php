@@ -187,9 +187,6 @@ class LockResolverTest extends TestCase
 
     public function testMultipleDifferentKeysFetchFromPdIndependently(): void
     {
-        $key1 = 'key-a';
-        $key2 = 'key-b';
-
         $region1 = new RegionInfo(regionId: 1, leaderPeerId: 1, leaderStoreId: 1, epochConfVer: 1, epochVersion: 1);
         $region2 = new RegionInfo(regionId: 2, leaderPeerId: 2, leaderStoreId: 2, epochConfVer: 1, epochVersion: 1);
 
@@ -200,7 +197,7 @@ class LockResolverTest extends TestCase
 
         $pdRegionCallCount = 0;
         $this->pdClient->method('getRegion')
-            ->willReturnCallback(function () use (&$pdRegionCallCount, $key1, $key2, $region1, $region2): RegionInfo {
+            ->willReturnCallback(function () use (&$pdRegionCallCount, $region1, $region2): RegionInfo {
                 $pdRegionCallCount++;
                 return match ($pdRegionCallCount) {
                     1 => $region1,
@@ -280,8 +277,8 @@ class LockResolverTest extends TestCase
             });
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock($key1, self::LOCK_TS, self::CALLER_START_TS);
-        $resolver->resolveLock($key2, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock('key-a', self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock('key-b', self::LOCK_TS, self::CALLER_START_TS);
 
         $this->assertSame(2, $pdRegionCallCount, 'PD should be queried once per unique key');
     }
