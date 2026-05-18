@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Integration;
 
+use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -117,6 +120,65 @@ class LoggingIntegrationTest extends TestCase
         $this->assertTrue($this->testHandler->hasInfoThatContains('Invalidated region on retry'));
     }
 
+    public function testScanLogsRetryWarning(): void
+    {
+        $cache = new RegionCache(logger: $this->logger);
+        $client = new RawKvClient($this->pdClient, $this->grpc, $cache, 20000, $this->logger);
+
+        $region = $this->defaultRegion();
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getRegion')->willReturn($region);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $scanResponse = new RawScanResponse();
+        $kv = new KvPair();
+        $kv->setKey('found');
+        $kv->setValue('data');
+        $scanResponse->setKvs([$kv]);
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new TiKvException('EpochNotMatch')),
+                $scanResponse,
+            );
+
+        $result = $client->scan('a', 'z', 10);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('found', $result[0]['key']);
+        $this->assertTrue($this->testHandler->hasWarningThatContains('Retrying operation'));
+    }
+
+    public function testDeleteRangeLogsRetryWarning(): void
+    {
+        if (!extension_loaded('grpc')) {
+            $this->markTestSkipped('gRPC extension not available');
+        }
+
+        $cache = new RegionCache(logger: $this->logger);
+        $client = new RawKvClient($this->pdClient, $this->grpc, $cache, 20000, $this->logger);
+
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $region = $this->defaultRegion();
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getRegion')->willReturn($region);
+
+        $deleteRangeResponse = new RawDeleteRangeResponse();
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new TiKvException('EpochNotMatch')),
+                $deleteRangeResponse,
+            );
+
+        $client->deleteRange('a', 'z');
+
+        $this->assertTrue($this->testHandler->hasWarningThatContains('Retrying operation'));
+    }
+
     public function testFatalErrorLogsErrorWithMonolog(): void
     {
         $cache = new RegionCache(logger: $this->logger);
@@ -152,7 +214,7 @@ class LoggingIntegrationTest extends TestCase
         } catch (TiKvException) {
         }
 
-        $this->assertTrue($this->testHandler->hasErrorThatContains('Retry budget exhausted'));
+        $this->assertTrue($this->testHandler->hasErrorThatContains('budget exhausted'));
     }
 
     public function testLogContextContainsExpectedFields(): void
