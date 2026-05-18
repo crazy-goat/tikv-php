@@ -37,6 +37,7 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -635,6 +636,16 @@ final class Transaction
             $errors = $response->getErrors();
             if (count($errors) > 0) {
                 foreach ($errors as $keyError) {
+                    $deadlock = $keyError->getDeadlock();
+                    if ($deadlock !== null) {
+                        throw new DeadlockException(
+                            message: 'Deadlock detected during pessimistic lock',
+                            deadlockKey: $deadlock->getDeadlockKey() !== '' ? $deadlock->getDeadlockKey() : null,
+                            deadlockKeyHash: (int) $deadlock->getDeadlockKeyHash(),
+                            lockTs: (int) $deadlock->getLockTs(),
+                        );
+                    }
+
                     $locked = $keyError->getLocked();
                     if ($locked !== null) {
                         $this->lockResolver->resolveLock(
