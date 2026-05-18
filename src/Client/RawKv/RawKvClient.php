@@ -135,12 +135,24 @@ final class RawKvClient
         $this->atomic = $atomic ?? new RawKvAtomic($grpc, $regionResolver, $timeoutConfig);
         $this->batch = $batch ?? new RawKvBatch($grpc, $regionResolver, $timeoutConfig, $logger);
         $this->scanner = $scanner ?? new RawKvScanner(
-            $pdClient, $grpc, $regionResolver, $timeoutConfig,
-            $maxBackoffMs, $serverBusyBudgetMs, $regionCache, $logger,
+            $pdClient,
+            $grpc,
+            $regionResolver,
+            $timeoutConfig,
+            $maxBackoffMs,
+            $serverBusyBudgetMs,
+            $regionCache,
+            $logger,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
-            $pdClient, $grpc, $regionResolver, $regionCache,
-            $timeoutConfig, $maxBackoffMs, $serverBusyBudgetMs, $logger,
+            $pdClient,
+            $grpc,
+            $regionResolver,
+            $regionCache,
+            $timeoutConfig,
+            $maxBackoffMs,
+            $serverBusyBudgetMs,
+            $logger,
         );
     }
 
@@ -319,8 +331,12 @@ final class RawKvClient
     // Scan operations
     // ========================================================================
 
-    public function scanIterator(string $startKey, string $endKey, int $batchSize = 256, bool $keyOnly = false): ScanIterator
-    {
+    public function scanIterator(
+        string $startKey,
+        string $endKey,
+        int $batchSize = 256,
+        bool $keyOnly = false,
+    ): ScanIterator {
         $this->ensureOpen();
 
         return $this->scanner->scanIterator($startKey, $endKey, $batchSize, $keyOnly);

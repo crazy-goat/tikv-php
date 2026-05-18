@@ -193,7 +193,14 @@ final class RawKvScanner
             $this->logger,
         );
 
-        return $executor->execute($startKey, function () use ($region, $startKey, $endKey, $limit, $keyOnly, $reverse): array {
+        return $executor->execute($startKey, function () use (
+            $region,
+            $startKey,
+            $endKey,
+            $limit,
+            $keyOnly,
+            $reverse,
+        ): array {
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawScanRequest();

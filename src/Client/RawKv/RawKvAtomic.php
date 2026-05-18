@@ -19,8 +19,13 @@ final readonly class RawKvAtomic
     ) {
     }
 
-    public function compareAndSwap(string $key, ?string $expectedValue, string $newValue, int $ttl, RetryExecutor $retryExecutor): CasResult
-    {
+    public function compareAndSwap(
+        string $key,
+        ?string $expectedValue,
+        string $newValue,
+        int $ttl,
+        RetryExecutor $retryExecutor,
+    ): CasResult {
         return $retryExecutor->execute($key, function () use ($key, $expectedValue, $newValue, $ttl): CasResult {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);

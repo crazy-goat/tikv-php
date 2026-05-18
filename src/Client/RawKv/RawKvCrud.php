@@ -4,14 +4,14 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use CrazyGoat\Proto\Kvrpcpb\RawDeleteRequest;
+use CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
-use CrazyGoat\Proto\Kvrpcpb\RawDeleteRequest;
-use CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;

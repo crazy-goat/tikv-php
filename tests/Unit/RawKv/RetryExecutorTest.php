@@ -10,7 +10,6 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
-use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -103,7 +102,10 @@ class RetryExecutorTest extends TestCase
 
         $logger->expects($this->once())
             ->method('error')
-            ->with('Fatal error, not retrying', $this->callback(fn(array $ctx): bool => $ctx['error'] === 'RaftEntryTooLarge'));
+            ->with(
+                'Fatal error, not retrying',
+                $this->callback(fn(array $ctx): bool => $ctx['error'] === 'RaftEntryTooLarge'),
+            );
 
         $this->expectException(TiKvException::class);
         $executor->execute('key', function (): never {
