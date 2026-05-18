@@ -66,12 +66,6 @@ final readonly class LockResolver
         $this->invalidateRegionFor($key);
     }
 
-    public function checkDeadlock(string $txnId): bool
-    {
-        $this->logger->debug('Checking for deadlock', ['txnId' => $txnId]);
-        return false;
-    }
-
     public function getGrpc(): GrpcClientInterface
     {
         return $this->grpc;

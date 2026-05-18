@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Kvrpcpb\Deadlock;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
@@ -17,6 +20,8 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
@@ -631,5 +636,93 @@ class TransactionTest extends TestCase
         $result = $txn->get('key');
 
         $this->assertSame('ok', $result);
+    }
+
+    public function testSetWithPessimisticLockThrowsDeadlockException(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $deadlock = new Deadlock();
+        $deadlock->setDeadlockKeyHash(12345);
+        $deadlock->setDeadlockKey('blocking-key');
+        $deadlock->setLockTs(999);
+
+        $keyError = new KeyError();
+        $keyError->setDeadlock($deadlock);
+
+        $response = new PessimisticLockResponse();
+        $response->setErrors([$keyError]);
+
+        $this->grpc->method('call')
+            ->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+
+        $this->expectException(DeadlockException::class);
+        $this->expectExceptionMessage('Deadlock detected during pessimistic lock');
+
+        $txn->set('key', 'value');
+    }
+
+    public function testPessimisticLockConflictStillThrowsTransactionConflict(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $keyError = new KeyError();
+        $keyError->setConflict(new \CrazyGoat\Proto\Kvrpcpb\WriteConflict());
+
+        $response = new PessimisticLockResponse();
+        $response->setErrors([$keyError]);
+
+        $this->grpc->method('call')
+            ->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+
+        $this->expectException(TransactionConflictException::class);
+
+        $txn->set('key', 'value');
+    }
+
+    public function testDeadlockExceptionCarriesDeadlockKeyAndHash(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $deadlock = new Deadlock();
+        $deadlock->setDeadlockKeyHash(42);
+        $deadlock->setDeadlockKey('my-key');
+        $deadlock->setLockTs(777);
+
+        $keyError = new KeyError();
+        $keyError->setDeadlock($deadlock);
+
+        $response = new PessimisticLockResponse();
+        $response->setErrors([$keyError]);
+
+        $this->grpc->method('call')
+            ->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+
+        try {
+            $txn->set('key', 'value');
+            $this->fail('Expected DeadlockException was not thrown');
+        } catch (DeadlockException $e) {
+            $this->assertSame('my-key', $e->getDeadlockKey());
+            $this->assertSame(42, $e->getDeadlockKeyHash());
+            $this->assertSame(777, $e->getLockTs());
+        }
     }
 }
