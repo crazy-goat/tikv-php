@@ -168,7 +168,7 @@ class RawKvSplitterTest extends TestCase
         ];
     }
 
-    private static function createKvPair(string $key, string $value): KvPair
+    private function createKvPair(string $key, string $value): KvPair
     {
         $pair = new KvPair();
         $pair->setKey($key);
