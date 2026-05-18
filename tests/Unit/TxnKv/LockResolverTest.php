@@ -82,7 +82,13 @@ class LockResolverTest extends TestCase
     private function mockGrpcCalls(): void
     {
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass): object {
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                $request,
+                string $responseClass,
+            ): object {
                 if ($responseClass === CheckTxnStatusResponse::class) {
                     return $this->checkResponse;
                 }
@@ -213,7 +219,12 @@ class LockResolverTest extends TestCase
         $putCalledForKey1 = false;
         $putCalledForKey2 = false;
         $this->regionCache->method('getByKey')
-            ->willReturnCallback(function (string $key) use (&$putCalledForKey1, &$putCalledForKey2, $region1, $region2): ?RegionInfo {
+            ->willReturnCallback(function (string $key) use (
+                &$putCalledForKey1,
+                &$putCalledForKey2,
+                $region1,
+                $region2,
+            ): ?RegionInfo {
                 if ($key === 'key-a' && $putCalledForKey1) {
                     return $region1;
                 }
@@ -252,7 +263,13 @@ class LockResolverTest extends TestCase
 
         $grpcCallCount = 0;
         $this->grpc->method('call')
-            ->willReturnCallback(function () use (&$grpcCallCount, $checkResp1, $checkResp2, $resolveResp1, $resolveResp2): object {
+            ->willReturnCallback(function () use (
+                &$grpcCallCount,
+                $checkResp1,
+                $checkResp2,
+                $resolveResp1,
+                $resolveResp2,
+            ): object {
                 $grpcCallCount++;
                 return match ($grpcCallCount) {
                     1 => $checkResp1,
