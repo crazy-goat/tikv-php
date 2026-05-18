@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
+use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -68,6 +69,80 @@ class RawKvSplitterTest extends TestCase
         $this->assertSame([], $result);
     }
 
+    public function testSplitPairsIntoBatchesSinglePair(): void
+    {
+        $pair = $this->createKvPair('key1', 'value1');
+        $result = RawKvSplitter::splitPairsIntoBatches([$pair], 10, 100);
+        $this->assertCount(1, $result);
+        $this->assertCount(1, $result[0]['pairs']);
+        $this->assertSame('key1', $result[0]['pairs'][0]->getKey());
+        $this->assertSame([], $result[0]['ttls']);
+    }
+
+    public function testSplitPairsIntoBatchesExceedsCount(): void
+    {
+        $pairs = [
+            $this->createKvPair('k1', 'v1'),
+            $this->createKvPair('k2', 'v2'),
+            $this->createKvPair('k3', 'v3'),
+        ];
+        $result = RawKvSplitter::splitPairsIntoBatches($pairs, 2, 100);
+        $this->assertCount(2, $result);
+        $this->assertCount(2, $result[0]['pairs']);
+        $this->assertCount(1, $result[1]['pairs']);
+    }
+
+    public function testSplitPairsIntoBatchesExceedsBytes(): void
+    {
+        $pairs = [
+            $this->createKvPair('longkey1', 'longvalue1'),
+            $this->createKvPair('longkey2', 'longvalue2'),
+        ];
+        $result = RawKvSplitter::splitPairsIntoBatches($pairs, 10, 10, []);
+        $this->assertCount(2, $result);
+    }
+
+    public function testSplitPairsIntoBatchesWithTtls(): void
+    {
+        $pairs = [
+            $this->createKvPair('k1', 'v1'),
+            $this->createKvPair('k2', 'v2'),
+        ];
+        $result = RawKvSplitter::splitPairsIntoBatches($pairs, 10, 100, [60, 120]);
+        $this->assertCount(1, $result);
+        $this->assertSame([60, 120], $result[0]['ttls']);
+    }
+
+    public function testSplitPairsIntoBatchesTtlsTrackAcrossBatches(): void
+    {
+        $pairs = [
+            $this->createKvPair('k1', 'v1'),
+            $this->createKvPair('k2', 'v2'),
+            $this->createKvPair('k3', 'v3'),
+            $this->createKvPair('k4', 'v4'),
+        ];
+        $result = RawKvSplitter::splitPairsIntoBatches($pairs, 2, 100, [10, 20, 30, 40]);
+        $this->assertCount(2, $result);
+        $this->assertSame([10, 20], $result[0]['ttls']);
+        $this->assertSame([30, 40], $result[1]['ttls']);
+    }
+
+    public function testSplitPairsIntoBatchesWithPartialTtlsEmitsWarning(): void
+    {
+        $pairs = [
+            $this->createKvPair('k1', 'v1'),
+            $this->createKvPair('k2', 'v2'),
+            $this->createKvPair('k3', 'v3'),
+        ];
+        // TTL array shorter than pairs — triggers undefined array key at RawKvSplitter:72
+        // PHP emits a warning but continues with null values for missing indices
+        $result = RawKvSplitter::splitPairsIntoBatches($pairs, 10, 100, [60]);
+        $this->assertCount(1, $result);
+        $this->assertCount(3, $result[0]['pairs']);
+        $this->assertCount(3, $result[0]['ttls']);
+        $this->assertSame(60, $result[0]['ttls'][0]);
+    }
+
     // ========================================================================
     // calculatePrefixEndKey
     // ========================================================================
@@ -91,5 +166,13 @@ class RawKvSplitterTest extends TestCase
             'multiple ff at end' => ["abc\xff\xff", 'abd'],
             'leading ff' => ["\xff\xffa", "\xff\xffb"],
         ];
+    }
+
+    private static function createKvPair(string $key, string $value): KvPair
+    {
+        $pair = new KvPair();
+        $pair->setKey($key);
+        $pair->setValue($value);
+        return $pair;
     }
 }

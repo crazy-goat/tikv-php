@@ -30,6 +30,7 @@ use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 use CrazyGoat\TiKV\Client\RawKv\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use CrazyGoat\TiKV\Client\RawKv\ScanIterator;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -133,6 +134,137 @@ class RawKvClientTest extends TestCase
         yield 'batchScan' => ['batchScan', [[['a', 'b']], 10]];
         yield 'scanIterator' => ['scanIterator', ['start', 'end']];
         yield 'scanPrefixIterator' => ['scanPrefixIterator', ['prefix']];
+    }
+
+    // ========================================================================
+    // Input validation
+    // ========================================================================
+
+    public function testGetThrowsOnEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key must not be empty');
+        $this->client->get('');
+    }
+
+    public function testGetThrowsOnOversizedKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key size');
+        $this->client->get($key);
+    }
+
+    public function testPutThrowsOnEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->put('', 'value');
+    }
+
+    public function testPutThrowsOnOversizedKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->put($key, 'value');
+    }
+
+    public function testPutThrowsOnOversizedValue(): void
+    {
+        $value = str_repeat('a', RawKvClient::MAX_VALUE_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->put('key', $value);
+    }
+
+    public function testDeleteThrowsOnEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->delete('');
+    }
+
+    public function testBatchGetThrowsOnEmptyKeyInList(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->batchGet(['valid', '']);
+    }
+
+    public function testBatchPutThrowsOnEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->batchPut(['' => 'value']);
+    }
+
+    public function testBatchPutThrowsOnOversizedValue(): void
+    {
+        $value = str_repeat('a', RawKvClient::MAX_VALUE_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->batchPut(['key' => $value]);
+    }
+
+    public function testBatchDeleteThrowsOnEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->batchDelete(['valid', '']);
+    }
+
+    public function testBatchGetThrowsOnOversizedKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key size');
+        $this->client->batchGet([$key]);
+    }
+
+    public function testBatchDeleteThrowsOnOversizedKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key size');
+        $this->client->batchDelete([$key]);
+    }
+
+    public function testScanThrowsOnOversizedStartKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key size');
+        $this->client->scan($key, 'end');
+    }
+
+    public function testScanThrowsOnOversizedEndKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key size');
+        $this->client->scan('start', $key);
+    }
+
+    public function testReverseScanThrowsOnOversizedStartKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key size');
+        $this->client->reverseScan($key, 'end');
+    }
+
+    public function testReverseScanThrowsOnOversizedEndKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key size');
+        $this->client->reverseScan('start', $key);
+    }
+
+    public function testCompareAndSwapThrowsOnEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->compareAndSwap('', 'old', 'new');
+    }
+
+    public function testCompareAndSwapThrowsOnOversizedValue(): void
+    {
+        $value = str_repeat('a', RawKvClient::MAX_VALUE_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->compareAndSwap('key', null, $value);
     }
 
     // ========================================================================
@@ -342,7 +474,174 @@ class RawKvClientTest extends TestCase
     }
 
     // ========================================================================
+    // scanPrefix()
+    // ========================================================================
+
+    public function testScanPrefixDelegatesToScan(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('prefix_key1');
+        $pair->setValue('v1');
+
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $result = $this->client->scanPrefix('prefix_');
+
+        $this->assertCount(1, $result);
+        $this->assertSame('prefix_key1', $result[0]['key']);
+        $this->assertSame('v1', $result[0]['value']);
+    }
+
+    public function testScanPrefixWithKeyOnly(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $result = $this->client->scanPrefix('k', 0, true);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('k1', $result[0]['key']);
+        $this->assertNull($result[0]['value']);
+    }
+
+    // ========================================================================
+    // scanIterator() / scanPrefixIterator()
+    // ========================================================================
+
+    public function testScanIteratorReturnsScanIterator(): void
+    {
+        $iterator = $this->client->scanIterator('start', 'end');
+
+        $this->assertInstanceOf(ScanIterator::class, $iterator);
+    }
+
+    public function testScanPrefixIteratorReturnsScanIterator(): void
+    {
+        $iterator = $this->client->scanPrefixIterator('prefix_');
+
+        $this->assertInstanceOf(ScanIterator::class, $iterator);
+    }
+
+    // ========================================================================
+    // reverseScan()
+    // ========================================================================
+
+    public function testReverseScanReturnsResultsInDescendingOrder(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pairs = [];
+        foreach (['c', 'b', 'a'] as $k) {
+            $pair = new KvPair();
+            $pair->setKey($k);
+            $pair->setValue('v_' . $k);
+            $pairs[] = $pair;
+        }
+
+        $response = new RawScanResponse();
+        $response->setKvs($pairs);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $result = $this->client->reverseScan('z', 'a');
+
+        $this->assertCount(3, $result);
+        $this->assertSame('c', $result[0]['key']);
+        $this->assertSame('b', $result[1]['key']);
+        $this->assertSame('a', $result[2]['key']);
+    }
+
+    // ========================================================================
+    // deleteRange()
+    // ========================================================================
+
+    public function testDeleteRangeWithSameStartEndReturnsEarly(): void
+    {
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->grpc->expects($this->never())->method('call');
+
+        $this->client->deleteRange('a', 'a');
+    }
+
+    // ========================================================================
     // batchScan()
+    // ========================================================================
+
+    public function testBatchScanMultipleRangesReturnsCorrectShape(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair1 = new KvPair();
+        $pair1->setKey('k1');
+        $pair1->setValue('v1');
+
+        $pair2 = new KvPair();
+        $pair2->setKey('k2');
+        $pair2->setValue('v2');
+
+        $response = new RawScanResponse();
+        $response->setKvs([$pair1]);
+
+        $response2 = new RawScanResponse();
+        $response2->setKvs([$pair2]);
+
+        $this->grpc->method('call')
+            ->willReturnOnConsecutiveCalls($response, $response2);
+
+        $result = $this->client->batchScan([['a', 'm'], ['m', 'z']], 10);
+
+        $this->assertCount(2, $result);
+        $this->assertCount(1, $result[0]);
+        $this->assertSame('k1', $result[0][0]['key']);
+        $this->assertCount(1, $result[1]);
+        $this->assertSame('k2', $result[1][0]['key']);
+    }
+
     // ========================================================================
 
     public function testBatchScanThrowsOnInvalidEachLimit(): void
