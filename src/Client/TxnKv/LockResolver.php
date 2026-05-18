@@ -177,7 +177,10 @@ final readonly class LockResolver
             return $region;
         }
 
-        return $this->pdClient->getRegion($key);
+        $region = $this->pdClient->getRegion($key);
+        $this->regionCache->put($region);
+
+        return $region;
     }
 
     private function resolveStoreAddress(int $storeId): string
