@@ -228,7 +228,7 @@ final class Transaction
                 continue;
             }
 
-            $regionLimit = $remaining;
+            $regionLimit = $remaining === 0 ? self::DEFAULT_SCAN_LIMIT : $remaining;
             $regionResults = $this->executeScanForRegion(
                 $region,
                 $scanStart,

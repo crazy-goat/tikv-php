@@ -295,6 +295,80 @@ class TxnKvE2ETest extends TestCase
         $txn->rollback();
     }
 
+    public function testScanWithLimitZeroReturnsAll(): void
+    {
+        $prefix = 'txn-scan-zero-' . uniqid();
+        $key1 = $prefix . '-a';
+        $key2 = $prefix . '-b';
+        $key3 = $prefix . '-c';
+        $this->keysToCleanup[] = $key1;
+        $this->keysToCleanup[] = $key2;
+        $this->keysToCleanup[] = $key3;
+
+        $setupTxn = $this->testClient->begin(['pessimistic' => false]);
+        $setupTxn->set($key1, 'v1');
+        $setupTxn->set($key2, 'v2');
+        $setupTxn->set($key3, 'v3');
+        $setupTxn->commit();
+
+        $txn = $this->testClient->begin(['pessimistic' => false]);
+        $results = $txn->scan($prefix, $prefix . '~', 0);
+
+        $this->assertCount(3, $results);
+        $this->assertSame('v1', $results[0]['value']);
+        $this->assertSame('v2', $results[1]['value']);
+        $this->assertSame('v3', $results[2]['value']);
+
+        $txn->rollback();
+    }
+
+    public function testScanWithPositiveLimitReturnsExactlyThatMany(): void
+    {
+        $prefix = 'txn-scan-limit-' . uniqid();
+        $key1 = $prefix . '-a';
+        $key2 = $prefix . '-b';
+        $key3 = $prefix . '-c';
+        $this->keysToCleanup[] = $key1;
+        $this->keysToCleanup[] = $key2;
+        $this->keysToCleanup[] = $key3;
+
+        $setupTxn = $this->testClient->begin(['pessimistic' => false]);
+        $setupTxn->set($key1, 'v1');
+        $setupTxn->set($key2, 'v2');
+        $setupTxn->set($key3, 'v3');
+        $setupTxn->commit();
+
+        $txn = $this->testClient->begin(['pessimistic' => false]);
+        $results = $txn->scan($prefix, $prefix . '~', 2);
+
+        $this->assertCount(2, $results);
+
+        $txn->rollback();
+    }
+
+    public function testScanWithLimitOneReturnsSingleKey(): void
+    {
+        $prefix = 'txn-scan-one-' . uniqid();
+        $key1 = $prefix . '-a';
+        $key2 = $prefix . '-b';
+        $this->keysToCleanup[] = $key1;
+        $this->keysToCleanup[] = $key2;
+
+        $setupTxn = $this->testClient->begin(['pessimistic' => false]);
+        $setupTxn->set($key1, 'v1');
+        $setupTxn->set($key2, 'v2');
+        $setupTxn->commit();
+
+        $txn = $this->testClient->begin(['pessimistic' => false]);
+        $results = $txn->scan($prefix, $prefix . '~', 1);
+
+        $this->assertCount(1, $results);
+        $this->assertSame($key1, $results[0]['key']);
+        $this->assertSame('v1', $results[0]['value']);
+
+        $txn->rollback();
+    }
+
     // ========================================================================
     // Pessimistic transactions
     // ========================================================================

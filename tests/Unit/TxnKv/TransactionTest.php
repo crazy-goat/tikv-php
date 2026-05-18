@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
+use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -224,5 +227,182 @@ class TransactionTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('Transaction is not active');
         $txn->heartbeat();
+    }
+
+    // ========================================================================
+    // scan() — limit=0 handling
+    // ========================================================================
+
+    private function makeStore(): Store
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        return $store;
+    }
+
+    private function makeRegion(
+        int $id,
+        string $startKey,
+        string $endKey,
+    ): RegionInfo {
+        return new RegionInfo(
+            regionId: $id,
+            leaderPeerId: $id,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: $startKey,
+            endKey: $endKey,
+        );
+    }
+
+    /**
+     * @param array<string, string> $keys
+     */
+    private function makeScanResponse(array $keys): ScanResponse
+    {
+        $response = new ScanResponse();
+        $pairs = [];
+        foreach ($keys as $k => $v) {
+            $pair = new KvPair();
+            $pair->setKey($k);
+            $pair->setValue($v);
+            $pairs[] = $pair;
+        }
+        $response->setPairs($pairs);
+        return $response;
+    }
+
+    public function testScanWithLimitZeroUsesDefaultScanLimit(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->once())->method('call')->with(
+            $this->anything(),
+            $this->anything(),
+            $this->anything(),
+            // Protobuf checkUint32 sign-extends values > 0x7FFFFFFF,
+            // so 4294967295 (uint32 max) is stored as -1 on 64-bit PHP
+            $this->callback(fn(ScanRequest $request): bool => ($request->getLimit() & 0xFFFFFFFF) === 4294967295),
+            $this->anything(),
+        )->willReturn($this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']));
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('', '');
+
+        $this->assertCount(2, $result);
+    }
+
+    public function testScanWithPositiveLimitPassesLimitThrough(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->once())->method('call')->with(
+            $this->anything(),
+            $this->anything(),
+            $this->anything(),
+            $this->callback(fn(ScanRequest $request): bool => $request->getLimit() === 5),
+            $this->anything(),
+        )->willReturn($this->makeScanResponse(['k1' => 'v1']));
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('', '', 5);
+
+        $this->assertCount(1, $result);
+    }
+
+    public function testScanWithLimitZeroScansAllRegions(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k3');
+        $region2 = $this->makeRegion(2, 'k3', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response1 = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
+        $response2 = $this->makeScanResponse(['k3' => 'v3', 'k4' => 'v4']);
+
+        $this->grpc->expects($this->exactly(2))->method('call')->willReturn($response1, $response2);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('', '');
+
+        $this->assertCount(4, $result);
+    }
+
+    public function testScanWithPositiveLimitStopsAfterLimit(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k3');
+        $region2 = $this->makeRegion(2, 'k3', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response1 = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
+
+        $this->grpc->expects($this->once())->method('call')->willReturn($response1);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('', '', 2);
+
+        $this->assertCount(2, $result);
+    }
+
+    public function testScanWithPositiveLimitAcrossMultipleRegions(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k2');
+        $region2 = $this->makeRegion(2, 'k2', 'k4');
+        $region3 = $this->makeRegion(3, 'k4', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2, $region3]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response1 = $this->makeScanResponse(['k1' => 'v1']);
+        $response2 = $this->makeScanResponse(['k2' => 'v2', 'k3' => 'v3']);
+
+        $this->grpc->expects($this->exactly(2))->method('call')->willReturn($response1, $response2);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('', '', 3);
+
+        $this->assertCount(3, $result);
+    }
+
+    public function testScanMergesWriteSetIntoResults(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response = $this->makeScanResponse([
+            'k1' => 'scanned-v1',
+            'k2' => 'scanned-v2',
+        ]);
+
+        $this->grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'local-v1');
+        $result = $txn->scan('', '');
+
+        $this->assertCount(2, $result);
+        $this->assertSame('local-v1', $result[0]['value']);
+        $this->assertSame('scanned-v2', $result[1]['value']);
+    }
+
+    public function testScanWithLimitZeroAndNoResultsReturnsEmpty(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->once())->method('call')->willReturn($this->makeScanResponse([]));
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('', '');
+
+        $this->assertSame([], $result);
     }
 }
