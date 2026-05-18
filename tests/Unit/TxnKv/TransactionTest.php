@@ -80,6 +80,7 @@ class TransactionTest extends TestCase
             regionCache: $this->regionCache,
             lockResolver: $this->lockResolver,
             regionResolver: $this->regionResolver,
+            maxBackoffMs: $options['maxBackoffMs'] ?? 20000,
         );
     }
 
@@ -724,5 +725,397 @@ class TransactionTest extends TestCase
             $this->assertSame(42, $e->getDeadlockKeyHash());
             $this->assertSame(777, $e->getLockTs());
         }
+    }
+
+    // ========================================================================
+    // batchGet()
+    // ========================================================================
+
+    public function testBatchGetReturnsAllWriteSetValuesWithoutGrpc(): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+
+        $this->grpc->expects($this->never())->method('call');
+
+        $result = $txn->batchGet(['k1', 'k2']);
+
+        $this->assertSame(['k1' => 'v1', 'k2' => 'v2'], $result);
+    }
+
+    public function testBatchGetMergesWriteSetAndRemoteInOrder(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $batchGetResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $pair = new KvPair();
+        $pair->setKey('k2');
+        $pair->setValue('remote-v2');
+        $batchGetResponse->setPairs([$pair]);
+
+        $this->grpc->method('call')->willReturn($batchGetResponse);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'local-v1');
+
+        $result = $txn->batchGet(['k1', 'k2', 'k3']);
+
+        $this->assertSame('local-v1', $result['k1']);
+        $this->assertSame('remote-v2', $result['k2']);
+        $this->assertNull($result['k3']);
+    }
+
+    public function testBatchGetEmptyInputReturnsEmpty(): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $this->assertSame([], $txn->batchGet([]));
+    }
+
+    // ========================================================================
+    // get() — response error handling
+    // ========================================================================
+
+    public function testGetWithNotFoundReturnsNull(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(true);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('missing-key');
+
+        $this->assertNull($result);
+    }
+
+    public function testGetWithLockKeyInResponseResolvesAndRetries(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $checkTxnStatusResponse = new \CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse();
+        $checkTxnStatusResponse->setCommitVersion(0);
+        $checkTxnStatusResponse->setLockTtl(0);
+
+        $resolveLockResponse = new \CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse();
+
+        $firstResponse = new GetResponse();
+        $lockInfo = new \CrazyGoat\Proto\Kvrpcpb\LockInfo();
+        $lockInfo->setKey('key');
+        $lockInfo->setLockVersion(999);
+        $keyError = new KeyError();
+        $keyError->setLocked($lockInfo);
+        $firstResponse->setError($keyError);
+
+        $secondResponse = new GetResponse();
+        $secondResponse->setNotFound(false);
+        $secondResponse->setValue('resolved-value');
+
+        $callCount = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
+                &$callCount,
+                $firstResponse,
+                $secondResponse,
+                $checkTxnStatusResponse,
+                $resolveLockResponse,
+            ): object {
+                $callCount++;
+                return match ($method) {
+                    'KvGet' => $callCount === 1 ? $firstResponse : $secondResponse,
+                    'KvCheckTxnStatus' => $checkTxnStatusResponse,
+                    'KvResolveLock' => $resolveLockResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('key');
+
+        $this->assertSame('resolved-value', $result);
+    }
+
+    public function testGetWithRetryableThrowsTransactionConflict(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $keyError = new KeyError();
+        $keyError->setRetryable('optimistic lock not found');
+        $response->setError($keyError);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $this->expectException(TransactionConflictException::class);
+        $this->expectExceptionMessage('optimistic lock not found');
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->get('key');
+    }
+
+    // ========================================================================
+    // commit()
+    // ========================================================================
+
+    public function testCommitOptimisticWithKeys(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $methodSequence = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
+                &$methodSequence,
+                $prewriteResponse,
+                $commitResponse,
+            ): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(2000, $txn->getCommitTs());
+        $this->assertSame(['KvPrewrite', 'KvCommit'], $methodSequence);
+    }
+
+    public function testCommitPessimisticWithKeys(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
+                $prewriteResponse,
+                $commitResponse,
+            ): object {
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(3000, $txn->getCommitTs());
+    }
+
+    // ========================================================================
+    // rollback()
+    // ========================================================================
+
+    public function testRollbackWithPessimisticKeysCallsPessimisticRollbackAndBatchRollback(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $methodSequence = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
+                &$methodSequence,
+            ): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame([], $txn->getWriteSet());
+        $this->assertContains('KVPessimisticRollback', $methodSequence);
+        $this->assertContains('KvBatchRollback', $methodSequence);
+    }
+
+    // ========================================================================
+    // scan() — write set interaction
+    // ========================================================================
+
+    public function testScanFiltersOutDeletedWriteSetKeys(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response = $this->makeScanResponse([
+            'k1' => 'v1',
+            'k2' => 'v2',
+            'k3' => 'v3',
+        ]);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->delete('k2');
+        $result = $txn->scan('', '');
+
+        $this->assertCount(2, $result);
+        $this->assertSame('k1', $result[0]['key']);
+        $this->assertSame('k3', $result[1]['key']);
+    }
+
+    public function testScanDeletedKeyNotInScannedResultsDoesNotAffectOutput(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response = $this->makeScanResponse(['k1' => 'v1']);
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->delete('missing-key');
+        $result = $txn->scan('', '');
+
+        $this->assertCount(1, $result);
+        $this->assertSame('k1', $result[0]['key']);
+    }
+
+    // ========================================================================
+    // Retry — budget exhaustion
+    // ========================================================================
+
+    public function testExecuteWithRetryExhaustsBudgetAndThrowsOriginalException(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $originalException = new TiKvException('StaleCommand');
+
+        $this->grpc->method('call')
+            ->willThrowException($originalException);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('StaleCommand');
+
+        $txn = $this->createTransaction(['pessimistic' => false, 'maxBackoffMs' => 1]);
+        $txn->get('key');
+    }
+
+    // ========================================================================
+    // get() — fills readSet
+    // ========================================================================
+
+    public function testGetPopulatesReadSet(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('some-value');
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->get('my-key');
+
+        $this->assertArrayHasKey('my-key', $txn->getReadSet());
+        $this->assertSame('some-value', $txn->getReadSet()['my-key']);
+    }
+
+    public function testGetPopulatesReadSetWithNullOnNotFound(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(true);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('missing');
+
+        $this->assertNull($result);
+        $this->assertArrayHasKey('missing', $txn->getReadSet());
+        $this->assertNull($txn->getReadSet()['missing']);
     }
 }
