@@ -764,6 +764,7 @@ class PdClientTest extends TestCase
                 $this->callback(function (\CrazyGoat\Proto\Pdpb\GetRegionRequest $req): bool {
                     $hdr = $req->getHeader();
                     $this->assertNotNull($hdr);
+                    /** @var \CrazyGoat\Proto\Pdpb\RequestHeader $hdr */
                     $this->assertSame(0, $hdr->getClusterId());
                     return true;
                 }),
@@ -813,6 +814,8 @@ class PdClientTest extends TestCase
                     static $callNum = 0;
                     $callNum++;
                     $hdr = $req->getHeader();
+                    $this->assertNotNull($hdr);
+                    /** @var \CrazyGoat\Proto\Pdpb\RequestHeader $hdr */
                     if ($callNum === 1) {
                         $this->assertSame(0, $hdr->getClusterId());
                     } else {

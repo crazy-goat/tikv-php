@@ -45,6 +45,7 @@ class GrpcFutureTest extends TestCase
         $result = $future->wait();
 
         $this->assertInstanceOf(RawGetResponse::class, $result);
+        /** @var RawGetResponse $result */
         $this->assertSame('hello', $result->getValue());
     }
 
@@ -99,6 +100,8 @@ class GrpcFutureTest extends TestCase
         $result1 = $future->wait();
         $result2 = $future->wait();
 
+        /** @var RawGetResponse $result1 */
+        /** @var RawGetResponse $result2 */
         $this->assertSame('cached', $result1->getValue());
         $this->assertSame('cached', $result2->getValue());
     }
@@ -119,7 +122,7 @@ class GrpcFutureTest extends TestCase
 
         try {
             $future->wait();
-        } catch (GrpcException $first) {
+        } catch (GrpcException) {
         }
 
         $future->wait();
