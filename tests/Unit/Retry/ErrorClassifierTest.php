@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Retry;
 
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
-use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use PHPUnit\Framework\TestCase;
 
 class ErrorClassifierTest extends TestCase
@@ -82,32 +82,50 @@ class ErrorClassifierTest extends TestCase
 
     public function testRegionNotInitializedReturnsRegionNotInitialized(): void
     {
-        $this->assertSame(BackoffType::RegionNotInitialized, ErrorClassifier::classify(new TiKvException('RegionNotInitialized')));
+        $this->assertSame(
+            BackoffType::RegionNotInitialized,
+            ErrorClassifier::classify(new TiKvException('RegionNotInitialized')),
+        );
     }
 
     public function testReadIndexNotReadyReturnsReadIndexNotReady(): void
     {
-        $this->assertSame(BackoffType::ReadIndexNotReady, ErrorClassifier::classify(new TiKvException('ReadIndexNotReady')));
+        $this->assertSame(
+            BackoffType::ReadIndexNotReady,
+            ErrorClassifier::classify(new TiKvException('ReadIndexNotReady')),
+        );
     }
 
     public function testProposalInMergingModeReturnsProposalInMergingMode(): void
     {
-        $this->assertSame(BackoffType::ProposalInMergingMode, ErrorClassifier::classify(new TiKvException('ProposalInMergingMode')));
+        $this->assertSame(
+            BackoffType::ProposalInMergingMode,
+            ErrorClassifier::classify(new TiKvException('ProposalInMergingMode')),
+        );
     }
 
     public function testRecoveryInProgressReturnsRecoveryInProgress(): void
     {
-        $this->assertSame(BackoffType::RecoveryInProgress, ErrorClassifier::classify(new TiKvException('RecoveryInProgress')));
+        $this->assertSame(
+            BackoffType::RecoveryInProgress,
+            ErrorClassifier::classify(new TiKvException('RecoveryInProgress')),
+        );
     }
 
     public function testIsWitnessReturnsIsWitness(): void
     {
-        $this->assertSame(BackoffType::IsWitness, ErrorClassifier::classify(new TiKvException('IsWitness')));
+        $this->assertSame(
+            BackoffType::IsWitness,
+            ErrorClassifier::classify(new TiKvException('IsWitness')),
+        );
     }
 
     public function testMaxTimestampNotSyncedReturnsMaxTimestampNotSynced(): void
     {
-        $this->assertSame(BackoffType::MaxTimestampNotSynced, ErrorClassifier::classify(new TiKvException('MaxTimestampNotSynced')));
+        $this->assertSame(
+            BackoffType::MaxTimestampNotSynced,
+            ErrorClassifier::classify(new TiKvException('MaxTimestampNotSynced')),
+        );
     }
 
     // ========================================================================
@@ -116,12 +134,18 @@ class ErrorClassifierTest extends TestCase
 
     public function testGrpcExceptionReturnsTiKvRpc(): void
     {
-        $this->assertSame(BackoffType::TiKvRpc, ErrorClassifier::classify(new GrpcException('connection reset', 14)));
+        $this->assertSame(
+            BackoffType::TiKvRpc,
+            ErrorClassifier::classify(new GrpcException('connection reset', 14)),
+        );
     }
 
     public function testRegionExceptionReturnsRegionMiss(): void
     {
-        $this->assertSame(BackoffType::RegionMiss, ErrorClassifier::classify(new RegionException('test', 'region error')));
+        $this->assertSame(
+            BackoffType::RegionMiss,
+            ErrorClassifier::classify(new RegionException('test', 'region error')),
+        );
     }
 
     // ========================================================================
