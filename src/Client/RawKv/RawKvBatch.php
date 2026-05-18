@@ -298,8 +298,11 @@ final readonly class RawKvBatch
         };
     }
 
-    private function batchGetWithRetry(RegionInfo $region, array $keys, RetryExecutor $retryExecutor): RawBatchGetResponse
-    {
+    private function batchGetWithRetry(
+        RegionInfo $region,
+        array $keys,
+        RetryExecutor $retryExecutor,
+    ): RawBatchGetResponse {
         return $retryExecutor->execute($keys[0] ?? '', function () use ($region, $keys): RawBatchGetResponse {
             $fresh = $this->resolveRegion($region, $keys[0] ?? '');
             $future = $this->executeBatchGetForRegionAsync($fresh, $keys);
@@ -313,8 +316,12 @@ final readonly class RawKvBatch
      * @param KvPair[] $pairs
      * @param int|int[] $ttl
      */
-    private function batchPutWithRetry(RegionInfo $region, array $pairs, int|array $ttl, RetryExecutor $retryExecutor): null
-    {
+    private function batchPutWithRetry(
+        RegionInfo $region,
+        array $pairs,
+        int|array $ttl,
+        RetryExecutor $retryExecutor,
+    ): null {
         $firstKey = $pairs[0]?->getKey() ?? '';
         return $retryExecutor->execute($firstKey, function () use ($region, $pairs, $ttl): null {
             $fresh = $this->resolveRegion($region, $pairs[0]?->getKey() ?? '');

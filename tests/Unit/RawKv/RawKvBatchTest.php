@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -12,8 +14,6 @@ use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
 use CrazyGoat\TiKV\Client\RawKv\RegionResolver;
 use CrazyGoat\TiKV\Client\RawKv\RetryExecutor;
-use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
-use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
