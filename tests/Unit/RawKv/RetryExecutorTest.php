@@ -14,8 +14,9 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
-use CrazyGoat\TiKV\Client\RawKv\RegionResolver;
-use CrazyGoat\TiKV\Client\RawKv\RetryExecutor;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -145,6 +146,31 @@ class RetryExecutorTest extends TestCase
         });
 
         $this->assertSame('found', $result);
+        $this->assertSame(2, $callCount);
+    }
+
+    public function testExecuteWithCustomClassifierRetriesOnTxnLock(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+
+        $classifier = fn(TiKvException $e): ?BackoffType => match (true) {
+            str_contains($e->getMessage(), 'Lock') || str_contains($e->getMessage(), 'locked') => BackoffType::TxnLock,
+            default => null,
+        };
+
+        $callCount = 0;
+        $result = $this->executor->execute('key', function () use (&$callCount): string {
+            $callCount++;
+            if ($callCount === 1) {
+                throw new TiKvException('Lock conflict');
+            }
+            return 'resolved';
+        }, $classifier);
+
+        $this->assertSame('resolved', $result);
         $this->assertSame(2, $callCount);
     }
 }

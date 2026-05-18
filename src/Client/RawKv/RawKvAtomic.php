@@ -9,6 +9,9 @@ use CrazyGoat\Proto\Kvrpcpb\RawCASResponse;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 
 final readonly class RawKvAtomic
 {
@@ -31,7 +34,7 @@ final readonly class RawKvAtomic
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawCASRequest();
-            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
             $request->setValue($newValue);
 

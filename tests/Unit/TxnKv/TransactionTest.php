@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
@@ -27,6 +28,7 @@ class TransactionTest extends TestCase
     private PdClientInterface&MockObject $pdClient;
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
+    private RegionResolver $regionResolver;
     private LockResolver $lockResolver;
     private RegionInfo $testRegion;
 
@@ -47,10 +49,14 @@ class TransactionTest extends TestCase
         $this->grpc = $this->createMock(GrpcClientInterface::class);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
 
+        $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
+
         $this->lockResolver = new LockResolver(
             $this->grpc,
-            $this->pdClient,
+            $this->regionResolver,
             $this->regionCache,
+            20000,
+            new \Psr\Log\NullLogger(),
         );
     }
 
@@ -68,6 +74,7 @@ class TransactionTest extends TestCase
             grpc: $this->grpc,
             regionCache: $this->regionCache,
             lockResolver: $this->lockResolver,
+            regionResolver: $this->regionResolver,
         );
     }
 

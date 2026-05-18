@@ -15,6 +15,9 @@ use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 
 final readonly class RawKvCrud
 {
@@ -32,7 +35,7 @@ final readonly class RawKvCrud
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawGetRequest();
-            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
 
             /** @var RawGetResponse $response */
@@ -58,7 +61,7 @@ final readonly class RawKvCrud
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawPutRequest();
-            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
             $request->setValue($value);
             if ($ttl > 0) {
@@ -85,7 +88,7 @@ final readonly class RawKvCrud
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRequest();
-            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
 
             $response = $this->grpc->call(
@@ -108,7 +111,7 @@ final readonly class RawKvCrud
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawGetKeyTTLRequest();
-            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
 
             /** @var RawGetKeyTTLResponse $response */

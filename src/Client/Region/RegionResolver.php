@@ -2,8 +2,9 @@
 
 declare(strict_types=1);
 
-namespace CrazyGoat\TiKV\Client\RawKv;
+namespace CrazyGoat\TiKV\Client\Region;
 
+use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
@@ -33,7 +34,7 @@ final readonly class RegionResolver
     public function resolveStoreAddress(int $storeId): string
     {
         $store = $this->pdClient->getStore($storeId);
-        if (!$store instanceof \CrazyGoat\Proto\Metapb\Store) {
+        if (!$store instanceof Store) {
             throw new StoreNotFoundException($storeId);
         }
 

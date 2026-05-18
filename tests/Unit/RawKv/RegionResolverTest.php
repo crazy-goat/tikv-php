@@ -9,7 +9,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
-use CrazyGoat\TiKV\Client\RawKv\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 

@@ -17,6 +17,9 @@ use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Grpc\Call;
 use Grpc\Timeval;
 use Psr\Log\LoggerInterface;
@@ -202,7 +205,7 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchGetRequest();
-        $request->setContext(RegionContext::fromRegionInfo($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setKeys($keys);
 
         $batchReadTimeout = $this->timeoutMs('batch_read');
@@ -234,7 +237,7 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContext::fromRegionInfo($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -270,7 +273,7 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContext::fromRegionInfo($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setKeys($keys);
 
         $batchWriteTimeout = $this->timeoutMs('batch_write');

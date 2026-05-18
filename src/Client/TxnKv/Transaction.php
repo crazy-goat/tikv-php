@@ -30,12 +30,13 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
-use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
-use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -49,6 +50,7 @@ final class Transaction
     /** @var array<string, ?string> key => value read (for read-set tracking) */
     private array $readSet = [];
     private bool $closed = false;
+    private ?RetryExecutor $retryExecutor = null;
 
     private const OPTIMISTIC_LOCK_TTL_MS = 3000;
     private const PESSIMISTIC_LOCK_TTL_MS = 30000;
@@ -64,6 +66,7 @@ final class Transaction
         private readonly GrpcClientInterface $grpc,
         private readonly RegionCacheInterface $regionCache,
         private readonly LockResolver $lockResolver,
+        private readonly RegionResolver $regionResolver,
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
     ) {
@@ -108,11 +111,11 @@ final class Transaction
         }
 
         return $this->executeWithRetry($key, function () use ($key): ?string {
-            $region = $this->getRegionInfo($key);
-            $address = $this->resolveStoreAddress($region->leaderStoreId);
+            $region = $this->regionResolver->getRegionInfo($key);
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new GetRequest();
-            $request->setContext($this->createContext($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
             $request->setVersion($this->startTs);
 
@@ -308,11 +311,11 @@ final class Transaction
         $primary = $this->getPrimaryKey();
 
         return $this->executeWithRetry($primary, function () use ($primary, $adviseLockTtlMs): int {
-            $region = $this->getRegionInfo($primary);
-            $address = $this->resolveStoreAddress($region->leaderStoreId);
+            $region = $this->regionResolver->getRegionInfo($primary);
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new TxnHeartBeatRequest();
-            $request->setContext($this->createContext($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setPrimaryLock($primary);
             $request->setStartVersion($this->startTs);
             $request->setAdviseLockTtl($adviseLockTtlMs);
@@ -418,10 +421,10 @@ final class Transaction
         array $mutations,
         string $primary,
     ): void {
-        $address = $this->resolveStoreAddress($region->leaderStoreId);
+        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new PrewriteRequest();
-        $request->setContext($this->createContext($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setMutations($mutations);
         $request->setPrimaryLock($primary);
         $request->setStartVersion($this->startTs);
@@ -529,10 +532,10 @@ final class Transaction
      */
     private function commitForRegion(RegionInfo $region, array $keys): void
     {
-        $address = $this->resolveStoreAddress($region->leaderStoreId);
+        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new CommitRequest();
-        $request->setContext($this->createContext($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setStartVersion($this->startTs);
         $request->setKeys($keys);
         $request->setCommitVersion($this->commitTs ?? 0);
@@ -570,10 +573,10 @@ final class Transaction
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
-            $address = $this->resolveStoreAddress($region->leaderStoreId);
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new BatchRollbackRequest();
-            $request->setContext($this->createContext($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setStartVersion($this->startTs);
             $request->setKeys($regionKeys);
 
@@ -595,15 +598,15 @@ final class Transaction
 
     private function pessimisticLock(string $key): void
     {
-        $region = $this->getRegionInfo($key);
-        $address = $this->resolveStoreAddress($region->leaderStoreId);
+        $region = $this->regionResolver->getRegionInfo($key);
+        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $mutation = new Mutation();
         $mutation->setOp(Op::PessimisticLock);
         $mutation->setKey($key);
 
         $request = new PessimisticLockRequest();
-        $request->setContext($this->createContext($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setMutations([$mutation]);
         $request->setPrimaryLock(count($this->writeSet) === 0 ? $key : $this->getPrimaryKey());
         $request->setStartVersion($this->startTs);
@@ -669,10 +672,10 @@ final class Transaction
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
-            $address = $this->resolveStoreAddress($region->leaderStoreId);
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new PessimisticRollbackRequest();
-            $request->setContext($this->createContext($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setStartVersion($this->startTs);
             $request->setForUpdateTs($this->startTs);
             $request->setKeys($regionKeys);
@@ -704,10 +707,10 @@ final class Transaction
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
-            $address = $this->resolveStoreAddress($region->leaderStoreId);
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new BatchGetRequest();
-            $request->setContext($this->createContext($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKeys($regionKeys);
             $request->setVersion($this->startTs);
 
@@ -746,10 +749,10 @@ final class Transaction
         int $limit,
     ): array {
         return $this->executeWithRetry($startKey, function () use ($region, $startKey, $endKey, $limit): array {
-            $address = $this->resolveStoreAddress($region->leaderStoreId);
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new ScanRequest();
-            $request->setContext($this->createContext($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setStartKey($startKey);
             if ($endKey !== '') {
                 $request->setEndKey($endKey);
@@ -832,7 +835,7 @@ final class Transaction
         $grouped = [];
         foreach ($mutations as $mutation) {
             $key = $mutation->getKey();
-            $region = $this->getRegionInfo($key);
+            $region = $this->regionResolver->getRegionInfo($key);
             $regionId = $region->regionId;
             if (!isset($grouped[$regionId])) {
                 $grouped[$regionId] = ['region' => $region, 'mutations' => []];
@@ -850,7 +853,7 @@ final class Transaction
     {
         $grouped = [];
         foreach ($keys as $key) {
-            $region = $this->getRegionInfo($key);
+            $region = $this->regionResolver->getRegionInfo($key);
             $regionId = $region->regionId;
             if (!isset($grouped[$regionId])) {
                 $grouped[$regionId] = ['region' => $region, 'keys' => []];
@@ -858,54 +861,6 @@ final class Transaction
             $grouped[$regionId]['keys'][] = $key;
         }
         return $grouped;
-    }
-
-    private function createContext(
-        RegionInfo $region,
-    ): \CrazyGoat\Proto\Kvrpcpb\Context {
-        $context = new \CrazyGoat\Proto\Kvrpcpb\Context();
-
-        $peer = new \CrazyGoat\Proto\Metapb\Peer();
-        $peer->setId($region->leaderPeerId);
-        $peer->setStoreId($region->leaderStoreId);
-
-        $context->setRegionId($region->regionId);
-        $context->setPeer($peer);
-
-        $regionEpoch = new \CrazyGoat\Proto\Metapb\RegionEpoch();
-        $regionEpoch->setConfVer($region->epochConfVer);
-        $regionEpoch->setVersion($region->epochVersion);
-        $context->setRegionEpoch($regionEpoch);
-
-        return $context;
-    }
-
-    private function getRegionInfo(string $key): RegionInfo
-    {
-        $region = $this->regionCache->getByKey($key);
-        if ($region instanceof RegionInfo) {
-            return $region;
-        }
-
-        $region = $this->pdClient->getRegion($key);
-        $this->regionCache->put($region);
-
-        return $region;
-    }
-
-    private function resolveStoreAddress(int $storeId): string
-    {
-        $store = $this->pdClient->getStore($storeId);
-        if (!$store instanceof \CrazyGoat\Proto\Metapb\Store) {
-            throw new StoreNotFoundException($storeId);
-        }
-
-        $address = $store->getAddress();
-        if ($address === '') {
-            throw new StoreNotFoundException($storeId);
-        }
-
-        return $address;
     }
 
     private function handleRegionError(
@@ -938,6 +893,20 @@ final class Transaction
         $this->closed = true;
     }
 
+    private function retryExecutor(): RetryExecutor
+    {
+        $this->retryExecutor ??= new RetryExecutor(
+            $this->maxBackoffMs,
+            600000,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            $this->logger,
+        );
+
+        return $this->retryExecutor;
+    }
+
     /**
      * @template T
      * @param callable(): T $operation
@@ -945,52 +914,13 @@ final class Transaction
      */
     private function executeWithRetry(string $key, callable $operation): mixed
     {
-        $totalBackoffMs = 0;
-        $attempt = 0;
-
-        while (true) {
-            try {
-                return $operation();
-            } catch (TiKvException $e) {
-                $backoffType = $this->classifyError($e);
-
-                if (!$backoffType instanceof BackoffType) {
-                    throw $e;
-                }
-
-                $sleepMs = $backoffType->sleepMs($attempt);
-                $totalBackoffMs += $sleepMs;
-
-                if ($totalBackoffMs > $this->maxBackoffMs) {
-                    throw $e;
-                }
-
-                $cached = $this->regionCache->getByKey($key);
-                if ($cached instanceof RegionInfo) {
-                    $this->regionCache->invalidate($cached->regionId);
-                }
-
-                $this->logger->warning('Retrying transaction operation', [
-                    'key' => $key,
-                    'attempt' => $attempt,
-                    'backoffType' => $backoffType->name,
-                    'sleepMs' => $sleepMs,
-                ]);
-
-                if ($sleepMs > 0) {
-                    usleep($sleepMs * 1000);
-                }
-
-                $attempt++;
-            }
-        }
+        return $this->retryExecutor()->execute($key, $operation, $this->classifyError(...));
     }
 
     private function classifyError(TiKvException $e): ?BackoffType
     {
         $message = $e->getMessage();
 
-        // Transaction-specific error handling
         if (str_contains($message, 'KeyExists') || str_contains($message, 'WriteConflict')) {
             return null;
         }
@@ -998,6 +928,6 @@ final class Transaction
             return BackoffType::TxnLock;
         }
 
-        return ErrorClassifier::classify($e);
+        return null;
     }
 }
