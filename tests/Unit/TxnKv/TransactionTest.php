@@ -66,7 +66,7 @@ class TransactionTest extends TestCase
     }
 
     /**
-     * @param array{txnId?: string, startTs?: int, pessimistic?: bool, priority?: int} $options
+     * @param array{txnId?: string, startTs?: int, pessimistic?: bool, priority?: int, maxBackoffMs?: int} $options
      */
     private function createTransaction(array $options = []): Transaction
     {
@@ -835,7 +835,11 @@ class TransactionTest extends TestCase
 
         $callCount = 0;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method
+            ) use (
                 &$callCount,
                 $firstResponse,
                 $secondResponse,
@@ -901,7 +905,11 @@ class TransactionTest extends TestCase
 
         $methodSequence = [];
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method
+            ) use (
                 &$methodSequence,
                 $prewriteResponse,
                 $commitResponse,
@@ -939,16 +947,11 @@ class TransactionTest extends TestCase
         $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
 
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
-                $prewriteResponse,
-                $commitResponse,
-            ): object {
-                return match ($method) {
-                    'KvPrewrite' => $prewriteResponse,
-                    'KvCommit' => $commitResponse,
-                    'KvPessimisticLock' => new PessimisticLockResponse(),
-                    default => throw new \RuntimeException("Unexpected method: $method"),
-                };
+            ->willReturnCallback(fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvPrewrite' => $prewriteResponse,
+                'KvCommit' => $commitResponse,
+                'KvPessimisticLock' => new PessimisticLockResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
             });
 
         $txn = $this->createTransaction(['pessimistic' => true]);
@@ -975,7 +978,11 @@ class TransactionTest extends TestCase
 
         $methodSequence = [];
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method
+            ) use (
                 &$methodSequence,
             ): object {
                 $methodSequence[] = $method;

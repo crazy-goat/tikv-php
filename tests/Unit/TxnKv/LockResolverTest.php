@@ -236,7 +236,14 @@ class LockResolverTest extends TestCase
 
         $resolveCalls = 0;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $addr, string $svc, string $method) use (&$resolveCalls, $checkResponse): object {
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$resolveCalls,
+                $checkResponse,
+            ): object {
                 if ($method === 'KvCheckTxnStatus') {
                     return $checkResponse;
                 }
@@ -256,7 +263,7 @@ class LockResolverTest extends TestCase
     public function testResolveLockWithActiveLockWaitsThenRollsBack(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->region);
-        $this->pdClient->method('getStore')->willReturnCallback(function () {
+        $this->pdClient->method('getStore')->willReturnCallback(function (): \CrazyGoat\Proto\Metapb\Store {
             $store = new \CrazyGoat\Proto\Metapb\Store();
             $store->setAddress(self::STORE_ADDRESS);
             return $store;
@@ -279,7 +286,11 @@ class LockResolverTest extends TestCase
         $checkCount = 0;
         $resolveCalls = 0;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $addr, string $svc, string $method) use (
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method
+            ) use (
                 &$checkCount,
                 &$resolveCalls,
                 $firstCheck,
@@ -291,8 +302,7 @@ class LockResolverTest extends TestCase
                 }
                 if ($method === 'KvResolveLock') {
                     $resolveCalls++;
-                    $resp = $this->createMock(ResolveLockResponse::class);
-                    return $resp;
+                    return $this->createMock(ResolveLockResponse::class);
                 }
                 throw new \RuntimeException("Unexpected method: $method");
             });
