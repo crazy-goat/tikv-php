@@ -10,6 +10,9 @@ use PHPUnit\Framework\TestCase;
 
 class GrpcResponseParserTest extends TestCase
 {
+    /**
+     * @return array<string, array{event: mixed, expected: array{code: int, details: string}}>
+     */
     public static function extractStatusDataProvider(): array
     {
         return [
@@ -63,7 +66,10 @@ class GrpcResponseParserTest extends TestCase
         ];
     }
 
-    /** @dataProvider extractStatusDataProvider */
+    /**
+     * @dataProvider extractStatusDataProvider
+     * @param array{code: int, details: string} $expected
+     */
     public function testExtractStatus(mixed $event, array $expected): void
     {
         $result = GrpcResponseParser::extractStatus($event);
