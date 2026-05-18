@@ -113,7 +113,7 @@ class LockResolverTest extends TestCase
         $putCalled = false;
         $this->regionCache->method('getByKey')
             ->willReturnCallback(function () use (&$putCalled): ?RegionInfo {
-                if ($putCalled) {
+                if ($putCalled) { // @phpstan-ignore if.alwaysFalse
                     return $this->region;
                 }
                 return null;
@@ -160,7 +160,7 @@ class LockResolverTest extends TestCase
         $putCalled = false;
         $this->regionCache->method('getByKey')
             ->willReturnCallback(function () use (&$putCalled): ?RegionInfo {
-                if ($putCalled) {
+                if ($putCalled) { // @phpstan-ignore if.alwaysFalse
                     return $this->region;
                 }
                 return null;
@@ -199,7 +199,7 @@ class LockResolverTest extends TestCase
         $this->pdClient->method('getRegion')
             ->willReturnCallback(function () use (&$pdRegionCallCount, $region1, $region2): RegionInfo {
                 $pdRegionCallCount++;
-                return match ($pdRegionCallCount) {
+                return match ($pdRegionCallCount) { // @phpstan-ignore match.unhandled
                     1 => $region1,
                     2 => $region2,
                 };
@@ -222,10 +222,10 @@ class LockResolverTest extends TestCase
                 $region1,
                 $region2,
             ): ?RegionInfo {
-                if ($key === 'key-a' && $putCalledForKey1) {
+                if ($key === 'key-a' && $putCalledForKey1) { // @phpstan-ignore booleanAnd.rightAlwaysFalse
                     return $region1;
                 }
-                if ($key === 'key-b' && $putCalledForKey2) {
+                if ($key === 'key-b' && $putCalledForKey2) { // @phpstan-ignore booleanAnd.rightAlwaysFalse
                     return $region2;
                 }
                 return null;
@@ -268,7 +268,7 @@ class LockResolverTest extends TestCase
                 $resolveResp2,
             ): object {
                 $grpcCallCount++;
-                return match ($grpcCallCount) {
+                return match ($grpcCallCount) { // @phpstan-ignore match.unhandled
                     1 => $checkResp1,
                     2 => $resolveResp1,
                     3 => $checkResp2,
