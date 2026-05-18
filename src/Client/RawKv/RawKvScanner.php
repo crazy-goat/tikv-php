@@ -1,0 +1,255 @@
+<?php
+
+declare(strict_types=1);
+
+namespace CrazyGoat\TiKV\Client\RawKv;
+
+use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
+use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
+use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use Psr\Log\LoggerInterface;
+
+final class RawKvScanner
+{
+    public const MAX_SCAN_LIMIT = 10240;
+
+    public function __construct(
+        private readonly PdClientInterface $pdClient,
+        private readonly GrpcClientInterface $grpc,
+        private readonly RegionResolver $regionResolver,
+        private readonly TimeoutConfig $timeoutConfig,
+        private readonly int $maxBackoffMs,
+        private readonly int $serverBusyBudgetMs,
+        private readonly RegionCacheInterface $regionCache,
+        private readonly LoggerInterface $logger,
+    ) {
+    }
+
+    /**
+     * @return array<array{key: string, value: ?string}>
+     */
+    public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly): array
+    {
+        $limit = $this->validateScanLimit($limit);
+
+        $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        $results = [];
+        $remaining = $limit;
+
+        foreach ($regions as $region) {
+            $scanStart = $startKey > $region->startKey ? $startKey : $region->startKey;
+            $scanEnd = $endKey === ''
+                ? $region->endKey
+                : ($region->endKey !== '' && $endKey > $region->endKey ? $region->endKey : $endKey);
+
+            if ($scanStart >= $scanEnd && $scanEnd !== '') {
+                continue;
+            }
+
+            $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
+            $regionResults = $this->executeScanForRegion($region, $scanStart, $scanEnd, $regionLimit, $keyOnly, false);
+            $results = array_merge($results, $regionResults);
+
+            if ($remaining > 0) {
+                $remaining -= count($regionResults);
+                if ($remaining <= 0) {
+                    break;
+                }
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * @return array<array{key: string, value: ?string}>
+     */
+    public function reverseScan(string $startKey, string $endKey, int $limit, bool $keyOnly): array
+    {
+        $limit = $this->validateScanLimit($limit);
+
+        $regions = $this->pdClient->scanRegions($endKey, $startKey, 0);
+        $regions = array_reverse($regions);
+
+        $results = [];
+        $remaining = $limit;
+
+        foreach ($regions as $region) {
+            $scanStartKey = ($region->endKey === '' || $startKey < $region->endKey) ? $startKey : $region->endKey;
+            $scanEndKey = ($endKey > $region->startKey) ? $endKey : $region->startKey;
+
+            if ($scanEndKey >= $scanStartKey && $scanEndKey !== '') {
+                continue;
+            }
+
+            $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
+            $regionResults = $this->executeScanForRegion(
+                $region,
+                $scanStartKey,
+                $scanEndKey,
+                $regionLimit,
+                $keyOnly,
+                true,
+            );
+            $results = array_merge($results, $regionResults);
+
+            if ($remaining > 0) {
+                $remaining -= count($regionResults);
+                if ($remaining <= 0) {
+                    break;
+                }
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * @return array<array{key: string, value: ?string}>
+     */
+    public function scanPrefix(string $prefix, int $limit, bool $keyOnly): array
+    {
+        return $this->scan($prefix, RawKvSplitter::calculatePrefixEndKey($prefix), $limit, $keyOnly);
+    }
+
+    /**
+     * @param array<array{0: string, 1: string}> $ranges
+     * @return array<array<array{key: string, value: ?string}>>
+     */
+    public function batchScan(array $ranges, int $eachLimit, bool $keyOnly): array
+    {
+        if ($ranges === []) {
+            return [];
+        }
+
+        if ($eachLimit <= 0) {
+            throw new InvalidArgumentException('eachLimit must be greater than 0');
+        }
+
+        if ($eachLimit > self::MAX_SCAN_LIMIT) {
+            throw new InvalidArgumentException(sprintf(
+                'eachLimit (%d) exceeds maximum allowed scan limit of %d',
+                $eachLimit,
+                self::MAX_SCAN_LIMIT,
+            ));
+        }
+
+        $results = [];
+        foreach ($ranges as $range) {
+            if (!is_array($range) || count($range) !== 2) {
+                throw new InvalidArgumentException('Each range must be an array of [startKey, endKey]');
+            }
+            [$startKey, $endKey] = $range;
+            $results[] = $this->scan($startKey, $endKey, $eachLimit, $keyOnly);
+        }
+
+        return $results;
+    }
+
+    public function scanIterator(string $startKey, string $endKey, int $batchSize, bool $keyOnly): ScanIterator
+    {
+        return new ScanIterator(
+            $this->scan(...),
+            $startKey,
+            $endKey,
+            $batchSize,
+            $keyOnly,
+        );
+    }
+
+    public function scanPrefixIterator(string $prefix, int $batchSize, bool $keyOnly): ScanIterator
+    {
+        return new ScanIterator(
+            $this->scan(...),
+            $prefix,
+            RawKvSplitter::calculatePrefixEndKey($prefix),
+            $batchSize,
+            $keyOnly,
+        );
+    }
+
+    /**
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function executeScanForRegion(
+        RegionInfo $region,
+        string $startKey,
+        string $endKey,
+        int $limit,
+        bool $keyOnly,
+        bool $reverse,
+    ): array {
+        $executor = new RetryExecutor(
+            $this->maxBackoffMs,
+            $this->serverBusyBudgetMs,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            $this->logger,
+        );
+
+        return $executor->execute($startKey, function () use ($region, $startKey, $endKey, $limit, $keyOnly, $reverse): array {
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+
+            $request = new RawScanRequest();
+            $request->setContext(RegionContext::fromRegionInfo($region));
+            $request->setStartKey($startKey);
+            if ($endKey !== '') {
+                $request->setEndKey($endKey);
+            }
+            if ($limit > 0) {
+                $request->setLimit($limit);
+            }
+            $request->setKeyOnly($keyOnly);
+            $request->setReverse($reverse);
+
+            /** @var RawScanResponse $response */
+            $response = $this->grpc->call(
+                $address,
+                'tikvpb.Tikv',
+                'RawScan',
+                $request,
+                RawScanResponse::class,
+                $this->timeoutMs(),
+            );
+            RegionErrorHandler::check($response);
+
+            $results = [];
+            foreach ($response->getKvs() as $pair) {
+                $results[] = [
+                    'key' => $pair->getKey(),
+                    'value' => $keyOnly ? null : $pair->getValue(),
+                ];
+            }
+
+            return $results;
+        });
+    }
+
+    private function validateScanLimit(int $limit): int
+    {
+        if ($limit === 0) {
+            return self::MAX_SCAN_LIMIT;
+        }
+
+        if ($limit > self::MAX_SCAN_LIMIT) {
+            throw new InvalidArgumentException(sprintf(
+                'Scan limit (%d) exceeds maximum allowed scan limit of %d',
+                $limit,
+                self::MAX_SCAN_LIMIT,
+            ));
+        }
+
+        return $limit;
+    }
+
+    private function timeoutMs(): ?int
+    {
+        return $this->timeoutConfig->scanTimeoutMs;
+    }
+}
