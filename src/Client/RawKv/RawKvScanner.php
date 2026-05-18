@@ -141,6 +141,7 @@ final readonly class RawKvScanner
 
         $results = [];
         foreach ($ranges as $range) {
+            /** @phpstan-ignore function.alreadyNarrowedType, booleanOr.alwaysFalse, notIdentical.alwaysFalse */
             if (!is_array($range) || count($range) !== 2) {
                 throw new InvalidArgumentException('Each range must be an array of [startKey, endKey]');
             }

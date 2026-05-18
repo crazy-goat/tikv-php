@@ -53,6 +53,10 @@ final class RawKvClient
     private readonly RawKvScanner $scanner;
     private readonly RawKvRangeOps $rangeOps;
 
+    /**
+     * @param string[] $pdEndpoints
+     * @param array<string, mixed> $options
+     */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
         if ($pdEndpoints === []) {
@@ -276,6 +280,10 @@ final class RawKvClient
     // Batch operations
     // ========================================================================
 
+    /**
+     * @param string[] $keys
+     * @return array<string, ?string>
+     */
     public function batchGet(array $keys): array
     {
         $this->ensureOpen();
@@ -292,6 +300,10 @@ final class RawKvClient
         return $this->batch->batchGet($keys);
     }
 
+    /**
+     * @param array<string, string> $keyValuePairs
+     * @param int|array<array-key, int> $ttl
+     */
     public function batchPut(array $keyValuePairs, int|array $ttl = 0): void
     {
         $this->ensureOpen();
@@ -309,6 +321,9 @@ final class RawKvClient
         $this->batch->batchPut($keyValuePairs, $ttl);
     }
 
+    /**
+     * @param string[] $keys
+     */
     public function batchDelete(array $keys): void
     {
         $this->ensureOpen();
@@ -347,6 +362,9 @@ final class RawKvClient
         return $this->scanner->scanPrefixIterator($prefix, $batchSize, $keyOnly);
     }
 
+    /**
+     * @return array<array{key: string, value: ?string}>
+     */
     public function scan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {
         $this->ensureOpen();
@@ -358,6 +376,9 @@ final class RawKvClient
         return $this->scanner->scan($startKey, $endKey, $limit, $keyOnly);
     }
 
+    /**
+     * @return array<array{key: string, value: ?string}>
+     */
     public function scanPrefix(string $prefix, int $limit = 0, bool $keyOnly = false): array
     {
         $this->ensureOpen();
@@ -365,6 +386,9 @@ final class RawKvClient
         return $this->scanner->scanPrefix($prefix, $limit, $keyOnly);
     }
 
+    /**
+     * @return array<array{key: string, value: ?string}>
+     */
     public function reverseScan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {
         $this->ensureOpen();
@@ -376,6 +400,10 @@ final class RawKvClient
         return $this->scanner->reverseScan($startKey, $endKey, $limit, $keyOnly);
     }
 
+    /**
+     * @param array<array{0: string, 1: string}> $ranges
+     * @return array<array<array{key: string, value: ?string}>>
+     */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly = false): array
     {
         $this->ensureOpen();
