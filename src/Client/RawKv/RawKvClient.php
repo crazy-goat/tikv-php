@@ -297,7 +297,7 @@ final class RawKvClient
             $this->validateKeySize($key, 'batchGet');
         }
 
-        return $this->batch->batchGet($keys);
+        return $this->batch->batchGet($keys, $this->createRetryExecutor());
     }
 
     /**
@@ -318,7 +318,7 @@ final class RawKvClient
             $this->validateValueSize($value, 'batchPut');
         }
 
-        $this->batch->batchPut($keyValuePairs, $ttl);
+        $this->batch->batchPut($keyValuePairs, $ttl, $this->createRetryExecutor());
     }
 
     /**
@@ -337,7 +337,7 @@ final class RawKvClient
             $this->validateKeySize($key, 'batchDelete');
         }
 
-        $this->batch->batchDelete($keys);
+        $this->batch->batchDelete($keys, $this->createRetryExecutor());
     }
 
     // ========================================================================

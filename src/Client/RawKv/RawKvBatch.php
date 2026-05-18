@@ -40,7 +40,7 @@ final readonly class RawKvBatch
      * @param string[] $keys
      * @return array<string, ?string>
      */
-    public function batchGet(array $keys): array
+    public function batchGet(array $keys, RetryExecutor $retryExecutor): array
     {
         if ($keys === []) {
             return [];
@@ -59,10 +59,11 @@ final readonly class RawKvBatch
                 strlen(...),
             );
             foreach ($subBatches as $subBatch) {
-                $regionCalls[] = (fn(): GrpcFuture => $this->executeBatchGetForRegionAsync(
+                $regionCalls[] = fn(): RawBatchGetResponse => $this->batchGetWithRetry(
                     $regionData['region'],
                     $subBatch,
-                ));
+                    $retryExecutor,
+                );
             }
         }
 
@@ -88,7 +89,7 @@ final readonly class RawKvBatch
      * @param array<string, string> $keyValuePairs
      * @param int|array<array-key, int> $ttl
      */
-    public function batchPut(array $keyValuePairs, int|array $ttl): void
+    public function batchPut(array $keyValuePairs, int|array $ttl, RetryExecutor $retryExecutor): void
     {
         if ($keyValuePairs === []) {
             return;
@@ -143,11 +144,13 @@ final readonly class RawKvBatch
 
             foreach ($subBatches as $subBatch) {
                 $batchTtls = $subBatch['ttls'];
-                $regionCalls[] = (fn(): GrpcFuture => $this->executeBatchPutForRegionAsync(
+                $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
+                $regionCalls[] = fn(): null => $this->batchPutWithRetry(
                     $regionData['region'],
                     $subBatch['pairs'],
-                    $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0),
-                ));
+                    $batchTtl,
+                    $retryExecutor,
+                );
             }
         }
 
@@ -157,7 +160,7 @@ final readonly class RawKvBatch
     /**
      * @param string[] $keys
      */
-    public function batchDelete(array $keys): void
+    public function batchDelete(array $keys, RetryExecutor $retryExecutor): void
     {
         if ($keys === []) {
             return;
@@ -176,10 +179,11 @@ final readonly class RawKvBatch
                 strlen(...),
             );
             foreach ($subBatches as $subBatch) {
-                $regionCalls[] = (fn(): GrpcFuture => $this->executeBatchDeleteForRegionAsync(
+                $regionCalls[] = fn(): null => $this->batchDeleteWithRetry(
                     $regionData['region'],
                     $subBatch,
-                ));
+                    $retryExecutor,
+                );
             }
         }
 
@@ -292,5 +296,55 @@ final readonly class RawKvBatch
             'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
             default => null,
         };
+    }
+
+    private function batchGetWithRetry(RegionInfo $region, array $keys, RetryExecutor $retryExecutor): RawBatchGetResponse
+    {
+        return $retryExecutor->execute($keys[0] ?? '', function () use ($region, $keys): RawBatchGetResponse {
+            $fresh = $this->resolveRegion($region, $keys[0] ?? '');
+            $future = $this->executeBatchGetForRegionAsync($fresh, $keys);
+            $response = $future->wait();
+            RegionErrorHandler::check($response);
+            return $response;
+        });
+    }
+
+    /**
+     * @param KvPair[] $pairs
+     * @param int|int[] $ttl
+     */
+    private function batchPutWithRetry(RegionInfo $region, array $pairs, int|array $ttl, RetryExecutor $retryExecutor): null
+    {
+        $firstKey = $pairs[0]?->getKey() ?? '';
+        return $retryExecutor->execute($firstKey, function () use ($region, $pairs, $ttl): null {
+            $fresh = $this->resolveRegion($region, $pairs[0]?->getKey() ?? '');
+            $future = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl);
+            $response = $future->wait();
+            RegionErrorHandler::check($response);
+            return null;
+        });
+    }
+
+    private function batchDeleteWithRetry(RegionInfo $region, array $keys, RetryExecutor $retryExecutor): null
+    {
+        return $retryExecutor->execute($keys[0] ?? '', function () use ($region, $keys): null {
+            $fresh = $this->resolveRegion($region, $keys[0] ?? '');
+            $future = $this->executeBatchDeleteForRegionAsync($fresh, $keys);
+            $response = $future->wait();
+            RegionErrorHandler::check($response);
+            return null;
+        });
+    }
+
+    /**
+     * Re-resolve region leader to handle stale cache after a NotLeader retry.
+     */
+    private function resolveRegion(RegionInfo $original, string $key): RegionInfo
+    {
+        $current = $this->regionResolver->getRegionInfo($key);
+        if ($current->regionId === $original->regionId) {
+            return $current;
+        }
+        return $original;
     }
 }
