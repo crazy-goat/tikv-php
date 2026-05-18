@@ -48,6 +48,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 use Grpc\Call;
 use Grpc\Timeval;
@@ -1074,67 +1075,7 @@ final class RawKvClient
 
     private function classifyError(TiKvException $e): ?BackoffType
     {
-        $message = $e->getMessage();
-
-        if (str_contains($message, 'RaftEntryTooLarge')) {
-            return null;
-        }
-        if (str_contains($message, 'KeyNotInRegion')) {
-            return null;
-        }
-
-        if (str_contains($message, 'EpochNotMatch') || str_contains($message, 'epoch not match')) {
-            return BackoffType::None;
-        }
-        if (str_contains($message, 'ServerIsBusy')) {
-            return BackoffType::ServerBusy;
-        }
-        if (str_contains($message, 'StaleCommand')) {
-            return BackoffType::StaleCmd;
-        }
-        if (str_contains($message, 'RegionNotFound')) {
-            return BackoffType::RegionMiss;
-        }
-        if (str_contains($message, 'NotLeader')) {
-            return BackoffType::NotLeader;
-        }
-
-        // Additional region error types
-        if (str_contains($message, 'DiskFull')) {
-            return BackoffType::DiskFull;
-        }
-        if (str_contains($message, 'RegionNotInitialized')) {
-            return BackoffType::RegionNotInitialized;
-        }
-        if (str_contains($message, 'ReadIndexNotReady')) {
-            return BackoffType::ReadIndexNotReady;
-        }
-        if (str_contains($message, 'ProposalInMergingMode')) {
-            return BackoffType::ProposalInMergingMode;
-        }
-        if (str_contains($message, 'RecoveryInProgress')) {
-            return BackoffType::RecoveryInProgress;
-        }
-        if (str_contains($message, 'IsWitness')) {
-            return BackoffType::IsWitness;
-        }
-        if (str_contains($message, 'MaxTimestampNotSynced')) {
-            return BackoffType::MaxTimestampNotSynced;
-        }
-
-        // Fatal errors (non-retryable)
-        if (str_contains($message, 'FlashbackInProgress')) {
-            return null;
-        }
-        if (str_contains($message, 'FlashbackNotPrepared')) {
-            return null;
-        }
-
-        if ($e instanceof GrpcException) {
-            return BackoffType::TiKvRpc;
-        }
-
-        return null;
+        return ErrorClassifier::classify($e);
     }
 
     /**

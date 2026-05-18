@@ -24,8 +24,6 @@ enum BackoffType
 
     // Transactional backoff types
     case TxnLock;
-    case TxnLockFast;
-    case TxnNotFound;
 
     public function baseMs(): int
     {
@@ -46,8 +44,6 @@ enum BackoffType
             self::MaxTimestampNotSynced => 2,
             // Transactional backoff types
             self::TxnLock => 200,
-            self::TxnLockFast => 100,
-            self::TxnNotFound => 2,
         };
     }
 
@@ -70,8 +66,6 @@ enum BackoffType
             self::MaxTimestampNotSynced => 500,
             // Transactional backoff types
             self::TxnLock => 3000,
-            self::TxnLockFast => 3000,
-            self::TxnNotFound => 500,
         };
     }
 
@@ -79,7 +73,7 @@ enum BackoffType
     {
         return match ($this) {
             self::ServerBusy, self::TiKvRpc, self::RecoveryInProgress, self::IsWitness,
-            self::TxnLock, self::TxnLockFast => true,
+            self::TxnLock => true,
             default => false,
         };
     }

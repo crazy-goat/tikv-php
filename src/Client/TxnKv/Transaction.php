@@ -35,6 +35,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -989,18 +990,7 @@ final class Transaction
     {
         $message = $e->getMessage();
 
-        if (str_contains($message, 'EpochNotMatch') || str_contains($message, 'epoch not match')) {
-            return BackoffType::None;
-        }
-        if (str_contains($message, 'ServerIsBusy')) {
-            return BackoffType::ServerBusy;
-        }
-        if (str_contains($message, 'NotLeader')) {
-            return BackoffType::NotLeader;
-        }
-        if (str_contains($message, 'RegionNotFound')) {
-            return BackoffType::RegionMiss;
-        }
+        // Transaction-specific error handling
         if (str_contains($message, 'KeyExists') || str_contains($message, 'WriteConflict')) {
             return null;
         }
@@ -1008,14 +998,6 @@ final class Transaction
             return BackoffType::TxnLock;
         }
 
-        if ($e instanceof RegionException) {
-            return BackoffType::RegionMiss;
-        }
-
-        if ($e instanceof GrpcException) {
-            return BackoffType::TiKvRpc;
-        }
-
-        return null;
+        return ErrorClassifier::classify($e);
     }
 }
