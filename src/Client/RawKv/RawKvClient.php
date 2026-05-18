@@ -52,7 +52,6 @@ final class RawKvClient
     private readonly RawKvBatch $batch;
     private readonly RawKvScanner $scanner;
     private readonly RawKvRangeOps $rangeOps;
-    private readonly LoggerInterface $logger;
 
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
@@ -119,9 +118,9 @@ final class RawKvClient
         private readonly GrpcClientInterface $grpc,
         private readonly RegionCacheInterface $regionCache = new RegionCache(),
         private readonly int $maxBackoffMs = 20000,
-        LoggerInterface $logger = new NullLogger(),
+        private readonly LoggerInterface $logger = new NullLogger(),
         private readonly int $serverBusyBudgetMs = 600000,
-        private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
+        TimeoutConfig $timeoutConfig = new TimeoutConfig(),
         ?RegionResolver $regionResolver = null,
         ?RawKvCrud $crud = null,
         ?RawKvAtomic $atomic = null,
@@ -129,11 +128,10 @@ final class RawKvClient
         ?RawKvScanner $scanner = null,
         ?RawKvRangeOps $rangeOps = null,
     ) {
-        $this->logger = $logger;
-        $regionResolver = $regionResolver ?? new RegionResolver($pdClient, $regionCache);
+        $regionResolver ??= new RegionResolver($pdClient, $regionCache);
         $this->crud = $crud ?? new RawKvCrud($grpc, $regionResolver, $timeoutConfig);
         $this->atomic = $atomic ?? new RawKvAtomic($grpc, $regionResolver, $timeoutConfig);
-        $this->batch = $batch ?? new RawKvBatch($grpc, $regionResolver, $timeoutConfig, $logger);
+        $this->batch = $batch ?? new RawKvBatch($grpc, $regionResolver, $timeoutConfig, $this->logger);
         $this->scanner = $scanner ?? new RawKvScanner(
             $pdClient,
             $grpc,
@@ -142,7 +140,7 @@ final class RawKvClient
             $maxBackoffMs,
             $serverBusyBudgetMs,
             $regionCache,
-            $logger,
+            $this->logger,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -152,7 +150,7 @@ final class RawKvClient
             $timeoutConfig,
             $maxBackoffMs,
             $serverBusyBudgetMs,
-            $logger,
+            $this->logger,
         );
     }
 

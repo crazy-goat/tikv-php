@@ -14,19 +14,19 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use Psr\Log\LoggerInterface;
 
-final class RawKvScanner
+final readonly class RawKvScanner
 {
     public const MAX_SCAN_LIMIT = 10240;
 
     public function __construct(
-        private readonly PdClientInterface $pdClient,
-        private readonly GrpcClientInterface $grpc,
-        private readonly RegionResolver $regionResolver,
-        private readonly TimeoutConfig $timeoutConfig,
-        private readonly int $maxBackoffMs,
-        private readonly int $serverBusyBudgetMs,
-        private readonly RegionCacheInterface $regionCache,
-        private readonly LoggerInterface $logger,
+        private PdClientInterface $pdClient,
+        private GrpcClientInterface $grpc,
+        private RegionResolver $regionResolver,
+        private TimeoutConfig $timeoutConfig,
+        private int $maxBackoffMs,
+        private int $serverBusyBudgetMs,
+        private RegionCacheInterface $regionCache,
+        private LoggerInterface $logger,
     ) {
     }
 
@@ -222,7 +222,7 @@ final class RawKvScanner
                 'RawScan',
                 $request,
                 RawScanResponse::class,
-                $this->timeoutMs(),
+                $this->timeoutConfig->scanTimeoutMs,
             );
             RegionErrorHandler::check($response);
 
@@ -253,10 +253,5 @@ final class RawKvScanner
         }
 
         return $limit;
-    }
-
-    private function timeoutMs(): ?int
-    {
-        return $this->timeoutConfig->scanTimeoutMs;
     }
 }

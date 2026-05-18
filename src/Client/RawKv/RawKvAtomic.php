@@ -53,7 +53,7 @@ final readonly class RawKvAtomic
                 'RawCompareAndSwap',
                 $request,
                 RawCASResponse::class,
-                $this->timeoutMs(),
+                $this->timeoutConfig->writeTimeoutMs,
             );
             RegionErrorHandler::check($response);
 
@@ -67,10 +67,5 @@ final readonly class RawKvAtomic
                 previousValue: $response->getPreviousNotExist() ? null : $response->getPreviousValue(),
             );
         });
-    }
-
-    private function timeoutMs(): ?int
-    {
-        return $this->timeoutConfig->writeTimeoutMs;
     }
 }

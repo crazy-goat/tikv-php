@@ -21,7 +21,7 @@ use Grpc\Call;
 use Grpc\Timeval;
 use Psr\Log\LoggerInterface;
 
-final class RawKvBatch
+final readonly class RawKvBatch
 {
     private const MAX_BATCH_LIMIT = 512;
     private const MAX_BATCH_PUT_SIZE = 16384;
@@ -29,10 +29,10 @@ final class RawKvBatch
     private const MAX_BATCH_DELETE_SIZE = 16384;
 
     public function __construct(
-        private readonly GrpcClientInterface $grpc,
-        private readonly RegionResolver $regionResolver,
-        private readonly TimeoutConfig $timeoutConfig,
-        private readonly LoggerInterface $logger,
+        private GrpcClientInterface $grpc,
+        private RegionResolver $regionResolver,
+        private TimeoutConfig $timeoutConfig,
+        private LoggerInterface $logger,
     ) {
     }
 

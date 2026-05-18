@@ -18,17 +18,17 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use Psr\Log\LoggerInterface;
 
-final class RawKvRangeOps
+final readonly class RawKvRangeOps
 {
     public function __construct(
-        private readonly PdClientInterface $pdClient,
-        private readonly GrpcClientInterface $grpc,
-        private readonly RegionResolver $regionResolver,
-        private readonly RegionCacheInterface $regionCache,
-        private readonly TimeoutConfig $timeoutConfig,
-        private readonly int $maxBackoffMs,
-        private readonly int $serverBusyBudgetMs,
-        private readonly LoggerInterface $logger,
+        private PdClientInterface $pdClient,
+        private GrpcClientInterface $grpc,
+        private RegionResolver $regionResolver,
+        private RegionCacheInterface $regionCache,
+        private TimeoutConfig $timeoutConfig,
+        private int $maxBackoffMs,
+        private int $serverBusyBudgetMs,
+        private LoggerInterface $logger,
     ) {
     }
 
@@ -116,7 +116,7 @@ final class RawKvRangeOps
                 'RawDeleteRange',
                 $request,
                 RawDeleteRangeResponse::class,
-                $this->timeoutMs(),
+                $this->timeoutConfig->deleteRangeTimeoutMs,
             );
             RegionErrorHandler::check($response);
 
@@ -161,7 +161,7 @@ final class RawKvRangeOps
                 'RawChecksum',
                 $request,
                 RawChecksumResponse::class,
-                $this->timeoutMs(),
+                $this->timeoutConfig->deleteRangeTimeoutMs,
             );
             RegionErrorHandler::check($response);
 
@@ -176,10 +176,5 @@ final class RawKvRangeOps
                 totalBytes: (int) $response->getTotalBytes(),
             );
         });
-    }
-
-    private function timeoutMs(): ?int
-    {
-        return $this->timeoutConfig->deleteRangeTimeoutMs;
     }
 }

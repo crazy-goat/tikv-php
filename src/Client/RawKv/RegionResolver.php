@@ -9,11 +9,11 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 
-final class RegionResolver
+final readonly class RegionResolver
 {
     public function __construct(
-        private readonly PdClientInterface $pdClient,
-        private readonly RegionCacheInterface $regionCache,
+        private PdClientInterface $pdClient,
+        private RegionCacheInterface $regionCache,
     ) {
     }
 
