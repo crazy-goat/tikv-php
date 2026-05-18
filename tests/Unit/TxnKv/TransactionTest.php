@@ -4,12 +4,16 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
@@ -404,5 +408,221 @@ class TransactionTest extends TestCase
         $result = $txn->scan('', '');
 
         $this->assertSame([], $result);
+    }
+
+    // ========================================================================
+    // Retry / error classification
+    // ========================================================================
+
+    public function testGetWithKeyExistsIsFatal(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willThrowException(new TiKvException('KeyExists'));
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('KeyExists');
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->get('key');
+    }
+
+    public function testGetWithWriteConflictIsFatal(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willThrowException(new TiKvException('WriteConflict'));
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('WriteConflict');
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->get('key');
+    }
+
+    public function testGetWithLockRetriesWithTxnLock(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('invalidate');
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('recovered');
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new TiKvException('Lock encountered')),
+                $response,
+            );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('key');
+
+        $this->assertSame('recovered', $result);
+    }
+
+    public function testGetWithStaleCommandRetriesWithStaleCmd(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('invalidate');
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('recovered');
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new TiKvException('StaleCommand')),
+                $response,
+            );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('key');
+
+        $this->assertSame('recovered', $result);
+    }
+
+    public function testGetWithDiskFullRetriesWithDiskFull(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('invalidate');
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('recovered');
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new TiKvException('DiskFull')),
+                $response,
+            );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('key');
+
+        $this->assertSame('recovered', $result);
+    }
+
+    public function testGetWithEpochNotMatchRetriesImmediately(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('invalidate');
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('recovered');
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new TiKvException('EpochNotMatch')),
+                $response,
+            );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('key');
+
+        $this->assertSame('recovered', $result);
+    }
+
+    public function testGetWithGrpcExceptionRetries(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('invalidate');
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('recovered');
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new GrpcException('connection reset', 14)),
+                $response,
+            );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('key');
+
+        $this->assertSame('recovered', $result);
+    }
+
+    public function testGetWithRegionExceptionRetriesAsRegionMiss(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('invalidate');
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('recovered');
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new RegionException('test', 'region miss')),
+                $response,
+            );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('key');
+
+        $this->assertSame('recovered', $result);
+    }
+
+    /**
+     * Verify Transaction delegates unknown TiKvException to ErrorClassifier.
+     * Previously Transaction didn't handle StaleCommand, meaning it would
+     * throw immediately. Now ErrorClassifier returns StaleCmd for it.
+     */
+    public function testTransactionNowHandlesPreviouslyMissingErrors(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('invalidate');
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('ok');
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new TiKvException('ReadIndexNotReady')),
+                $response,
+            );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->get('key');
+
+        $this->assertSame('ok', $result);
     }
 }
