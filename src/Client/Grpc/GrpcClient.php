@@ -57,7 +57,7 @@ final class GrpcClient implements GrpcClientInterface
             \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
         ]);
 
-        $status = $this->extractStatus($event);
+        $status = GrpcResponseParser::extractStatus($event);
 
         if ($status['code'] !== \Grpc\STATUS_OK) {
             throw new GrpcException(
@@ -66,7 +66,7 @@ final class GrpcClient implements GrpcClientInterface
             );
         }
 
-        return $this->deserializeResponse($event, $responseClass);
+        return GrpcResponseParser::deserialize($event, $responseClass);
     }
 
     public function close(): void
@@ -113,59 +113,6 @@ final class GrpcClient implements GrpcClientInterface
         }
 
         return $this->channels[$address];
-    }
-
-    /**
-     * @return array{code: int, details: string}
-     */
-    private function extractStatus(mixed $event): array
-    {
-        if (is_object($event)) {
-            $event = (array) $event;
-        }
-
-        /** @var array<string, mixed> $eventArray */
-        $eventArray = $event;
-        $status = $eventArray['status'] ?? null;
-        if (is_object($status)) {
-            $status = (array) $status;
-        }
-
-        /** @var array<string, mixed> $statusArray */
-        $statusArray = is_array($status) ? $status : [];
-
-        $code = $statusArray['code'] ?? 0;
-        $details = $statusArray['details'] ?? '';
-
-        return [
-            'code' => is_int($code) ? $code : (is_string($code) ? (int) $code : 0),
-            'details' => is_string($details) ? $details : (is_scalar($details) ? (string) $details : ''),
-        ];
-    }
-
-    /**
-     * @template T of Message
-     * @param class-string<T> $responseClass
-     * @return T
-     */
-    private function deserializeResponse(mixed $event, string $responseClass): Message
-    {
-        if (is_object($event)) {
-            $event = (array) $event;
-        }
-
-        /** @var array<string, mixed> $eventArray */
-        $eventArray = $event;
-        $message = $eventArray['message'] ?? null;
-
-        /** @var T $response */
-        $response = new $responseClass();
-
-        if ($message !== null && $message !== '' && is_string($message)) {
-            $response->mergeFromString($message);
-        }
-
-        return $response;
     }
 
     private function createTlsCredentials(): ChannelCredentials
