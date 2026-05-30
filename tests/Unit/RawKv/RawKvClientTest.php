@@ -1465,4 +1465,170 @@ class RawKvClientTest extends TestCase
 
         $this->assertNull($this->client->putIfAbsent('key', 'value'));
     }
+
+    // ========================================================================
+    // Column family
+    // ========================================================================
+
+    public function testGetColumnFamilyDefaultIsEmpty(): void
+    {
+        $this->assertSame('', $this->client->getColumnFamily());
+    }
+
+    public function testSetColumnFamilyReturnsSelf(): void
+    {
+        $result = $this->client->setColumnFamily('write');
+
+        $this->assertSame($this->client, $result);
+    }
+
+    public function testSetGetColumnFamilyRoundTrip(): void
+    {
+        $this->client->setColumnFamily('lock');
+
+        $this->assertSame('lock', $this->client->getColumnFamily());
+    }
+
+    public function testGetWithColumnFamilySetsCfOnRequest(): void
+    {
+        $this->client->setColumnFamily('write');
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new RawGetResponse();
+        $response->setValue('hello');
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest, $response): \CrazyGoat\Proto\Kvrpcpb\RawGetResponse {
+                $capturedRequest = $request;
+                return $response;
+            });
+
+        $this->client->get('key');
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class, $capturedRequest);
+        $this->assertSame('write', $capturedRequest->getCf());
+    }
+
+    public function testGetWithoutColumnFamilyDoesNotSetCf(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new RawGetResponse();
+        $response->setValue('hello');
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest, $response): \CrazyGoat\Proto\Kvrpcpb\RawGetResponse {
+                $capturedRequest = $request;
+                return $response;
+            });
+
+        $this->client->get('key');
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class, $capturedRequest);
+        $this->assertSame('', $capturedRequest->getCf());
+    }
+
+    public function testPutWithColumnFamilySetsCfOnRequest(): void
+    {
+        $this->client->setColumnFamily('default');
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest): \CrazyGoat\Proto\Kvrpcpb\RawPutResponse {
+                $capturedRequest = $request;
+                return new RawPutResponse();
+            });
+
+        $this->client->put('key', 'value');
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawPutRequest::class, $capturedRequest);
+        $this->assertSame('default', $capturedRequest->getCf());
+    }
+
+    public function testDeleteWithColumnFamilySetsCfOnRequest(): void
+    {
+        $this->client->setColumnFamily('lock');
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest): \CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse {
+                $capturedRequest = $request;
+                return new RawDeleteResponse();
+            });
+
+        $this->client->delete('key');
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawDeleteRequest::class, $capturedRequest);
+        $this->assertSame('lock', $capturedRequest->getCf());
+    }
+
+    public function testGetKeyTTLWithColumnFamilySetsCfOnRequest(): void
+    {
+        $this->client->setColumnFamily('write');
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new RawGetKeyTTLResponse();
+        $response->setTtl(100);
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest, $response): \CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLResponse {
+                $capturedRequest = $request;
+                return $response;
+            });
+
+        $this->client->getKeyTTL('key');
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLRequest::class, $capturedRequest);
+        $this->assertSame('write', $capturedRequest->getCf());
+    }
+
+    public function testCompareAndSwapWithColumnFamilySetsCfOnRequest(): void
+    {
+        $this->client->setAtomicForCAS(true);
+        $this->client->setColumnFamily('default');
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new RawCASResponse();
+        $response->setSucceed(true);
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest, $response): \CrazyGoat\Proto\Kvrpcpb\RawCASResponse {
+                $capturedRequest = $request;
+                return $response;
+            });
+
+        $this->client->compareAndSwap('key', 'old', 'new');
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawCASRequest::class, $capturedRequest);
+        $this->assertSame('default', $capturedRequest->getCf());
+    }
 }

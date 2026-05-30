@@ -35,7 +35,7 @@ final readonly class RawKvRangeOps
     ) {
     }
 
-    public function deleteRange(string $startKey, string $endKey): void
+    public function deleteRange(string $startKey, string $endKey, string $columnFamily = ''): void
     {
         if ($startKey === $endKey) {
             return;
@@ -53,13 +53,13 @@ final readonly class RawKvRangeOps
                 continue;
             }
 
-            $this->executeDeleteRangeForRegion($region, $rangeStart, $rangeEnd);
+            $this->executeDeleteRangeForRegion($region, $rangeStart, $rangeEnd, $columnFamily);
         }
     }
 
-    public function deletePrefix(string $prefix): void
+    public function deletePrefix(string $prefix, string $columnFamily = ''): void
     {
-        $this->deleteRange($prefix, RawKvSplitter::calculatePrefixEndKey($prefix));
+        $this->deleteRange($prefix, RawKvSplitter::calculatePrefixEndKey($prefix), $columnFamily);
     }
 
     public function checksum(string $startKey, string $endKey): ChecksumResult
@@ -93,7 +93,7 @@ final readonly class RawKvRangeOps
         );
     }
 
-    private function executeDeleteRangeForRegion(RegionInfo $region, string $startKey, string $endKey): void
+    private function executeDeleteRangeForRegion(RegionInfo $region, string $startKey, string $endKey, string $columnFamily = ''): void
     {
         $executor = new RetryExecutor(
             $this->maxBackoffMs,
@@ -104,13 +104,16 @@ final readonly class RawKvRangeOps
             $this->logger,
         );
 
-        $executor->execute($startKey, function () use ($region, $startKey, $endKey): null {
+        $executor->execute($startKey, function () use ($region, $startKey, $endKey, $columnFamily): null {
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRangeRequest();
             $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setStartKey($startKey);
             $request->setEndKey($endKey);
+            if ($columnFamily !== '') {
+                $request->setCf($columnFamily);
+            }
 
             /** @var RawDeleteRangeResponse $response */
             $response = $this->grpc->call(
