@@ -678,6 +678,8 @@ class RawKvClientTest extends TestCase
 
     public function testCompareAndSwapSuccess(): void
     {
+        $this->client->setAtomicForCAS(true);
+
         $this->regionCache->method('getByKey')->willReturn(null);
         $this->regionCache->method('put');
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
@@ -699,6 +701,8 @@ class RawKvClientTest extends TestCase
 
     public function testCompareAndSwapFailure(): void
     {
+        $this->client->setAtomicForCAS(true);
+
         $this->regionCache->method('getByKey')->willReturn(null);
         $this->regionCache->method('put');
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
@@ -723,6 +727,8 @@ class RawKvClientTest extends TestCase
 
     public function testPutIfAbsentReturnsNullOnSuccess(): void
     {
+        $this->client->setAtomicForCAS(true);
+
         $this->regionCache->method('getByKey')->willReturn(null);
         $this->regionCache->method('put');
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
@@ -739,6 +745,8 @@ class RawKvClientTest extends TestCase
 
     public function testPutIfAbsentReturnsExistingValue(): void
     {
+        $this->client->setAtomicForCAS(true);
+
         $this->regionCache->method('getByKey')->willReturn(null);
         $this->regionCache->method('put');
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
@@ -1267,5 +1275,194 @@ class RawKvClientTest extends TestCase
         $this->assertSame(500, \CrazyGoat\TiKV\Client\Retry\BackoffType::NotLeader->capMs());
         $this->assertFalse(\CrazyGoat\TiKV\Client\Retry\BackoffType::NotLeader->equalJitter());
         $this->assertSame(2, \CrazyGoat\TiKV\Client\Retry\BackoffType::NotLeader->sleepMs(0));
+    }
+
+    // ========================================================================
+    // Atomic for CAS mode
+    // ========================================================================
+
+    public function testAtomicForCASDisabledByDefault(): void
+    {
+        $this->assertFalse($this->client->isAtomicForCAS());
+    }
+
+    public function testSetAtomicForCASReturnsSelf(): void
+    {
+        $result = $this->client->setAtomicForCAS(true);
+
+        $this->assertSame($this->client, $result);
+    }
+
+    public function testSetAtomicForCAS(): void
+    {
+        $this->client->setAtomicForCAS(true);
+
+        $this->assertTrue($this->client->isAtomicForCAS());
+    }
+
+    public function testPutSetsForCasWhenAtomicEnabled(): void
+    {
+        $this->client->setAtomicForCAS(true);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                $this->anything(),
+                $this->callback(function (Message $request): bool {
+                    if ($request instanceof \CrazyGoat\Proto\Kvrpcpb\RawPutRequest) {
+                        return $request->getForCas() === true;
+                    }
+                    return false;
+                }),
+                $this->anything(),
+                $this->anything(),
+            )
+            ->willReturn(new RawPutResponse());
+
+        $this->client->put('key', 'value');
+    }
+
+    public function testPutDoesNotSetForCasWhenAtomicDisabled(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                $this->anything(),
+                $this->callback(function (Message $request): bool {
+                    if ($request instanceof \CrazyGoat\Proto\Kvrpcpb\RawPutRequest) {
+                        return $request->getForCas() === false;
+                    }
+                    return false;
+                }),
+                $this->anything(),
+                $this->anything(),
+            )
+            ->willReturn(new RawPutResponse());
+
+        $this->client->put('key', 'value');
+    }
+
+    public function testDeleteSetsForCasWhenAtomicEnabled(): void
+    {
+        $this->client->setAtomicForCAS(true);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                $this->anything(),
+                $this->callback(function (Message $request): bool {
+                    if ($request instanceof \CrazyGoat\Proto\Kvrpcpb\RawDeleteRequest) {
+                        return $request->getForCas() === true;
+                    }
+                    return false;
+                }),
+                $this->anything(),
+                $this->anything(),
+            )
+            ->willReturn(new RawDeleteResponse());
+
+        $this->client->delete('key');
+    }
+
+    public function testDeleteDoesNotSetForCasWhenAtomicDisabled(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                $this->anything(),
+                $this->callback(function (Message $request): bool {
+                    if ($request instanceof \CrazyGoat\Proto\Kvrpcpb\RawDeleteRequest) {
+                        return $request->getForCas() === false;
+                    }
+                    return false;
+                }),
+                $this->anything(),
+                $this->anything(),
+            )
+            ->willReturn(new RawDeleteResponse());
+
+        $this->client->delete('key');
+    }
+
+    public function testCompareAndSwapRequiresAtomicMode(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('CompareAndSwap requires atomic mode');
+
+        $this->client->compareAndSwap('key', 'old', 'new');
+    }
+
+    public function testCompareAndSwapWorksWhenAtomicEnabled(): void
+    {
+        $this->client->setAtomicForCAS(true);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new RawCASResponse();
+        $response->setSucceed(true);
+        $response->setPreviousValue('old');
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $result = $this->client->compareAndSwap('key', 'old', 'new');
+
+        $this->assertTrue($result->swapped);
+    }
+
+    public function testPutIfAbsentRequiresAtomicMode(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('CompareAndSwap requires atomic mode');
+
+        $this->client->putIfAbsent('key', 'value');
+    }
+
+    public function testPutIfAbsentWorksWhenAtomicEnabled(): void
+    {
+        $this->client->setAtomicForCAS(true);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new RawCASResponse();
+        $response->setSucceed(true);
+        $response->setPreviousNotExist(true);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $this->assertNull($this->client->putIfAbsent('key', 'value'));
     }
 }

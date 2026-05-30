@@ -54,9 +54,9 @@ final readonly class RawKvCrud
         });
     }
 
-    public function put(string $key, string $value, int $ttl, RetryExecutor $retryExecutor): void
+    public function put(string $key, string $value, int $ttl, RetryExecutor $retryExecutor, bool $forCas = false): void
     {
-        $retryExecutor->execute($key, function () use ($key, $value, $ttl): null {
+        $retryExecutor->execute($key, function () use ($key, $value, $ttl, $forCas): null {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
@@ -66,6 +66,9 @@ final readonly class RawKvCrud
             $request->setValue($value);
             if ($ttl > 0) {
                 $request->setTtl($ttl);
+            }
+            if ($forCas) {
+                $request->setForCas(true);
             }
 
             $response = $this->grpc->call(
@@ -81,15 +84,18 @@ final readonly class RawKvCrud
         });
     }
 
-    public function delete(string $key, RetryExecutor $retryExecutor): void
+    public function delete(string $key, RetryExecutor $retryExecutor, bool $forCas = false): void
     {
-        $retryExecutor->execute($key, function () use ($key): null {
+        $retryExecutor->execute($key, function () use ($key, $forCas): null {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRequest();
             $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
+            if ($forCas) {
+                $request->setForCas(true);
+            }
 
             $response = $this->grpc->call(
                 $address,
