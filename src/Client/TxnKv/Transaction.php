@@ -50,6 +50,8 @@ final class Transaction
     private array $writeSet = [];
     /** @var array<string, ?string> key => value read (for read-set tracking) */
     private array $readSet = [];
+    /** @var string[] keys pending pessimistic lock (batched at commit time) */
+    private array $pendingLockKeys = [];
     private bool $closed = false;
     private ?RetryExecutor $retryExecutor = null;
 
@@ -195,7 +197,7 @@ final class Transaction
         $this->ensureActive();
 
         if ($this->pessimistic) {
-            $this->pessimisticLock($key);
+            $this->pendingLockKeys[] = $key;
         }
 
         $this->writeSet[$key] = $value;
@@ -206,7 +208,7 @@ final class Transaction
         $this->ensureActive();
 
         if ($this->pessimistic) {
-            $this->pessimisticLock($key);
+            $this->pendingLockKeys[] = $key;
         }
 
         $this->writeSet[$key] = null;
@@ -397,6 +399,8 @@ final class Transaction
     private function commitPessimistic(): void
     {
         $primary = $this->getPrimaryKey();
+        $this->pessimisticLockBatch($primary);
+
         $mutations = $this->buildMutations();
         $keysByRegion = $this->groupMutationsByRegion($mutations);
         $allKeys = array_keys($this->writeSet);
@@ -597,77 +601,98 @@ final class Transaction
         }
     }
 
-    private function pessimisticLock(string $key): void
+    private function pessimisticLockBatch(string $primary): void
     {
-        $region = $this->regionResolver->getRegionInfo($key);
-        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+        if ($this->pendingLockKeys === []) {
+            return;
+        }
 
-        $mutation = new Mutation();
-        $mutation->setOp(Op::PessimisticLock);
-        $mutation->setKey($key);
+        $keys = array_values(array_unique($this->pendingLockKeys));
+        $this->pendingLockKeys = [];
 
-        $request = new PessimisticLockRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
-        $request->setMutations([$mutation]);
-        $request->setPrimaryLock(count($this->writeSet) === 0 ? $key : $this->getPrimaryKey());
-        $request->setStartVersion($this->startTs);
-        $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
-        $request->setForUpdateTs($this->startTs);
-        $request->setIsFirstLock(count($this->writeSet) === 0);
-        $request->setReturnValues(true);
+        $keysByRegion = $this->groupStringsByRegion($keys);
+        $isFirstLock = true;
 
-        $this->logger->debug('PessimisticLock', [
-            'txnId' => $this->txnId,
-            'key' => $key,
-        ]);
+        foreach ($keysByRegion as $regionData) {
+            $region = $regionData['region'];
+            $regionKeys = $regionData['keys'];
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-        try {
-            /** @var PessimisticLockResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvPessimisticLock',
-                $request,
-                PessimisticLockResponse::class,
-            );
+            $mutations = [];
+            foreach ($regionKeys as $key) {
+                $mutation = new Mutation();
+                $mutation->setOp(Op::PessimisticLock);
+                $mutation->setKey($key);
+                $mutations[] = $mutation;
+            }
 
-            $this->handleRegionError($response, $region);
+            $request = new PessimisticLockRequest();
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setMutations($mutations);
+            $request->setPrimaryLock($primary);
+            $request->setStartVersion($this->startTs);
+            $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
+            $request->setForUpdateTs($this->startTs);
+            $request->setIsFirstLock($isFirstLock);
+            $request->setReturnValues(true);
 
-            $errors = $response->getErrors();
-            if (count($errors) > 0) {
-                foreach ($errors as $keyError) {
-                    $deadlock = $keyError->getDeadlock();
-                    if ($deadlock !== null) {
-                        throw new DeadlockException(
-                            message: 'Deadlock detected during pessimistic lock',
-                            deadlockKey: $deadlock->getDeadlockKey() !== '' ? $deadlock->getDeadlockKey() : null,
-                            deadlockKeyHash: (int) $deadlock->getDeadlockKeyHash(),
-                            lockTs: (int) $deadlock->getLockTs(),
-                        );
-                    }
+            $this->logger->debug('PessimisticLock', [
+                'txnId' => $this->txnId,
+                'regionId' => $region->regionId,
+                'keyCount' => count($regionKeys),
+            ]);
 
-                    $locked = $keyError->getLocked();
-                    if ($locked !== null) {
-                        $this->lockResolver->resolveLock(
-                            $locked->getKey(),
-                            (int) $locked->getLockVersion(),
-                            $this->startTs,
-                        );
-                    }
+            try {
+                /** @var PessimisticLockResponse $response */
+                $response = $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'KvPessimisticLock',
+                    $request,
+                    PessimisticLockResponse::class,
+                );
 
-                    $conflict = $keyError->getConflict();
-                    if ($conflict !== null) {
-                        throw new TransactionConflictException(
-                            'Write conflict during pessimistic lock',
-                        );
+                $this->handleRegionError($response, $region);
+
+                $errors = $response->getErrors();
+                if (count($errors) > 0) {
+                    foreach ($errors as $keyError) {
+                        $deadlock = $keyError->getDeadlock();
+                        if ($deadlock !== null) {
+                            throw new DeadlockException(
+                                message: 'Deadlock detected during pessimistic lock',
+                                deadlockKey: $deadlock->getDeadlockKey() !== '' ? $deadlock->getDeadlockKey() : null,
+                                deadlockKeyHash: (int) $deadlock->getDeadlockKeyHash(),
+                                lockTs: (int) $deadlock->getLockTs(),
+                            );
+                        }
+
+                        $locked = $keyError->getLocked();
+                        if ($locked !== null) {
+                            $this->lockResolver->resolveLock(
+                                $locked->getKey(),
+                                (int) $locked->getLockVersion(),
+                                $this->startTs,
+                            );
+                        }
+
+                        $conflict = $keyError->getConflict();
+                        if ($conflict !== null) {
+                            throw new TransactionConflictException(
+                                'Write conflict during pessimistic lock',
+                            );
+                        }
                     }
                 }
+            } catch (GrpcException $e) {
+                $this->logger->warning('Pessimistic lock failed, will retry on prewrite', [
+                    'regionId' => $region->regionId,
+                    'keyCount' => count($regionKeys),
+                    'error' => $e->getMessage(),
+                ]);
             }
-        } catch (GrpcException $e) {
-            $this->logger->warning('Pessimistic lock failed, will retry on prewrite', [
-                'key' => $key,
-                'error' => $e->getMessage(),
-            ]);
+
+            $isFirstLock = false;
         }
     }
 

@@ -639,7 +639,7 @@ class TransactionTest extends TestCase
         $this->assertSame('ok', $result);
     }
 
-    public function testSetWithPessimisticLockThrowsDeadlockException(): void
+    public function testCommitPessimisticLockThrowsDeadlockException(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
         $this->regionCache->method('put');
@@ -662,14 +662,15 @@ class TransactionTest extends TestCase
             ->willReturn($response);
 
         $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('key', 'value');
 
         $this->expectException(DeadlockException::class);
         $this->expectExceptionMessage('Deadlock detected during pessimistic lock');
 
-        $txn->set('key', 'value');
+        $txn->commit();
     }
 
-    public function testPessimisticLockConflictStillThrowsTransactionConflict(): void
+    public function testCommitPessimisticLockConflictStillThrowsTransactionConflict(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
         $this->regionCache->method('put');
@@ -687,13 +688,14 @@ class TransactionTest extends TestCase
             ->willReturn($response);
 
         $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('key', 'value');
 
         $this->expectException(TransactionConflictException::class);
 
-        $txn->set('key', 'value');
+        $txn->commit();
     }
 
-    public function testDeadlockExceptionCarriesDeadlockKeyAndHash(): void
+    public function testCommitPessimisticLockDeadlockExceptionCarriesKeyAndHash(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
         $this->regionCache->method('put');
@@ -716,9 +718,10 @@ class TransactionTest extends TestCase
             ->willReturn($response);
 
         $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('key', 'value');
 
         try {
-            $txn->set('key', 'value');
+            $txn->commit();
             $this->fail('Expected DeadlockException was not thrown');
         } catch (DeadlockException $e) {
             $this->assertSame('my-key', $e->getDeadlockKey());
@@ -1124,5 +1127,224 @@ class TransactionTest extends TestCase
         $this->assertNull($result);
         $this->assertArrayHasKey('missing', $txn->getReadSet());
         $this->assertNull($txn->getReadSet()['missing']);
+    }
+
+    // ========================================================================
+    // Pessimistic lock batching
+    // ========================================================================
+
+    public function testPessimisticLockBatchesMultipleKeysInSameRegion(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $lockResponse = new PessimisticLockResponse();
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $this->grpc->method('call')
+            ->willReturnCallback(fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvPessimisticLock' => $lockResponse,
+                'KvPrewrite' => $prewriteResponse,
+                'KvCommit' => $commitResponse,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+        $txn->set('k3', 'v3');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+    }
+
+    public function testPessimisticLockSendsSingleRpcPerRegion(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k3');
+        $region2 = $this->makeRegion(2, 'k3', '');
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $lockResponse = new PessimisticLockResponse();
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $this->grpc->method('call')
+            ->willReturnCallback(fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvPessimisticLock' => $lockResponse,
+                'KvPrewrite' => $prewriteResponse,
+                'KvCommit' => $commitResponse,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+        $txn->set('k4', 'v4');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+    }
+
+    public function testPessimisticLockSetsIsFirstLockTrueOnFirstBatchOnly(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k3');
+        $region2 = $this->makeRegion(2, 'k3', '');
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->pdClient->method('getTimestamp')->willReturn(4000);
+
+        $lockResponse = new PessimisticLockResponse();
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                $lockResponse,
+                $prewriteResponse,
+                $commitResponse,
+                &$capturedRequests,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $capturedRequests[] = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+        $txn->set('k4', 'v4');
+        $txn->commit();
+
+        $this->assertCount(2, $capturedRequests);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $capturedRequests[0]);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $capturedRequests[1]);
+        $this->assertTrue($capturedRequests[0]->getIsFirstLock());
+        $this->assertFalse($capturedRequests[1]->getIsFirstLock());
+    }
+
+    public function testPessimisticLockBatchSendsAllMutationsInSingleRequest(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('getTimestamp')->willReturn(5000);
+
+        $lockResponse = new PessimisticLockResponse();
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                $lockResponse,
+                $prewriteResponse,
+                $commitResponse,
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $capturedRequest = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+        $txn->set('k3', 'v3');
+        $txn->commit();
+
+        $this->assertNotNull($capturedRequest);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $capturedRequest);
+        $this->assertCount(3, $capturedRequest->getMutations());
+    }
+
+    public function testPessimisticLockDeduplicatesKeys(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('getTimestamp')->willReturn(6000);
+
+        $lockResponse = new PessimisticLockResponse();
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request
+            ) use (
+                $lockResponse,
+                $prewriteResponse,
+                $commitResponse,
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $capturedRequest = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->delete('k1');
+        $txn->set('k1', 'v2');
+        $txn->commit();
+
+        $this->assertNotNull($capturedRequest);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $capturedRequest);
+        $this->assertCount(1, $capturedRequest->getMutations());
     }
 }
