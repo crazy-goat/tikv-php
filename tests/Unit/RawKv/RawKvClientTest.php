@@ -473,6 +473,19 @@ class RawKvClientTest extends TestCase
         $this->client->deletePrefix('');
     }
 
+    public function testDeletePrefixThrowsOnAllFFPrefix(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('0xFF bytes');
+        $this->client->deletePrefix("\xff\xff");
+    }
+
+    public function testDeletePrefixThrowsOnSingleFFByte(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->client->deletePrefix("\xff");
+    }
+
     // ========================================================================
     // scanPrefix()
     // ========================================================================
