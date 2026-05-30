@@ -115,7 +115,6 @@ class RawKvScannerTest extends TestCase
 
         $pairR1a = new KvPair();
         $pairR1a->setKey('key_a');
-        $pairR1a->setKey('key_a');
         $pairR1a->setValue('val_a');
 
         $pairR1b = new KvPair();
