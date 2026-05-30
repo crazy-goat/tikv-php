@@ -646,6 +646,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
 
         $deadlock = new Deadlock();
         $deadlock->setDeadlockKeyHash(12345);
@@ -677,6 +678,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
 
         $keyError = new KeyError();
         $keyError->setConflict(new \CrazyGoat\Proto\Kvrpcpb\WriteConflict());
@@ -702,6 +704,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
 
         $deadlock = new Deadlock();
         $deadlock->setDeadlockKeyHash(42);
@@ -756,6 +759,7 @@ class TransactionTest extends TestCase
         $store->setAddress('127.0.0.1:20160');
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
 
         $batchGetResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
         $pair = new KvPair();
@@ -901,6 +905,7 @@ class TransactionTest extends TestCase
         $store->setAddress('127.0.0.1:20160');
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
         $this->pdClient->method('getTimestamp')->willReturn(2000);
 
         $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
@@ -978,6 +983,7 @@ class TransactionTest extends TestCase
         $store->setAddress('127.0.0.1:20160');
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
 
         $methodSequence = [];
         $this->grpc->method('call')
@@ -1211,6 +1217,7 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getRegion')->willReturnCallback(
             fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
         );
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getTimestamp')->willReturn(4000);
 
         $lockResponse = new PessimisticLockResponse();
@@ -1260,6 +1267,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
         $this->pdClient->method('getTimestamp')->willReturn(5000);
 
         $lockResponse = new PessimisticLockResponse();
@@ -1307,6 +1315,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
         $this->pdClient->method('getTimestamp')->willReturn(6000);
 
         $lockResponse = new PessimisticLockResponse();

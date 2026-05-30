@@ -49,7 +49,7 @@ final readonly class RawKvBatch
             return [];
         }
 
-        $keysByRegion = RegionGrouper::groupKeysByRegion($keys, $this->regionResolver->getRegionInfo(...));
+        $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
@@ -118,9 +118,15 @@ final readonly class RawKvBatch
             }
         }
 
+        $keys = array_keys($keyValuePairs);
+        $resolved = $this->regionResolver->batchResolveRegions($keys);
+
         $pairsByRegion = [];
         foreach ($keyValuePairs as $key => $value) {
-            $region = $this->regionResolver->getRegionInfo($key);
+            $region = $resolved[$key] ?? null;
+            if ($region === null) {
+                continue;
+            }
             $regionId = $region->regionId;
             if (!isset($pairsByRegion[$regionId])) {
                 $pairsByRegion[$regionId] = ['region' => $region, 'pairs' => []];
@@ -181,7 +187,7 @@ final readonly class RawKvBatch
             return;
         }
 
-        $keysByRegion = RegionGrouper::groupKeysByRegion($keys, $this->regionResolver->getRegionInfo(...));
+        $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
