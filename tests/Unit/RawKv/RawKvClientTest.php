@@ -1503,7 +1503,17 @@ class RawKvClientTest extends TestCase
 
         $capturedRequest = null;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest, $response): \CrazyGoat\Proto\Kvrpcpb\RawGetResponse {
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                $request,
+                string $responseClass,
+                ?int $timeoutMs,
+            ) use (
+                &$capturedRequest,
+                $response
+): \CrazyGoat\Proto\Kvrpcpb\RawGetResponse {
                 $capturedRequest = $request;
                 return $response;
             });
@@ -1526,7 +1536,17 @@ class RawKvClientTest extends TestCase
 
         $capturedRequest = null;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest, $response): \CrazyGoat\Proto\Kvrpcpb\RawGetResponse {
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                $request,
+                string $responseClass,
+                ?int $timeoutMs,
+            ) use (
+                &$capturedRequest,
+                $response
+): \CrazyGoat\Proto\Kvrpcpb\RawGetResponse {
                 $capturedRequest = $request;
                 return $response;
             });
@@ -1548,7 +1568,14 @@ class RawKvClientTest extends TestCase
 
         $capturedRequest = null;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest): \CrazyGoat\Proto\Kvrpcpb\RawPutResponse {
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                $request,
+                string $responseClass,
+                ?int $timeoutMs,
+            ) use (&$capturedRequest): \CrazyGoat\Proto\Kvrpcpb\RawPutResponse {
                 $capturedRequest = $request;
                 return new RawPutResponse();
             });
@@ -1570,7 +1597,14 @@ class RawKvClientTest extends TestCase
 
         $capturedRequest = null;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest): \CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse {
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                $request,
+                string $responseClass,
+                ?int $timeoutMs,
+            ) use (&$capturedRequest): \CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse {
                 $capturedRequest = $request;
                 return new RawDeleteResponse();
             });
@@ -1595,7 +1629,17 @@ class RawKvClientTest extends TestCase
 
         $capturedRequest = null;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest, $response): \CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLResponse {
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                $request,
+                string $responseClass,
+                ?int $timeoutMs,
+            ) use (
+                &$capturedRequest,
+                $response
+): \CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLResponse {
                 $capturedRequest = $request;
                 return $response;
             });
@@ -1621,7 +1665,17 @@ class RawKvClientTest extends TestCase
 
         $capturedRequest = null;
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $address, string $service, string $method, $request, string $responseClass, ?int $timeoutMs) use (&$capturedRequest, $response): \CrazyGoat\Proto\Kvrpcpb\RawCASResponse {
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                $request,
+                string $responseClass,
+                ?int $timeoutMs,
+            ) use (
+                &$capturedRequest,
+                $response
+): \CrazyGoat\Proto\Kvrpcpb\RawCASResponse {
                 $capturedRequest = $request;
                 return $response;
             });

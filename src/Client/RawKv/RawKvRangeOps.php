@@ -93,8 +93,12 @@ final readonly class RawKvRangeOps
         );
     }
 
-    private function executeDeleteRangeForRegion(RegionInfo $region, string $startKey, string $endKey, string $columnFamily = ''): void
-    {
+    private function executeDeleteRangeForRegion(
+        RegionInfo $region,
+        string $startKey,
+        string $endKey,
+        string $columnFamily = '',
+    ): void {
         $executor = new RetryExecutor(
             $this->maxBackoffMs,
             $this->serverBusyBudgetMs,

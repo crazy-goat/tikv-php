@@ -55,7 +55,15 @@ final readonly class RawKvScanner
             }
 
             $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
-            $regionResults = $this->executeScanForRegion($region, $scanStart, $scanEnd, $regionLimit, $keyOnly, false, $columnFamily);
+            $regionResults = $this->executeScanForRegion(
+                $region,
+                $scanStart,
+                $scanEnd,
+                $regionLimit,
+                $keyOnly,
+                false,
+                $columnFamily,
+            );
             $results = array_merge($results, $regionResults);
 
             if ($remaining > 0) {
@@ -72,8 +80,13 @@ final readonly class RawKvScanner
     /**
      * @return array<array{key: string, value: ?string}>
      */
-    public function reverseScan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
-    {
+    public function reverseScan(
+        string $startKey,
+        string $endKey,
+        int $limit,
+        bool $keyOnly,
+        string $columnFamily = '',
+    ): array {
         $limit = $this->validateScanLimit($limit);
 
         $regions = $this->pdClient->scanRegions($endKey, $startKey, 0);
@@ -156,8 +169,13 @@ final readonly class RawKvScanner
         return $results;
     }
 
-    public function scanIterator(string $startKey, string $endKey, int $batchSize, bool $keyOnly, string $columnFamily = ''): ScanIterator
-    {
+    public function scanIterator(
+        string $startKey,
+        string $endKey,
+        int $batchSize,
+        bool $keyOnly,
+        string $columnFamily = '',
+    ): ScanIterator {
         return new ScanIterator(
             $this->scan(...),
             $startKey,
@@ -168,8 +186,12 @@ final readonly class RawKvScanner
         );
     }
 
-    public function scanPrefixIterator(string $prefix, int $batchSize, bool $keyOnly, string $columnFamily = ''): ScanIterator
-    {
+    public function scanPrefixIterator(
+        string $prefix,
+        int $batchSize,
+        bool $keyOnly,
+        string $columnFamily = '',
+    ): ScanIterator {
         return new ScanIterator(
             $this->scan(...),
             $prefix,

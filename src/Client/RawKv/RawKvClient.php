@@ -308,7 +308,14 @@ final class RawKvClient
             throw new \RuntimeException('CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))');
         }
 
-        return $this->atomic->compareAndSwap($key, $expectedValue, $newValue, $ttl, $this->createRetryExecutor(), $this->columnFamily);
+        return $this->atomic->compareAndSwap(
+            $key,
+            $expectedValue,
+            $newValue,
+            $ttl,
+            $this->createRetryExecutor(),
+            $this->columnFamily,
+        );
     }
 
     public function putIfAbsent(string $key, string $value, int $ttl = 0): ?string
@@ -360,7 +367,13 @@ final class RawKvClient
             $this->validateValueSize($value, 'batchPut');
         }
 
-        $this->batch->batchPut($keyValuePairs, $ttl, $this->createRetryExecutor(), $this->atomicForCAS, $this->columnFamily);
+        $this->batch->batchPut(
+            $keyValuePairs,
+            $ttl,
+            $this->createRetryExecutor(),
+            $this->atomicForCAS,
+            $this->columnFamily,
+        );
     }
 
     /**

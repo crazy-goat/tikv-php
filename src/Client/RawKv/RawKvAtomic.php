@@ -30,7 +30,13 @@ final readonly class RawKvAtomic
         RetryExecutor $retryExecutor,
         string $columnFamily = '',
     ): CasResult {
-        return $retryExecutor->execute($key, function () use ($key, $expectedValue, $newValue, $ttl, $columnFamily): CasResult {
+        return $retryExecutor->execute($key, function () use (
+            $key,
+            $expectedValue,
+            $newValue,
+            $ttl,
+            $columnFamily,
+        ): CasResult {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 

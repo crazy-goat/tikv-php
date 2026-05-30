@@ -96,8 +96,12 @@ final readonly class RawKvCrud
         });
     }
 
-    public function delete(string $key, RetryExecutor $retryExecutor, bool $forCas = false, string $columnFamily = ''): void
-    {
+    public function delete(
+        string $key,
+        RetryExecutor $retryExecutor,
+        bool $forCas = false,
+        string $columnFamily = '',
+    ): void {
         $retryExecutor->execute($key, function () use ($key, $forCas, $columnFamily): null {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);

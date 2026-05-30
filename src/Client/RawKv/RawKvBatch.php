@@ -171,8 +171,12 @@ final readonly class RawKvBatch
     /**
      * @param string[] $keys
      */
-    public function batchDelete(array $keys, RetryExecutor $retryExecutor, bool $forCas = false, string $columnFamily = ''): void
-    {
+    public function batchDelete(
+        array $keys,
+        RetryExecutor $retryExecutor,
+        bool $forCas = false,
+        string $columnFamily = '',
+    ): void {
         if ($keys === []) {
             return;
         }
@@ -210,8 +214,11 @@ final readonly class RawKvBatch
     /**
      * @param string[] $keys
      */
-    private function executeBatchGetForRegionAsync(RegionInfo $region, array $keys, string $columnFamily = ''): GrpcFuture
-    {
+    private function executeBatchGetForRegionAsync(
+        RegionInfo $region,
+        array $keys,
+        string $columnFamily = '',
+    ): GrpcFuture {
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchGetRequest();
@@ -292,8 +299,12 @@ final readonly class RawKvBatch
     /**
      * @param string[] $keys
      */
-    private function executeBatchDeleteForRegionAsync(RegionInfo $region, array $keys, bool $forCas = false, string $columnFamily = ''): GrpcFuture
-    {
+    private function executeBatchDeleteForRegionAsync(
+        RegionInfo $region,
+        array $keys,
+        bool $forCas = false,
+        string $columnFamily = '',
+    ): GrpcFuture {
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchDeleteRequest();
@@ -349,7 +360,12 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): RawBatchGetResponse {
         $key = $keys[0] ?? '';
-        return $retryExecutor->execute($key, function () use ($region, $keys, $key, $columnFamily): RawBatchGetResponse {
+        return $retryExecutor->execute($key, function () use (
+            $region,
+            $keys,
+            $key,
+            $columnFamily,
+        ): RawBatchGetResponse {
             $fresh = $this->resolveRegion($region, $key);
             $future = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
             /** @var RawBatchGetResponse $response */
@@ -372,7 +388,14 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): null {
         $firstKey = $pairs !== [] ? $pairs[0]->getKey() : '';
-        return $retryExecutor->execute($firstKey, function () use ($region, $pairs, $ttl, $firstKey, $forCas, $columnFamily): null {
+        return $retryExecutor->execute($firstKey, function () use (
+            $region,
+            $pairs,
+            $ttl,
+            $firstKey,
+            $forCas,
+            $columnFamily,
+        ): null {
             $fresh = $this->resolveRegion($region, $firstKey);
             $future = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
             $response = $future->wait();
@@ -392,7 +415,13 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): null {
         $key = $keys[0] ?? '';
-        return $retryExecutor->execute($key, function () use ($region, $keys, $key, $forCas, $columnFamily): null {
+        return $retryExecutor->execute($key, function () use (
+            $region,
+            $keys,
+            $key,
+            $forCas,
+            $columnFamily,
+        ): null {
             $fresh = $this->resolveRegion($region, $key);
             $future = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
             $response = $future->wait();
