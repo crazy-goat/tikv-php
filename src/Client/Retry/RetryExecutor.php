@@ -39,8 +39,6 @@ final class RetryExecutor
      */
     public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
     {
-        $this->totalBackoffMs = 0;
-        $this->serverBusyBackoffMs = 0;
         $this->attempt = 0;
 
         while (true) {

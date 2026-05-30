@@ -41,6 +41,7 @@ final readonly class RawKvRangeOps
             return;
         }
 
+        $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
 
         foreach ($regions as $region) {
@@ -53,7 +54,7 @@ final readonly class RawKvRangeOps
                 continue;
             }
 
-            $this->executeDeleteRangeForRegion($region, $rangeStart, $rangeEnd, $columnFamily);
+            $this->executeDeleteRangeForRegion($executor, $region, $rangeStart, $rangeEnd, $columnFamily);
         }
     }
 
@@ -64,6 +65,7 @@ final readonly class RawKvRangeOps
 
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
+        $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
 
         $mergedChecksum = 0;
@@ -80,7 +82,7 @@ final readonly class RawKvRangeOps
                 continue;
             }
 
-            $result = $this->executeChecksumForRegion($region, $rangeStart, $rangeEnd);
+            $result = $this->executeChecksumForRegion($executor, $region, $rangeStart, $rangeEnd);
             $mergedChecksum ^= $result->checksum;
             $mergedTotalKvs += $result->totalKvs;
             $mergedTotalBytes += $result->totalBytes;
@@ -94,20 +96,12 @@ final readonly class RawKvRangeOps
     }
 
     private function executeDeleteRangeForRegion(
+        RetryExecutor $executor,
         RegionInfo $region,
         string $startKey,
         string $endKey,
         string $columnFamily = '',
     ): void {
-        $executor = new RetryExecutor(
-            $this->maxBackoffMs,
-            $this->serverBusyBudgetMs,
-            $this->regionCache,
-            $this->grpc,
-            $this->regionResolver,
-            $this->logger,
-        );
-
         $executor->execute($startKey, function () use ($region, $startKey, $endKey, $columnFamily): null {
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
@@ -139,17 +133,12 @@ final readonly class RawKvRangeOps
         });
     }
 
-    private function executeChecksumForRegion(RegionInfo $region, string $startKey, string $endKey): ChecksumResult
-    {
-        $executor = new RetryExecutor(
-            $this->maxBackoffMs,
-            $this->serverBusyBudgetMs,
-            $this->regionCache,
-            $this->grpc,
-            $this->regionResolver,
-            $this->logger,
-        );
-
+    private function executeChecksumForRegion(
+        RetryExecutor $executor,
+        RegionInfo $region,
+        string $startKey,
+        string $endKey,
+    ): ChecksumResult {
         return $executor->execute($startKey, function () use ($region, $startKey, $endKey): ChecksumResult {
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
@@ -186,5 +175,17 @@ final readonly class RawKvRangeOps
                 totalBytes: (int) $response->getTotalBytes(),
             );
         });
+    }
+
+    private function createRetryExecutor(): RetryExecutor
+    {
+        return new RetryExecutor(
+            $this->maxBackoffMs,
+            $this->serverBusyBudgetMs,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            $this->logger,
+        );
     }
 }
