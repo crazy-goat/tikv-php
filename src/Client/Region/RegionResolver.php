@@ -75,7 +75,7 @@ final readonly class RegionResolver
         $result = [];
         foreach ($keys as $key) {
             $region = $this->findRegionForKey($key, $regions);
-            if ($region !== null) {
+            if ($region instanceof RegionInfo) {
                 $result[$key] = $region;
             }
         }
