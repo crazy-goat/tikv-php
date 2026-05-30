@@ -80,4 +80,125 @@ class RegionResolverTest extends TestCase
         $this->expectException(StoreNotFoundException::class);
         $this->resolver->resolveStoreAddress(1);
     }
+
+    public function testBatchResolveRegionsEmptyKeys(): void
+    {
+        $this->pdClient->expects($this->never())->method('scanRegions');
+
+        $result = $this->resolver->batchResolveRegions([]);
+        $this->assertSame([], $result);
+    }
+
+    public function testBatchResolveRegionsSingleKey(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'z',
+        );
+
+        $this->pdClient->method('scanRegions')->with('a', 'a')->willReturn([$region]);
+        $this->regionCache->expects($this->once())->method('put')->with($region);
+
+        $result = $this->resolver->batchResolveRegions(['a']);
+        $this->assertSame(['a' => $region], $result);
+    }
+
+    public function testBatchResolveRegionsMultipleKeysSameRegion(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'z',
+        );
+
+        $this->pdClient->method('scanRegions')->with('a', 'c')->willReturn([$region]);
+        $this->regionCache->expects($this->once())->method('put')->with($region);
+
+        $result = $this->resolver->batchResolveRegions(['a', 'b', 'c']);
+        $this->assertCount(3, $result);
+        $this->assertSame($region, $result['a']);
+        $this->assertSame($region, $result['b']);
+        $this->assertSame($region, $result['c']);
+    }
+
+    public function testBatchResolveRegionsMultipleKeysMultipleRegions(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 2,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->pdClient->method('scanRegions')->with('a', 'z')->willReturn([$region1, $region2]);
+        $this->regionCache->expects($this->exactly(2))->method('put');
+
+        $result = $this->resolver->batchResolveRegions(['a', 'm', 'z']);
+        $this->assertCount(3, $result);
+        $this->assertSame($region1, $result['a']);
+        $this->assertSame($region2, $result['m']);
+        $this->assertSame($region2, $result['z']);
+    }
+
+    public function testBatchResolveRegionsPopulatesCache(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'z',
+        );
+
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->regionCache->expects($this->once())->method('put')->with($region);
+
+        $this->resolver->batchResolveRegions(['a', 'b', 'c']);
+    }
+
+    public function testBatchResolveRegionsSkipsKeysOutsideRegions(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'b',
+            endKey: 'y',
+        );
+
+        $this->pdClient->method('scanRegions')->with('a', 'z')->willReturn([$region]);
+        $this->regionCache->expects($this->once())->method('put')->with($region);
+
+        $result = $this->resolver->batchResolveRegions(['a', 'b', 'x', 'z']);
+        $this->assertCount(2, $result);
+        $this->assertArrayHasKey('b', $result);
+        $this->assertArrayHasKey('x', $result);
+        $this->assertArrayNotHasKey('a', $result);
+        $this->assertArrayNotHasKey('z', $result);
+    }
 }

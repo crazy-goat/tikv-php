@@ -33,6 +33,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\RawKv\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
@@ -868,10 +869,25 @@ final class Transaction
      */
     private function groupMutationsByRegion(array $mutations): array
     {
-        $grouped = [];
+        if ($mutations === []) {
+            return [];
+        }
+
+        $keys = array_map(fn(Mutation $m) => $m->getKey(), $mutations);
+        $resolved = $this->regionResolver->batchResolveRegions($keys);
+
+        $keyToMutation = [];
         foreach ($mutations as $mutation) {
-            $key = $mutation->getKey();
-            $region = $this->regionResolver->getRegionInfo($key);
+            $keyToMutation[$mutation->getKey()] = $mutation;
+        }
+
+        $grouped = [];
+        foreach ($keys as $key) {
+            $region = $resolved[$key] ?? null;
+            if ($region === null) {
+                continue;
+            }
+            $mutation = $keyToMutation[$key];
             $regionId = $region->regionId;
             if (!isset($grouped[$regionId])) {
                 $grouped[$regionId] = ['region' => $region, 'mutations' => []];
@@ -887,16 +903,7 @@ final class Transaction
      */
     private function groupStringsByRegion(array $keys): array
     {
-        $grouped = [];
-        foreach ($keys as $key) {
-            $region = $this->regionResolver->getRegionInfo($key);
-            $regionId = $region->regionId;
-            if (!isset($grouped[$regionId])) {
-                $grouped[$regionId] = ['region' => $region, 'keys' => []];
-            }
-            $grouped[$regionId]['keys'][] = $key;
-        }
-        return $grouped;
+        return RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
     }
 
     private function handleRegionError(
