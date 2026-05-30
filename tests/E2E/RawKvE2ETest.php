@@ -48,6 +48,7 @@ class RawKvE2ETest extends TestCase
             $this->markTestSkipped('TiKV cluster not available');
         }
         $this->testClient = self::$client;
+        $this->testClient->setAtomicForCAS(true);
         $this->keysToCleanup = [];
     }
 

@@ -49,6 +49,8 @@ final class RawKvClient
 
     private bool $closed = false;
 
+    private bool $atomicForCAS = false;
+
     private readonly RawKvCrud $crud;
     private readonly RawKvAtomic $atomic;
     private readonly RawKvBatch $batch;
@@ -161,6 +163,22 @@ final class RawKvClient
     }
 
     // ========================================================================
+    // Atomic for CAS mode
+    // ========================================================================
+
+    public function setAtomicForCAS(bool $enabled): self
+    {
+        $this->atomicForCAS = $enabled;
+
+        return $this;
+    }
+
+    public function isAtomicForCAS(): bool
+    {
+        return $this->atomicForCAS;
+    }
+
+    // ========================================================================
     // Validation
     // ========================================================================
 
@@ -238,7 +256,7 @@ final class RawKvClient
         $this->validateKeySize($key, 'put');
         $this->validateValueSize($value, 'put');
 
-        $this->crud->put($key, $value, $ttl, $this->createRetryExecutor());
+        $this->crud->put($key, $value, $ttl, $this->createRetryExecutor(), $this->atomicForCAS);
     }
 
     public function delete(string $key): void
@@ -247,7 +265,7 @@ final class RawKvClient
         $this->validateKeyNotEmpty($key, 'delete');
         $this->validateKeySize($key, 'delete');
 
-        $this->crud->delete($key, $this->createRetryExecutor());
+        $this->crud->delete($key, $this->createRetryExecutor(), $this->atomicForCAS);
     }
 
     public function getKeyTTL(string $key): ?int
@@ -267,6 +285,10 @@ final class RawKvClient
         $this->validateKeyNotEmpty($key, 'compareAndSwap');
         $this->validateKeySize($key, 'compareAndSwap');
         $this->validateValueSize($newValue, 'compareAndSwap');
+
+        if (!$this->atomicForCAS) {
+            throw new \RuntimeException('CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))');
+        }
 
         return $this->atomic->compareAndSwap($key, $expectedValue, $newValue, $ttl, $this->createRetryExecutor());
     }
@@ -320,7 +342,7 @@ final class RawKvClient
             $this->validateValueSize($value, 'batchPut');
         }
 
-        $this->batch->batchPut($keyValuePairs, $ttl, $this->createRetryExecutor());
+        $this->batch->batchPut($keyValuePairs, $ttl, $this->createRetryExecutor(), $this->atomicForCAS);
     }
 
     /**
@@ -339,7 +361,7 @@ final class RawKvClient
             $this->validateKeySize($key, 'batchDelete');
         }
 
-        $this->batch->batchDelete($keys, $this->createRetryExecutor());
+        $this->batch->batchDelete($keys, $this->createRetryExecutor(), $this->atomicForCAS);
     }
 
     // ========================================================================
