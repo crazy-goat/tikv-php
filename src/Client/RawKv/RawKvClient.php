@@ -51,6 +51,8 @@ final class RawKvClient
 
     private bool $atomicForCAS = false;
 
+    private string $columnFamily = '';
+
     private readonly RawKvCrud $crud;
     private readonly RawKvAtomic $atomic;
     private readonly RawKvBatch $batch;
@@ -179,6 +181,22 @@ final class RawKvClient
     }
 
     // ========================================================================
+    // Column family
+    // ========================================================================
+
+    public function setColumnFamily(string $cf): self
+    {
+        $this->columnFamily = $cf;
+
+        return $this;
+    }
+
+    public function getColumnFamily(): string
+    {
+        return $this->columnFamily;
+    }
+
+    // ========================================================================
     // Validation
     // ========================================================================
 
@@ -246,7 +264,7 @@ final class RawKvClient
         $this->validateKeyNotEmpty($key, 'get');
         $this->validateKeySize($key, 'get');
 
-        return $this->crud->get($key, $this->createRetryExecutor());
+        return $this->crud->get($key, $this->createRetryExecutor(), $this->columnFamily);
     }
 
     public function put(string $key, string $value, int $ttl = 0): void
@@ -256,7 +274,7 @@ final class RawKvClient
         $this->validateKeySize($key, 'put');
         $this->validateValueSize($value, 'put');
 
-        $this->crud->put($key, $value, $ttl, $this->createRetryExecutor(), $this->atomicForCAS);
+        $this->crud->put($key, $value, $ttl, $this->createRetryExecutor(), $this->atomicForCAS, $this->columnFamily);
     }
 
     public function delete(string $key): void
@@ -265,14 +283,14 @@ final class RawKvClient
         $this->validateKeyNotEmpty($key, 'delete');
         $this->validateKeySize($key, 'delete');
 
-        $this->crud->delete($key, $this->createRetryExecutor(), $this->atomicForCAS);
+        $this->crud->delete($key, $this->createRetryExecutor(), $this->atomicForCAS, $this->columnFamily);
     }
 
     public function getKeyTTL(string $key): ?int
     {
         $this->ensureOpen();
 
-        return $this->crud->getKeyTTL($key, $this->createRetryExecutor());
+        return $this->crud->getKeyTTL($key, $this->createRetryExecutor(), $this->columnFamily);
     }
 
     // ========================================================================
@@ -290,7 +308,14 @@ final class RawKvClient
             throw new \RuntimeException('CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))');
         }
 
-        return $this->atomic->compareAndSwap($key, $expectedValue, $newValue, $ttl, $this->createRetryExecutor());
+        return $this->atomic->compareAndSwap(
+            $key,
+            $expectedValue,
+            $newValue,
+            $ttl,
+            $this->createRetryExecutor(),
+            $this->columnFamily,
+        );
     }
 
     public function putIfAbsent(string $key, string $value, int $ttl = 0): ?string
@@ -321,7 +346,7 @@ final class RawKvClient
             $this->validateKeySize($key, 'batchGet');
         }
 
-        return $this->batch->batchGet($keys, $this->createRetryExecutor());
+        return $this->batch->batchGet($keys, $this->createRetryExecutor(), $this->columnFamily);
     }
 
     /**
@@ -342,7 +367,13 @@ final class RawKvClient
             $this->validateValueSize($value, 'batchPut');
         }
 
-        $this->batch->batchPut($keyValuePairs, $ttl, $this->createRetryExecutor(), $this->atomicForCAS);
+        $this->batch->batchPut(
+            $keyValuePairs,
+            $ttl,
+            $this->createRetryExecutor(),
+            $this->atomicForCAS,
+            $this->columnFamily,
+        );
     }
 
     /**
@@ -361,7 +392,7 @@ final class RawKvClient
             $this->validateKeySize($key, 'batchDelete');
         }
 
-        $this->batch->batchDelete($keys, $this->createRetryExecutor(), $this->atomicForCAS);
+        $this->batch->batchDelete($keys, $this->createRetryExecutor(), $this->atomicForCAS, $this->columnFamily);
     }
 
     // ========================================================================
@@ -376,14 +407,14 @@ final class RawKvClient
     ): ScanIterator {
         $this->ensureOpen();
 
-        return $this->scanner->scanIterator($startKey, $endKey, $batchSize, $keyOnly);
+        return $this->scanner->scanIterator($startKey, $endKey, $batchSize, $keyOnly, $this->columnFamily);
     }
 
     public function scanPrefixIterator(string $prefix, int $batchSize = 256, bool $keyOnly = false): ScanIterator
     {
         $this->ensureOpen();
 
-        return $this->scanner->scanPrefixIterator($prefix, $batchSize, $keyOnly);
+        return $this->scanner->scanPrefixIterator($prefix, $batchSize, $keyOnly, $this->columnFamily);
     }
 
     /**
@@ -397,7 +428,7 @@ final class RawKvClient
             $this->validateKeySize($endKey, 'scan');
         }
 
-        return $this->scanner->scan($startKey, $endKey, $limit, $keyOnly);
+        return $this->scanner->scan($startKey, $endKey, $limit, $keyOnly, $this->columnFamily);
     }
 
     /**
@@ -407,7 +438,7 @@ final class RawKvClient
     {
         $this->ensureOpen();
 
-        return $this->scanner->scanPrefix($prefix, $limit, $keyOnly);
+        return $this->scanner->scanPrefix($prefix, $limit, $keyOnly, $this->columnFamily);
     }
 
     /**
@@ -421,7 +452,7 @@ final class RawKvClient
             $this->validateKeySize($endKey, 'reverseScan');
         }
 
-        return $this->scanner->reverseScan($startKey, $endKey, $limit, $keyOnly);
+        return $this->scanner->reverseScan($startKey, $endKey, $limit, $keyOnly, $this->columnFamily);
     }
 
     /**
@@ -436,7 +467,7 @@ final class RawKvClient
             return [];
         }
 
-        return $this->scanner->batchScan($ranges, $eachLimit, $keyOnly);
+        return $this->scanner->batchScan($ranges, $eachLimit, $keyOnly, $this->columnFamily);
     }
 
     // ========================================================================
@@ -447,7 +478,7 @@ final class RawKvClient
     {
         $this->ensureOpen();
 
-        $this->rangeOps->deleteRange($startKey, $endKey);
+        $this->rangeOps->deleteRange($startKey, $endKey, $this->columnFamily);
     }
 
     public function deletePrefix(string $prefix): void
@@ -458,7 +489,7 @@ final class RawKvClient
             throw new InvalidArgumentException('Prefix must not be empty -- refusing to delete all keys');
         }
 
-        $this->rangeOps->deletePrefix($prefix);
+        $this->rangeOps->deletePrefix($prefix, $this->columnFamily);
     }
 
     public function checksum(string $startKey, string $endKey): ChecksumResult

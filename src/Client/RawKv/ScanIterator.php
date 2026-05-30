@@ -34,7 +34,7 @@ final class ScanIterator implements Iterator
     private readonly \Closure $scanFn;
 
     /**
-     * @param callable(string, string, int, bool): array<array{key: string, value: ?string}> $scanFn
+     * @param callable(string, string, int, bool, string): array<array{key: string, value: ?string}> $scanFn
      */
     public function __construct(
         callable $scanFn,
@@ -42,6 +42,7 @@ final class ScanIterator implements Iterator
         private readonly string $endKey,
         private readonly int $batchSize = 256,
         private readonly bool $keyOnly = false,
+        private readonly string $columnFamily = '',
     ) {
         $this->scanFn = \Closure::fromCallable($scanFn);
 
@@ -120,6 +121,7 @@ final class ScanIterator implements Iterator
             $this->endKey,
             $this->batchSize,
             $this->keyOnly,
+            $this->columnFamily,
         );
 
         if ($results === []) {

@@ -36,7 +36,7 @@ final readonly class RawKvScanner
     /**
      * @return array<array{key: string, value: ?string}>
      */
-    public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly): array
+    public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
     {
         $limit = $this->validateScanLimit($limit);
 
@@ -55,7 +55,15 @@ final readonly class RawKvScanner
             }
 
             $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
-            $regionResults = $this->executeScanForRegion($region, $scanStart, $scanEnd, $regionLimit, $keyOnly, false);
+            $regionResults = $this->executeScanForRegion(
+                $region,
+                $scanStart,
+                $scanEnd,
+                $regionLimit,
+                $keyOnly,
+                false,
+                $columnFamily,
+            );
             $results = array_merge($results, $regionResults);
 
             if ($remaining > 0) {
@@ -72,8 +80,13 @@ final readonly class RawKvScanner
     /**
      * @return array<array{key: string, value: ?string}>
      */
-    public function reverseScan(string $startKey, string $endKey, int $limit, bool $keyOnly): array
-    {
+    public function reverseScan(
+        string $startKey,
+        string $endKey,
+        int $limit,
+        bool $keyOnly,
+        string $columnFamily = '',
+    ): array {
         $limit = $this->validateScanLimit($limit);
 
         $regions = $this->pdClient->scanRegions($endKey, $startKey, 0);
@@ -98,6 +111,7 @@ final readonly class RawKvScanner
                 $regionLimit,
                 $keyOnly,
                 true,
+                $columnFamily,
             );
             $results = array_merge($results, $regionResults);
 
@@ -115,16 +129,16 @@ final readonly class RawKvScanner
     /**
      * @return array<array{key: string, value: ?string}>
      */
-    public function scanPrefix(string $prefix, int $limit, bool $keyOnly): array
+    public function scanPrefix(string $prefix, int $limit, bool $keyOnly, string $columnFamily = ''): array
     {
-        return $this->scan($prefix, RawKvSplitter::calculatePrefixEndKey($prefix), $limit, $keyOnly);
+        return $this->scan($prefix, RawKvSplitter::calculatePrefixEndKey($prefix), $limit, $keyOnly, $columnFamily);
     }
 
     /**
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
      */
-    public function batchScan(array $ranges, int $eachLimit, bool $keyOnly): array
+    public function batchScan(array $ranges, int $eachLimit, bool $keyOnly, string $columnFamily = ''): array
     {
         if ($ranges === []) {
             return [];
@@ -149,31 +163,42 @@ final readonly class RawKvScanner
                 throw new InvalidArgumentException('Each range must be an array of [startKey, endKey]');
             }
             [$startKey, $endKey] = $range;
-            $results[] = $this->scan($startKey, $endKey, $eachLimit, $keyOnly);
+            $results[] = $this->scan($startKey, $endKey, $eachLimit, $keyOnly, $columnFamily);
         }
 
         return $results;
     }
 
-    public function scanIterator(string $startKey, string $endKey, int $batchSize, bool $keyOnly): ScanIterator
-    {
+    public function scanIterator(
+        string $startKey,
+        string $endKey,
+        int $batchSize,
+        bool $keyOnly,
+        string $columnFamily = '',
+    ): ScanIterator {
         return new ScanIterator(
             $this->scan(...),
             $startKey,
             $endKey,
             $batchSize,
             $keyOnly,
+            $columnFamily,
         );
     }
 
-    public function scanPrefixIterator(string $prefix, int $batchSize, bool $keyOnly): ScanIterator
-    {
+    public function scanPrefixIterator(
+        string $prefix,
+        int $batchSize,
+        bool $keyOnly,
+        string $columnFamily = '',
+    ): ScanIterator {
         return new ScanIterator(
             $this->scan(...),
             $prefix,
             RawKvSplitter::calculatePrefixEndKey($prefix),
             $batchSize,
             $keyOnly,
+            $columnFamily,
         );
     }
 
@@ -187,6 +212,7 @@ final readonly class RawKvScanner
         int $limit,
         bool $keyOnly,
         bool $reverse,
+        string $columnFamily = '',
     ): array {
         $executor = new RetryExecutor(
             $this->maxBackoffMs,
@@ -204,6 +230,7 @@ final readonly class RawKvScanner
             $limit,
             $keyOnly,
             $reverse,
+            $columnFamily,
         ): array {
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
@@ -218,6 +245,9 @@ final readonly class RawKvScanner
             }
             $request->setKeyOnly($keyOnly);
             $request->setReverse($reverse);
+            if ($columnFamily !== '') {
+                $request->setCf($columnFamily);
+            }
 
             /** @var RawScanResponse $response */
             $response = $this->grpc->call(

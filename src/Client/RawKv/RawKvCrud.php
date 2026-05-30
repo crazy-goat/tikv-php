@@ -28,15 +28,18 @@ final readonly class RawKvCrud
     ) {
     }
 
-    public function get(string $key, RetryExecutor $retryExecutor): ?string
+    public function get(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): ?string
     {
-        return $retryExecutor->execute($key, function () use ($key): ?string {
+        return $retryExecutor->execute($key, function () use ($key, $columnFamily): ?string {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawGetRequest();
             $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
+            if ($columnFamily !== '') {
+                $request->setCf($columnFamily);
+            }
 
             /** @var RawGetResponse $response */
             $response = $this->grpc->call(
@@ -54,9 +57,15 @@ final readonly class RawKvCrud
         });
     }
 
-    public function put(string $key, string $value, int $ttl, RetryExecutor $retryExecutor, bool $forCas = false): void
-    {
-        $retryExecutor->execute($key, function () use ($key, $value, $ttl, $forCas): null {
+    public function put(
+        string $key,
+        string $value,
+        int $ttl,
+        RetryExecutor $retryExecutor,
+        bool $forCas = false,
+        string $columnFamily = '',
+    ): void {
+        $retryExecutor->execute($key, function () use ($key, $value, $ttl, $forCas, $columnFamily): null {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
@@ -69,6 +78,9 @@ final readonly class RawKvCrud
             }
             if ($forCas) {
                 $request->setForCas(true);
+            }
+            if ($columnFamily !== '') {
+                $request->setCf($columnFamily);
             }
 
             $response = $this->grpc->call(
@@ -84,9 +96,13 @@ final readonly class RawKvCrud
         });
     }
 
-    public function delete(string $key, RetryExecutor $retryExecutor, bool $forCas = false): void
-    {
-        $retryExecutor->execute($key, function () use ($key, $forCas): null {
+    public function delete(
+        string $key,
+        RetryExecutor $retryExecutor,
+        bool $forCas = false,
+        string $columnFamily = '',
+    ): void {
+        $retryExecutor->execute($key, function () use ($key, $forCas, $columnFamily): null {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
@@ -95,6 +111,9 @@ final readonly class RawKvCrud
             $request->setKey($key);
             if ($forCas) {
                 $request->setForCas(true);
+            }
+            if ($columnFamily !== '') {
+                $request->setCf($columnFamily);
             }
 
             $response = $this->grpc->call(
@@ -110,15 +129,18 @@ final readonly class RawKvCrud
         });
     }
 
-    public function getKeyTTL(string $key, RetryExecutor $retryExecutor): ?int
+    public function getKeyTTL(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): ?int
     {
-        return $retryExecutor->execute($key, function () use ($key): ?int {
+        return $retryExecutor->execute($key, function () use ($key, $columnFamily): ?int {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawGetKeyTTLRequest();
             $request->setContext(RegionContextFactory::fromRegionInfo($region));
             $request->setKey($key);
+            if ($columnFamily !== '') {
+                $request->setCf($columnFamily);
+            }
 
             /** @var RawGetKeyTTLResponse $response */
             $response = $this->grpc->call(
