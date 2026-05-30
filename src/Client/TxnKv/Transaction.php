@@ -240,7 +240,7 @@ final class Transaction
                 $scanEnd,
                 $regionLimit,
             );
-            $results = array_merge($results, $regionResults);
+            array_push($results, ...$regionResults);
 
             if ($remaining > 0) {
                 $remaining -= count($regionResults);
