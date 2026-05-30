@@ -39,6 +39,7 @@ final readonly class RawKvScanner
     public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
     {
         $limit = $this->validateScanLimit($limit);
+        $executor = $this->createRetryExecutor();
 
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         $results = [];
@@ -56,6 +57,7 @@ final readonly class RawKvScanner
 
             $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
             $regionResults = $this->executeScanForRegion(
+                $executor,
                 $region,
                 $scanStart,
                 $scanEnd,
@@ -88,6 +90,7 @@ final readonly class RawKvScanner
         string $columnFamily = '',
     ): array {
         $limit = $this->validateScanLimit($limit);
+        $executor = $this->createRetryExecutor();
 
         $regions = $this->pdClient->scanRegions($endKey, $startKey, 0);
         $regions = array_reverse($regions);
@@ -105,6 +108,7 @@ final readonly class RawKvScanner
 
             $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
             $regionResults = $this->executeScanForRegion(
+                $executor,
                 $region,
                 $scanStartKey,
                 $scanEndKey,
@@ -206,6 +210,7 @@ final readonly class RawKvScanner
      * @return array<array{key: string, value: ?string}>
      */
     private function executeScanForRegion(
+        RetryExecutor $executor,
         RegionInfo $region,
         string $startKey,
         string $endKey,
@@ -214,15 +219,6 @@ final readonly class RawKvScanner
         bool $reverse,
         string $columnFamily = '',
     ): array {
-        $executor = new RetryExecutor(
-            $this->maxBackoffMs,
-            $this->serverBusyBudgetMs,
-            $this->regionCache,
-            $this->grpc,
-            $this->regionResolver,
-            $this->logger,
-        );
-
         return $executor->execute($startKey, function () use (
             $region,
             $startKey,
@@ -287,5 +283,17 @@ final readonly class RawKvScanner
         }
 
         return $limit;
+    }
+
+    private function createRetryExecutor(): RetryExecutor
+    {
+        return new RetryExecutor(
+            $this->maxBackoffMs,
+            $this->serverBusyBudgetMs,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            $this->logger,
+        );
     }
 }
