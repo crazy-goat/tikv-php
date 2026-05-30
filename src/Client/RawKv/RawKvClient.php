@@ -489,6 +489,13 @@ final class RawKvClient
             throw new InvalidArgumentException('Prefix must not be empty -- refusing to delete all keys');
         }
 
+        if (RawKvSplitter::calculatePrefixEndKey($prefix) === '') {
+            throw new InvalidArgumentException(
+                'Prefix consists entirely of 0xFF bytes and has no representable'
+                . ' upper bound; refusing to delete to end of keyspace'
+            );
+        }
+
         $this->rangeOps->deletePrefix($prefix, $this->columnFamily);
     }
 
