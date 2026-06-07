@@ -289,6 +289,8 @@ final class RawKvClient
     public function getKeyTTL(string $key): ?int
     {
         $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'getKeyTTL');
+        $this->validateKeySize($key, 'getKeyTTL');
 
         return $this->crud->getKeyTTL($key, $this->createRetryExecutor(), $this->columnFamily);
     }

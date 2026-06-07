@@ -853,6 +853,21 @@ class RawKvClientTest extends TestCase
         $this->assertNull($this->client->getKeyTTL('no-ttl'));
     }
 
+    public function testGetKeyTTLThrowsOnEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key must not be empty');
+        $this->client->getKeyTTL('');
+    }
+
+    public function testGetKeyTTLThrowsOnOversizedKey(): void
+    {
+        $key = str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key size');
+        $this->client->getKeyTTL($key);
+    }
+
     // ========================================================================
     // Retry / backoff
     // ========================================================================
