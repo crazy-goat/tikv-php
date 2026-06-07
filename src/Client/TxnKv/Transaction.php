@@ -834,10 +834,11 @@ final class Transaction
 
     private function getPrimaryKey(): string
     {
-        foreach (array_keys($this->writeSet) as $key) {
-            return $key;
+        $key = array_key_first($this->writeSet);
+        if ($key === null) {
+            throw new \LogicException('Write set is empty, no primary key');
         }
-        throw new \LogicException('Write set is empty, no primary key');
+        return $key;
     }
 
     /**
