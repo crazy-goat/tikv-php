@@ -39,7 +39,7 @@
     "scripts": {
         "lint": ["phpcs --standard=phpcs.xml.dist", "@rector", "@phpstan"],
         "lint:fix": ["@rector:fix", "phpcbf --standard=phpcs.xml.dist"],
-        "phpstan": "phpstan analyse",
+        "phpstan": "phpstan analyse --memory-limit=1G",
         "cs": "phpcs --standard=phpcs.xml.dist",
         "cs-fix": "phpcbf --standard=phpcs.xml.dist",
         "test": "phpunit",
