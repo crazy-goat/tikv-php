@@ -4,24 +4,11 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Grpc;
 
-use CrazyGoat\TiKV\Client\Tls\TlsConfig;
 use Google\Protobuf\Internal\Message;
 use Grpc\Channel;
-use Psr\Log\LoggerInterface;
 
 interface GrpcClientInterface
 {
-    /**
-     * Create a new gRPC client.
-     *
-     * @param LoggerInterface $logger PSR-3 logger instance
-     * @param TlsConfig|null $tlsConfig Optional TLS configuration for secure connections
-     */
-    public function __construct(
-        LoggerInterface $logger = new \Psr\Log\NullLogger(),
-        ?TlsConfig $tlsConfig = null,
-    );
-
     /**
      * Execute a gRPC call.
      *
