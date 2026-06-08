@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `deletePrefix()` now rejects prefixes consisting entirely of 0xFF bytes, which would previously delete to the end of the keyspace instead of just the intended range (#105)
 - Replaced `array_merge` in scan loops with `array_push` to avoid O(n²) copying across regions (#97)
 - `getPrimaryKey()` now uses `array_key_first()` instead of `array_keys()`, avoiding O(n) memory allocation on every call (#114)
+- PHPStan analysis now sets an explicit memory limit of 1G, preventing crashes with the default 128M limit (#115)
 
 ## [0.2.0] - 2026-05-11
 
