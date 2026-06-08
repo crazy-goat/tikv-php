@@ -677,7 +677,7 @@ class RawKvClientTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturn([]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $this->expectException(InvalidArgumentException::class);
+        $this->expectException(\TypeError::class);
         $this->client->batchScan([['only-one']], 10); // @phpstan-ignore argument.type
     }
 
