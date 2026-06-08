@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\E2E;
 
+use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
@@ -2707,5 +2708,187 @@ class RawKvE2ETest extends TestCase
         }
 
         $this->keysToCleanup = array_diff($this->keysToCleanup, array_keys($pairs));
+    }
+
+    // ========================================================================
+    // Client lifecycle (close behavior)
+    // ========================================================================
+
+    private function createFreshClient(): RawKvClient
+    {
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        return RawKvClient::create($pdEndpoints);
+    }
+
+    public function testCloseThenGetThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->get('any-key');
+    }
+
+    public function testCloseThenPutThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->put('any-key', 'any-value');
+    }
+
+    public function testCloseThenDeleteThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->delete('any-key');
+    }
+
+    public function testCloseThenDeleteRangeThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->deleteRange('a', 'z');
+    }
+
+    public function testCloseThenScanThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->scan('a', 'z');
+    }
+
+    public function testCloseThenReverseScanThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->reverseScan('a', 'z');
+    }
+
+    public function testCloseThenBatchGetThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->batchGet(['key1', 'key2']);
+    }
+
+    public function testCloseThenBatchPutThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->batchPut(['key' => 'value']);
+    }
+
+    public function testCloseThenBatchDeleteThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->batchDelete(['key1', 'key2']);
+    }
+
+    public function testCloseThenBatchScanThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->batchScan([['a', 'z']], 10);
+    }
+
+    public function testCloseThenChecksumThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->checksum('a', 'z');
+    }
+
+    public function testCloseThenGetKeyTTLThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->getKeyTTL('any-key');
+    }
+
+    public function testCloseThenCompareAndSwapThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->compareAndSwap('any-key', 'old', 'new');
+    }
+
+    public function testCloseThenPutIfAbsentThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->putIfAbsent('any-key', 'value');
+    }
+
+    public function testCloseThenScanIteratorThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->scanIterator('a', 'z', 10);
+    }
+
+    public function testCloseThenScanPrefixThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->scanPrefix('prefix');
+    }
+
+    public function testCloseIsIdempotent(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        // Second close must not throw
+        $client->close();
+
+        // Must remain closed (still throw)
+        $this->expectException(ClientClosedException::class);
+        $client->get('any-key');
+    }
+
+    public function testMultiplePostCloseOperationsAllThrow(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        for ($i = 0; $i < 5; $i++) {
+            try {
+                $client->get('key-' . $i);
+                $this->fail('Expected ClientClosedException on iteration ' . $i);
+            } catch (ClientClosedException) {
+                // Expected
+            }
+        }
     }
 }

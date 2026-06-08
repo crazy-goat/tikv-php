@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\E2E;
 
+use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use PHPUnit\Framework\TestCase;
@@ -481,5 +482,71 @@ class TxnKvE2ETest extends TestCase
         $readTxn = $this->testClient->begin(['pessimistic' => false]);
         $this->assertSame('restored', $readTxn->get($key));
         $readTxn->rollback();
+    }
+
+    // ========================================================================
+    // Client lifecycle (close behavior)
+    // ========================================================================
+
+    private function createFreshTxnClient(): TxnKvClient
+    {
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        return TxnKvClient::create($pdEndpoints);
+    }
+
+    public function testCloseThenBeginThrowsClientClosedException(): void
+    {
+        $client = $this->createFreshTxnClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->begin();
+    }
+
+    public function testCloseIsIdempotent(): void
+    {
+        $client = $this->createFreshTxnClient();
+        $client->close();
+
+        // Second close must not throw
+        $client->close();
+
+        // Must remain closed (still throw)
+        $this->expectException(ClientClosedException::class);
+        $client->begin();
+    }
+
+    public function testTransactionBeforeCloseRemainsUsable(): void
+    {
+        $key = $this->uniqueKey('txn-lifecycle');
+        $this->keysToCleanup[] = $key;
+
+        $client = $this->createFreshTxnClient();
+        $txn = $client->begin(['pessimistic' => false]);
+        $txn->set($key, 'value-before-close');
+
+        // Close the client
+        $client->close();
+
+        // Existing transaction should still be usable
+        $this->assertSame('value-before-close', $txn->get($key));
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+    }
+
+    public function testMultiplePostCloseBeginAllThrow(): void
+    {
+        $client = $this->createFreshTxnClient();
+        $client->close();
+
+        for ($i = 0; $i < 3; $i++) {
+            try {
+                $client->begin();
+                $this->fail('Expected ClientClosedException on iteration ' . $i);
+            } catch (ClientClosedException) {
+                // Expected
+            }
+        }
     }
 }
