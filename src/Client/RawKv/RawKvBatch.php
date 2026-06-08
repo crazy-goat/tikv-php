@@ -77,7 +77,7 @@ final readonly class RawKvBatch
         foreach ($regionResults as $response) {
             assert($response instanceof RawBatchGetResponse);
             foreach ($response->getPairs() as $pair) {
-                $results[$pair->getKey()] = $pair->getValue() !== '' ? $pair->getValue() : null;
+                $results[$pair->getKey()] = $pair->getValue();
             }
         }
 

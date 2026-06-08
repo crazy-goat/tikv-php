@@ -294,6 +294,7 @@ class RawKvClientTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $response = new RawGetResponse();
+        $response->setNotFound(true);
         $response->setValue('');
 
         $this->grpc->method('call')->willReturn($response);
