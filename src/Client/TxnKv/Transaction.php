@@ -278,11 +278,7 @@ final class Transaction
             return;
         }
 
-        if ($this->pessimistic) {
-            $this->commitPessimistic();
-        } else {
-            $this->commitOptimistic();
-        }
+        $this->doCommit();
     }
 
     public function rollback(): void
@@ -366,41 +362,13 @@ final class Transaction
         return $this->readSet;
     }
 
-    private function commitOptimistic(): void
+    private function doCommit(): void
     {
         $primary = $this->getPrimaryKey();
-        $mutations = $this->buildMutations();
-        $keysByRegion = $this->groupMutationsByRegion($mutations);
 
-        $allKeys = array_keys($this->writeSet);
-        $firstRegionKeys = null;
-
-        foreach ($keysByRegion as $regionData) {
-            $region = $regionData['region'];
-            $regionMutations = $regionData['mutations'];
-            $isPrimaryRegion = $firstRegionKeys === null;
-
-            if ($firstRegionKeys === null) {
-                $firstRegionKeys = array_map(
-                    fn(Mutation $m) => $m->getKey(),
-                    $regionMutations,
-                );
-            }
-
-            $this->prewriteForRegion($region, $regionMutations, $primary);
+        if ($this->pessimistic) {
+            $this->pessimisticLockBatch($primary);
         }
-
-        $this->commitTs = $this->pdClient->getTimestamp();
-        $this->commitKeys($allKeys);
-
-        $this->status = TransactionStatus::Committed;
-        $this->closeTransaction();
-    }
-
-    private function commitPessimistic(): void
-    {
-        $primary = $this->getPrimaryKey();
-        $this->pessimisticLockBatch($primary);
 
         $mutations = $this->buildMutations();
         $keysByRegion = $this->groupMutationsByRegion($mutations);
