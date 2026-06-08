@@ -158,8 +158,8 @@ final class Transaction
             }
 
             $value = $response->getValue();
-            $this->readSet[$key] = $value !== '' ? $value : null;
-            return $this->readSet[$key];
+            $this->readSet[$key] = $value;
+            return $value;
         });
     }
 
@@ -762,7 +762,7 @@ final class Transaction
             $this->handleRegionError($response, $region);
 
             foreach ($response->getPairs() as $pair) {
-                $results[$pair->getKey()] = $pair->getValue() !== '' ? $pair->getValue() : null;
+                $results[$pair->getKey()] = $pair->getValue();
             }
         }
 
@@ -824,7 +824,7 @@ final class Transaction
             foreach ($response->getPairs() as $pair) {
                 $results[] = [
                     'key' => $pair->getKey(),
-                    'value' => $pair->getValue() !== '' ? $pair->getValue() : null,
+                    'value' => $pair->getValue(),
                 ];
             }
 

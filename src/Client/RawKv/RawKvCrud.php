@@ -52,8 +52,11 @@ final readonly class RawKvCrud
             );
             RegionErrorHandler::check($response);
 
-            $value = $response->getValue();
-            return $value !== '' ? $value : null;
+            if ($response->getNotFound()) {
+                return null;
+            }
+
+            return $response->getValue();
         });
     }
 

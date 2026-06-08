@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced `array_merge` in scan loops with `array_push` to avoid O(n²) copying across regions (#97)
 - `getPrimaryKey()` now uses `array_key_first()` instead of `array_keys()`, avoiding O(n) memory allocation on every call (#114)
 - PHPStan analysis now sets an explicit memory limit of 1G, preventing crashes with the default 128M limit (#115)
+- `get()`, `batchGet()`, and `Transaction::get()` now correctly distinguish empty-string values from missing keys by checking the response's `not_found` flag instead of treating empty values as null (#77)
 
 ## [0.2.0] - 2026-05-11
 
