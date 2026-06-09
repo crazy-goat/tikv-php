@@ -98,7 +98,9 @@ class RawKvBatchTest extends TestCase
 
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1'));
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
+            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+        ]));
 
         $retryExecutor = $this->createRetryExecutor();
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], 60, $retryExecutor);
@@ -111,7 +113,9 @@ class RawKvBatchTest extends TestCase
 
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1'));
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
+            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+        ]));
 
         $retryExecutor = $this->createRetryExecutor();
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], ['k1' => 60, 'k2' => 120], $retryExecutor);

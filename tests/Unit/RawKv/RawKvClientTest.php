@@ -376,7 +376,9 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn(null);
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1'));
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
+            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+        ]));
 
         $this->assertSame(['k1' => null, 'k2' => null], $this->client->batchGet(['k1', 'k2']));
     }
@@ -388,7 +390,9 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn(null);
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1'));
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
+            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+        ]));
 
         $this->assertSame(['missing' => null], $this->client->batchGet(['missing']));
     }
