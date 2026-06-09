@@ -7,16 +7,17 @@ namespace CrazyGoat\TiKV\Tests\Unit\Batch;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Grpc\Call;
 use PHPUnit\Framework\TestCase;
 
 class GrpcFutureTest extends TestCase
 {
+    use GrpcExtensionGate;
+
     protected function setUp(): void
     {
-        if (!extension_loaded('grpc')) {
-            $this->markTestSkipped('grpc extension is not loaded');
-        }
+        $this->requireGrpcExtension();
     }
 
     public function testConstruction(): void
@@ -65,7 +66,7 @@ class GrpcFutureTest extends TestCase
         $future->wait();
     }
 
-    public function testWaitThrowsGrpcExceptionOnNullResult(): void
+    public function testWaitReturnsEmptyMessageOnNullResult(): void
     {
         $call = $this->createMock(Call::class);
         $call->expects($this->once())
@@ -76,10 +77,10 @@ class GrpcFutureTest extends TestCase
             ]);
 
         $future = new GrpcFuture($call, RawGetResponse::class);
+        $result = $future->wait();
 
-        $this->expectException(GrpcException::class);
-        $this->expectExceptionMessage('Unexpected null result');
-        $future->wait();
+        $this->assertInstanceOf(RawGetResponse::class, $result);
+        $this->assertSame('', $result->getValue());
     }
 
     public function testWaitIsIdempotentReturnsCachedResult(): void

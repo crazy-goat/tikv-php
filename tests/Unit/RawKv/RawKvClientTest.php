@@ -31,6 +31,7 @@ use CrazyGoat\TiKV\Client\RawKv\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\RawKv\ScanIterator;
+use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -40,6 +41,8 @@ use Psr\Log\NullLogger;
 
 class RawKvClientTest extends TestCase
 {
+    use GrpcExtensionGate;
+
     private PdClientInterface&MockObject $pdClient;
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
@@ -368,12 +371,26 @@ class RawKvClientTest extends TestCase
 
     public function testBatchGetReturnsOrderedResults(): void
     {
-        $this->markTestSkipped('Async batchGet requires real gRPC channel - needs integration test');
+        $this->requireGrpcExtension();
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1'));
+
+        $this->assertSame(['k1' => null, 'k2' => null], $this->client->batchGet(['k1', 'k2']));
     }
 
     public function testBatchGetReturnsNullForMissingKeys(): void
     {
-        $this->markTestSkipped('Async batchGet requires real gRPC channel - needs integration test');
+        $this->requireGrpcExtension();
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1'));
+
+        $this->assertSame(['missing' => null], $this->client->batchGet(['missing']));
     }
 
     // ========================================================================

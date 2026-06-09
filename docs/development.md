@@ -468,6 +468,16 @@ public function testRetryOnEpochNotMatch(): void
 }
 ```
 
+### gRPC Extension Test Lane
+
+Run the gRPC-dependent unit tests with the PHP gRPC extension loaded:
+
+```bash
+composer test:grpc
+```
+
+CI runs the same suite on PHP 8.4 with `extensions: grpc` and `coverage: pcov`, using `--fail-on-skipped` so a missing extension fails the job instead of producing skipped tests.
+
 ### E2E Test Patterns
 
 **Test Isolation:**

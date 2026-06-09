@@ -14,12 +14,15 @@ use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 
 class RawKvBatchTest extends TestCase
 {
+    use GrpcExtensionGate;
+
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
     private PdClientInterface&MockObject $pdClient;
@@ -91,12 +94,11 @@ class RawKvBatchTest extends TestCase
 
     public function testBatchPutWithIntTtl(): void
     {
-        if (!class_exists(\Grpc\Timeval::class)) {
-            $this->markTestSkipped('Requires grpc extension');
-        }
+        $this->requireGrpcExtension();
 
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1'));
 
         $retryExecutor = $this->createRetryExecutor();
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], 60, $retryExecutor);
@@ -105,12 +107,11 @@ class RawKvBatchTest extends TestCase
 
     public function testBatchPutWithAssociativeTtlArray(): void
     {
-        if (!class_exists(\Grpc\Timeval::class)) {
-            $this->markTestSkipped('Requires grpc extension');
-        }
+        $this->requireGrpcExtension();
 
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1'));
 
         $retryExecutor = $this->createRetryExecutor();
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], ['k1' => 60, 'k2' => 120], $retryExecutor);
