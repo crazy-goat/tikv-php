@@ -143,6 +143,19 @@ class RawKvSplitterTest extends TestCase
         $this->assertSame(60, $result[0]['ttls'][0]);
     }
 
+    public function testSplitPairsIntoBatchesTtlsAlignWithNonSequentialKeys(): void
+    {
+        // Simulate a scenario where $pairs has non-sequential keys (e.g. after filtering).
+        // Before the fix, $ttls[$i] would use the pair key, misaligning TTL values.
+        $pairs = [
+            5 => $this->createKvPair('k1', 'v1'),
+            9 => $this->createKvPair('k2', 'v2'),
+        ];
+        $result = RawKvSplitter::splitPairsIntoBatches($pairs, 10, 100, [60, 120]);
+        $this->assertCount(1, $result);
+        $this->assertSame([60, 120], $result[0]['ttls'], 'TTLs should align by position, not by key');
+    }
+
     // ========================================================================
     // calculatePrefixEndKey
     // ========================================================================

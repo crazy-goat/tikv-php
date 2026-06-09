@@ -50,6 +50,14 @@ final class RawKvSplitter
      */
     public static function splitPairsIntoBatches(array $pairs, int $maxCount, int $maxBytes, array $ttls = []): array
     {
+        // Normalize keys to sequential 0-indexed arrays so TTLs always align
+        // with pairs regardless of incoming key shape.
+        $pairs = array_values($pairs);
+        $hasTtls = $ttls !== [];
+        if ($hasTtls) {
+            $ttls = array_values($ttls);
+        }
+
         $batches = [];
         $currentPairs = [];
         $currentTtls = [];
@@ -68,7 +76,7 @@ final class RawKvSplitter
             }
 
             $currentPairs[] = $pair;
-            if ($ttls !== []) {
+            if ($hasTtls) {
                 $currentTtls[] = $ttls[$i];
             }
             $currentCount++;
