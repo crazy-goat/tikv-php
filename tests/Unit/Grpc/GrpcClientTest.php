@@ -11,13 +11,13 @@ use PHPUnit\Framework\TestCase;
 
 class GrpcClientTest extends TestCase
 {
+    use GrpcExtensionGate;
+
     private GrpcClient $client;
 
     protected function setUp(): void
     {
-        if (!extension_loaded('grpc')) {
-            $this->markTestSkipped('gRPC extension not available');
-        }
+        $this->requireGrpcExtension();
         $this->client = new GrpcClient();
     }
 
@@ -53,6 +53,7 @@ class GrpcClientTest extends TestCase
             'RawGet',
             $request,
             \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
+            timeoutMs: 1000,
         );
     }
 }

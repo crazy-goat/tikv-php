@@ -8,6 +8,16 @@
     <testsuites>
         <testsuite name="Unit">
             <directory>tests/Unit</directory>
+            <exclude>tests/Unit/Grpc/GrpcClientTest.php</exclude>
+            <exclude>tests/Unit/Batch/GrpcFutureTest.php</exclude>
+            <exclude>tests/Unit/RawKv/RawKvBatchTest.php</exclude>
+            <exclude>tests/Unit/RawKv/RawKvClientTest.php</exclude>
+        </testsuite>
+        <testsuite name="Grpc">
+            <file>tests/Unit/Grpc/GrpcClientTest.php</file>
+            <file>tests/Unit/Batch/GrpcFutureTest.php</file>
+            <file>tests/Unit/RawKv/RawKvBatchTest.php</file>
+            <file>tests/Unit/RawKv/RawKvClientTest.php</file>
         </testsuite>
         <testsuite name="Integration">
             <directory>tests/Integration</directory>

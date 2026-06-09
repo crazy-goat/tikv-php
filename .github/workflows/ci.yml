@@ -133,6 +133,36 @@ jobs:
         run: ./vendor/bin/phpunit --testsuite Unit --testdox --no-coverage
         timeout-minutes: 5
 
+  grpc-unit-tests:
+    name: gRPC Unit Tests (PHP 8.4)
+    needs: [check-actor, lint]
+    if: needs.check-actor.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: grpc
+          coverage: pcov
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run gRPC unit tests
+        run: ./vendor/bin/phpunit --testsuite Grpc --testdox --fail-on-skipped --coverage-xml=coverage-xml
+        timeout-minutes: 5
+
   e2e-tests:
     name: E2E Tests
     needs: [check-actor, lint, changes]
