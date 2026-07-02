@@ -322,4 +322,43 @@ class RetryExecutorTest extends TestCase
             deadlineMs: -1,
         );
     }
+
+    public function testRetryBudgetExhaustedCarriesPreviousException(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('invalidate');
+
+        $maxAttempts = 2;
+        $executor = new RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: new NullLogger(),
+            maxAttempts: $maxAttempts,
+        );
+
+        // The original TiKvException thrown by the operation should be carried
+        // as the previous exception on the RetryBudgetExhaustedException, so
+        // callers can inspect the underlying region/grpc failure that was
+        // being retried.
+        $originalMessage = 'EpochNotMatch';
+        $originalException = null;
+
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        try {
+            $executor->execute('key', function () use (&$originalException, $originalMessage): never {
+                $originalException = new TiKvException($originalMessage);
+                throw $originalException;
+            });
+        } catch (RetryBudgetExhaustedException $e) {
+            $previous = $e->getPrevious();
+            $this->assertInstanceOf(TiKvException::class, $previous);
+            $this->assertSame($originalException, $previous);
+            $this->assertSame($originalMessage, $previous->getMessage());
+            throw $e;
+        }
+    }
 }

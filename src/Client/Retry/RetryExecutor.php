@@ -57,6 +57,7 @@ final class RetryExecutor
     {
         $this->attempt = 0;
         $startTimeMs = $this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0;
+        $lastError = null;
 
         while (true) {
             // Enforce absolute attempt cap before running the operation.
@@ -73,6 +74,7 @@ final class RetryExecutor
                     sprintf('Retry attempt cap (%d) exhausted for key "%s"', $this->maxAttempts, $key),
                     $this->attempt,
                     $this->totalBackoffMs,
+                    $lastError,
                 );
             }
 
@@ -90,6 +92,7 @@ final class RetryExecutor
                         sprintf('Retry deadline (%d ms) exhausted for key "%s"', $this->deadlineMs, $key),
                         $this->attempt,
                         $elapsedMs,
+                        $lastError,
                     );
                 }
             }
@@ -97,6 +100,7 @@ final class RetryExecutor
             try {
                 return $operation();
             } catch (TiKvException $e) {
+                $lastError = $e;
                 $this->attempt++;
 
                 $backoffType = $this->handleNotLeader($e, $key);
