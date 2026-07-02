@@ -20,6 +20,11 @@ final readonly class BatchAsyncExecutor
     /**
      * Execute multiple callables concurrently and return results.
      *
+     * On the first wait-phase failure, remaining un-waited futures are
+     * cancelled so their pending gRPC calls do not leak completion-queue
+     * or channel resources, and the loop short-circuits. Errors raised
+     * during the callable invocation phase are accumulated as before.
+     *
      * @param array<int, callable(): mixed> $regionCalls Array of regionId => callable
      *                                                   returning GrpcFuture or direct value
      * @return array<int, mixed> Array of regionId => result
@@ -62,6 +67,14 @@ final readonly class BatchAsyncExecutor
                     'regionId' => $regionId,
                     'error' => $e->getMessage(),
                 ]);
+                // Cancel any remaining un-waited futures so their pending
+                // gRPC calls do not leak completion-queue/channel resources.
+                foreach ($futures as $remaining) {
+                    if ($remaining instanceof GrpcFuture && !$remaining->isCompleted()) {
+                        $remaining->cancel();
+                    }
+                }
+                break;
             }
         }
 

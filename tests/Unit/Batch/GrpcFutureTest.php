@@ -128,4 +128,117 @@ class GrpcFutureTest extends TestCase
 
         $future->wait();
     }
+
+    public function testCancelMarksCompletedAndCallsUnderlyingCall(): void
+    {
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('cancel');
+
+        $future = new GrpcFuture($call, RawGetResponse::class);
+
+        $this->assertFalse($future->isCompleted());
+        $future->cancel();
+        $this->assertTrue($future->isCompleted());
+    }
+
+    public function testCancelIsIdempotent(): void
+    {
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('cancel');
+
+        $future = new GrpcFuture($call, RawGetResponse::class);
+
+        $future->cancel();
+        $future->cancel();
+        $future->cancel();
+
+        $this->assertTrue($future->isCompleted());
+    }
+
+    public function testWaitAfterCancelThrowsCancelledException(): void
+    {
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('cancel');
+
+        $future = new GrpcFuture($call, RawGetResponse::class);
+        $future->cancel();
+
+        $this->expectException(GrpcException::class);
+        $this->expectExceptionMessage('Call cancelled');
+        $future->wait();
+    }
+
+    public function testCancelAfterWaitIsNoOp(): void
+    {
+        $response = new RawGetResponse();
+        $response->setValue('done');
+        $serialized = $response->serializeToString();
+
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('startBatch')
+            ->willReturn([
+                'status' => ['code' => 0, 'details' => 'OK'],
+                'message' => $serialized,
+            ]);
+        $call->expects($this->never())
+            ->method('cancel');
+
+        $future = new GrpcFuture($call, RawGetResponse::class);
+        $future->wait();
+        $future->cancel();
+
+        $this->assertTrue($future->isCompleted());
+    }
+
+    public function testDestructWithoutWaitCancelsPendingCall(): void
+    {
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('cancel');
+
+        $future = new GrpcFuture($call, RawGetResponse::class);
+        unset($future);
+
+        $this->expectNotToPerformAssertions();
+    }
+
+    public function testDestructAfterWaitDoesNotCancel(): void
+    {
+        $response = new RawGetResponse();
+        $response->setValue('done');
+        $serialized = $response->serializeToString();
+
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('startBatch')
+            ->willReturn([
+                'status' => ['code' => 0, 'details' => 'OK'],
+                'message' => $serialized,
+            ]);
+        $call->expects($this->never())
+            ->method('cancel');
+
+        $future = new GrpcFuture($call, RawGetResponse::class);
+        $future->wait();
+        unset($future);
+
+        $this->expectNotToPerformAssertions();
+    }
+
+    public function testCancelSwallowsUnderlyingCallException(): void
+    {
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('cancel')
+            ->willThrowException(new \RuntimeException('boom'));
+
+        $future = new GrpcFuture($call, RawGetResponse::class);
+        $future->cancel();
+
+        $this->assertTrue($future->isCompleted());
+    }
 }
