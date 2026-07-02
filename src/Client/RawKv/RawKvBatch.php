@@ -273,7 +273,7 @@ final readonly class RawKvBatch
         if (is_array($ttl)) {
             $request->setTtls($ttl);
         } elseif ($ttl > 0) {
-            $request->setTtls([$ttl]);
+            $request->setTtls(array_fill(0, count($pairs), $ttl));
         }
         if ($forCas) {
             $request->setForCas(true);
