@@ -71,10 +71,19 @@ final class GrpcClient implements GrpcClientInterface
 
     public function close(): void
     {
-        foreach ($this->channels as $channel) {
-            $channel->close();
-        }
+        $channels = $this->channels;
         $this->channels = [];
+
+        foreach ($channels as $address => $channel) {
+            try {
+                $channel->close();
+            } catch (\Throwable $e) {
+                $this->logger->error('Failed to close gRPC channel', [
+                    'address' => $address,
+                    'exception' => $e,
+                ]);
+            }
+        }
     }
 
     public function closeChannel(string $address): void
