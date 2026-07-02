@@ -17,6 +17,14 @@ use Psr\Log\LoggerInterface;
 
 final class RetryExecutor
 {
+    /**
+     * Default maximum number of attempts per call. Bounds the retry loop
+     * independently of accumulated backoff time — ensures that errors
+     * classified as BackoffType::None (e.g. EpochNotMatch) with sleepMs=0
+     * cannot drive an infinite, zero-delay busy loop.
+     */
+    public const DEFAULT_MAX_ATTEMPTS = 30;
+
     private int $totalBackoffMs = 0;
     private int $serverBusyBackoffMs = 0;
     private int $attempt = 0;
@@ -28,7 +36,15 @@ final class RetryExecutor
         private readonly GrpcClientInterface $grpc,
         private readonly RegionResolver $regionResolver,
         private readonly LoggerInterface $logger,
+        private readonly int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS,
+        private readonly int $deadlineMs = 0,
     ) {
+        if ($maxAttempts < 1) {
+            throw new \InvalidArgumentException('maxAttempts must be >= 1');
+        }
+        if ($deadlineMs < 0) {
+            throw new \InvalidArgumentException('deadlineMs must be >= 0');
+        }
     }
 
     /**
@@ -40,11 +56,49 @@ final class RetryExecutor
     public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
     {
         $this->attempt = 0;
+        $startTimeMs = $this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0;
 
         while (true) {
+            // Enforce absolute attempt cap before running the operation.
+            // Catches zero-backoff errors (e.g. EpochNotMatch classified as
+            // BackoffType::None) that would otherwise drive an infinite loop.
+            if ($this->attempt >= $this->maxAttempts) {
+                $this->logger->error('Retry attempt cap exhausted', [
+                    'key' => $key,
+                    'attempt' => $this->attempt,
+                    'maxAttempts' => $this->maxAttempts,
+                    'totalBackoffMs' => $this->totalBackoffMs,
+                ]);
+                throw new RetryBudgetExhaustedException(
+                    sprintf('Retry attempt cap (%d) exhausted for key "%s"', $this->maxAttempts, $key),
+                    $this->attempt,
+                    $this->totalBackoffMs,
+                );
+            }
+
+            // Enforce wall-clock deadline (if configured).
+            if ($this->deadlineMs > 0) {
+                $elapsedMs = (int) (microtime(true) * 1000) - $startTimeMs;
+                if ($elapsedMs >= $this->deadlineMs) {
+                    $this->logger->error('Retry deadline exhausted', [
+                        'key' => $key,
+                        'attempt' => $this->attempt,
+                        'elapsedMs' => $elapsedMs,
+                        'deadlineMs' => $this->deadlineMs,
+                    ]);
+                    throw new RetryBudgetExhaustedException(
+                        sprintf('Retry deadline (%d ms) exhausted for key "%s"', $this->deadlineMs, $key),
+                        $this->attempt,
+                        $elapsedMs,
+                    );
+                }
+            }
+
             try {
                 return $operation();
             } catch (TiKvException $e) {
+                $this->attempt++;
+
                 $backoffType = $this->handleNotLeader($e, $key);
 
                 if (!$backoffType instanceof BackoffType) {
@@ -116,8 +170,6 @@ final class RetryExecutor
                 if ($sleepMs > 0) {
                     usleep($sleepMs * 1000);
                 }
-
-                $this->attempt++;
             }
         }
     }

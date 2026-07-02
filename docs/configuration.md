@@ -257,6 +257,21 @@ These errors are not retried:
 - `RaftEntryTooLarge` - Value too large
 - `FlashbackInProgress` - Region in flashback mode
 
+### Retry Bounds
+
+Every retry loop is bounded by **two independent safety nets** to prevent
+infinite busy loops when the underlying error has zero backoff delay
+(e.g. `EpochNotMatch` is classified as `BackoffType::None` with `sleepMs=0`):
+
+| Bound | Default | Description |
+|-------|---------|-------------|
+| `maxAttempts` | `30` | Maximum number of times the operation is invoked before the executor gives up. |
+| `deadlineMs` | `0` (disabled) | Optional wall-clock deadline from the start of the call. When set, the executor terminates if the deadline is reached, regardless of `sleepMs`. |
+
+When either bound is reached the executor throws
+`RetryBudgetExhaustedException` (extends `TiKvException`). This exception
+exposes `attempts()` and `elapsedOrBackoffMs()` for diagnostics.
+
 ### Custom Retry (Advanced)
 
 For custom retry logic, extend the client:

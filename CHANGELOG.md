@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `batchPut()` with a scalar TTL now expands the TTL to one element per pair instead of sending a 1-element array for an N-key batch, ensuring every key receives the intended expiry (#78)
 - `LockResolverTest` now executes (all 11 tests) instead of erroring on every method — replaced `createMock()` of generated protobuf messages with real `CheckTxnStatusResponse`/`ResolveLockResponse` instances constructed via setters, restoring coverage of the commit/rollback/wait/region-error decision matrix (#99)
 - `close()` is now exception-safe across `GrpcClient`, `RawKvClient`, and `TxnKvClient` — a throw from one channel/sub-client no longer leaks the rest or leaves the client in a non-idempotent state (#107)
+- `RetryExecutor::execute()` is now bounded by a configurable attempt cap (`maxAttempts`, default 30) and an optional wall-clock deadline (`deadlineMs`), independent of accumulated backoff. Previously, errors classified as `BackoffType::None` (e.g. `EpochNotMatch`) returned `sleepMs=0`, so `totalBackoffMs` never grew and the `while (true)` loop drove an infinite zero-sleep 100%-CPU busy loop. New exhaustion throws `RetryBudgetExhaustedException` (extends `TiKvException`) (#72)
 
 ## [0.2.0] - 2026-05-11
 
