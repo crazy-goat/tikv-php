@@ -51,6 +51,13 @@ interface PdClientInterface
     public function getClusterId(): ?int;
 
     /**
+     * Cache the cluster ID after learning it from a PD response or
+     * "mismatch cluster id" error. Used by `TimestampOracle` to share
+     * the cluster-id discovery performed during TSO calls.
+     */
+    public function setClusterId(int $clusterId): void;
+
+    /**
      * Close the PD connection and release resources.
      */
     public function close(): void;

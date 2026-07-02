@@ -171,6 +171,11 @@ final class PdClient implements PdClientInterface
         return $this->clusterId;
     }
 
+    public function setClusterId(int $clusterId): void
+    {
+        $this->clusterId = $clusterId;
+    }
+
     public function close(): void
     {
         $this->grpc->close();
