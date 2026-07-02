@@ -13,19 +13,26 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
-final class TimestampOracle
+final readonly class TimestampOracle
 {
-    private int $lastPhysical = 0;
-    private int $lastLogical = 0;
-
     public function __construct(
-        private readonly GrpcClientInterface $grpc,
-        private readonly string $pdAddress,
-        private readonly PdClientInterface $pdClient,
-        private readonly LoggerInterface $logger = new NullLogger(),
+        private GrpcClientInterface $grpc,
+        private string $pdAddress,
+        private PdClientInterface $pdClient,
+        private LoggerInterface $logger = new NullLogger(),
     ) {
     }
 
+    /**
+     * Request a monotonically increasing timestamp from PD's TSO service.
+     *
+     * Fails closed on TSO unavailability: a locally fabricated timestamp
+     * would violate TiKV MVCC ordering (snapshot isolation / global ordering),
+     * so callers must observe the failure and decide whether to retry or
+     * abort the transaction.
+     *
+     * @throws TiKvException when the TSO RPC fails or returns an invalid response
+     */
     public function getTimestamp(): int
     {
         $request = new TsoRequest();
@@ -37,11 +44,16 @@ final class TimestampOracle
 
             return $this->extractTimestamp($response);
         } catch (GrpcException $e) {
-            $this->logger->warning('TSO request failed, using local fallback', [
+            $this->logger->error('TSO request failed; refusing to fabricate a local timestamp', [
                 'error' => $e->getMessage(),
+                'grpcStatusCode' => $e->grpcStatusCode,
             ]);
 
-            return $this->getTimestampFallback();
+            throw new TiKvException(
+                sprintf('TSO request failed: %s', $e->getMessage()),
+                $e->grpcStatusCode,
+                $e,
+            );
         }
     }
 
@@ -64,7 +76,8 @@ final class TimestampOracle
      * Mirrors `PdClient::callWithClusterIdRetry()` so the oracle benefits
      * from the same first-connect cluster-id discovery as the other PD
      * RPCs. The retry only fires for the "mismatch cluster id" error;
-     * any other gRPC failure propagates immediately.
+     * any other gRPC failure propagates immediately so the caller can
+     * fail closed.
      */
     private function callTso(TsoRequest $request): TsoResponse
     {
@@ -150,27 +163,11 @@ final class TimestampOracle
         $physical = (int) $ts->getPhysical();
         $logical = (int) $ts->getLogical();
 
-        $this->lastPhysical = $physical;
-        $this->lastLogical = $logical;
-
         return $this->composeTs($physical, $logical);
     }
 
     private function composeTs(int $physical, int $logical): int
     {
         return ($physical << 18) | $logical;
-    }
-
-    private function getTimestampFallback(): int
-    {
-        $physicalMs = (int) (hrtime(true) / 1_000_000);
-        $ts = ($physicalMs << 18);
-
-        if ($ts <= $this->lastPhysical << 18) {
-            $this->lastLogical++;
-            $ts = $this->composeTs($this->lastPhysical, $this->lastLogical);
-        }
-
-        return $ts;
     }
 }
