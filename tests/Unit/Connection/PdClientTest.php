@@ -14,6 +14,7 @@ use CrazyGoat\Proto\Pdpb\ResponseHeader;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
@@ -243,6 +244,64 @@ class PdClientTest extends TestCase
         $this->assertSame([], $result->peers);
     }
 
+    // ========================================================================
+    //  fail-closed behavior for missing leader/region (#104)
+    // ========================================================================
+
+    public function testGetRegionFailsClosedWhenPdReturnsNoRegion(): void
+    {
+        // PD returned a response with no Region — previously fabricated as
+        // regionId=0/leaderStoreId=1 and cached, silently misrouting future
+        // requests. Must throw a TiKvException instead.
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+
+        $response = new GetRegionResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('PD GetRegion returned no region for key');
+
+        $client->getRegion('key');
+    }
+
+    public function testGetRegionReportsUnknownStoreIdZeroWhenLeaderMissing(): void
+    {
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $region = new Region();
+        $region->setId(42);
+        $region->setRegionEpoch($epoch);
+
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+
+        $response = new GetRegionResponse();
+        $response->setHeader($header);
+        $response->setRegion($region);
+        // No leader set.
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $result = $client->getRegion('key');
+
+        // Fail closed: leaderStoreId 0 ("unknown") matches no real store, so
+        // resolveStoreAddress() raises StoreNotFoundException rather than
+        // silently routing to a guessed store id 1.
+        $this->assertSame(42, $result->regionId);
+        $this->assertSame(0, $result->leaderPeerId);
+        $this->assertSame(0, $result->leaderStoreId);
+    }
+
     private function makeGetRegionResponse(): GetRegionResponse
     {
         $epoch = new RegionEpoch();
@@ -426,7 +485,7 @@ class PdClientTest extends TestCase
         $this->assertSame(20, $result[0]->peers[1]->storeId);
     }
 
-    public function testScanRegionsWithNoLeaderFallsBackToDefaults(): void
+    public function testScanRegionsWithNoLeaderReportsUnknownStoreIdZero(): void
     {
         $region = new Region();
         $region->setId(7);
@@ -451,10 +510,65 @@ class PdClientTest extends TestCase
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->scanRegions('', '');
 
+        // Fail closed: a missing leader reports store id 0 ("unknown"), which
+        // matches no real store, so resolveStoreAddress() raises an explicit
+        // StoreNotFoundException instead of silently routing to store id 1.
         $this->assertCount(1, $result);
         $this->assertSame(7, $result[0]->regionId);
         $this->assertSame(0, $result[0]->leaderPeerId);
-        $this->assertSame(1, $result[0]->leaderStoreId);
+        $this->assertSame(0, $result[0]->leaderStoreId);
+    }
+
+    public function testScanRegionsWithMixedLeaderedAndLeaderlessRegions(): void
+    {
+        // Two regions: the first has a leader, the second does not. Verifies
+        // the per-index $leaders[$index] ?? null alignment maps the right
+        // leader to the right region, and the leaderless one reports store
+        // id 0 rather than inheriting the neighboring region's leader.
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $region1 = new Region();
+        $region1->setId(1);
+        $region1->setStartKey('');
+        $region1->setEndKey('m');
+        $region1->setRegionEpoch($epoch);
+
+        $region2 = new Region();
+        $region2->setId(2);
+        $region2->setStartKey('m');
+        $region2->setEndKey('');
+        $region2->setRegionEpoch($epoch);
+
+        $leader1 = new Peer();
+        $leader1->setId(10);
+        $leader1->setStoreId(5);
+
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+
+        $response = new \CrazyGoat\Proto\Pdpb\ScanRegionsResponse();
+        $response->setHeader($header);
+        $response->setRegionMetas([$region1, $region2]);
+        // Only the first region has a leader; the second is leaderless.
+        $response->setLeaders([$leader1]);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $result = $client->scanRegions('', '');
+
+        $this->assertCount(2, $result);
+        // First region: leader present.
+        $this->assertSame(1, $result[0]->regionId);
+        $this->assertSame(10, $result[0]->leaderPeerId);
+        $this->assertSame(5, $result[0]->leaderStoreId);
+        // Second region: leaderless -> unknown (store id 0), not store id 5.
+        $this->assertSame(2, $result[1]->regionId);
+        $this->assertSame(0, $result[1]->leaderPeerId);
+        $this->assertSame(0, $result[1]->leaderStoreId);
     }
 
     public function testScanRegionsPassesStartKeyEndKeyAndLimit(): void

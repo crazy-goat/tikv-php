@@ -9,3 +9,4 @@
 /phpcs-report.json
 .worktrees/
 .opencode
+repomix-output.xml

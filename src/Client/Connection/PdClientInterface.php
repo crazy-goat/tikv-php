@@ -14,8 +14,13 @@ interface PdClientInterface
     /**
      * Get the region that contains the given key.
      *
+     * Fails closed when PD returns no region for the key: a fabricated
+     * regionId/leaderStoreId would be cached and silently misroute
+     * requests. Throws a {@see TiKvException} so the failure is visible
+     * rather than corrupting the region cache.
+     *
      * @throws GrpcException On transport error
-     * @throws TiKvException On PD error
+     * @throws TiKvException On PD error, or when PD returns no region
      */
     public function getRegion(string $key): RegionInfo;
 

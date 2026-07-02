@@ -11,11 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dedicated CI lane for gRPC-dependent unit tests with the PHP gRPC extension loaded and skipped tests failing (#117)
 - E2E tests for client lifecycle: Close then get/put/delete/scan/... throws ClientClosedException, double close is idempotent, transaction before close remains usable (#55)
 - Removed `__construct()` from `GrpcClientInterface` — interfaces should not enforce constructor signatures; all consumers use DI or concrete class instantiation (#46)
+- `RegionInfoMapper`, a shared proto→DTO mapper used by `PdClient::getRegion()` and `scanRegions()` so both RPCs share identical, explicit null-handling for a missing leader (#104)
 
 ### Changed
 - Merged `commitOptimistic()` and `commitPessimistic()` into a single `doCommit()` method; removed dead `$firstRegionKeys`/`$isPrimaryRegion` that were never used (#113)
 
 ### Fixed
+- `PdClient::getRegion()` no longer fabricates `regionId=0`/`leaderStoreId=1` when PD returns no region/leader — it now throws a `TiKvException` on a missing region and reports leader store id `0` ("unknown") for a missing leader, so `resolveStoreAddress()` raises a visible `StoreNotFoundException` instead of silently routing requests to a guessed store on split/merge (#104)
 - `GrpcFuture` now exposes `cancel()` and `__destruct()` so abandoned pending gRPC calls are cancelled instead of leaking completion-queue/channel resources; `BatchAsyncExecutor` cancels remaining un-waited futures on the first wait-phase failure (#90)
 - `splitPairsIntoBatches()` now normalizes `$pairs` and `$ttls` keys to sequential 0-indexed arrays, preventing silent TTL misalignment when pairs have non-sequential keys (#106)
 - Removed dead runtime guard in `batchScan()` that was suppressed with `@phpstan-ignore`; the PHPDoc type `array<array{0: string, 1: string}>` already guarantees the contract, and malformed input now produces a `TypeError` instead of `InvalidArgumentException` (#112)
