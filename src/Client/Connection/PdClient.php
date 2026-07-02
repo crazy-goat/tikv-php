@@ -15,9 +15,10 @@ use CrazyGoat\Proto\Pdpb\ScanRegionsResponse;
 use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
-use CrazyGoat\TiKV\Client\RawKv\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper;
 use Google\Protobuf\Internal\Message;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -63,29 +64,14 @@ final class PdClient implements PdClientInterface
         );
 
         $region = $response->getRegion();
-        $leader = $response->getLeader();
-        $regionEpoch = $region?->getRegionEpoch();
-
-        $peers = [];
-        if ($region !== null) {
-            foreach ($region->getPeers() as $peer) {
-                $peers[] = new PeerInfo(
-                    peerId: (int) $peer->getId(),
-                    storeId: (int) $peer->getStoreId(),
-                );
-            }
+        if (!$region instanceof \CrazyGoat\Proto\Metapb\Region) {
+            // Fail closed: a fabricated regionId=0/leaderStoreId=1 would be
+            // cached and silently misroute requests. Throw so the failure is
+            // visible instead of corrupting the region cache.
+            throw new TiKvException('PD GetRegion returned no region for key');
         }
 
-        return new RegionInfo(
-            regionId: $region ? (int) $region->getId() : 0,
-            leaderPeerId: $leader ? (int) $leader->getId() : 0,
-            leaderStoreId: $leader ? (int) $leader->getStoreId() : 1,
-            epochConfVer: $regionEpoch ? (int) $regionEpoch->getConfVer() : 0,
-            epochVersion: $regionEpoch ? (int) $regionEpoch->getVersion() : 0,
-            startKey: $region ? $region->getStartKey() : '',
-            endKey: $region ? $region->getEndKey() : '',
-            peers: $peers,
-        );
+        return RegionInfoMapper::fromProto($region, $response->getLeader());
     }
 
     public function getStore(int $storeId): ?Store
@@ -141,26 +127,7 @@ final class PdClient implements PdClientInterface
         foreach ($regionMetas as $index => $region) {
             /** @var \CrazyGoat\Proto\Metapb\Peer|null $leader */
             $leader = $leaders[$index] ?? null;
-            $regionEpoch = $region->getRegionEpoch();
-
-            $peers = [];
-            foreach ($region->getPeers() as $peer) {
-                $peers[] = new PeerInfo(
-                    peerId: (int) $peer->getId(),
-                    storeId: (int) $peer->getStoreId(),
-                );
-            }
-
-            $regions[] = new RegionInfo(
-                regionId: (int) $region->getId(),
-                leaderPeerId: $leader instanceof \CrazyGoat\Proto\Metapb\Peer ? (int) $leader->getId() : 0,
-                leaderStoreId: $leader instanceof \CrazyGoat\Proto\Metapb\Peer ? (int) $leader->getStoreId() : 1,
-                epochConfVer: $regionEpoch ? (int) $regionEpoch->getConfVer() : 0,
-                epochVersion: $regionEpoch ? (int) $regionEpoch->getVersion() : 0,
-                startKey: $region->getStartKey(),
-                endKey: $region->getEndKey(),
-                peers: $peers,
-            );
+            $regions[] = RegionInfoMapper::fromProto($region, $leader);
         }
 
         return $regions;
