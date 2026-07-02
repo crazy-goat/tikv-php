@@ -98,6 +98,51 @@ class RawKvClientTest extends TestCase
         $this->expectNotToPerformAssertions();
     }
 
+    public function testCloseContinuesWhenGrpcCloseThrows(): void
+    {
+        $this->grpc->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('grpc boom'));
+        $this->pdClient->expects($this->once())->method('close');
+
+        $this->client->close();
+    }
+
+    public function testCloseContinuesWhenPdCloseThrows(): void
+    {
+        $this->grpc->expects($this->once())->method('close');
+        $this->pdClient->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('pd boom'));
+
+        $this->client->close();
+    }
+
+    public function testCloseSwallowsBothSubCloseExceptions(): void
+    {
+        $this->grpc->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('grpc boom'));
+        $this->pdClient->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('pd boom'));
+
+        $this->client->close();
+    }
+
+    public function testCloseIsIdempotentAfterSubCloseThrows(): void
+    {
+        $this->grpc->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('grpc boom'));
+        $this->pdClient->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('pd boom'));
+
+        $this->client->close();
+        $this->client->close();
+    }
+
     // ========================================================================
     // ClientClosedException on all operations
     // ========================================================================

@@ -56,4 +56,71 @@ class GrpcClientTest extends TestCase
             timeoutMs: 1000,
         );
     }
+
+    public function testCloseContinuesAfterChannelCloseThrows(): void
+    {
+        $throwing = $this->createMock(\Grpc\Channel::class);
+        $throwing->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('boom'));
+
+        $ok = $this->createMock(\Grpc\Channel::class);
+        $ok->expects($this->once())->method('close');
+
+        $this->injectChannels([
+            'addr-throws:1' => $throwing,
+            'addr-ok:1' => $ok,
+        ]);
+
+        $this->client->close();
+
+        $this->assertSame([], $this->readChannels());
+    }
+
+    public function testCloseResetsChannelsEvenWhenAllThrow(): void
+    {
+        $throwing = $this->createMock(\Grpc\Channel::class);
+        $throwing->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('boom'));
+
+        $this->injectChannels(['addr:1' => $throwing]);
+
+        $this->client->close();
+
+        $this->assertSame([], $this->readChannels());
+    }
+
+    public function testCloseIsIdempotentAfterPartialFailure(): void
+    {
+        $throwing = $this->createMock(\Grpc\Channel::class);
+        $throwing->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('boom'));
+
+        $this->injectChannels(['addr:1' => $throwing]);
+
+        $this->client->close();
+        $this->client->close();
+    }
+
+    /**
+     * @param array<string, \Grpc\Channel> $channels
+     */
+    private function injectChannels(array $channels): void
+    {
+        $prop = new \ReflectionProperty(GrpcClient::class, 'channels');
+        $prop->setValue($this->client, $channels);
+    }
+
+    /**
+     * @return array<string, \Grpc\Channel>
+     */
+    private function readChannels(): array
+    {
+        $prop = new \ReflectionProperty(GrpcClient::class, 'channels');
+        /** @var array<string, \Grpc\Channel> $value */
+        $value = $prop->getValue($this->client);
+        return $value;
+    }
 }

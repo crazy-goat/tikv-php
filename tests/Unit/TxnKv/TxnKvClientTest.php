@@ -118,6 +118,56 @@ class TxnKvClientTest extends TestCase
         $client->close(); // second close must not throw or call close again
     }
 
+    public function testCloseContinuesWhenGrpcCloseThrows(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->expects($this->once())->method('close');
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('grpc boom'));
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+    }
+
+    public function testCloseContinuesWhenPdCloseThrows(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('pd boom'));
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('close');
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+    }
+
+    public function testCloseSwallowsBothSubCloseExceptions(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('pd boom'));
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('grpc boom'));
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+    }
+
     // ========================================================================
     // begin() — priority propagation
     // ========================================================================

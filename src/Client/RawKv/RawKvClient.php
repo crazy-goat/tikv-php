@@ -514,10 +514,22 @@ final class RawKvClient
 
     public function close(): void
     {
-        if (!$this->closed) {
+        if ($this->closed) {
+            return;
+        }
+
+        $this->closed = true;
+
+        try {
             $this->grpc->close();
+        } catch (\Throwable $e) {
+            $this->logger->error('Failed to close gRPC client', ['exception' => $e]);
+        }
+
+        try {
             $this->pdClient->close();
-            $this->closed = true;
+        } catch (\Throwable $e) {
+            $this->logger->error('Failed to close PD client', ['exception' => $e]);
         }
     }
 }
