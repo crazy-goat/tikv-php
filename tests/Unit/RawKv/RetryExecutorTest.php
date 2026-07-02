@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -172,5 +173,192 @@ class RetryExecutorTest extends TestCase
 
         $this->assertSame('resolved', $result);
         $this->assertSame(2, $callCount);
+    }
+
+    // ========================================================================
+    // Attempt-cap and deadline safety (issue #72)
+    //
+    // EpochNotMatch / other zero-backoff errors used to drive an infinite
+    // zero-sleep busy loop because totalBackoffMs never grew when
+    // sleepMs=0. The attempt cap and wall-clock deadline bound the loop
+    // independently of accumulated sleep time.
+    // ========================================================================
+
+    public function testEpochNotMatchLoopTerminatesAfterMaxAttempts(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('invalidate');
+
+        $maxAttempts = 5;
+        $executor = new RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: new NullLogger(),
+            maxAttempts: $maxAttempts,
+        );
+
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        $callCount = 0;
+        try {
+            $executor->execute('key', function () use (&$callCount): never {
+                $callCount++;
+                throw new TiKvException('EpochNotMatch');
+            });
+        } finally {
+            $this->assertSame($maxAttempts, $callCount, 'Operation should run exactly maxAttempts times');
+        }
+    }
+
+    public function testWallClockDeadlineTerminatesZeroBackoffLoop(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('invalidate');
+
+        // Cap attempts high so the deadline (not the attempt cap) is what
+        // trips the loop. Deadline is intentionally tiny: usleep is not
+        // called for BackoffType::None, so the deadline check happens on
+        // every iteration.
+        $executor = new RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: new NullLogger(),
+            maxAttempts: 100000,
+            deadlineMs: 1, // 1 ms — guaranteed to elapse on first check
+        );
+
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        $callCount = 0;
+        try {
+            $executor->execute('key', function () use (&$callCount): never {
+                $callCount++;
+                throw new TiKvException('EpochNotMatch');
+            });
+        } finally {
+            // Deadline caps wall-clock time even when sleepMs=0 each iteration.
+            $this->assertGreaterThanOrEqual(1, $callCount);
+        }
+    }
+
+    public function testDefaultMaxAttemptsIsApplied(): void
+    {
+        // No maxAttempts argument => DEFAULT_MAX_ATTEMPTS cap is used.
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('invalidate');
+
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        $callCount = 0;
+        try {
+            $this->executor->execute('key', function () use (&$callCount): never {
+                $callCount++;
+                throw new TiKvException('EpochNotMatch');
+            });
+        } finally {
+            $this->assertSame(RetryExecutor::DEFAULT_MAX_ATTEMPTS, $callCount);
+        }
+    }
+
+    public function testNonZeroBackoffLoopStillTerminatesAfterMaxAttempts(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('invalidate');
+
+        $maxAttempts = 3;
+        $executor = new RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: new NullLogger(),
+            maxAttempts: $maxAttempts,
+        );
+
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        $callCount = 0;
+        try {
+            $executor->execute('key', function () use (&$callCount): never {
+                $callCount++;
+                throw new TiKvException('StaleCommand');
+            });
+        } finally {
+            $this->assertSame($maxAttempts, $callCount);
+        }
+    }
+
+    public function testConstructorRejectsNonPositiveMaxAttempts(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: new NullLogger(),
+            maxAttempts: 0,
+        );
+    }
+
+    public function testConstructorRejectsNegativeDeadline(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: new NullLogger(),
+            deadlineMs: -1,
+        );
+    }
+
+    public function testRetryBudgetExhaustedCarriesPreviousException(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('invalidate');
+
+        $maxAttempts = 2;
+        $executor = new RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: new NullLogger(),
+            maxAttempts: $maxAttempts,
+        );
+
+        // The original TiKvException thrown by the operation should be carried
+        // as the previous exception on the RetryBudgetExhaustedException, so
+        // callers can inspect the underlying region/grpc failure that was
+        // being retried.
+        $originalMessage = 'EpochNotMatch';
+        $originalException = null;
+
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        try {
+            $executor->execute('key', function () use (&$originalException, $originalMessage): never {
+                $originalException = new TiKvException($originalMessage);
+                throw $originalException;
+            });
+        } catch (RetryBudgetExhaustedException $e) {
+            $previous = $e->getPrevious();
+            $this->assertInstanceOf(TiKvException::class, $previous);
+            $this->assertSame($originalException, $previous);
+            $this->assertSame($originalMessage, $previous->getMessage());
+            throw $e;
+        }
     }
 }
