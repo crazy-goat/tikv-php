@@ -13,20 +13,51 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
-final class TimestampOracle
+final readonly class TimestampOracle
 {
-    private int $lastPhysical = 0;
-    private int $lastLogical = 0;
-
     public function __construct(
-        private readonly GrpcClientInterface $grpc,
-        private readonly string $pdAddress,
-        private readonly PdClientInterface $pdClient,
-        private readonly LoggerInterface $logger = new NullLogger(),
+        private GrpcClientInterface $grpc,
+        private string $pdAddress,
+        private PdClientInterface $pdClient,
+        private LoggerInterface $logger = new NullLogger(),
     ) {
     }
 
+    /**
+     * Request a monotonically increasing timestamp from PD's TSO service.
+     *
+     * Fails closed on TSO unavailability: a locally fabricated timestamp
+     * would violate TiKV MVCC ordering (snapshot isolation / global ordering),
+     * so callers must observe the failure and decide whether to retry or
+     * abort the transaction.
+     *
+     * @throws TiKvException when the TSO RPC fails or returns an invalid response
+     */
     public function getTimestamp(): int
+    {
+        $request = new TsoRequest();
+        $request->setHeader($this->createHeader());
+        $request->setCount(1);
+
+        try {
+            $response = $this->callTso($request);
+
+            return $this->extractTimestamp($response);
+        } catch (GrpcException $e) {
+            $this->logger->error('TSO request failed; refusing to fabricate a local timestamp', [
+                'error' => $e->getMessage(),
+                'grpcStatusCode' => $e->grpcStatusCode,
+            ]);
+
+            throw new TiKvException(
+                sprintf('TSO request failed: %s', $e->getMessage()),
+                $e->grpcStatusCode,
+                $e,
+            );
+        }
+    }
+
+    private function createHeader(): RequestHeader
     {
         $header = new RequestHeader();
         if ($this->pdClient instanceof PdClient) {
@@ -36,10 +67,20 @@ final class TimestampOracle
             }
         }
 
-        $request = new TsoRequest();
-        $request->setHeader($header);
-        $request->setCount(1);
+        return $header;
+    }
 
+    /**
+     * Issue the TSO RPC, retrying once on cluster-id mismatch.
+     *
+     * Mirrors `PdClient::callWithClusterIdRetry()` so the oracle benefits
+     * from the same first-connect cluster-id discovery as the other PD
+     * RPCs. The retry only fires for the "mismatch cluster id" error;
+     * any other gRPC failure propagates immediately so the caller can
+     * fail closed.
+     */
+    private function callTso(TsoRequest $request): TsoResponse
+    {
         try {
             $response = $this->grpc->call(
                 $this->pdAddress,
@@ -49,14 +90,67 @@ final class TimestampOracle
                 TsoResponse::class,
             );
 
-            return $this->extractTimestamp($response);
-        } catch (GrpcException $e) {
-            $this->logger->warning('TSO request failed, using local fallback', [
-                'error' => $e->getMessage(),
-            ]);
+            $this->learnClusterId($response);
 
-            return $this->getTimestampFallback();
+            return $response;
+        } catch (GrpcException $e) {
+            $extractedId = $this->extractClusterIdFromError($e->getMessage());
+            if ($extractedId === null) {
+                throw $e;
+            }
+
+            if (!$this->pdClient instanceof PdClient) {
+                throw $e;
+            }
+
+            $this->logger->warning(
+                'Cluster ID mismatch on TSO, retrying',
+                ['clusterId' => $extractedId],
+            );
+            $this->pdClient->setClusterId($extractedId);
+            $request->setHeader($this->createHeader());
+
+            $response = $this->grpc->call(
+                $this->pdAddress,
+                'pdpb.PD',
+                'Tso',
+                $request,
+                TsoResponse::class,
+            );
+
+            $this->learnClusterId($response);
+
+            return $response;
         }
+    }
+
+    private function learnClusterId(TsoResponse $response): void
+    {
+        if (!$this->pdClient instanceof PdClient) {
+            return;
+        }
+
+        if ($this->pdClient->getClusterId() !== null) {
+            return;
+        }
+
+        $header = $response->getHeader();
+        if ($header !== null) {
+            $this->pdClient->setClusterId((int) $header->getClusterId());
+            $this->logger->info('Learned cluster ID', ['clusterId' => $header->getClusterId()]);
+        }
+    }
+
+    private function extractClusterIdFromError(string $message): ?int
+    {
+        if (!str_contains($message, 'mismatch cluster id')) {
+            return null;
+        }
+        if (preg_match('/need (\d+) but got/', $message, $matches)) {
+            return (int) $matches[1];
+        }
+
+        return null;
     }
 
     private function extractTimestamp(TsoResponse $response): int
@@ -69,27 +163,11 @@ final class TimestampOracle
         $physical = (int) $ts->getPhysical();
         $logical = (int) $ts->getLogical();
 
-        $this->lastPhysical = $physical;
-        $this->lastLogical = $logical;
-
         return $this->composeTs($physical, $logical);
     }
 
     private function composeTs(int $physical, int $logical): int
     {
         return ($physical << 18) | $logical;
-    }
-
-    private function getTimestampFallback(): int
-    {
-        $physicalMs = (int) (hrtime(true) / 1_000_000);
-        $ts = ($physicalMs << 18);
-
-        if ($ts <= $this->lastPhysical << 18) {
-            $this->lastLogical++;
-            $ts = $this->composeTs($this->lastPhysical, $this->lastLogical);
-        }
-
-        return $ts;
     }
 }
