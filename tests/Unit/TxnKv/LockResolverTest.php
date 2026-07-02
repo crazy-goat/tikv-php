@@ -4,14 +4,19 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Errorpb\Error;
+use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
+use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
+use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
@@ -29,13 +34,11 @@ class LockResolverTest extends TestCase
 
     private const STORE_ADDRESS = 'addr:20160';
 
-    private GrpcClientInterface& \PHPUnit\Framework\MockObject\MockObject $grpc;
-    private PdClientInterface& \PHPUnit\Framework\MockObject\MockObject $pdClient;
-    private RegionCacheInterface& \PHPUnit\Framework\MockObject\MockObject $regionCache;
-    private LoggerInterface& \PHPUnit\Framework\MockObject\MockObject $logger;
+    private GrpcClientInterface&MockObject $grpc;
+    private PdClientInterface&MockObject $pdClient;
+    private RegionCacheInterface&MockObject $regionCache;
+    private LoggerInterface&MockObject $logger;
     private RegionInfo $region;
-    private CheckTxnStatusResponse& \PHPUnit\Framework\MockObject\MockObject $checkResponse;
-    private ResolveLockResponse& \PHPUnit\Framework\MockObject\MockObject $resolveResponse;
 
     protected function setUp(): void
     {
@@ -51,15 +54,6 @@ class LockResolverTest extends TestCase
             epochConfVer: self::EPOCH_CONF_VER,
             epochVersion: self::EPOCH_VERSION,
         );
-
-        $this->checkResponse = $this->createMock(CheckTxnStatusResponse::class);
-        $this->checkResponse->method('getRegionError')->willReturn(null);
-        $this->checkResponse->method('getError')->willReturn(null);
-        $this->checkResponse->method('getAction')->willReturn(0);
-        $this->checkResponse->method('getLockTtl')->willReturn(0);
-        $this->checkResponse->method('getCommitVersion')->willReturn(1);
-
-        $this->resolveResponse = $this->createMock(ResolveLockResponse::class);
     }
 
     private function createResolver(): LockResolver
@@ -75,27 +69,57 @@ class LockResolverTest extends TestCase
         );
     }
 
-    private function mockStore(): void
+    private function makeStore(string $address = self::STORE_ADDRESS): Store
     {
-        $store = $this->createMock(\CrazyGoat\Proto\Metapb\Store::class);
-        $store->method('getAddress')->willReturn(self::STORE_ADDRESS);
-        $this->pdClient->method('getStore')->willReturn($store);
+        $store = new Store();
+        $store->setAddress($address);
+        return $store;
     }
 
-    private function mockGrpcCalls(): void
+    private function makeCheckTxnStatusResponse(
+        int $commitVersion = 0,
+        int $lockTtl = 0,
+        int $action = Action::NoAction,
+        ?Error $regionError = null,
+    ): CheckTxnStatusResponse {
+        $response = new CheckTxnStatusResponse();
+        if ($regionError instanceof \CrazyGoat\Proto\Errorpb\Error) {
+            $response->setRegionError($regionError);
+        }
+        $response->setCommitVersion($commitVersion);
+        $response->setLockTtl($lockTtl);
+        $response->setAction($action);
+        return $response;
+    }
+
+    /**
+     * @param CheckTxnStatusResponse ...$checkResponses Responses returned in order
+     *                                            for successive KvCheckTxnStatus calls
+     */
+    private function mockGrpcCalls(CheckTxnStatusResponse ...$checkResponses): void
     {
+        $checkIndex = 0;
         $this->grpc->method('call')
             ->willReturnCallback(function (
                 string $address,
                 string $service,
                 string $method,
-                $request,
+                mixed $request,
                 string $responseClass,
+            ) use (
+                &$checkIndex,
+                $checkResponses,
             ): object {
-                if ($responseClass === CheckTxnStatusResponse::class) {
-                    return $this->checkResponse;
+                if ($method === 'KvCheckTxnStatus') {
+                    if (!isset($checkResponses[$checkIndex])) {
+                        throw new \RuntimeException('Unexpected extra KvCheckTxnStatus call');
+                    }
+                    return $checkResponses[$checkIndex++];
                 }
-                return $this->resolveResponse;
+                if ($method === 'KvResolveLock') {
+                    return new ResolveLockResponse();
+                }
+                throw new \RuntimeException("Unexpected method: $method");
             });
     }
 
@@ -134,8 +158,8 @@ class LockResolverTest extends TestCase
             ->with(self::TEST_KEY)
             ->willReturn($this->region);
 
-        $this->mockStore();
-        $this->mockGrpcCalls();
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCalls($this->makeCheckTxnStatusResponse(commitVersion: 1));
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
@@ -151,8 +175,8 @@ class LockResolverTest extends TestCase
         $this->regionCache->expects($this->never())
             ->method('put');
 
-        $this->mockStore();
-        $this->mockGrpcCalls();
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCalls($this->makeCheckTxnStatusResponse(commitVersion: 1));
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
@@ -181,8 +205,8 @@ class LockResolverTest extends TestCase
                 $putCalled = true;
             });
 
-        $this->mockStore();
-        $this->mockGrpcCalls();
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCalls($this->makeCheckTxnStatusResponse(commitVersion: 1));
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
@@ -195,140 +219,83 @@ class LockResolverTest extends TestCase
     public function testResolveLockWithCommitTsGetsCommitted(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $store = new \CrazyGoat\Proto\Metapb\Store();
-        $store->setAddress(self::STORE_ADDRESS);
-        $this->pdClient->method('getStore')->willReturn($store);
-
-        $resolveCalls = 0;
-        $this->grpc->method('call')
-            ->willReturnCallback(function (string $addr, string $svc, string $method) use (&$resolveCalls): object {
-                if ($method === 'KvCheckTxnStatus') {
-                    return $this->checkResponse;
-                }
-                if ($method === 'KvResolveLock') {
-                    $resolveCalls++;
-                    return $this->resolveResponse;
-                }
-                throw new \RuntimeException("Unexpected method: $method");
-            });
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(commitVersion: 1),
+                new ResolveLockResponse(),
+            );
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
-
-        $this->assertSame(1, $resolveCalls, 'KvResolveLock should be called exactly once');
     }
 
     public function testResolveLockWithZeroCommitTsRollsBack(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $store = new \CrazyGoat\Proto\Metapb\Store();
-        $store->setAddress(self::STORE_ADDRESS);
-        $this->pdClient->method('getStore')->willReturn($store);
-
-        $checkResponse = $this->createMock(CheckTxnStatusResponse::class);
-        $checkResponse->method('getRegionError')->willReturn(null);
-        $checkResponse->method('getError')->willReturn(null);
-        $checkResponse->method('getCommitVersion')->willReturn(0);
-        $checkResponse->method('getLockTtl')->willReturn(0);
-        $checkResponse->method('getAction')->willReturn(0);
-
-        $resolveCalls = 0;
-        $this->grpc->method('call')
-            ->willReturnCallback(function (
-                string $addr,
-                string $svc,
-                string $method,
-            ) use (
-                &$resolveCalls,
-                $checkResponse,
-            ): object {
-                if ($method === 'KvCheckTxnStatus') {
-                    return $checkResponse;
-                }
-                if ($method === 'KvResolveLock') {
-                    $resolveCalls++;
-                    return $this->resolveResponse;
-                }
-                throw new \RuntimeException("Unexpected method: $method");
-            });
+        $this->grpc->expects($this->exactly(3))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(commitVersion: 0),
+                $this->makeCheckTxnStatusResponse(commitVersion: 0),
+                new ResolveLockResponse(),
+            );
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
-
-        $this->assertSame(1, $resolveCalls, 'KvResolveLock should be called in rollback path');
     }
 
     public function testResolveLockWithActiveLockWaitsThenRollsBack(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->region);
-        $this->pdClient->method('getStore')->willReturnCallback(function (): \CrazyGoat\Proto\Metapb\Store {
-            $store = new \CrazyGoat\Proto\Metapb\Store();
-            $store->setAddress(self::STORE_ADDRESS);
-            return $store;
-        });
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $firstCheck = $this->createMock(CheckTxnStatusResponse::class);
-        $firstCheck->method('getRegionError')->willReturn(null);
-        $firstCheck->method('getError')->willReturn(null);
-        $firstCheck->method('getCommitVersion')->willReturn(0);
-        $firstCheck->method('getAction')->willReturn(0);
-        $firstCheck->method('getLockTtl')->willReturn(50);
-
-        $secondCheck = $this->createMock(CheckTxnStatusResponse::class);
-        $secondCheck->method('getRegionError')->willReturn(null);
-        $secondCheck->method('getError')->willReturn(null);
-        $secondCheck->method('getCommitVersion')->willReturn(0);
-        $secondCheck->method('getAction')->willReturn(0);
-        $secondCheck->method('getLockTtl')->willReturn(0);
-
-        $checkCount = 0;
-        $resolveCalls = 0;
-        $this->grpc->method('call')
-            ->willReturnCallback(function (
-                string $addr,
-                string $svc,
-                string $method
-            ) use (
-                &$checkCount,
-                &$resolveCalls,
-                $firstCheck,
-                $secondCheck,
-            ): object {
-                if ($method === 'KvCheckTxnStatus') {
-                    $checkCount++;
-                    return $checkCount === 1 ? $firstCheck : $secondCheck;
-                }
-                if ($method === 'KvResolveLock') {
-                    $resolveCalls++;
-                    return $this->createMock(ResolveLockResponse::class);
-                }
-                throw new \RuntimeException("Unexpected method: $method");
-            });
+        $this->grpc->expects($this->exactly(3))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 50),
+                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
+                new ResolveLockResponse(),
+            );
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+    }
 
-        $this->assertSame(2, $checkCount, 'CheckTxnStatus should be called twice for active lock');
-        $this->assertSame(1, $resolveCalls, 'KvResolveLock should be called after rollback');
+    public function testResolveLockWithLockActionImmediatelyRollsBack(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->exactly(3))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
+                $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
+                new ResolveLockResponse(),
+            );
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
     }
 
     public function testResolveLockWithRegionErrorThrows(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->region);
         $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $store = new \CrazyGoat\Proto\Metapb\Store();
-        $store->setAddress(self::STORE_ADDRESS);
-        $this->pdClient->method('getStore')->willReturn($store);
+        $regionError = new Error();
+        $regionError->setMessage('region not found');
+        $this->grpc->method('call')->willReturn(
+            $this->makeCheckTxnStatusResponse(regionError: $regionError),
+        );
 
-        $errorResponse = $this->createMock(CheckTxnStatusResponse::class);
-        $errorResponse->method('getRegionError')->willReturn(new \CrazyGoat\Proto\Errorpb\Error());
-
-        $this->grpc->method('call')->willReturn($errorResponse);
-
-        $this->expectException(\CrazyGoat\TiKV\Client\Exception\RegionException::class);
+        $this->expectException(RegionException::class);
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
@@ -343,11 +310,6 @@ class LockResolverTest extends TestCase
         $region1 = new RegionInfo(regionId: 1, leaderPeerId: 1, leaderStoreId: 1, epochConfVer: 1, epochVersion: 1);
         $region2 = new RegionInfo(regionId: 2, leaderPeerId: 2, leaderStoreId: 2, epochConfVer: 1, epochVersion: 1);
 
-        $store1 = $this->createMock(\CrazyGoat\Proto\Metapb\Store::class);
-        $store1->method('getAddress')->willReturn('addr:20160');
-        $store2 = $this->createMock(\CrazyGoat\Proto\Metapb\Store::class);
-        $store2->method('getAddress')->willReturn('addr:20161');
-
         $pdRegionCallCount = 0;
         $this->pdClient->method('getRegion')
             ->willReturnCallback(function () use (&$pdRegionCallCount, $region1, $region2): RegionInfo {
@@ -359,12 +321,11 @@ class LockResolverTest extends TestCase
             });
 
         $this->pdClient->method('getStore')
-            ->willReturnCallback(function (int $storeId) use ($store1, $store2): \CrazyGoat\Proto\Metapb\Store {
-                if ($storeId === 1) {
-                    return $store1;
-                }
-                return $store2;
-            });
+            ->willReturnCallback(
+                fn(int $storeId): Store => $this->makeStore(
+                    $storeId === 1 ? 'addr:20160' : 'addr:20161',
+                ),
+            );
 
         $putCalledForKey1 = false;
         $putCalledForKey2 = false;
@@ -394,38 +355,13 @@ class LockResolverTest extends TestCase
                 }
             });
 
-        $checkResp1 = $this->createMock(CheckTxnStatusResponse::class);
-        $checkResp1->method('getRegionError')->willReturn(null);
-        $checkResp1->method('getError')->willReturn(null);
-        $checkResp1->method('getAction')->willReturn(0);
-        $checkResp1->method('getLockTtl')->willReturn(0);
-        $checkResp1->method('getCommitVersion')->willReturn(1);
-
-        $checkResp2 = $this->createMock(CheckTxnStatusResponse::class);
-        $checkResp2->method('getRegionError')->willReturn(null);
-        $checkResp2->method('getError')->willReturn(null);
-        $checkResp2->method('getAction')->willReturn(0);
-        $checkResp2->method('getLockTtl')->willReturn(0);
-        $checkResp2->method('getCommitVersion')->willReturn(1);
-
-        $resolveResp1 = $this->createMock(ResolveLockResponse::class);
-        $resolveResp2 = $this->createMock(ResolveLockResponse::class);
-
         $grpcCallCount = 0;
         $this->grpc->method('call')
-            ->willReturnCallback(function () use (
-                &$grpcCallCount,
-                $checkResp1,
-                $checkResp2,
-                $resolveResp1,
-                $resolveResp2,
-            ): object {
+            ->willReturnCallback(function () use (&$grpcCallCount): object {
                 $grpcCallCount++;
                 return match ($grpcCallCount) { // @phpstan-ignore match.unhandled
-                    1 => $checkResp1,
-                    2 => $resolveResp1,
-                    3 => $checkResp2,
-                    4 => $resolveResp2,
+                    1, 3 => $this->makeCheckTxnStatusResponse(commitVersion: 1),
+                    2, 4 => new ResolveLockResponse(),
                 };
             });
 
