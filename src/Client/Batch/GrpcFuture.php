@@ -54,4 +54,31 @@ final class GrpcFuture
 
         return $this->result;
     }
+
+    public function cancel(): void
+    {
+        if ($this->completed) {
+            return;
+        }
+
+        $this->error = new GrpcException('Call cancelled', \Grpc\STATUS_CANCELLED);
+        $this->completed = true;
+
+        // Swallow any throwable from the underlying call: cancel() must
+        // never propagate, especially from __destruct() during shutdown.
+        try {
+            $this->call->cancel();
+        } catch (\Throwable) {
+        }
+    }
+
+    public function isCompleted(): bool
+    {
+        return $this->completed;
+    }
+
+    public function __destruct()
+    {
+        $this->cancel();
+    }
 }
