@@ -61,6 +61,8 @@ final class RetryExecutor
 
         while (true) {
             // Enforce absolute attempt cap before running the operation.
+            // 'attempt' counts completed runs, so on the next retry we would
+            // run call #attempt+1; cap once that would exceed maxAttempts.
             // Catches zero-backoff errors (e.g. EpochNotMatch classified as
             // BackoffType::None) that would otherwise drive an infinite loop.
             if ($this->attempt >= $this->maxAttempts) {
@@ -101,7 +103,7 @@ final class RetryExecutor
                 return $operation();
             } catch (TiKvException $e) {
                 $lastError = $e;
-                $this->attempt++;
+                $attemptBeforeInspection = $this->attempt;
 
                 $backoffType = $this->handleNotLeader($e, $key);
 
@@ -137,14 +139,14 @@ final class RetryExecutor
                     }
                 }
 
-                $sleepMs = $backoffType->sleepMs($this->attempt);
+                $sleepMs = $backoffType->sleepMs($attemptBeforeInspection);
 
                 if ($backoffType === BackoffType::ServerBusy) {
                     $this->serverBusyBackoffMs += $sleepMs;
                     if ($this->serverBusyBackoffMs > $this->serverBusyBudgetMs) {
                         $this->logger->error('ServerBusy budget exhausted', [
                             'key' => $key,
-                            'attempt' => $this->attempt,
+                            'attempt' => $attemptBeforeInspection,
                             'serverBusyBackoffMs' => $this->serverBusyBackoffMs,
                             'serverBusyBudgetMs' => $this->serverBusyBudgetMs,
                         ]);
@@ -155,7 +157,7 @@ final class RetryExecutor
                     if ($this->totalBackoffMs > $this->maxBackoffMs) {
                         $this->logger->error('Retry budget exhausted', [
                             'key' => $key,
-                            'attempt' => $this->attempt,
+                            'attempt' => $attemptBeforeInspection,
                             'totalBackoffMs' => $this->totalBackoffMs,
                             'maxBackoffMs' => $this->maxBackoffMs,
                         ]);
@@ -165,7 +167,7 @@ final class RetryExecutor
 
                 $this->logger->warning('Retrying operation', [
                     'key' => $key,
-                    'attempt' => $this->attempt,
+                    'attempt' => $attemptBeforeInspection,
                     'backoffType' => $backoffType->name,
                     'sleepMs' => $sleepMs,
                     'totalBackoffMs' => $this->totalBackoffMs,
@@ -174,6 +176,8 @@ final class RetryExecutor
                 if ($sleepMs > 0) {
                     usleep($sleepMs * 1000);
                 }
+
+                $this->attempt++;
             }
         }
     }
