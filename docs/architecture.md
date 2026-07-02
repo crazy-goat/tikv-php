@@ -221,12 +221,21 @@ Optimistic Transaction                   Pessimistic Transaction
 - Critical for MVCC: every transaction needs a unique startTs and commitTs
 - Uses unary gRPC call (not bidirectional streaming, since PHP processes are short-lived)
 
+**Failure semantics**:
+- On TSO RPC failure the oracle **fails closed** — it throws `TiKvException`
+  carrying the original gRPC status code and logs at `error` level.
+- A locally fabricated timestamp (e.g. from `hrtime()`) would mix
+  boot-relative time with PD's epoch-milliseconds and could violate TiKV
+  MVCC ordering, so callers must observe the failure and decide whether
+  to retry or abort the transaction.
+
 **Key Methods**:
 ```php
 class TimestampOracle
 {
     public function getTimestamp(): int;
     // Returns a 64-bit timestamp: (physical << 18) | logical
+    // @throws TiKvException when the TSO RPC fails or returns an invalid response
 }
 ```
 

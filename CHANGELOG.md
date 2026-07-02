@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merged `commitOptimistic()` and `commitPessimistic()` into a single `doCommit()` method; removed dead `$firstRegionKeys`/`$isPrimaryRegion` that were never used (#113)
 
 ### Fixed
+- `TimestampOracle::getTimestamp()` now fails closed on TSO RPC failure instead of fabricating a local timestamp from `hrtime()`. The previous fallback mixed boot-relative milliseconds with PD's epoch-milliseconds, producing timestamps that could violate TiKV MVCC ordering and cause lost updates / snapshot-isolation anomalies. The failure is now logged at `error` level and surfaces as a `TiKvException` carrying the original gRPC status code (#74)
 - `splitPairsIntoBatches()` now normalizes `$pairs` and `$ttls` keys to sequential 0-indexed arrays, preventing silent TTL misalignment when pairs have non-sequential keys (#106)
 - Removed dead runtime guard in `batchScan()` that was suppressed with `@phpstan-ignore`; the PHPDoc type `array<array{0: string, 1: string}>` already guarantees the contract, and malformed input now produces a `TypeError` instead of `InvalidArgumentException` (#112)
 - `getKeyTTL()` now validates key (empty/oversized), consistent with `get()`, `put()`, `delete()` (#109)
