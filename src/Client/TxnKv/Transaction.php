@@ -37,6 +37,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\RawKv\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -257,16 +258,8 @@ final class Transaction
         $results = [];
         $remaining = $limit;
 
-        foreach ($regions as $region) {
-            $scanStart = $startKey > $region->startKey ? $startKey : $region->startKey;
-            $scanEnd = $endKey === ''
-                ? $region->endKey
-                : ($region->endKey !== '' && $endKey > $region->endKey ? $region->endKey : $endKey);
-
-            if ($scanStart >= $scanEnd && $scanEnd !== '') {
-                continue;
-            }
-
+        $clipper = new RegionRangeClipper();
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
             $regionLimit = $remaining === 0 ? self::DEFAULT_SCAN_LIMIT : $remaining;
             $regionResults = $this->executeScanForRegion(
                 $region,

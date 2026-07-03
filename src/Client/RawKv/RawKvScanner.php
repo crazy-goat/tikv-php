@@ -13,6 +13,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
@@ -45,16 +46,8 @@ final readonly class RawKvScanner
         $results = [];
         $remaining = $limit;
 
-        foreach ($regions as $region) {
-            $scanStart = $startKey > $region->startKey ? $startKey : $region->startKey;
-            $scanEnd = $endKey === ''
-                ? $region->endKey
-                : ($region->endKey !== '' && $endKey > $region->endKey ? $region->endKey : $endKey);
-
-            if ($scanStart >= $scanEnd && $scanEnd !== '') {
-                continue;
-            }
-
+        $clipper = new RegionRangeClipper();
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
             $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
             $regionResults = $this->executeScanForRegion(
                 $executor,
@@ -98,20 +91,14 @@ final readonly class RawKvScanner
         $results = [];
         $remaining = $limit;
 
-        foreach ($regions as $region) {
-            $scanStartKey = ($region->endKey === '' || $startKey < $region->endKey) ? $startKey : $region->endKey;
-            $scanEndKey = ($endKey > $region->startKey) ? $endKey : $region->startKey;
-
-            if ($scanEndKey >= $scanStartKey && $scanEndKey !== '') {
-                continue;
-            }
-
+        $clipper = new RegionRangeClipper();
+        foreach ($clipper->clipReverse($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
             $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
             $regionResults = $this->executeScanForRegion(
                 $executor,
                 $region,
-                $scanStartKey,
-                $scanEndKey,
+                $scanStart,
+                $scanEnd,
                 $regionLimit,
                 $keyOnly,
                 true,

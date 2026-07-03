@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
@@ -43,17 +44,9 @@ final readonly class RawKvRangeOps
 
         $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        $clipper = new RegionRangeClipper();
 
-        foreach ($regions as $region) {
-            $rangeStart = $startKey > $region->startKey ? $startKey : $region->startKey;
-            $rangeEnd = ($endKey === '' || ($region->endKey !== '' && $endKey > $region->endKey))
-                ? $region->endKey
-                : $endKey;
-
-            if ($rangeStart >= $rangeEnd && $rangeEnd !== '') {
-                continue;
-            }
-
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $rangeStart, $rangeEnd]) {
             $this->executeDeleteRangeForRegion($executor, $region, $rangeStart, $rangeEnd, $columnFamily);
         }
     }
@@ -67,21 +60,13 @@ final readonly class RawKvRangeOps
     {
         $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        $clipper = new RegionRangeClipper();
 
         $mergedChecksum = 0;
         $mergedTotalKvs = 0;
         $mergedTotalBytes = 0;
 
-        foreach ($regions as $region) {
-            $rangeStart = $startKey > $region->startKey ? $startKey : $region->startKey;
-            $rangeEnd = ($endKey === '' || ($region->endKey !== '' && $endKey > $region->endKey))
-                ? $region->endKey
-                : $endKey;
-
-            if ($rangeStart >= $rangeEnd && $rangeEnd !== '') {
-                continue;
-            }
-
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $rangeStart, $rangeEnd]) {
             $result = $this->executeChecksumForRegion($executor, $region, $rangeStart, $rangeEnd);
             $mergedChecksum ^= $result->checksum;
             $mergedTotalKvs += $result->totalKvs;
