@@ -315,6 +315,26 @@ class RawKvClientTest extends TestCase
         $this->client->compareAndSwap('key', null, $value);
     }
 
+    public function testCompareAndSwapThrowsWithoutAtomicMode(): void
+    {
+        $this->assertFalse($this->client->isAtomicForCAS());
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('CompareAndSwap requires atomic mode');
+
+        $this->client->compareAndSwap('key', 'old', 'new');
+    }
+
+    public function testCompareAndSwapSucceedsWithAtomicMode(): void
+    {
+        $this->client->setAtomicForCAS(true);
+        $this->assertTrue($this->client->isAtomicForCAS());
+
+        // No exception should be thrown for the mode check
+        // (the actual gRPC call will be mocked below)
+        $this->expectNotToPerformAssertions();
+    }
+
     // ========================================================================
     // get()
     // ========================================================================

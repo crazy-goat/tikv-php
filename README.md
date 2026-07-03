@@ -88,8 +88,17 @@ $remaining = $client->getKeyTTL('session');          // seconds remaining, or nu
 
 ### Atomic Operations
 
+> **Note:** Compare-And-Swap (CAS) and Put-If-Absent require atomic mode to be
+> enabled via `setAtomicForCAS(true)`. In atomic mode, the underlying `RawPut`
+> RPC sends the `for_cas` flag, which tells TiKV to use the atomic code path.
+> Atomic mode is disabled by default for performance — the non-atomic code path
+> is faster for regular writes. Enable it only when you need CAS semantics.
+
 ```php
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
+
+// Enable atomic mode for CAS operations
+$client->setAtomicForCAS(true);
 
 // Compare-And-Swap (CAS)
 $result = $client->compareAndSwap('counter', '1', '2');
@@ -203,6 +212,9 @@ try {
     // Check TTL
     $ttl = $client->getKeyTTL('user:123');
     echo "TTL remaining: $ttl seconds\n";
+    
+    // Enable atomic mode for CAS operations
+    $client->setAtomicForCAS(true);
     
     // Atomic counter update
     $client->put('counter', '0');

@@ -13,6 +13,9 @@ $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', getenv('PD_ENDPOINTS')) : [
 $client = RawKvClient::create($pdEndpoints);
 
 try {
+    // Enable atomic mode for CAS operations
+    $client->setAtomicForCAS(true);
+
     echo "TiKV PHP Client - Atomic Operations Example\n";
     echo "==========================================\n\n";
     
