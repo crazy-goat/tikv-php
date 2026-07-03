@@ -13,6 +13,7 @@ use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 use Psr\Log\LoggerInterface;
@@ -20,12 +21,15 @@ use Psr\Log\NullLogger;
 
 final class TxnKvClient
 {
+    public const OPT_TIMEOUT = 'timeout';
+
     private bool $closed = false;
     private readonly RegionResolver $regionResolver;
 
     /**
      * @param string[] $pdEndpoints PD addresses (currently only the first is used)
-     * @param array<string, mixed> $options Client options, including 'tls' for TLS configuration
+     * @param array<string, mixed> $options Client options, including 'tls' for TLS
+     *                                      configuration and 'timeout' for timeout config
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
@@ -59,7 +63,27 @@ final class TxnKvClient
         $storeCache = new StoreCache(logger: $resolvedLogger);
         $pdClient = new PdClient($grpc, $pdAddress, $resolvedLogger, $storeCache);
 
-        return new self($pdClient, $grpc, logger: $resolvedLogger);
+        $timeoutConfig = new TimeoutConfig();
+
+        if (isset($options[self::OPT_TIMEOUT]) && is_array($options[self::OPT_TIMEOUT])) {
+            $t = $options[self::OPT_TIMEOUT];
+            $timeoutConfig = new TimeoutConfig(
+                readTimeoutMs: isset($t['readTimeoutMs']) && is_int($t['readTimeoutMs'])
+                    ? $t['readTimeoutMs'] : $timeoutConfig->readTimeoutMs,
+                writeTimeoutMs: isset($t['writeTimeoutMs']) && is_int($t['writeTimeoutMs'])
+                    ? $t['writeTimeoutMs'] : $timeoutConfig->writeTimeoutMs,
+                batchReadTimeoutMs: isset($t['batchReadTimeoutMs']) && is_int($t['batchReadTimeoutMs'])
+                    ? $t['batchReadTimeoutMs'] : $timeoutConfig->batchReadTimeoutMs,
+                batchWriteTimeoutMs: isset($t['batchWriteTimeoutMs']) && is_int($t['batchWriteTimeoutMs'])
+                    ? $t['batchWriteTimeoutMs'] : $timeoutConfig->batchWriteTimeoutMs,
+                scanTimeoutMs: isset($t['scanTimeoutMs']) && is_int($t['scanTimeoutMs'])
+                    ? $t['scanTimeoutMs'] : $timeoutConfig->scanTimeoutMs,
+                deleteRangeTimeoutMs: isset($t['deleteRangeTimeoutMs']) && is_int($t['deleteRangeTimeoutMs'])
+                    ? $t['deleteRangeTimeoutMs'] : $timeoutConfig->deleteRangeTimeoutMs,
+            );
+        }
+
+        return new self($pdClient, $grpc, logger: $resolvedLogger, timeoutConfig: $timeoutConfig);
     }
 
     public function __construct(
@@ -69,6 +93,7 @@ final class TxnKvClient
         ?RegionResolver $regionResolver = null,
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
+        private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
     ) {
         $this->regionResolver = $regionResolver ?? new RegionResolver($this->pdClient, $this->regionCache);
     }
@@ -113,6 +138,7 @@ final class TxnKvClient
             regionResolver: $this->regionResolver,
             maxBackoffMs: $this->maxBackoffMs,
             logger: $this->logger,
+            timeoutConfig: $this->timeoutConfig,
         );
     }
 
