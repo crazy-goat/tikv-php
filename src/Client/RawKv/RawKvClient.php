@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
@@ -19,6 +20,8 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
@@ -53,6 +56,7 @@ final class RawKvClient
 
     public const OPT_TIMEOUT = 'timeout';
     public const OPT_SLOW_LOG = 'slowLog';
+    public const OPT_METRICS = 'metrics';
 
     private bool $closed = false;
 
@@ -72,13 +76,24 @@ final class RawKvClient
      *
      * @throws InvalidArgumentException if PD endpoints array is empty
      */
-    public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
-    {
+    public static function create(
+        array $pdEndpoints,
+        ?LoggerInterface $logger = null,
+        array $options = []
+    ): self {
         if ($pdEndpoints === []) {
             throw new InvalidArgumentException('PD endpoints array must not be empty');
         }
 
         $resolvedLogger = $logger ?? new NullLogger();
+
+        $metrics = $options[self::OPT_METRICS] ?? new NoOpMetrics();
+        if (!$metrics instanceof MetricsInterface) {
+            throw new InvalidArgumentException(
+                "options['" . self::OPT_METRICS . "'] must be an instance of MetricsInterface, "
+                . 'got ' . (get_debug_type($metrics))
+            );
+        }
 
         $tlsConfig = null;
         if (isset($options['tls']) && is_array($options['tls'])) {
@@ -198,8 +213,9 @@ final class RawKvClient
         ?RawKvScanner $scanner = null,
         ?RawKvRangeOps $rangeOps = null,
         private readonly ?SlowLogConfig $slowLogConfig = null,
+        private readonly MetricsInterface $metrics = new NoOpMetrics(),
     ) {
-        $regionResolver ??= new RegionResolver($pdClient, $regionCache);
+        $regionResolver ??= new RegionResolver($pdClient, $regionCache, $metrics);
         $this->crud = $crud ?? new RawKvCrud(
             $grpc,
             $regionResolver,
@@ -323,7 +339,7 @@ final class RawKvClient
 
     private function createRetryExecutor(): RetryExecutor
     {
-        $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
+        $regionResolver = new RegionResolver($this->pdClient, $this->regionCache, $this->metrics);
 
         return new RetryExecutor(
             $this->maxBackoffMs,
@@ -332,6 +348,7 @@ final class RawKvClient
             $this->grpc,
             $regionResolver,
             $this->logger,
+            metrics: $this->metrics,
         );
     }
 
@@ -694,6 +711,60 @@ final class RawKvClient
     public function getClusterId(): ?int
     {
         return $this->pdClient->getClusterId();
+    }
+
+    // ========================================================================
+    // Health Check
+    // ========================================================================
+
+    /**
+     * Probe the PD cluster by issuing a {@see GetMembers} RPC and return
+     * the learned cluster ID.
+     *
+     * Use as a lightweight health check in load-balancer probes,
+     * Kubernetes readiness checks, etc. The call does not touch any
+     * user data and never fails with "no region" — it only fails when
+     * PD is unreachable or rejects the request.
+     *
+     * Returns the cluster ID on success. Returns null if PD responded
+     * but the response header did not carry a cluster ID (callers may
+     * treat null as "reachable but identity unknown").
+     *
+     * @throws ClientClosedException When the client has been closed
+     * @throws HealthCheckException When the PD probe fails
+     */
+    public function healthCheck(): ?int
+    {
+        $this->ensureOpen();
+
+        try {
+            return $this->pdClient->ping();
+        } catch (ClientClosedException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw new HealthCheckException(
+                sprintf('PD health check failed: %s', $e->getMessage()),
+                $e,
+            );
+        }
+    }
+
+    // ========================================================================
+    // Metrics
+    // ========================================================================
+
+    /**
+     * Return the metrics implementation in use.
+     *
+     * The returned object is the same instance passed via
+     * RawKvClient::create() options['metrics'], or the no-op default
+     * when no metrics backend was configured. Use to inspect counters
+     * in-process (e.g. {@see InMemoryMetrics}) without consuming the
+     * exported Prometheus / StatsD stream.
+     */
+    public function getMetrics(): MetricsInterface
+    {
+        return $this->metrics;
     }
 
     // ========================================================================

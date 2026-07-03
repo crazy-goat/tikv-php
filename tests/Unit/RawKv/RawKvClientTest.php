@@ -20,12 +20,16 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
@@ -95,6 +99,95 @@ class RawKvClientTest extends TestCase
     }
 
     // ========================================================================
+    // Health check
+    // ========================================================================
+
+    public function testHealthCheckReturnsLearnedClusterId(): void
+    {
+        $this->pdClient->expects($this->once())->method('ping')->willReturn(12345);
+
+        $this->assertSame(12345, $this->client->healthCheck());
+    }
+
+    public function testHealthCheckReturnsNullWhenPdHasNoClusterIdHeader(): void
+    {
+        $this->pdClient->expects($this->once())->method('ping')->willReturn(null);
+
+        $this->assertNull($this->client->healthCheck());
+    }
+
+    public function testHealthCheckThrowsHealthCheckExceptionOnTransportError(): void
+    {
+        $this->pdClient->expects($this->once())->method('ping')->willThrowException(
+            new GrpcException(details: 'connection refused', grpcStatusCode: 14),
+        );
+
+        $this->expectException(HealthCheckException::class);
+        $this->expectExceptionMessage('PD health check failed');
+        $this->client->healthCheck();
+    }
+
+    public function testHealthCheckRethrowsClientClosedException(): void
+    {
+        $this->client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $this->client->healthCheck();
+    }
+
+    // ========================================================================
+    // Metrics
+    // ========================================================================
+
+    public function testGetMetricsReturnsNoOpByDefault(): void
+    {
+        $this->assertInstanceOf(NoOpMetrics::class, $this->client->getMetrics());
+    }
+
+    public function testGetMetricsReturnsInjectedInstance(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            metrics: $metrics,
+        );
+
+        $this->assertSame($metrics, $client->getMetrics());
+    }
+
+    public function testGetMetricsDoesNotThrowWhenNeverQueried(): void
+    {
+        // The default-construction path must yield a fully working NoOp
+        // metrics backend without any additional setup.
+        $metrics = $this->client->getMetrics();
+
+        $metrics->rpcStarted('dummy');
+        $metrics->rpcCompleted('dummy', 1.0, true);
+        $metrics->retryAttempted('NotLeader');
+        $metrics->regionCacheHit('dummy');
+        $metrics->regionCacheMiss('dummy');
+        $metrics->regionInvalidated('not_leader');
+
+        $this->assertInstanceOf(MetricsInterface::class, $metrics);
+    }
+
+    public function testCreateAcceptsMetricsOption(): void
+    {
+        $metrics = new InMemoryMetrics();
+        // The create() factory requires real gRPC; we use mocking via the constructor instead.
+        $client = new RawKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+            $this->createMock(RegionCacheInterface::class),
+            metrics: $metrics,
+        );
+
+        $this->assertSame($metrics, $client->getMetrics());
+    }
+
+    // ========================================================================
     // Lifecycle
     // ========================================================================
 
@@ -108,6 +201,13 @@ class RawKvClientTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('PD endpoints array must not be empty');
         RawKvClient::create([]);
+    }
+
+    public function testCreateRejectsNonInterfaceMetricsOption(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['metrics'] must be an instance of MetricsInterface");
+        RawKvClient::create(['pd:2379'], options: ['metrics' => new \stdClass()]);
     }
 
     public function testCloseIsIdempotent(): void

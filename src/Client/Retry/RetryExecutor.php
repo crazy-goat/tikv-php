@@ -11,6 +11,8 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -39,6 +41,7 @@ final class RetryExecutor
         private readonly LoggerInterface $logger,
         private readonly int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS,
         private readonly int $deadlineMs = 0,
+        private readonly MetricsInterface $metrics = new NoOpMetrics(),
     ) {
         if ($maxAttempts < 1) {
             throw new \InvalidArgumentException('maxAttempts must be >= 1');
@@ -128,6 +131,7 @@ final class RetryExecutor
                     $cached = $this->regionCache->getByKey($key);
                     if ($cached instanceof RegionInfo) {
                         $this->regionCache->invalidate($cached->regionId);
+                        $this->metrics->regionInvalidated('retry_region_error');
                         $this->logger->info('Invalidated region on retry', [
                             'key' => KeyRedactor::redact($key),
                             'regionId' => $cached->regionId,
@@ -176,6 +180,8 @@ final class RetryExecutor
                     'sleepMs' => $sleepMs,
                     'totalBackoffMs' => $this->totalBackoffMs,
                 ]);
+
+                $this->metrics->retryAttempted($backoffType->name);
 
                 if ($sleepMs > 0) {
                     usleep($sleepMs * 1000);

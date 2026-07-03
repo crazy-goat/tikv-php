@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `MetricsInterface` in `src/Client/Observability/` — optional zero-cost observability hook for emitting RPC counts (`rpcStarted`/`rpcCompleted`), retry counts (`retryAttempted`), region-cache hit/miss (`regionCacheHit`/`regionCacheMiss`) and region-invalidation events (`regionInvalidated`). Counters are tagged by operation (e.g. `'tikvpb.Tikv/KvGet'`) or backoff type (`'NotLeader'`, `'ServerBusy'`, …) and the implementation is free to bucket tags however it wishes. The default `NoOpMetrics` is on the hot path of every gRPC call, region lookup and retry, so callers that do not opt in pay a single empty-method dispatch per call site. Pass an implementation via `RawKvClient::create()` and `TxnKvClient::create()` options key `'metrics'`, or inject it directly through the constructor. (#116)
+- `InMemoryMetrics` — a thread-unsafe reference implementation useful for tests and benchmarks; counters are stored as `[tag => count]` maps and RPC latency is retained so tests can assert on mean latency or counts. (#116)
+- `RawKvClient::healthCheck()` / `TxnKvClient::healthCheck()` — issues the lightweight `GetMembers` RPC (no user data, no "no region" failure) and returns the learned cluster ID, or null if the PD response carried no cluster ID header. Suitable as a load-balancer / Kubernetes readiness probe. (#116)
+- `RawKvClient::getMetrics()` / `TxnKvClient::getMetrics()` — accessor for the metrics implementation in use, allowing in-process inspection of counters. (#116)
+- `PdClientInterface::ping()` — dedicated `GetMembers` RPC concretely implemented in `PdClient::ping()`; uses the existing cluster-id mismatch retry path. (#116)
+- `HealthCheckException` in `src/Client/Exception/` — thrown by `healthCheck()` on transport / PD failure; extends `TiKvException` so it composes with the existing exception hierarchy. (#116)
+- Unit tests for `MetricsInterface`/`NoOpMetrics`/`InMemoryMetrics` covering counter independence, mean-latency computation, region-cache and retry tagging, and `reset()` semantics. (#116)
+- Unit tests for `RawKvClient::healthCheck()` (cluster ID returned, null when PD has no cluster ID, transport failure becomes `HealthCheckException`, throws `ClientClosedException` after `close()`). (#116)
+- Unit tests for `RawKvClient::getMetrics()` (default is `NoOpMetrics`, injected instance round-trip, factory option accepted, factory rejects non-`MetricsInterface` values). (#116)
+- Unit tests for `RegionResolver` cache-hit / cache-miss metric emission. (#116)
+- Unit tests for `RetryExecutor` metric emission (no-retry yields no metrics, retryable error increments retry counter, attempts under attempt-cap all emit). (#116)
+- Unit tests for `PdClient::ping()` (cluster ID from response header, null when missing, propagates gRPC errors). (#116)
+- E2E tests `testHealthCheckReturnsLearnedClusterId` / `testHealthCheckAfterClientCloseThrows` / `testMetricsBackendReceivesRpcCountersOnRealOperation` — exercise the new APIs end-to-end against a real PD cluster. (#116)
+
 ### Security
 - **Plaintext gRPC is no longer the silent default** — `GrpcClient` now logs a warning whenever an insecure (plaintext) channel is opened. A new `allowInsecure` constructor parameter (defaults to `true` for backward compatibility) controls whether insecure channels are permitted; set `allowInsecure: false` to fail-closed when no TLS configuration is provided. (#80)
 - **Partial TLS configuration now throws `InvalidArgumentException`** — `TlsConfig` constructor rejects configurations with client certificate/key without a CA certificate. Previously, a partial mTLS configuration (client cert+key without CA) was reported as "not enabled", causing the connection to silently downgrade to plaintext, sending credentials over an unencrypted channel. (#80)
