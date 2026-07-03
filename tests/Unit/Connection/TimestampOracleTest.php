@@ -33,7 +33,13 @@ class TimestampOracleTest extends TestCase
 
         $grpc->method('call')->willReturn($response);
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
         $result = $oracle->getTimestamp();
 
         $expected = (1715000000000 << 18) | 5;
@@ -55,7 +61,13 @@ class TimestampOracleTest extends TestCase
 
         $grpc->method('call')->willReturn($response);
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
         $result = $oracle->getTimestamp();
 
         $expected = (1715000000000 << 18) | 0;
@@ -72,7 +84,13 @@ class TimestampOracleTest extends TestCase
 
         $grpc->method('call')->willReturn($response);
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
 
         $this->expectException(TiKvException::class);
         $this->expectExceptionMessage('TSO response missing timestamp');
@@ -88,7 +106,13 @@ class TimestampOracleTest extends TestCase
         $grpc->method('call')
             ->willThrowException(new GrpcException('tso unavailable', 14));
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
 
         $this->expectException(TiKvException::class);
         $this->expectExceptionMessage('TSO request failed');
@@ -104,7 +128,13 @@ class TimestampOracleTest extends TestCase
         $grpc->method('call')
             ->willThrowException(new GrpcException('tso unavailable', 14));
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
 
         try {
             $oracle->getTimestamp();
@@ -135,7 +165,13 @@ class TimestampOracleTest extends TestCase
                 ),
             );
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, $logger);
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            $logger,
+        );
 
         try {
             $oracle->getTimestamp();
@@ -158,7 +194,13 @@ class TimestampOracleTest extends TestCase
 
         $pdClient = new PdClient($grpc, '127.0.0.1:2379');
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            $pdClient->getClusterId(...),
+            $pdClient->setClusterId(...),
+            new NullLogger(),
+        );
         $result = $oracle->getTimestamp();
 
         $expected = (1715000000000 << 18) | 1;
@@ -184,7 +226,13 @@ class TimestampOracleTest extends TestCase
 
         $pdClient = new PdClient($grpc, '127.0.0.1:2379');
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            $pdClient->getClusterId(...),
+            $pdClient->setClusterId(...),
+            new NullLogger(),
+        );
         $result = $oracle->getTimestamp();
 
         $expected = (1715000000000 << 18) | 2;
@@ -204,7 +252,13 @@ class TimestampOracleTest extends TestCase
 
         $pdClient = new PdClient($grpc, '127.0.0.1:2379');
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            $pdClient->getClusterId(...),
+            $pdClient->setClusterId(...),
+            new NullLogger(),
+        );
 
         $this->expectException(TiKvException::class);
         $this->expectExceptionMessage('TSO request failed');
@@ -220,7 +274,13 @@ class TimestampOracleTest extends TestCase
         $grpc->method('call')
             ->willThrowException(new GrpcException('mismatch cluster id, need 42 but got 0', 14));
 
-        $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $pdClient, new NullLogger());
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
 
         $this->expectException(TiKvException::class);
         $this->expectExceptionMessage('TSO request failed');
