@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `GrpcResponseParser::setMaxMessageSize()` — configurable maximum protobuf message size guard before `mergeFromString()`, preventing potential DoS from oversized messages (defense in depth for CVE-2026-6409). Default is 0 (unlimited). (#75)
+- Unit tests for `GrpcResponseParser` max message size: within limit, exceeds limit, null message, zero disables limit. (#75)
 - `TlsConfigBuilder::withCaCertFile()`, `withCaCertPem()`, `withClientCertFile()`, `withClientCertPem()` — explicit API to distinguish file paths from inline PEM content, replacing the ambiguous `file_exists()` guessing in legacy methods. The new methods support an optional `$baseDir` parameter to restrict allowed directories. The legacy `withCaCert()` and `withClientCert()` are deprecated. (#87)
 - `RegionRangeClipper` in `src/Client/Region/` — centralises the region range-clipping logic that was duplicated across `RawKvScanner`, `RawKvRangeOps` and `Transaction`. All three call sites now delegate to the shared clipper, ensuring consistent half-open `[start, end)` semantics and empty-end-key = +infinity treatment. (#84)
 - Unit tests for `RegionRangeClipper` covering forward/reverse clipping across multiple adjacent regions, empty end key (+infinity), keys at region split points, range outside region, and empty regions array. (#84)
@@ -21,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests for `RetryExecutor` budget exhaustion (total backoff, ServerBusy, max-attempts cap, wall-clock deadline), `BatchAsyncExecutor` dispatch-phase vs wait-phase failure aggregation, `TlsConfigBuilder` disallowed-extension rejection, and `TlsConfig::close()` key-zeroing (#100)
 
 ### Changed
+- **Upgraded `google/protobuf` from `^3.25` to `^4.33.6`** — fixes CVE-2026-6409 (HIGH), a DoS vulnerability through malicious protobuf messages containing negative varints or deep recursion. (#75)
+- `composer.json` `config.audit.block-insecure` set to `true` — vulnerable dependencies now fail `composer audit` and block CI. (#75)
 - **Moved shared region DTOs and helpers from `RawKv` to `Region` namespace**: `RegionInfo` and `PeerInfo` DTOs moved to `CrazyGoat\TiKV\Client\Region\Dto`, `RegionGrouper` and `RegionErrorHandler` moved to `CrazyGoat\TiKV\Client\Region`. All imports updated across the codebase. The old `RawKv\Dto\RegionInfo`, `RawKv\Dto\PeerInfo`, `RawKv\RegionGrouper`, and `RawKv\RegionErrorHandler` aliases are removed. (#111)
 - Merged `commitOptimistic()` and `commitPessimistic()` into a single `doCommit()` method; removed dead `$firstRegionKeys`/`$isPrimaryRegion` that were never used (#113)
 - **Error classification now uses typed `ErrorKind` enum instead of message-string matching.** Added `ErrorKind` enum covering all 21 `Errorpb\Error` oneof variants; `RegionException` auto-detects the kind from the proto `Error` message; `ErrorClassifier::classifyByKind()` is the single source of truth for the error→backoff mapping; `Transaction::classifyError()` uses `TxnRetryableException` carrying `BackoffType` directly; `PdClient::extractClusterIdFromError()` uses pure regex without `str_contains()` (#93)

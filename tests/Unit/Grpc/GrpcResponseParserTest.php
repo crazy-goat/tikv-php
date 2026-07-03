@@ -150,4 +150,67 @@ class GrpcResponseParserTest extends TestCase
         $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class, $result);
         $this->assertSame('value-data', $result->getValue());
     }
+
+    public function testMaxMessageSizeAcceptsMessageWithinLimit(): void
+    {
+        GrpcResponseParser::setMaxMessageSize(1024);
+
+        $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
+        $request->setKey('within-limit');
+        $serialized = $request->serializeToString();
+
+        $event = ['message' => $serialized];
+        $result = GrpcResponseParser::deserialize($event, \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class);
+
+        $this->assertSame('within-limit', $result->getKey());
+    }
+
+    public function testMaxMessageSizeRejectsOversizedMessage(): void
+    {
+        GrpcResponseParser::setMaxMessageSize(1);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('exceeds maximum allowed');
+
+        $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
+        $request->setKey('too-large-key');
+        $serialized = $request->serializeToString();
+
+        $event = ['message' => $serialized];
+        GrpcResponseParser::deserialize($event, \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class);
+    }
+
+    public function testMaxMessageSizeDisabledByDefault(): void
+    {
+        $this->assertSame(0, GrpcResponseParser::getMaxMessageSize());
+    }
+
+    public function testMaxMessageSizeWithNullMessageDoesNotThrow(): void
+    {
+        GrpcResponseParser::setMaxMessageSize(1);
+
+        $event = ['message' => null];
+        $result = GrpcResponseParser::deserialize($event, \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class);
+
+        $this->assertInstanceOf(Message::class, $result);
+    }
+
+    public function testMaxMessageSizeZeroDisablesLimit(): void
+    {
+        GrpcResponseParser::setMaxMessageSize(0);
+
+        $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
+        $request->setKey('any-size');
+        $serialized = $request->serializeToString();
+
+        $event = ['message' => $serialized];
+        $result = GrpcResponseParser::deserialize($event, \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class);
+
+        $this->assertSame('any-size', $result->getKey());
+    }
+
+    protected function tearDown(): void
+    {
+        GrpcResponseParser::setMaxMessageSize(0);
+    }
 }
