@@ -258,6 +258,35 @@ class RawKvE2ETest extends TestCase
         $this->assertEquals($pairs, $this->testClient->batchGet(array_keys($pairs)));
     }
 
+    /**
+     * Multi-region batch correctness check.
+     *
+     * Writes 600 keys (well over the region size split boundary) and reads
+     * them back in a single batch operation. With the dispatch-phase refactor
+     * in #81 every region's send RPC is issued before any wait begins, so
+     * the cluster receives all fan-out sends together and the resulting
+     * batch read returns the values in original key order.
+     */
+    public function testBatchFanOutAcrossMultipleRegions(): void
+    {
+        $prefix = 'batch-fanout-' . uniqid() . '-';
+        $pairs = [];
+        for ($i = 0; $i < 600; $i++) {
+            // Pad the suffix so spans sort deterministically across regions.
+            $key = $prefix . str_pad((string) $i, 4, '0', STR_PAD_LEFT);
+            $pairs[$key] = "v{$i}";
+        }
+
+        $this->testClient->batchPut($pairs);
+        foreach (array_keys($pairs) as $key) {
+            $this->keysToCleanup[] = $key;
+        }
+
+        $results = $this->testClient->batchGet(array_keys($pairs));
+
+        $this->assertSame($pairs, $results, 'Multi-region batch read must return every key in the original order');
+    }
+
     // ========================================================================
     // Forward scan
     // ========================================================================

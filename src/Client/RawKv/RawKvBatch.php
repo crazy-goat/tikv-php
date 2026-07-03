@@ -12,6 +12,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -23,6 +24,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use Google\Protobuf\Internal\Message;
 use Grpc\Call;
 use Grpc\Timeval;
 use Psr\Log\LoggerInterface;
@@ -66,7 +68,7 @@ final readonly class RawKvBatch
                 strlen(...),
             );
             foreach ($subBatches as $subBatch) {
-                $regionCalls[] = fn(): RawBatchGetResponse => $this->batchGetWithRetry(
+                $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetWithRetry(
                     $subBatch,
                     $retryExecutor,
                     $columnFamily,
@@ -163,7 +165,7 @@ final readonly class RawKvBatch
             foreach ($subBatches as $subBatch) {
                 $batchTtls = $subBatch['ttls'];
                 $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
-                $regionCalls[] = fn(): null => $this->batchPutWithRetry(
+                $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchPutWithRetry(
                     $subBatch['pairs'],
                     $batchTtl,
                     $retryExecutor,
@@ -202,7 +204,7 @@ final readonly class RawKvBatch
                 strlen(...),
             );
             foreach ($subBatches as $subBatch) {
-                $regionCalls[] = fn(): null => $this->batchDeleteWithRetry(
+                $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchDeleteWithRetry(
                     $subBatch,
                     $retryExecutor,
                     $forCas,
@@ -215,7 +217,7 @@ final readonly class RawKvBatch
     }
 
     // ========================================================================
-    // Async per-region methods
+    // Async per-region methods (issue send only, return un-waited future)
     // ========================================================================
 
     /**
@@ -354,7 +356,11 @@ final readonly class RawKvBatch
     }
 
     // ========================================================================
-    // Retry wrappers
+    // Retry wrappers - return un-waited CheckedGrpcFuture so the executor's
+    // dispatch phase issues all gRPC sends before any wait begins (true
+    // client-side fan-out at the wire layer for the common single-region
+    // case). Region-error checking runs once at the executor wait boundary
+    // via CheckedGrpcFuture::waitForExecutor().
     // ========================================================================
 
     /**
@@ -364,13 +370,14 @@ final readonly class RawKvBatch
         array $keys,
         RetryExecutor $retryExecutor,
         string $columnFamily = '',
-    ): RawBatchGetResponse {
+    ): CheckedGrpcFuture {
         $key = $keys[0] ?? '';
-        return $retryExecutor->execute($key, function () use (
+        /** @var CheckedGrpcFuture $future */
+        $future = $retryExecutor->execute($key, function () use (
             $keys,
             $key,
             $columnFamily,
-        ): RawBatchGetResponse {
+        ): CheckedGrpcFuture {
             $fresh = $this->resolveRegion($key);
 
             // Fast path: all keys still belong to the same region.
@@ -383,20 +390,14 @@ final readonly class RawKvBatch
             }
 
             if ($allInRegion) {
-                $future = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
-                $response = $this->measure(
-                    'batch_read',
-                    $key,
-                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
-                );
-                /** @var RawBatchGetResponse $response */
-                RegionErrorHandler::check($response);
-                return $response;
+                $inner = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
+                return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_read', $key);
             }
 
-            // Multi-region path: a region split/merge occurred since the
-            // initial grouping. Re-resolve all keys and dispatch each
-            // sub-group to its own region, then merge the results.
+            // Multi-region path (rare error-recovery case after a split/merge):
+            // dispatch every sub-region's send up-front, then merge their
+            // responses during the wait phase. Because all sends are issued
+            // before any wait, server-side latencies overlap.
             $resolved = $this->regionResolver->batchResolveRegions($keys);
 
             $groups = [];
@@ -412,26 +413,33 @@ final readonly class RawKvBatch
                 $groups[$gid]['keys'][] = $k;
             }
 
-            $allPairs = [];
+            $innerFutures = [];
             foreach ($groups as $group) {
-                $f = $group['region'];
-                $future = $this->executeBatchGetForRegionAsync($f, $group['keys'], $columnFamily);
-                $response = $this->measure(
-                    'batch_read',
-                    $key,
-                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
-                );
-                /** @var RawBatchGetResponse $response */
-                RegionErrorHandler::check($response);
-                foreach ($response->getPairs() as $pair) {
-                    $allPairs[] = $pair;
-                }
+                $innerFutures[] = $this->executeBatchGetForRegionAsync($group['region'], $group['keys'], $columnFamily);
             }
 
-            $merged = new RawBatchGetResponse();
-            $merged->setPairs($allPairs);
-            return $merged;
+            $waiter = function () use ($innerFutures): Message {
+                $allPairs = [];
+                foreach ($innerFutures as $future) {
+                    /** @var RawBatchGetResponse $response */
+                    $response = $future->wait();
+                    RegionErrorHandler::check($response);
+                    foreach ($response->getPairs() as $pair) {
+                        $allPairs[] = $pair;
+                    }
+                }
+                $merged = new RawBatchGetResponse();
+                $merged->setPairs($allPairs);
+                return $merged;
+            };
+            return $this->wrapWithLogging(
+                CheckedGrpcFuture::fromCallable($waiter),
+                'batch_read',
+                $key,
+            );
         });
+
+        return $future;
     }
 
     /**
@@ -444,15 +452,16 @@ final readonly class RawKvBatch
         RetryExecutor $retryExecutor,
         bool $forCas = false,
         string $columnFamily = '',
-    ): null {
+    ): CheckedGrpcFuture {
         $firstKey = $pairs !== [] ? $pairs[0]->getKey() : '';
-        return $retryExecutor->execute($firstKey, function () use (
+        /** @var CheckedGrpcFuture $future */
+        $future = $retryExecutor->execute($firstKey, function () use (
             $pairs,
             $ttl,
             $firstKey,
             $forCas,
             $columnFamily,
-        ): null {
+        ): CheckedGrpcFuture {
             $fresh = $this->resolveRegion($firstKey);
 
             // Fast path: all pairs still belong to the same region.
@@ -465,18 +474,11 @@ final readonly class RawKvBatch
             }
 
             if ($allInRegion) {
-                $future = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
-                $response = $this->measure(
-                    'batch_write',
-                    $firstKey,
-                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
-                );
-                /** @var RawBatchPutResponse $response */
-                RegionErrorHandler::check($response);
-                return null;
+                $inner = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
+                return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $firstKey);
             }
 
-            // Multi-region path: re-resolve all keys and re-dispatch.
+            // Multi-region path: dispatch every sub-region's send up-front.
             $keys = array_map(fn(KvPair $p): string => $p->getKey(), $pairs);
             $resolved = $this->regionResolver->batchResolveRegions($keys);
 
@@ -498,22 +500,35 @@ final readonly class RawKvBatch
                 }
             }
 
+            $innerFutures = [];
             foreach ($groups as $group) {
-                $f = $group['region'];
                 $batchTtls = $group['ttls'];
                 $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
-                $future = $this->executeBatchPutForRegionAsync($f, $group['pairs'], $batchTtl, $forCas, $columnFamily);
-                $response = $this->measure(
-                    'batch_write',
-                    $firstKey,
-                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
+                $innerFutures[] = $this->executeBatchPutForRegionAsync(
+                    $group['region'],
+                    $group['pairs'],
+                    $batchTtl,
+                    $forCas,
+                    $columnFamily,
                 );
-                /** @var RawBatchPutResponse $response */
-                RegionErrorHandler::check($response);
             }
 
-            return null;
+            $waiter = function () use ($innerFutures): Message {
+                foreach ($innerFutures as $future) {
+                    /** @var RawBatchPutResponse $response */
+                    $response = $future->wait();
+                    RegionErrorHandler::check($response);
+                }
+                return new RawBatchPutResponse();
+            };
+            return $this->wrapWithLogging(
+                CheckedGrpcFuture::fromCallable($waiter),
+                'batch_write',
+                $firstKey,
+            );
         });
+
+        return $future;
     }
 
     /**
@@ -524,14 +539,15 @@ final readonly class RawKvBatch
         RetryExecutor $retryExecutor,
         bool $forCas = false,
         string $columnFamily = '',
-    ): null {
+    ): CheckedGrpcFuture {
         $key = $keys[0] ?? '';
-        return $retryExecutor->execute($key, function () use (
+        /** @var CheckedGrpcFuture $future */
+        $future = $retryExecutor->execute($key, function () use (
             $keys,
             $key,
             $forCas,
             $columnFamily,
-        ): null {
+        ): CheckedGrpcFuture {
             $fresh = $this->resolveRegion($key);
 
             // Fast path: all keys still belong to the same region.
@@ -544,18 +560,11 @@ final readonly class RawKvBatch
             }
 
             if ($allInRegion) {
-                $future = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
-                $response = $this->measure(
-                    'batch_write',
-                    $key,
-                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
-                );
-                /** @var RawBatchDeleteResponse $response */
-                RegionErrorHandler::check($response);
-                return null;
+                $inner = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
+                return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $key);
             }
 
-            // Multi-region path: re-resolve all keys and re-dispatch.
+            // Multi-region path: dispatch every sub-region's send up-front.
             $resolved = $this->regionResolver->batchResolveRegions($keys);
 
             $groups = [];
@@ -571,20 +580,75 @@ final readonly class RawKvBatch
                 $groups[$gid]['keys'][] = $k;
             }
 
+            $innerFutures = [];
             foreach ($groups as $group) {
-                $f = $group['region'];
-                $future = $this->executeBatchDeleteForRegionAsync($f, $group['keys'], $forCas, $columnFamily);
-                $response = $this->measure(
-                    'batch_write',
-                    $key,
-                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
+                $innerFutures[] = $this->executeBatchDeleteForRegionAsync(
+                    $group['region'],
+                    $group['keys'],
+                    $forCas,
+                    $columnFamily,
                 );
-                /** @var RawBatchDeleteResponse $response */
-                RegionErrorHandler::check($response);
             }
 
-            return null;
+            $waiter = function () use ($innerFutures): Message {
+                foreach ($innerFutures as $future) {
+                    /** @var RawBatchDeleteResponse $response */
+                    $response = $future->wait();
+                    RegionErrorHandler::check($response);
+                }
+                return new RawBatchDeleteResponse();
+            };
+            return $this->wrapWithLogging(
+                CheckedGrpcFuture::fromCallable($waiter),
+                'batch_write',
+                $key,
+            );
         });
+
+        return $future;
+    }
+
+    /**
+     * Wrap a {@see CheckedGrpcFuture} so that the wait phase is timed against
+     * the {@see SlowLogConfig} threshold and a warning is logged when the
+     * elapsed time exceeds it. Slow-log measurement belongs at the wait
+     * boundary because the interesting business latency is the round-trip,
+     * not the dispatch microseconds.
+     */
+    private function wrapWithLogging(
+        CheckedGrpcFuture $inner,
+        string $operation,
+        string $key,
+    ): CheckedGrpcFuture {
+        if (!$this->slowLogConfig instanceof SlowLogConfig) {
+            return $inner;
+        }
+        $threshold = $this->slowLogConfig->getThreshold($operation);
+        if ($threshold <= 0) {
+            return $inner;
+        }
+        $logger = $this->logger;
+        $logCallback = function (float $durationMs) use ($threshold, $operation, $key, $logger): void {
+            $logger->warning('Slow TiKV operation', [
+                'operation' => $operation,
+                'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
+                'duration_ms' => round($durationMs, 2),
+                'threshold_ms' => $threshold,
+            ]);
+        };
+        return CheckedGrpcFuture::fromCallable(
+            function () use ($inner, $threshold, $logCallback): Message {
+                $start = hrtime(true);
+                try {
+                    return $inner->waitForExecutor();
+                } finally {
+                    $durationMs = (hrtime(true) - $start) / 1_000_000;
+                    if ($durationMs > $threshold) {
+                        $logCallback($durationMs);
+                    }
+                }
+            },
+        );
     }
 
     /**
@@ -605,40 +669,5 @@ final readonly class RawKvBatch
     private function resolveRegion(string $key): RegionInfo
     {
         return $this->regionResolver->getRegionInfo($key);
-    }
-
-    /**
-     * Measure the execution time of a callable and log a warning if it
-     * exceeds the configured threshold for the given operation type.
-     *
-     * @template T
-     * @param callable(): T $fn
-     * @return T
-     */
-    private function measure(string $operation, string $key, callable $fn): mixed
-    {
-        if (!$this->slowLogConfig instanceof SlowLogConfig) {
-            return $fn();
-        }
-
-        $threshold = $this->slowLogConfig->getThreshold($operation);
-        if ($threshold <= 0) {
-            return $fn();
-        }
-
-        $start = hrtime(true);
-        try {
-            return $fn();
-        } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            if ($durationMs > $threshold) {
-                $this->logger->warning('Slow TiKV operation', [
-                    'operation' => $operation,
-                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
-                    'duration_ms' => round($durationMs, 2),
-                    'threshold_ms' => $threshold,
-                ]);
-            }
-        }
     }
 }
