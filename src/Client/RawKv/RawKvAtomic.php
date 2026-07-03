@@ -8,11 +8,14 @@ use CrazyGoat\Proto\Kvrpcpb\RawCASRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawCASResponse;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 final readonly class RawKvAtomic
 {
@@ -20,6 +23,8 @@ final readonly class RawKvAtomic
         private GrpcClientInterface $grpc,
         private RegionResolver $regionResolver,
         private TimeoutConfig $timeoutConfig,
+        private LoggerInterface $logger = new NullLogger(),
+        private ?SlowLogConfig $slowLogConfig = null,
     ) {
     }
 
@@ -60,15 +65,15 @@ final readonly class RawKvAtomic
                 $request->setCf($columnFamily);
             }
 
-            /** @var RawCASResponse $response */
-            $response = $this->grpc->call(
+            $response = $this->measure('write', $key, fn(): RawCASResponse => $this->grpc->call(
                 $address,
                 'tikvpb.Tikv',
                 'RawCompareAndSwap',
                 $request,
                 RawCASResponse::class,
                 $this->timeoutConfig->writeTimeoutMs,
-            );
+            ));
+            /** @var RawCASResponse $response */
             RegionErrorHandler::check($response);
 
             $error = $response->getError();
@@ -81,5 +86,40 @@ final readonly class RawKvAtomic
                 previousValue: $response->getPreviousNotExist() ? null : $response->getPreviousValue(),
             );
         });
+    }
+
+    /**
+     * Measure the execution time of a callable and log a warning if it
+     * exceeds the configured threshold for the given operation type.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    private function measure(string $operation, string $key, callable $fn): mixed
+    {
+        if (!$this->slowLogConfig instanceof SlowLogConfig) {
+            return $fn();
+        }
+
+        $threshold = $this->slowLogConfig->getThreshold($operation);
+        if ($threshold <= 0) {
+            return $fn();
+        }
+
+        $start = hrtime(true);
+        try {
+            return $fn();
+        } finally {
+            $durationMs = (hrtime(true) - $start) / 1_000_000;
+            if ($durationMs > $threshold) {
+                $this->logger->warning('Slow TiKV operation', [
+                    'operation' => $operation,
+                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
+                    'duration_ms' => round($durationMs, 2),
+                    'threshold_ms' => $threshold,
+                ]);
+            }
+        }
     }
 }

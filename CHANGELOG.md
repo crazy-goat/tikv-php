@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`PdClient ↔ TimestampOracle` reference cycle broken** — `TimestampOracle` now receives `getClusterId`/`setClusterId` closures instead of the full `PdClient` reference, allowing the cycle collector to reclaim memory promptly without relying on GC. (#91)
 
 ### Added
+- `SlowLogConfig` — optional, injectable configuration for slow operation logging in `RawKvClient`. Accepts per-operation-type thresholds (read, write, batch read/write, scan, delete range, checksum) in milliseconds. Pass via `RawKvClient::create()` options key `'slowLog'`. When a gRPC call exceeds its threshold, a PSR-3 warning is logged with the redacted key, duration, and threshold. (#31)
+- `TimeoutConfig` now has a `checksumTimeoutMs` property (default 30s) for the `RawChecksum` RPC, separate from `deleteRangeTimeoutMs`. Configured via `'timeout'` option key `checksumTimeoutMs`. (#31)
+- Unit tests for `SlowLogConfig`: default values, custom values, per-operation threshold lookups, unknown operation returns zero, zero threshold disables logging. (#31)
 - `StoreCache` now has a `maxEntries` cap (default 128) with LRU eviction — when at capacity, the least recently used entry is evicted before inserting a new one, preventing unbounded memory growth over time. (#108)
 - `GrpcClient` `closed` guard — `close()` sets an internal flag and `call()` throws `InvalidStateException` if invoked after close, making the closed state explicit and preventing latent use-after-close bugs. (#108)
 - Unit tests for `StoreCache` LRU eviction: eviction at capacity, correct LRU ordering with multiple entries, overwrite does not count towards capacity, clear resets and allows re-adding. (#108)

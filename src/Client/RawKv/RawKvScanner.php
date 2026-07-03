@@ -10,6 +10,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -32,6 +33,7 @@ final readonly class RawKvScanner
         private int $serverBusyBudgetMs,
         private RegionCacheInterface $regionCache,
         private LoggerInterface $logger,
+        private ?SlowLogConfig $slowLogConfig = null,
     ) {
     }
 
@@ -229,15 +231,15 @@ final readonly class RawKvScanner
                 $request->setCf($columnFamily);
             }
 
-            /** @var RawScanResponse $response */
-            $response = $this->grpc->call(
+            $response = $this->measure('scan', $startKey, fn(): RawScanResponse => $this->grpc->call(
                 $address,
                 'tikvpb.Tikv',
                 'RawScan',
                 $request,
                 RawScanResponse::class,
                 $this->timeoutConfig->scanTimeoutMs,
-            );
+            ));
+            /** @var RawScanResponse $response */
             RegionErrorHandler::check($response);
 
             $results = [];
@@ -279,5 +281,40 @@ final readonly class RawKvScanner
             $this->regionResolver,
             $this->logger,
         );
+    }
+
+    /**
+     * Measure the execution time of a callable and log a warning if it
+     * exceeds the configured threshold for the given operation type.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    private function measure(string $operation, string $key, callable $fn): mixed
+    {
+        if (!$this->slowLogConfig instanceof SlowLogConfig) {
+            return $fn();
+        }
+
+        $threshold = $this->slowLogConfig->getThreshold($operation);
+        if ($threshold <= 0) {
+            return $fn();
+        }
+
+        $start = hrtime(true);
+        try {
+            return $fn();
+        } finally {
+            $durationMs = (hrtime(true) - $start) / 1_000_000;
+            if ($durationMs > $threshold) {
+                $this->logger->warning('Slow TiKV operation', [
+                    'operation' => $operation,
+                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
+                    'duration_ms' => round($durationMs, 2),
+                    'threshold_ms' => $threshold,
+                ]);
+            }
+        }
     }
 }
