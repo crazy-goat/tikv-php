@@ -42,4 +42,50 @@ class TlsConfigTest extends TestCase
         $config = new TlsConfig();
         $this->assertFalse($config->isEnabled());
     }
+
+    // ========================================================================
+    // close() key-zeroing
+    // ========================================================================
+
+    public function testCloseZeroesClientKey(): void
+    {
+        $config = new TlsConfig(
+            caCert: 'ca-content',
+            clientCert: 'client-cert-content',
+            clientKey: 'client-key-content',
+        );
+
+        $config->close();
+
+        $this->assertNotNull($config->clientKey);
+        $this->assertSame(strlen('client-key-content'), strlen($config->clientKey));
+        $this->assertSame(
+            str_repeat("\0", strlen('client-key-content')),
+            $config->clientKey,
+        );
+    }
+
+    public function testCloseWithNullClientKeyDoesNotCrash(): void
+    {
+        $config = new TlsConfig(caCert: 'ca-content');
+
+        // Should not throw
+        $config->close();
+
+        $this->assertNull($config->clientKey);
+    }
+
+    public function testCloseDoesNotAffectCaCertOrClientCert(): void
+    {
+        $config = new TlsConfig(
+            caCert: 'ca-content',
+            clientCert: 'client-cert-content',
+            clientKey: 'sensitive-key',
+        );
+
+        $config->close();
+
+        $this->assertSame('ca-content', $config->caCert);
+        $this->assertSame('client-cert-content', $config->clientCert);
+    }
 }
