@@ -2781,28 +2781,40 @@ class RawKvE2ETest extends TestCase
         $client = RawKvClient::create($pdEndpoints, options: ['metrics' => $metrics]);
         $this->keysToCleanup[] = 'metrics:test:key';
 
-        $client->put('metrics:test:key', 'value');
-        $client->get('metrics:test:key');
-        $client->healthCheck();
+        $caught = null;
+        try {
+            $client->put('metrics:test:key', 'value');
+            $client->get('metrics:test:key');
+            $client->healthCheck();
+        } catch (\Throwable $e) {
+            $caught = $e;
+        }
 
         // At least one PD or TiKV RPC must have been recorded.
-        $totalRpc = array_sum([
-            $metrics->getRpcStarted('pdpb.PD/GetRegion'),
-            $metrics->getRpcStarted('pdpb.PD/GetMembers'),
-            $metrics->getRpcStarted('tikvpb.Tikv/KvPut'),
-            $metrics->getRpcStarted('tikvpb.Tikv/KvGet'),
-        ]);
+        $tags = [
+            'pdpb.PD/GetRegion' => $metrics->getRpcStarted('pdpb.PD/GetRegion'),
+            'pdpb.PD/GetMembers' => $metrics->getRpcStarted('pdpb.PD/GetMembers'),
+            'tikvpb.Tikv/KvPut' => $metrics->getRpcStarted('tikvpb.Tikv/KvPut'),
+            'tikvpb.Tikv/KvGet' => $metrics->getRpcStarted('tikvpb.Tikv/KvGet'),
+            'pdpb.PD/GetStore' => $metrics->getRpcStarted('pdpb.PD/GetStore'),
+        ];
+        $totalRpc = array_sum($tags);
+
+        if ($caught !== null) {
+            $this->fail(sprintf(
+                'Caught exception before metric check: %s :: %s. Tags: %s',
+                get_class($caught),
+                $caught->getMessage(),
+                json_encode($tags, JSON_THROW_ON_ERROR),
+            ));
+        }
+
         $this->assertGreaterThanOrEqual(
             1,
             $totalRpc,
-            sprintf(
-                'Expected >= 1 RPC counter (got PD/GetRegion=%d, PD/GetMembers=%d, KvPut=%d, KvGet=%d)',
-                $metrics->getRpcStarted('pdpb.PD/GetRegion'),
-                $metrics->getRpcStarted('pdpb.PD/GetMembers'),
-                $metrics->getRpcStarted('tikvpb.Tikv/KvPut'),
-                $metrics->getRpcStarted('tikvpb.Tikv/KvGet'),
-            ),
+            'Expected >= 1 RPC counter across all known tags; got: ' . json_encode($tags, JSON_THROW_ON_ERROR),
         );
+
         $client->close();
     }
 
