@@ -4,28 +4,6 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\TxnKv;
 
-use CrazyGoat\Proto\Kvrpcpb\BatchGetRequest;
-use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
-use CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest;
-use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
-use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
-use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
-use CrazyGoat\Proto\Kvrpcpb\GetRequest;
-use CrazyGoat\Proto\Kvrpcpb\GetResponse;
-use CrazyGoat\Proto\Kvrpcpb\KeyError;
-use CrazyGoat\Proto\Kvrpcpb\Mutation;
-use CrazyGoat\Proto\Kvrpcpb\Op;
-use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
-use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
-use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest;
-use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse;
-use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
-use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\PessimisticAction;
-use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
-use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
-use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
-use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatRequest;
-use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
@@ -37,41 +15,37 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
-use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
-use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
-use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
-use CrazyGoat\TiKV\Client\Region\RegionGrouper;
-use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
-use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
+/**
+ * A single transaction against TiKV.
+ *
+ * This is a thin façade that delegates to focused collaborators:
+ *
+ * - {@see TransactionState}   — encapsulates the mutable transaction state
+ * - {@see TxnReader}          — handles get, batchGet, scan operations
+ * - {@see TwoPhaseCommitter}  — handles commit, rollback, pessimistic locking
+ *
+ * The public API is unchanged from the original 944-line monolithic
+ * Transaction class (refactored in issue #83).  All behaviour is
+ * preserved; no breaking changes to callers.
+ */
 final class Transaction
 {
-    private ?int $commitTs = null;
-    private TransactionStatus $status = TransactionStatus::Active;
-    /** @var array<string, ?string> key => value. null value means delete */
-    private array $writeSet = [];
-    /** @var array<string, ?string> key => value read (for read-set tracking) */
-    private array $readSet = [];
-    /** @var string[] keys pending pessimistic lock (batched at commit time) */
-    private array $pendingLockKeys = [];
-    private bool $closed = false;
-    private ?int $maxForUpdateTs = null;
+    private readonly TransactionState $state;
+    private readonly TxnReader $reader;
+    private readonly TwoPhaseCommitter $committer;
     private ?RetryExecutor $retryExecutor = null;
 
-    private const OPTIMISTIC_LOCK_TTL_MS = 3000;
-    private const PESSIMISTIC_LOCK_TTL_MS = 30000;
     /** Maximum scan limit to prevent unbounded memory usage */
     private const MAX_SCAN_LIMIT = 10240;
-    /** TiKV KvScan treats limit=0 as "return 0 results" */
-    private const PESSIMISTIC_LOCK_RETRY_DELAY_MS = 100;
 
     public function __construct(
         private readonly string $txnId,
@@ -88,7 +62,36 @@ final class Transaction
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
         private readonly MetricsInterface $metrics = new NoOpMetrics(),
     ) {
+        $this->state = new TransactionState();
+
+        $this->reader = new TxnReader(
+            startTs: $this->startTs,
+            grpc: $this->grpc,
+            pdClient: $this->pdClient,
+            regionResolver: $this->regionResolver,
+            timeoutConfig: $this->timeoutConfig,
+            lockResolver: $this->lockResolver,
+            regionCache: $this->regionCache,
+        );
+
+        $this->committer = new TwoPhaseCommitter(
+            startTs: $this->startTs,
+            pessimistic: $this->pessimistic,
+            priority: $this->priority,
+            pdClient: $this->pdClient,
+            grpc: $this->grpc,
+            regionCache: $this->regionCache,
+            regionResolver: $this->regionResolver,
+            lockResolver: $this->lockResolver,
+            timeoutConfig: $this->timeoutConfig,
+            maxBackoffMs: $this->maxBackoffMs,
+            logger: $this->logger,
+        );
     }
+
+    // ---------------------------------------------------------------
+    //  Public getters (unchanged API)
+    // ---------------------------------------------------------------
 
     public function getTxnId(): string
     {
@@ -102,12 +105,12 @@ final class Transaction
 
     public function getCommitTs(): ?int
     {
-        return $this->commitTs;
+        return $this->state->getCommitTs();
     }
 
     public function getStatus(): TransactionStatus
     {
-        return $this->status;
+        return $this->state->getStatus();
     }
 
     public function isPessimistic(): bool
@@ -121,6 +124,26 @@ final class Transaction
     }
 
     /**
+     * @return array<string, ?string>
+     */
+    public function getWriteSet(): array
+    {
+        return $this->state->getWriteSet();
+    }
+
+    /**
+     * @return array<string, ?string>
+     */
+    public function getReadSet(): array
+    {
+        return $this->state->getReadSet();
+    }
+
+    // ---------------------------------------------------------------
+    //  Read operations (delegated to TxnReader)
+    // ---------------------------------------------------------------
+
+    /**
      * @throws InvalidStateException
      * @throws TiKvException
      * @throws TransactionConflictException
@@ -129,58 +152,14 @@ final class Transaction
      */
     public function get(string $key): ?string
     {
-        $this->ensureActive();
+        $this->state->ensureActive();
 
-        if (array_key_exists($key, $this->writeSet)) {
-            return $this->writeSet[$key];
-        }
-
-        return $this->executeWithRetry($key, function () use ($key): ?string {
-            $region = $this->regionResolver->getRegionInfo($key);
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-            $request = new GetRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setKey($key);
-            $request->setVersion($this->startTs);
-
-            /** @var GetResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvGet',
-                $request,
-                GetResponse::class,
-                $this->timeoutMs('read'),
-            );
-
-            $this->handleRegionError($response, $region);
-
-            $error = $response->getError();
-            if ($error !== null) {
-                $locked = $error->getLocked();
-                if ($locked !== null) {
-                    $rawPrimary = $locked->getPrimaryLock();
-                    $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $key);
-                    $this->lockResolver->resolveLock($lockPrimary, $locked);
-                    throw new TxnRetryableException('Lock encountered, resolved - retry', BackoffType::TxnLock);
-                }
-
-                $retryable = $error->getRetryable();
-                if ($retryable !== '') {
-                    throw new TransactionConflictException($retryable);
-                }
-            }
-
-            if ($response->getNotFound()) {
-                $this->readSet[$key] = null;
-                return null;
-            }
-
-            $value = $response->getValue();
-            $this->readSet[$key] = $value;
-            return $value;
-        });
+        return $this->reader->get(
+            $key,
+            $this->state,
+            $this->retryExecutor(),
+            $this->classifyError(...),
+        );
     }
 
     /**
@@ -195,56 +174,12 @@ final class Transaction
      */
     public function batchGet(array $keys): array
     {
-        $this->ensureActive();
+        $this->state->ensureActive();
 
-        $results = [];
-        $remaining = [];
-        foreach ($keys as $key) {
-            if (array_key_exists($key, $this->writeSet)) {
-                $results[$key] = $this->writeSet[$key];
-            } else {
-                $remaining[] = $key;
-            }
-        }
-
-        if ($remaining !== []) {
-            $remoteResults = $this->batchGetFromTiKV($remaining);
-            $results = array_merge($results, $remoteResults);
-        }
-
-        $ordered = [];
-        foreach ($keys as $key) {
-            $ordered[$key] = $results[$key] ?? null;
-        }
-        return $ordered;
-    }
-
-    /**
-     * @throws InvalidStateException
-     */
-    public function set(string $key, string $value): void
-    {
-        $this->ensureActive();
-
-        if ($this->pessimistic) {
-            $this->pendingLockKeys[] = $key;
-        }
-
-        $this->writeSet[$key] = $value;
-    }
-
-    /**
-     * @throws InvalidStateException
-     */
-    public function delete(string $key): void
-    {
-        $this->ensureActive();
-
-        if ($this->pessimistic) {
-            $this->pendingLockKeys[] = $key;
-        }
-
-        $this->writeSet[$key] = null;
+        return $this->reader->batchGet(
+            $keys,
+            $this->state,
+        );
     }
 
     /**
@@ -259,35 +194,54 @@ final class Transaction
      */
     public function scan(string $startKey, string $endKey, int $limit = 0): array
     {
-        $this->ensureActive();
+        $this->state->ensureActive();
 
-        $limit = $this->normalizeScanLimit($limit);
+        return $this->reader->scan(
+            $startKey,
+            $endKey,
+            $limit,
+            $this->state,
+            $this->retryExecutor(),
+            $this->classifyError(...),
+            self::MAX_SCAN_LIMIT,
+        );
+    }
 
-        $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
-        $results = [];
-        $remaining = $limit;
+    // ---------------------------------------------------------------
+    //  Write operations
+    // ---------------------------------------------------------------
 
-        $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
-            $regionLimit = $remaining > 0 ? $remaining : $limit;
-            $regionResults = $this->executeScanForRegion(
-                $region,
-                $scanStart,
-                $scanEnd,
-                $regionLimit,
-            );
-            array_push($results, ...$regionResults);
+    /**
+     * @throws InvalidStateException
+     */
+    public function set(string $key, string $value): void
+    {
+        $this->state->ensureActive();
 
-            if ($remaining > 0) {
-                $remaining -= count($regionResults);
-                if ($remaining <= 0) {
-                    break;
-                }
-            }
+        if ($this->pessimistic) {
+            $this->state->addPendingLockKey($key);
         }
 
-        return $this->finalizeScanResults($results, $startKey, $endKey, $limit);
+        $this->state->setWrite($key, $value);
     }
+
+    /**
+     * @throws InvalidStateException
+     */
+    public function delete(string $key): void
+    {
+        $this->state->ensureActive();
+
+        if ($this->pessimistic) {
+            $this->state->addPendingLockKey($key);
+        }
+
+        $this->state->setWrite($key, null);
+    }
+
+    // ---------------------------------------------------------------
+    //  Commit / Rollback (delegated to TwoPhaseCommitter)
+    // ---------------------------------------------------------------
 
     /**
      * @throws InvalidStateException
@@ -299,15 +253,22 @@ final class Transaction
      */
     public function commit(): void
     {
-        $this->ensureActive();
+        $this->state->ensureActive();
 
-        if ($this->writeSet === []) {
-            $this->status = TransactionStatus::Committed;
-            $this->closeTransaction();
+        if ($this->state->isEmptyWriteSet()) {
+            $this->state->setStatus(TransactionStatus::Committed);
+            $this->state->close();
             return;
         }
 
-        $this->doCommit();
+        $this->committer->commit(
+            $this->state,
+            $this->retryExecutor(),
+            $this->classifyError(...),
+        );
+
+        $this->state->setStatus(TransactionStatus::Committed);
+        $this->state->close();
     }
 
     /**
@@ -318,26 +279,24 @@ final class Transaction
      */
     public function rollback(): void
     {
-        $this->ensureActive();
+        $this->state->ensureActive();
 
-        if ($this->writeSet === []) {
-            $this->status = TransactionStatus::RolledBack;
-            $this->closeTransaction();
+        if ($this->state->isEmptyWriteSet()) {
+            $this->state->setStatus(TransactionStatus::RolledBack);
+            $this->state->close();
             return;
         }
 
-        if ($this->pessimistic) {
-            $this->pessimisticRollbackAll();
-        }
-
-        $this->batchRollback(array_keys($this->writeSet));
-
-        $this->writeSet = [];
-        $this->readSet = [];
-        $this->commitTs = null;
-        $this->status = TransactionStatus::RolledBack;
-        $this->closeTransaction();
+        $this->committer->rollback(
+            $this->state,
+            $this->retryExecutor(),
+            $this->classifyError(...),
+        );
     }
+
+    // ---------------------------------------------------------------
+    //  Heartbeat (delegated to TwoPhaseCommitter)
+    // ---------------------------------------------------------------
 
     /**
      * @throws InvalidStateException
@@ -347,855 +306,26 @@ final class Transaction
      */
     public function heartbeat(int $adviseLockTtlMs = 10000): int
     {
-        $this->ensureActive();
+        $this->state->ensureActive();
 
-        $primary = $this->getPrimaryKey();
+        $primary = $this->state->getPrimaryKey();
 
-        return $this->executeWithRetry($primary, function () use ($primary, $adviseLockTtlMs): int {
-            $region = $this->regionResolver->getRegionInfo($primary);
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-            $request = new TxnHeartBeatRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setPrimaryLock($primary);
-            $request->setStartVersion($this->startTs);
-            $request->setAdviseLockTtl($adviseLockTtlMs);
-
-            $this->logger->debug('TxnHeartBeat', [
-                'txnId' => $this->txnId,
-                'primary' => KeyRedactor::redact($primary),
-                'adviseLockTtlMs' => $adviseLockTtlMs,
-            ]);
-
-            /** @var TxnHeartBeatResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvTxnHeartBeat',
-                $request,
-                TxnHeartBeatResponse::class,
-                $this->timeoutMs('write'),
-            );
-
-            $this->handleRegionError($response, $region);
-
-            $error = $response->getError();
-            if ($error !== null) {
-                throw new TiKvException('Heartbeat failed: key error');
-            }
-
-            return (int) $response->getLockTtl();
-        });
-    }
-
-    /**
-     * @return array<string, ?string>
-     */
-    public function getWriteSet(): array
-    {
-        return $this->writeSet;
-    }
-
-    /**
-     * @return array<string, ?string>
-     */
-    public function getReadSet(): array
-    {
-        return $this->readSet;
-    }
-
-    private function doCommit(): void
-    {
-        $primary = $this->getPrimaryKey();
-
-        if ($this->pessimistic) {
-            $this->pessimisticLockBatch($primary);
-        }
-
-        $mutations = $this->buildMutations();
-        $keysByRegion = $this->groupMutationsByRegion($mutations);
-        $allKeys = array_keys($this->writeSet);
-
-        foreach ($keysByRegion as $regionData) {
-            $region = $regionData['region'];
-            $regionMutations = $regionData['mutations'];
-            $this->prewriteForRegion($region, $regionMutations, $primary);
-        }
-
-        $this->commitTs = $this->pdClient->getTimestamp();
-        $this->commitKeys($allKeys);
-
-        $this->status = TransactionStatus::Committed;
-        $this->closeTransaction();
-    }
-
-    /**
-     * @param Mutation[] $mutations
-     */
-    private function prewriteForRegion(
-        RegionInfo $region,
-        array $mutations,
-        string $primary,
-    ): void {
-        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-        $request = new PrewriteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
-        $request->setMutations($mutations);
-        $request->setPrimaryLock($primary);
-        $request->setStartVersion($this->startTs);
-        $request->setLockTtl(self::OPTIMISTIC_LOCK_TTL_MS);
-
-        if ($this->pessimistic) {
-            $forUpdateTs = $this->maxForUpdateTs ?? $this->startTs;
-            $request->setForUpdateTs($forUpdateTs);
-            $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
-            $actions = [];
-            foreach ($mutations as $mutation) {
-                $actions[] = PessimisticAction::DO_PESSIMISTIC_CHECK;
-            }
-            $request->setPessimisticActions($actions);
-        }
-
-        $this->logger->debug('Prewrite', [
-            'txnId' => $this->txnId,
-            'regionId' => $region->regionId,
-            'keyCount' => count($mutations),
-            'pessimistic' => $this->pessimistic,
-        ]);
-
-        /** @var PrewriteResponse $response */
-        $response = $this->grpc->call(
-            $address,
-            'tikvpb.Tikv',
-            'KvPrewrite',
-            $request,
-            PrewriteResponse::class,
-            $this->timeoutMs('write'),
+        return $this->committer->heartbeat(
+            $primary,
+            $this->state,
+            $this->retryExecutor(),
+            $this->classifyError(...),
+            $adviseLockTtlMs,
         );
-        $this->handleRegionError($response, $region);
-
-        $errors = $response->getErrors();
-        if (count($errors) > 0) {
-            $this->handlePrewriteErrors($errors);
-        }
     }
 
-    /**
-     * @param iterable<KeyError> $errors
-     */
-    private function handlePrewriteErrors(iterable $errors): void
-    {
-        foreach ($errors as $keyError) {
-            $locked = $keyError->getLocked();
-            if ($locked !== null) {
-                $rawPrimary = $locked->getPrimaryLock();
-                $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                $this->lockResolver->resolveLock($lockPrimary, $locked);
-                throw new TxnRetryableException(
-                    'Lock conflict during prewrite, resolved - retry',
-                    BackoffType::TxnLock,
-                );
-            }
-
-            $conflict = $keyError->getConflict();
-            if ($conflict !== null) {
-                throw new TransactionConflictException('Write conflict during prewrite');
-            }
-
-            $retryable = $keyError->getRetryable();
-            if ($retryable !== '') {
-                throw new TransactionConflictException($retryable);
-            }
-
-            $abort = $keyError->getAbort();
-            if ($abort !== '') {
-                throw new TransactionConflictException($abort);
-            }
-        }
-    }
-
-    private function handleCommitError(KeyError $error): void
-    {
-        $retryable = $error->getRetryable();
-        if ($retryable !== '') {
-            throw new TransactionConflictException($retryable);
-        }
-        $abort = $error->getAbort();
-        if ($abort !== '') {
-            throw new TransactionConflictException($abort);
-        }
-    }
-
-    private function handleRollbackError(KeyError $error): void
-    {
-        $locked = $error->getLocked();
-        if ($locked !== null) {
-            $rawPrimary = $locked->getPrimaryLock();
-            $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-            $this->lockResolver->resolveLock($lockPrimary, $locked);
-            throw new TxnRetryableException(
-                'Lock encountered during rollback, resolved - retry',
-                BackoffType::TxnLock,
-            );
-        }
-
-        $retryable = $error->getRetryable();
-        if ($retryable !== '') {
-            throw new TxnRetryableException(
-                'Retryable error during rollback: ' . $retryable,
-                BackoffType::TxnLock,
-            );
-        }
-
-        $abort = $error->getAbort();
-        if ($abort !== '') {
-            throw new TransactionConflictException(
-                'Abort during rollback: ' . $abort,
-            );
-        }
-    }
-
-    /**
-     * 2PC commit phase.
-     *
-     * TiKV requires the COMMIT of the primary key's region to precede the
-     * COMMIT of secondary regions — otherwise the secondary commit may be
-     * rejected with a "primary not committed" error. This method:
-     *   1. Resolves all keys to their current regions.
-     *   2. Identifies the region containing the primary key and commits it
-     *      first (without retry — a failure here means the transaction is
-     *      not committed and the caller must roll back).
-     *   3. Commits secondary regions under the retry executor. Commits are
-     *      idempotent given a fixed start_version + commit_version, so
-     *      transient region/grpc errors are safely retryable. This means
-     *      a half-committed state (primary committed, some secondary not)
-     *      is acceptable: a retry will eventually commit the remaining
-     *      secondary regions.
-     *
-     * @param string[] $keys
-     */
-    private function commitKeys(array $keys): void
-    {
-        if ($keys === []) {
-            return;
-        }
-
-        $keysByRegion = $this->groupStringsByRegion($keys);
-
-        if ($keysByRegion === []) {
-            // No region information available (e.g. resolution failed for
-            // every key). Nothing to do here; the caller will see a fatal
-            // error elsewhere in the commit flow.
-            return;
-        }
-
-        $primary = $this->getPrimaryKey();
-
-        // Resolve the primary's region so we can commit it first. If the
-        // primary is not present in the grouping (e.g. resolved to null),
-        // fall back to the first region in deterministic order.
-        $primaryRegionId = null;
-        foreach ($keysByRegion as $regionId => $regionData) {
-            if (in_array($primary, $regionData['keys'], true)) {
-                $primaryRegionId = $regionId;
-                break;
-            }
-        }
-
-        if ($primaryRegionId === null) {
-            $primaryRegionId = array_key_first($keysByRegion);
-        }
-
-        // Commit the primary first. Failures here are fatal: do not retry
-        // (otherwise we risk committing with an outdated commitTs).
-        $primaryRegionData = $keysByRegion[$primaryRegionId];
-        $primaryRegionKeys = $primaryRegionData['keys'];
-        $this->commitForRegion($primaryRegionData['region'], $primaryRegionKeys);
-
-        // The transaction is now logically committed (TiKV guarantees
-        // visibility once the primary commit succeeds, and secondaries
-        // are idempotent). The actual TransactionStatus flip to Committed
-        // happens in doCommit() after this method returns successfully,
-        // so the flag is driven by overall success, not just primary.
-
-        // Remove the primary region from the outstanding work; commit the
-        // remaining secondary regions under the retry executor.
-        unset($keysByRegion[$primaryRegionId]);
-
-        foreach ($keysByRegion as $regionData) {
-            $region = $regionData['region'];
-            $regionKeys = $regionData['keys'];
-            $firstKey = $regionKeys[0] ?? '';
-
-            $this->executeWithRetry($firstKey, function () use ($region, $regionKeys): null {
-                $this->commitForRegion($region, $regionKeys);
-                return null;
-            });
-        }
-    }
-
-    /**
-     * @param string[] $keys
-     * @throws InvalidStateException if commitTs is null (must be set before commit phase)
-     */
-    private function commitForRegion(RegionInfo $region, array $keys): void
-    {
-        if ($this->commitTs === null) {
-            throw new InvalidStateException(
-                'commitTs must be set before committing; doCommit() must run first.',
-            );
-        }
-
-        $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-        $request = new CommitRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
-        $request->setStartVersion($this->startTs);
-        $request->setKeys($keys);
-        $request->setCommitVersion($this->commitTs);
-
-        $this->logger->debug('Commit', [
-            'txnId' => $this->txnId,
-            'regionId' => $region->regionId,
-            'keyCount' => count($keys),
-            'commitTs' => $this->commitTs,
-        ]);
-
-        /** @var CommitResponse $response */
-        $response = $this->grpc->call(
-            $address,
-            'tikvpb.Tikv',
-            'KvCommit',
-            $request,
-            CommitResponse::class,
-            $this->timeoutMs('write'),
-        );
-        $this->handleRegionError($response, $region);
-
-        $error = $response->getError();
-        if ($error !== null) {
-            $this->handleCommitError($error);
-        }
-    }
-
-    /**
-     * @param string[] $keys
-     */
-    private function batchRollback(array $keys): void
-    {
-        $keysByRegion = $this->groupStringsByRegion($keys);
-
-        foreach ($keysByRegion as $regionData) {
-            $region = $regionData['region'];
-            $regionKeys = $regionData['keys'];
-            $firstKey = $regionKeys[0] ?? '';
-
-            $this->executeWithRetry($firstKey, function () use ($region, $regionKeys): null {
-                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-                $request = new BatchRollbackRequest();
-                $request->setContext(RegionContextFactory::fromRegionInfo($region));
-                $request->setStartVersion($this->startTs);
-                $request->setKeys($regionKeys);
-
-                $this->logger->debug('BatchRollback', [
-                    'txnId' => $this->txnId,
-                    'regionId' => $region->regionId,
-                    'keyCount' => count($regionKeys),
-                ]);
-
-                /** @var BatchRollbackResponse $response */
-                $response = $this->grpc->call(
-                    $address,
-                    'tikvpb.Tikv',
-                    'KvBatchRollback',
-                    $request,
-                    BatchRollbackResponse::class,
-                    $this->timeoutMs('write'),
-                );
-                $this->handleRegionError($response, $region);
-
-                $error = $response->getError();
-                if ($error !== null) {
-                    $this->handleRollbackError($error);
-                }
-
-                return null;
-            });
-        }
-    }
-
-    private function pessimisticLockBatch(string $primary): void
-    {
-        if ($this->pendingLockKeys === []) {
-            return;
-        }
-
-        $keys = array_values(array_unique($this->pendingLockKeys));
-        $this->pendingLockKeys = [];
-
-        $keysByRegion = $this->groupStringsByRegion($keys);
-        $isFirstLock = true;
-
-        foreach ($keysByRegion as $regionData) {
-            $region = $regionData['region'];
-            $regionKeys = $regionData['keys'];
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-            $mutations = [];
-            foreach ($regionKeys as $key) {
-                $mutation = new Mutation();
-                $mutation->setOp(Op::PessimisticLock);
-                $mutation->setKey($key);
-                $mutations[] = $mutation;
-            }
-
-            // Get a fresh PD timestamp for for_update_ts (fix #3).
-            $forUpdateTs = $this->pdClient->getTimestamp();
-            if ($this->maxForUpdateTs === null || $forUpdateTs > $this->maxForUpdateTs) {
-                $this->maxForUpdateTs = $forUpdateTs;
-            }
-
-            $elapsedMs = 0;
-            $attempt = 0;
-            do {
-                $attempt++;
-                $request = new PessimisticLockRequest();
-                $request->setContext(RegionContextFactory::fromRegionInfo($region));
-                $request->setMutations($mutations);
-                $request->setPrimaryLock($primary);
-                $request->setStartVersion($this->startTs);
-                $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
-                $request->setForUpdateTs($forUpdateTs);
-                $request->setIsFirstLock($isFirstLock);
-                $request->setReturnValues(true);
-
-                $this->logger->debug('PessimisticLock', [
-                    'txnId' => $this->txnId,
-                    'regionId' => $region->regionId,
-                    'keyCount' => count($regionKeys),
-                    'attempt' => $attempt,
-                    'forUpdateTs' => $forUpdateTs,
-                ]);
-
-                // GrpcException is NOT caught – transport errors propagate
-                // through the retry/classifier path (fix #1).
-                /** @var PessimisticLockResponse $response */
-                $response = $this->grpc->call(
-                    $address,
-                    'tikvpb.Tikv',
-                    'KvPessimisticLock',
-                    $request,
-                    PessimisticLockResponse::class,
-                    $this->timeoutMs('write'),
-                );
-
-                $this->handleRegionError($response, $region);
-
-                $errors = $response->getErrors();
-                $needRetry = false;
-
-                if (count($errors) > 0) {
-                    foreach ($errors as $keyError) {
-                        $deadlock = $keyError->getDeadlock();
-                        if ($deadlock !== null) {
-                            throw new DeadlockException(
-                                message: 'Deadlock detected during pessimistic lock',
-                                deadlockKey: $deadlock->getDeadlockKey() !== '' ? $deadlock->getDeadlockKey() : null,
-                                deadlockKeyHash: (int) $deadlock->getDeadlockKeyHash(),
-                                lockTs: (int) $deadlock->getLockTs(),
-                            );
-                        }
-
-                        $locked = $keyError->getLocked();
-                        if ($locked !== null) {
-                            // Resolve the conflicting lock, then re-attempt acquisition (fix #2).
-                            // Use the lock's real primary key for status check (fix #4).
-                            $rawPrimary = $locked->getPrimaryLock();
-                            $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                            $this->lockResolver->resolveLock($lockPrimary, $locked);
-                            $needRetry = true;
-                            break;
-                        }
-
-                        $conflict = $keyError->getConflict();
-                        if ($conflict !== null) {
-                            throw new TransactionConflictException(
-                                'Write conflict during pessimistic lock',
-                            );
-                        }
-                    }
-                }
-
-                if (!$needRetry) {
-                    // Lock acquired successfully.
-                    break;
-                }
-
-                // Backoff before re-attempting the lock.
-                $delayMs = min(
-                    self::PESSIMISTIC_LOCK_RETRY_DELAY_MS * (1 << min($attempt, 6)),
-                    10000,
-                );
-
-                // Cap cumulative sleep to maxBackoffMs.
-                $remainingMs = $this->maxBackoffMs - $elapsedMs;
-                if ($remainingMs <= 0) {
-                    $this->logger->warning('Pessimistic lock retry budget exhausted', [
-                        'txnId' => $this->txnId,
-                        'elapsedMs' => $elapsedMs,
-                    ]);
-                    break;
-                }
-                $delayMs = min($delayMs, $remainingMs);
-
-                $this->logger->debug('Pessimistic lock conflict, retrying', [
-                    'txnId' => $this->txnId,
-                    'attempt' => $attempt,
-                    'delayMs' => $delayMs,
-                    'elapsedMs' => $elapsedMs,
-                ]);
-                usleep($delayMs * 1000);
-                $elapsedMs += $delayMs;
-
-                // Re-fetch a fresh timestamp for the retry attempt.
-                $forUpdateTs = $this->pdClient->getTimestamp();
-                if ($forUpdateTs > $this->maxForUpdateTs) {
-                    $this->maxForUpdateTs = $forUpdateTs;
-                }
-            } while ($elapsedMs < $this->maxBackoffMs);
-
-            $isFirstLock = false;
-        }
-    }
-
-    private function pessimisticRollbackAll(): void
-    {
-        $pessimisticKeys = array_keys($this->writeSet);
-        if ($pessimisticKeys === []) {
-            return;
-        }
-
-        $keysByRegion = $this->groupStringsByRegion($pessimisticKeys);
-
-        foreach ($keysByRegion as $regionData) {
-            $region = $regionData['region'];
-            $regionKeys = $regionData['keys'];
-            $firstKey = $regionKeys[0] ?? '';
-
-            $this->executeWithRetry($firstKey, function () use ($region, $regionKeys): null {
-                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-                $request = new PessimisticRollbackRequest();
-                $request->setContext(RegionContextFactory::fromRegionInfo($region));
-                $request->setStartVersion($this->startTs);
-                $request->setForUpdateTs($this->startTs);
-                $request->setKeys($regionKeys);
-
-                $this->logger->debug('PessimisticRollback', [
-                    'txnId' => $this->txnId,
-                    'regionId' => $region->regionId,
-                ]);
-
-                /** @var PessimisticRollbackResponse $response */
-                $response = $this->grpc->call(
-                    $address,
-                    'tikvpb.Tikv',
-                    'KVPessimisticRollback',
-                    $request,
-                    PessimisticRollbackResponse::class,
-                    $this->timeoutMs('write'),
-                );
-                $this->handleRegionError($response, $region);
-
-                $errors = $response->getErrors();
-                foreach ($errors as $keyError) {
-                    $this->handleRollbackError($keyError);
-                }
-
-                return null;
-            });
-        }
-    }
-
-    /**
-     * @param string[] $keys
-     * @return array<string, ?string>
-     */
-    private function batchGetFromTiKV(array $keys): array
-    {
-        $results = [];
-        $keysByRegion = $this->groupStringsByRegion($keys);
-
-        foreach ($keysByRegion as $regionData) {
-            $region = $regionData['region'];
-            $regionKeys = $regionData['keys'];
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-            $request = new BatchGetRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setKeys($regionKeys);
-            $request->setVersion($this->startTs);
-
-            /** @var BatchGetResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvBatchGet',
-                $request,
-                BatchGetResponse::class,
-                $this->timeoutMs('batch_read'),
-            );
-            $this->handleRegionError($response, $region);
-
-            foreach ($response->getPairs() as $pair) {
-                $results[$pair->getKey()] = $pair->getValue();
-            }
-        }
-
-        foreach ($keys as $key) {
-            if (!array_key_exists($key, $results)) {
-                $results[$key] = null;
-            }
-            $this->readSet[$key] = $results[$key];
-        }
-
-        return $results;
-    }
-
-    /**
-     * @return array<array{key: string, value: ?string}>
-     */
-    private function executeScanForRegion(
-        RegionInfo $region,
-        string $startKey,
-        string $endKey,
-        int $limit,
-    ): array {
-        return $this->executeWithRetry($startKey, function () use ($region, $startKey, $endKey, $limit): array {
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-            $request = new ScanRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setStartKey($startKey);
-            if ($endKey !== '') {
-                $request->setEndKey($endKey);
-            }
-            $request->setLimit($limit > 0 ? $limit : self::MAX_SCAN_LIMIT);
-            $request->setVersion($this->startTs);
-
-            /** @var ScanResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvScan',
-                $request,
-                ScanResponse::class,
-                $this->timeoutMs('scan'),
-            );
-            $this->handleRegionError($response, $region);
-
-            $error = $response->getError();
-            if ($error !== null) {
-                $locked = $error->getLocked();
-                if ($locked !== null) {
-                    $rawPrimary = $locked->getPrimaryLock();
-                    $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                    $this->lockResolver->resolveLock($lockPrimary, $locked);
-                    throw new TxnRetryableException(
-                        'Lock encountered during scan, resolved - retry',
-                        BackoffType::TxnLock,
-                    );
-                }
-            }
-
-            $results = [];
-            foreach ($response->getPairs() as $pair) {
-                $results[] = [
-                    'key' => $pair->getKey(),
-                    'value' => $pair->getValue(),
-                ];
-            }
-
-            return $results;
-        });
-    }
-
-    /**
-     * @throws InvalidArgumentException
-     */
-    private function normalizeScanLimit(int $limit): int
-    {
-        if ($limit < 0) {
-            throw new InvalidArgumentException('Scan limit must be 0 or greater');
-        }
-
-        if ($limit === 0) {
-            return self::MAX_SCAN_LIMIT;
-        }
-
-        if ($limit > self::MAX_SCAN_LIMIT) {
-            throw new InvalidArgumentException(sprintf(
-                'Scan limit (%d) exceeds maximum allowed scan limit of %d',
-                $limit,
-                self::MAX_SCAN_LIMIT,
-            ));
-        }
-
-        return $limit;
-    }
-
-    /**
-     * Merge TiKV scan results with the local write set to enforce read-your-writes
-     * semantics, then apply the limit.
-     *
-     * @param array<array{key: string, value: ?string}> $results
-     * @return array<array{key: string, value: ?string}>
-     */
-    private function finalizeScanResults(array $results, string $startKey, string $endKey, int $limit): array
-    {
-        // Build a map of TiKV results (key => value)
-        $tikvMap = [];
-        foreach ($results as $entry) {
-            $tikvMap[$entry['key']] = $entry['value'];
-        }
-
-        // Collect all unique keys: from TiKV results + write-set keys in range
-        $allKeys = array_keys($tikvMap);
-        foreach (array_keys($this->writeSet) as $key) {
-            // Check if key is in range [startKey, endKey)
-            if ($key >= $startKey && ($endKey === '' || $key < $endKey)) {
-                $allKeys[] = $key;
-            }
-        }
-        $allKeys = array_unique($allKeys);
-        sort($allKeys);
-
-        // Build merged result set in key order
-        $merged = [];
-        foreach ($allKeys as $key) {
-            if (count($merged) >= $limit) {
-                break;
-            }
-
-            if (array_key_exists($key, $this->writeSet)) {
-                // Write set value takes precedence
-                if ($this->writeSet[$key] !== null) {
-                    $merged[] = ['key' => $key, 'value' => $this->writeSet[$key]];
-                }
-                // else: deleted in write set, omit from results
-            } elseif (array_key_exists($key, $tikvMap)) {
-                // Key came from TiKV and not in write set
-                $merged[] = ['key' => $key, 'value' => $tikvMap[$key]];
-            }
-        }
-
-        return $merged;
-    }
-
-    private function timeoutMs(string $operationType): ?int
-    {
-        return match ($operationType) {
-            'read' => $this->timeoutConfig->readTimeoutMs,
-            'write' => $this->timeoutConfig->writeTimeoutMs,
-            'batch_read' => $this->timeoutConfig->batchReadTimeoutMs,
-            'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
-            'scan' => $this->timeoutConfig->scanTimeoutMs,
-            default => null,
-        };
-    }
-
-    private function getPrimaryKey(): string
-    {
-        $key = array_key_first($this->writeSet);
-        if ($key === null) {
-            throw new InvalidStateException('Write set is empty, no primary key');
-        }
-        return $key;
-    }
-
-    /**
-     * @return Mutation[]
-     */
-    private function buildMutations(): array
-    {
-        $mutations = [];
-        foreach ($this->writeSet as $key => $value) {
-            $mutation = new Mutation();
-            $mutation->setKey($key);
-
-            if ($value === null) {
-                $mutation->setOp(Op::Del);
-                $mutation->setValue('');
-            } else {
-                $mutation->setOp(Op::Put);
-                $mutation->setValue($value);
-            }
-
-            $mutations[] = $mutation;
-        }
-        return $mutations;
-    }
-
-    /**
-     * @param Mutation[] $mutations
-     * @return array<int, array{region: RegionInfo, mutations: Mutation[]}>
-     */
-    private function groupMutationsByRegion(array $mutations): array
-    {
-        $grouped = RegionGrouper::groupItemsByRegion(
-            $mutations,
-            fn(Mutation $m) => $m->getKey(),
-            $this->regionResolver,
-        );
-
-        // Remap 'items' → 'mutations' for backward compatibility
-        $result = [];
-        foreach ($grouped as $regionId => $data) {
-            $result[$regionId] = [
-                'region' => $data['region'],
-                'mutations' => $data['items'],
-            ];
-        }
-
-        return $result;
-    }
-
-    /**
-     * @param string[] $keys
-     * @return array<int, array{region: RegionInfo, keys: string[]}>
-     */
-    private function groupStringsByRegion(array $keys): array
-    {
-        return RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
-    }
-
-    private function handleRegionError(
-        \Google\Protobuf\Internal\Message $response,
-        RegionInfo $region,
-    ): void {
-        RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
-    }
-
-    private function ensureActive(): void
-    {
-        if ($this->closed) {
-            throw new InvalidStateException('Transaction is not active');
-        }
-        if ($this->status !== TransactionStatus::Active) {
-            throw new InvalidStateException('Transaction is not active');
-        }
-    }
-
-    private function closeTransaction(): void
-    {
-        $this->closed = true;
-    }
+    // ---------------------------------------------------------------
+    //  Internal
+    // ---------------------------------------------------------------
 
     public function __destruct()
     {
-        if ($this->status === TransactionStatus::Active && !$this->closed) {
+        if ($this->state->getStatus() === TransactionStatus::Active && !$this->state->isClosed()) {
             try {
                 $this->rollback();
             } catch (\Throwable $e) {
@@ -1222,27 +352,12 @@ final class Transaction
         return $this->retryExecutor;
     }
 
-    /**
-     * @template T
-     * @param callable(): T $operation
-     * @return T
-     */
-    private function executeWithRetry(string $key, callable $operation): mixed
-    {
-        return $this->retryExecutor()->execute($key, $operation, $this->classifyError(...));
-    }
-
     private function classifyError(TiKvException $e): ?BackoffType
     {
-        // Typed path: exceptions that carry their own BackoffType.
         if ($e instanceof TxnRetryableException) {
             return $e->backoffType;
         }
 
-        // RegionException instances with a typed error kind are handled
-        // by ErrorClassifier (fallback in RetryExecutor).  For
-        // TransactionConflictException and other non-retryable tx errors
-        // the response is fatal (no retry).
         return null;
     }
 }
