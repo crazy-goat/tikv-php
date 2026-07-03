@@ -58,4 +58,55 @@ final class RegionGrouper
 
         return $grouped;
     }
+
+    /**
+     * Group arbitrary items by region using a key-extractor callable.
+     *
+     * This is the generalised version of {@see groupKeysByRegionBatch} for
+     * callers that hold non-string items (e.g. Mutation objects). Items
+     * whose key could not be resolved are silently skipped (caller should
+     * have validated all keys beforehand).
+     *
+     * Example:
+     * <code>
+     * RegionGrouper::groupItemsByRegion(
+     *     $mutations,
+     *     fn(Mutation $m) => $m->getKey(),
+     *     $regionResolver,
+     * );
+     * </code>
+     *
+     * @template T of object
+     * @param T[] $items
+     * @param callable(T): string $keyExtractor
+     * @return array<int, array{region: RegionInfo, items: T[]}>
+     */
+    public static function groupItemsByRegion(
+        array $items,
+        callable $keyExtractor,
+        RegionResolver $regionResolver,
+    ): array {
+        if ($items === []) {
+            return [];
+        }
+
+        $keys = array_map($keyExtractor, $items);
+        $resolved = $regionResolver->batchResolveRegions($keys);
+
+        $grouped = [];
+        foreach ($items as $item) {
+            $key = $keyExtractor($item);
+            $region = $resolved[$key] ?? null;
+            if ($region === null) {
+                continue;
+            }
+            $regionId = $region->regionId;
+            if (!isset($grouped[$regionId])) {
+                $grouped[$regionId] = ['region' => $region, 'items' => []];
+            }
+            $grouped[$regionId]['items'][] = $item;
+        }
+
+        return $grouped;
+    }
 }
