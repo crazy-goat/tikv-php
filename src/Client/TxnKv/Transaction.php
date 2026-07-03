@@ -557,6 +557,22 @@ final class Transaction
     }
 
     /**
+     * 2PC commit phase.
+     *
+     * TiKV requires the COMMIT of the primary key's region to precede the
+     * COMMIT of secondary regions — otherwise the secondary commit may be
+     * rejected with a "primary not committed" error. This method:
+     *   1. Resolves all keys to their current regions.
+     *   2. Identifies the region containing the primary key and commits it
+     *      first (without retry — a failure here means the transaction is
+     *      not committed and the caller must roll back).
+     *   3. Commits secondary regions under the retry executor. Commits are
+     *      idempotent given a fixed start_version + commit_version, so
+     *      transient region/grpc errors are safely retryable. This means
+     *      a half-committed state (primary committed, some secondary not)
+     *      is acceptable: a retry will eventually commit the remaining
+     *      secondary regions.
+     *
      * @param string[] $keys
      */
     private function commitKeys(array $keys): void
@@ -567,25 +583,77 @@ final class Transaction
 
         $keysByRegion = $this->groupStringsByRegion($keys);
 
+        if ($keysByRegion === []) {
+            // No region information available (e.g. resolution failed for
+            // every key). Nothing to do here; the caller will see a fatal
+            // error elsewhere in the commit flow.
+            return;
+        }
+
+        $primary = $this->getPrimaryKey();
+
+        // Resolve the primary's region so we can commit it first. If the
+        // primary is not present in the grouping (e.g. resolved to null),
+        // fall back to the first region in deterministic order.
+        $primaryRegionId = null;
+        foreach ($keysByRegion as $regionId => $regionData) {
+            if (in_array($primary, $regionData['keys'], true)) {
+                $primaryRegionId = $regionId;
+                break;
+            }
+        }
+
+        if ($primaryRegionId === null) {
+            $primaryRegionId = array_key_first($keysByRegion);
+        }
+
+        // Commit the primary first. Failures here are fatal: do not retry
+        // (otherwise we risk committing with an outdated commitTs).
+        $primaryRegionData = $keysByRegion[$primaryRegionId];
+        $primaryRegionKeys = $primaryRegionData['keys'];
+        $this->commitForRegion($primaryRegionData['region'], $primaryRegionKeys);
+
+        // The transaction is now logically committed (TiKV guarantees
+        // visibility once the primary commit succeeds, and secondaries
+        // are idempotent). The actual TransactionStatus flip to Committed
+        // happens in doCommit() after this method returns successfully,
+        // so the flag is driven by overall success, not just primary.
+
+        // Remove the primary region from the outstanding work; commit the
+        // remaining secondary regions under the retry executor.
+        unset($keysByRegion[$primaryRegionId]);
+
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
-            $this->commitForRegion($region, $regionKeys);
+            $firstKey = $regionKeys[0] ?? '';
+
+            $this->executeWithRetry($firstKey, function () use ($region, $regionKeys): null {
+                $this->commitForRegion($region, $regionKeys);
+                return null;
+            });
         }
     }
 
     /**
      * @param string[] $keys
+     * @throws InvalidStateException if commitTs is null (must be set before commit phase)
      */
     private function commitForRegion(RegionInfo $region, array $keys): void
     {
+        if ($this->commitTs === null) {
+            throw new InvalidStateException(
+                'commitTs must be set before committing; doCommit() must run first.',
+            );
+        }
+
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new CommitRequest();
         $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setStartVersion($this->startTs);
         $request->setKeys($keys);
-        $request->setCommitVersion($this->commitTs ?? 0);
+        $request->setCommitVersion($this->commitTs);
 
         $this->logger->debug('Commit', [
             'txnId' => $this->txnId,
