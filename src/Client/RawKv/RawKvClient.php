@@ -140,7 +140,7 @@ final class RawKvClient
             $tlsConfig = $builder->build();
         }
 
-        $grpc = new GrpcClient($resolvedLogger, $tlsConfig);
+        $grpc = new GrpcClient($resolvedLogger, $tlsConfig, metrics: $metrics);
         $storeCache = new StoreCache(logger: $resolvedLogger);
         $pdClient = new PdClient($grpc, $pdEndpoints[0], $resolvedLogger, $storeCache);
 
