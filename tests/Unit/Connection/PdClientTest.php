@@ -110,13 +110,56 @@ class PdClientTest extends TestCase
         $this->assertSame(1, $result->regionId);
     }
 
-    public function testCloseClosesGrpc(): void
+    public function testCloseDoesNotCloseGrpc(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('close');
+        $grpc->expects($this->never())->method('close');
 
         $client = new PdClient($grpc, 'pd:2379');
         $client->close();
+    }
+
+    public function testCloseClearsStoreCache(): void
+    {
+        $cache = $this->createMock(\CrazyGoat\TiKV\Client\Cache\StoreCacheInterface::class);
+        $cache->expects($this->once())->method('clear');
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $client = new PdClient($grpc, 'pd:2379', new NullLogger(), $cache);
+        $client->close();
+    }
+
+    public function testCloseResetsClusterId(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $client = new PdClient($grpc, 'pd:2379');
+        $client->setClusterId(42);
+        $this->assertSame(42, $client->getClusterId());
+
+        $client->close();
+        $this->assertNull($client->getClusterId());
+    }
+
+    public function testCloseResetsTso(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $client = new PdClient($grpc, 'pd:2379');
+
+        // Trigger TSO creation by calling getTimestamp (it will fail since we
+        // didn't set up a response, but the TSO object will be created).
+        try {
+            $client->getTimestamp();
+        } catch (\Throwable) {
+            // Expected to fail — we just need TSO to be initialized
+        }
+
+        $client->close();
+
+        // After close, TSO should be reset and a new getTimestamp call should
+        // create a fresh TSO rather than using the old one
+        $this->assertNull(
+            (new \ReflectionProperty(PdClient::class, 'tso'))->getValue($client)
+        );
     }
 
     public function testGetRegionLogsGrpcCall(): void

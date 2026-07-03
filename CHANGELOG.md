@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `StoreCache` now has a `maxEntries` cap (default 128) with LRU eviction — when at capacity, the least recently used entry is evicted before inserting a new one, preventing unbounded memory growth over time. (#108)
+- `GrpcClient` `closed` guard — `close()` sets an internal flag and `call()` throws `InvalidStateException` if invoked after close, making the closed state explicit and preventing latent use-after-close bugs. (#108)
+- Unit tests for `StoreCache` LRU eviction: eviction at capacity, correct LRU ordering with multiple entries, overwrite does not count towards capacity, clear resets and allows re-adding. (#108)
+- Unit tests for `PdClient::close()`: verifies store cache is cleared, cluster ID is reset, and TSO is nulled; verifies the shared `GrpcClient` is NOT closed by `PdClient`. (#108)
+- Unit test for `GrpcClient::call()` throwing `InvalidStateException` after `close()`. (#108)
 - Channel eviction in `GrpcClient`: idle channels are closed after a configurable TTL (default 10 min); at most `maxChannels` (default 64) are cached, evicting the least recently used channel when at capacity; channels in `TRANSIENT_FAILURE` or `SHUTDOWN` states are now reaped on next access (previously only `FATAL_FAILURE` was reaped). (#89)
 - `__destruct()` on `GrpcClient` — closes all cached channels when the reference is dropped without an explicit `close()` call. (#89)
 - `GrpcResponseParser::setMaxMessageSize()` — configurable maximum protobuf message size guard before `mergeFromString()`, preventing potential DoS from oversized messages (defense in depth for CVE-2026-6409). Default is 0 (unlimited). (#75)
@@ -25,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests for `RetryExecutor` budget exhaustion (total backoff, ServerBusy, max-attempts cap, wall-clock deadline), `BatchAsyncExecutor` dispatch-phase vs wait-phase failure aggregation, `TlsConfigBuilder` disallowed-extension rejection, and `TlsConfig::close()` key-zeroing (#100)
 
 ### Changed
+- **`PdClient::close()` no longer closes the shared `GrpcClient`** — ownership of the gRPC connection pool belongs to the high-level client (`RawKvClient` / `TxnKvClient`), which already closes it. `PdClient::close()` now only clears its own resources: store cache, cluster ID, and TSO. This prevents double-close on the shared `GrpcClient`. (#108)
 - **Upgraded `google/protobuf` from `^3.25` to `^4.33.6`** — fixes CVE-2026-6409 (HIGH), a DoS vulnerability through malicious protobuf messages containing negative varints or deep recursion. (#75)
 - `composer.json` `config.audit.block-insecure` set to `true` — vulnerable dependencies now fail `composer audit` and block CI. (#75)
 - **Moved shared region DTOs and helpers from `RawKv` to `Region` namespace**: `RegionInfo` and `PeerInfo` DTOs moved to `CrazyGoat\TiKV\Client\Region\Dto`, `RegionGrouper` and `RegionErrorHandler` moved to `CrazyGoat\TiKV\Client\Region`. All imports updated across the codebase. The old `RawKv\Dto\RegionInfo`, `RawKv\Dto\PeerInfo`, `RawKv\RegionGrouper`, and `RawKv\RegionErrorHandler` aliases are removed. (#111)

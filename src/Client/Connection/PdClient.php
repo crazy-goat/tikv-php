@@ -145,7 +145,12 @@ final class PdClient implements PdClientInterface
 
     public function close(): void
     {
-        $this->grpc->close();
+        // PdClient does NOT own the GrpcClient — it is shared and managed
+        // by the high-level client (RawKvClient or TxnKvClient). Only
+        // close PdClient-specific resources.
+        $this->storeCache?->clear();
+        $this->tso = null;
+        $this->clusterId = null;
     }
 
     private function createHeader(): RequestHeader

@@ -20,6 +20,8 @@ final class GrpcClient implements GrpcClientInterface
     /** @var array<string, array{channel: Channel, lastUsed: float, createdAt: float}> */
     private array $channels = [];
 
+    private bool $closed = false;
+
     private const DEFAULT_MAX_CHANNELS = 64;
     private const DEFAULT_IDLE_TTL_MS = 600000; // 10 minutes
 
@@ -44,6 +46,10 @@ final class GrpcClient implements GrpcClientInterface
         string $responseClass,
         ?int $timeoutMs = null,
     ): Message {
+        if ($this->closed) {
+            throw new InvalidStateException('gRPC client is closed');
+        }
+
         $channel = $this->getChannel($address);
 
         $deadline = $timeoutMs !== null && $timeoutMs > 0
@@ -87,6 +93,12 @@ final class GrpcClient implements GrpcClientInterface
 
     public function close(): void
     {
+        if ($this->closed) {
+            return;
+        }
+
+        $this->closed = true;
+
         $channels = $this->channels;
         $this->channels = [];
 
