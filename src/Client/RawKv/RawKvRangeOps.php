@@ -154,7 +154,7 @@ final readonly class RawKvRangeOps
                     'RawChecksum',
                     $request,
                     RawChecksumResponse::class,
-                    $this->timeoutConfig->deleteRangeTimeoutMs,
+                    $this->timeoutConfig->checksumTimeoutMs,
                 )
             );
             /** @var RawChecksumResponse $response */
@@ -195,7 +195,7 @@ final readonly class RawKvRangeOps
      */
     private function measure(string $operation, string $key, callable $fn): mixed
     {
-        if (!$this->slowLogConfig instanceof \CrazyGoat\TiKV\Client\Grpc\SlowLogConfig) {
+        if (!$this->slowLogConfig instanceof SlowLogConfig) {
             return $fn();
         }
 

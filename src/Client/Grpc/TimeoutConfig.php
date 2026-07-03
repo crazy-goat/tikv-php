@@ -13,6 +13,7 @@ final readonly class TimeoutConfig
         public int $batchWriteTimeoutMs = 10000,
         public int $scanTimeoutMs = 20000,
         public int $deleteRangeTimeoutMs = 30000,
+        public int $checksumTimeoutMs = 30000,
     ) {
     }
 }

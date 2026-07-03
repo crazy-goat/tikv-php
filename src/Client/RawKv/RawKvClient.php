@@ -49,6 +49,7 @@ final class RawKvClient
     public const OP_BATCH_WRITE = 'batch_write';
     public const OP_SCAN = 'scan';
     public const OP_DELETE_RANGE = 'delete_range';
+    public const OP_CHECKSUM = 'checksum';
 
     public const OPT_TIMEOUT = 'timeout';
     public const OPT_SLOW_LOG = 'slowLog';
@@ -145,6 +146,8 @@ final class RawKvClient
                     ? $t['scanTimeoutMs'] : $timeoutConfig->scanTimeoutMs,
                 deleteRangeTimeoutMs: isset($t['deleteRangeTimeoutMs']) && is_int($t['deleteRangeTimeoutMs'])
                     ? $t['deleteRangeTimeoutMs'] : $timeoutConfig->deleteRangeTimeoutMs,
+                checksumTimeoutMs: isset($t['checksumTimeoutMs']) && is_int($t['checksumTimeoutMs'])
+                    ? $t['checksumTimeoutMs'] : $timeoutConfig->checksumTimeoutMs,
             );
         }
 

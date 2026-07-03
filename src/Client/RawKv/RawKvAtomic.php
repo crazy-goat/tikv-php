@@ -98,7 +98,7 @@ final readonly class RawKvAtomic
      */
     private function measure(string $operation, string $key, callable $fn): mixed
     {
-        if (!$this->slowLogConfig instanceof \CrazyGoat\TiKV\Client\Grpc\SlowLogConfig) {
+        if (!$this->slowLogConfig instanceof SlowLogConfig) {
             return $fn();
         }
 
