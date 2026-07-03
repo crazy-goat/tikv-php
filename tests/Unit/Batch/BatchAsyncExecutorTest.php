@@ -154,9 +154,6 @@ class BatchAsyncExecutorTest extends TestCase
         // Region 3: success (future returns OK)
 
         $okCall = $this->createMock(Call::class);
-        $okResponse = new RawGetResponse();
-        $okResponse->setValue('ok');
-        $okCall = $this->createMock(Call::class);
         // Region 3 never reaches wait phase — the executor short-circuits
         // (cancelAll + break) on the first wait-phase failure in region 2.
         $okCall->expects($this->never())
