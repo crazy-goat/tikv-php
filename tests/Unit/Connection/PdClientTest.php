@@ -110,12 +110,25 @@ class PdClientTest extends TestCase
         $this->assertSame(1, $result->regionId);
     }
 
-    public function testCloseClosesGrpc(): void
+    public function testCloseDoesNotCloseSharedGrpc(): void
     {
+        // PdClient::close() must NOT close the shared GrpcClient – ownership
+        // belongs to RawKvClient / TxnKvClient.
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('close');
+        $grpc->expects($this->never())->method('close');
 
         $client = new PdClient($grpc, 'pd:2379');
+        $client->close();
+    }
+
+    public function testCloseClearsStoreCache(): void
+    {
+        $cache = $this->createMock(\CrazyGoat\TiKV\Client\Cache\StoreCacheInterface::class);
+        $cache->expects($this->once())->method('clear');
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new PdClient($grpc, 'pd:2379', new NullLogger(), $cache);
         $client->close();
     }
 

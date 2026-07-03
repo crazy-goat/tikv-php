@@ -104,6 +104,40 @@ class GrpcClientTest extends TestCase
         $this->client->close();
     }
 
+    public function testGetChannelThrowsAfterClose(): void
+    {
+        $this->client->close();
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidStateException::class);
+        $this->expectExceptionMessage('gRPC client is closed');
+
+        $this->client->getChannel('127.0.0.1:20160');
+    }
+
+    public function testCallThrowsAfterClose(): void
+    {
+        $this->client->close();
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidStateException::class);
+
+        $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
+        $request->setKey('test');
+
+        $this->client->call(
+            '127.0.0.1:20160',
+            'tikvpb.Tikv',
+            'RawGet',
+            $request,
+            \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
+        );
+    }
+
+    public function testCloseSetsClosedFlag(): void
+    {
+        $this->client->close();
+        $this->assertTrue($this->readClosedFlag());
+    }
+
     /**
      * @param array<string, \Grpc\Channel> $channels
      */
@@ -120,6 +154,14 @@ class GrpcClientTest extends TestCase
     {
         $prop = new \ReflectionProperty(GrpcClient::class, 'channels');
         /** @var array<string, \Grpc\Channel> $value */
+        $value = $prop->getValue($this->client);
+        return $value;
+    }
+
+    private function readClosedFlag(): bool
+    {
+        $prop = new \ReflectionProperty(GrpcClient::class, 'closed');
+        /** @var bool $value */
         $value = $prop->getValue($this->client);
         return $value;
     }
