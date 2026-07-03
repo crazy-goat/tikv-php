@@ -1473,4 +1473,241 @@ class TransactionTest extends TestCase
         $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $capturedRequest);
         $this->assertCount(1, $capturedRequest->getMutations());
     }
+
+    // ========================================================================
+    // 2PC commit ordering and retry (issue #76)
+    // ========================================================================
+
+    /**
+     * Primary key's region must be committed before any secondary region.
+     * TiKV rejects secondary commits that arrive before the primary's
+     * commit, leaving the transaction half-committed.  See issue #76.
+     */
+    public function testCommitPrimaryRegionCommittedBeforeSecondaries(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k3');
+        $region2 = $this->makeRegion(2, 'k3', '');
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getTimestamp')->willReturn(5000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        // Capture commit keys per region in invocation order.
+        $commitsByRegion = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$commitsByRegion,
+                $prewriteResponse,
+                $commitResponse,
+            ): object {
+                if ($method === 'KvCommit' && $request instanceof \CrazyGoat\Proto\Kvrpcpb\CommitRequest) {
+                    $context = $request->getContext();
+                    $regionId = $context !== null ? $context->getRegionId() : -1;
+                    $commitsByRegion[] = ['regionId' => $regionId, 'keys' => iterator_to_array($request->getKeys())];
+                }
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1'); // primary, in region1
+        $txn->set('k2', 'v2'); // primary region1
+        $txn->set('k4', 'v4'); // secondary, in region2
+        $txn->commit();
+
+        // Primary region (1) must commit first; secondary region (2) after.
+        $this->assertCount(2, $commitsByRegion);
+        $this->assertSame(1, $commitsByRegion[0]['regionId']);
+        $this->assertSame(2, $commitsByRegion[1]['regionId']);
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+    }
+
+    /**
+     * Transient gRPC errors on a SECONDARY commit must be retried by the
+     * retry executor (commits are idempotent).  Issue #76: previously a
+     * transient secondary error threw after the primary commit, leaving
+     * the txn half-committed with no retry.
+     */
+    public function testCommitSecondaryRegionTransientErrorIsRetriedNotFatal(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k3');
+        $region2 = $this->makeRegion(2, 'k3', '');
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getTimestamp')->willReturn(6000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setMessage('transient not leader');
+
+        // Fail the FIRST commit on region 2, then succeed.
+        $region2CallCount = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$region2CallCount,
+                $regionError,
+                $prewriteResponse,
+                $commitResponse,
+            ): object {
+                if ($method === 'KvCommit' && $request instanceof \CrazyGoat\Proto\Kvrpcpb\CommitRequest) {
+                    $context = $request->getContext();
+                    $regionId = $context !== null ? $context->getRegionId() : -1;
+                    if ($regionId === 2) {
+                        $region2CallCount++;
+                        if ($region2CallCount === 1) {
+                            $resp = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+                            $resp->setRegionError($regionError);
+                            return $resp;
+                        }
+                    }
+                }
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->set('k4', 'v4');
+        $txn->commit();
+
+        // The secondary region was retried and eventually committed.
+        $this->assertGreaterThanOrEqual(2, $region2CallCount);
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+    }
+
+    /**
+     * Status must be set to Committed if commit returns successfully.
+     * Even if secondary commits later fail, the transaction itself is
+     * irrevocably committed in TiKV after primary succeeds (commits are
+     * idempotent; the retry executor will retry on transient errors).
+     *
+     * Issue #76 AC: "status set Committed after primary success".
+     */
+    public function testCommitMarksStatusCommittedOnSuccessfulCommit(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k3');
+        $region2 = $this->makeRegion(2, 'k3', '');
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getTimestamp')->willReturn(7000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $this->grpc->method('call')
+            ->willReturnCallback(fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvPrewrite' => $prewriteResponse,
+                'KvCommit' => $commitResponse,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->set('k4', 'v4');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+    }
+
+    /**
+     * Bad region errors on the PRIMARY commit must NOT be retried (we
+     * could lose the commitTs). The error must propagate up.
+     */
+    public function testCommitPrimaryRegionErrorIsNotRetriedAndPropagates(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(8000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setMessage('region not found');
+
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+        $commitResponse->setRegionError($regionError);
+
+        $commitCallCount = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$commitCallCount,
+                $prewriteResponse,
+                $commitResponse,
+            ): object {
+                if ($method === 'KvCommit') {
+                    $commitCallCount++;
+                }
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected RegionException to propagate from primary commit');
+        } catch (RegionException) {
+            // Expected: error does NOT retry, error propagates.
+        }
+
+        // The primary commit must have been attempted exactly once — no retry
+        // because re-trying would invalidate the commitTs captured at the
+        // start of the commit phase.
+        $this->assertSame(1, $commitCallCount);
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+    }
 }
