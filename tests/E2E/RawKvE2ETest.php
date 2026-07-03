@@ -2800,10 +2800,10 @@ class RawKvE2ETest extends TestCase
         ];
         $totalRpc = array_sum($tags);
 
-        if ($caught !== null) {
+        if ($caught instanceof \Throwable) {
             $this->fail(sprintf(
                 'Caught exception before metric check: %s :: %s. Tags: %s',
-                get_class($caught),
+                $caught::class,
                 $caught->getMessage(),
                 json_encode($tags, JSON_THROW_ON_ERROR),
             ));
