@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Plaintext gRPC is no longer the silent default** — `GrpcClient` now logs a warning whenever an insecure (plaintext) channel is opened. A new `allowInsecure` constructor parameter (defaults to `true` for backward compatibility) controls whether insecure channels are permitted; set `allowInsecure: false` to fail-closed when no TLS configuration is provided. (#80)
+- **Partial TLS configuration now throws `InvalidArgumentException`** — `TlsConfig` constructor rejects configurations with client certificate/key without a CA certificate. Previously, a partial mTLS configuration (client cert+key without CA) was reported as "not enabled", causing the connection to silently downgrade to plaintext, sending credentials over an unencrypted channel. (#80)
+- **`TlsConfig::isEnabled()` now detects any TLS material** — returns `true` when either a CA certificate or a client certificate+key pair is present, preventing partial configurations from being misinterpreted as "disabled". Added `TlsConfig::isComplete()` to check for a fully valid configuration (CA certificate present). (#80)
+
 ### Fixed
 - **Transaction::scan() now enforces a `MAX_SCAN_LIMIT` (10240), applies the limit after write-set merge, and inserts in-range write-set keys not returned by TiKV** — previously, limit=0 sent uint32 max (memory exhaustion risk), and the limit was not re-applied after merging results with the write set. Additionally, newly-written keys inside the scan range that TiKV had not yet committed were silently missing from the result, violating read-your-writes semantics for scans. (#86)
 - **RawKvBatch retry now re-groups keys after region split/merge** — `resolveRegion()` no longer returns a stale `RegionInfo` when the region ID changes; the retry wrappers (`batchGetWithRetry`, `batchPutWithRetry`, `batchDeleteWithRetry`) now verify every key still falls within the resolved region's range and, when a split/merge scatters keys across multiple regions, re-resolve and re-dispatch each sub-group to its own region. `RegionErrorHandler::check()` now surfaces per-pair `KeyError`s from `RawBatchGetResponse` and top-level error strings from `RawBatchPutResponse`/`RawBatchDeleteResponse`, eliminating silent partial writes/deletes/reads. (#140)

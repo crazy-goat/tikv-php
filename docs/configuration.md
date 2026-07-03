@@ -94,6 +94,10 @@ export PD_ENDPOINTS="192.168.1.100:2379,192.168.1.101:2379"
 
 ## TLS/SSL Configuration
 
+> **Warning:** By default, when no TLS configuration is provided, the client connects
+> in plaintext (unencrypted). A warning is logged on every insecure channel creation.
+> To ensure TLS is always used, set `allowInsecure: false` (see below).
+
 ### Server Verification Only
 
 Verify the server's certificate:
@@ -123,6 +127,11 @@ $options = [
 
 $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 ```
+
+> **Important:** When providing a client certificate and key, a CA certificate is
+> **required**. The configuration will throw `InvalidArgumentException` if
+> clientCert/clientKey are provided without caCert — this prevents accidental
+> downgrade to plaintext.
 
 ### Using Certificate Content
 
@@ -159,6 +168,24 @@ $tlsConfig = $builder->build();
 $grpc = new GrpcClient($logger, $tlsConfig);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger);
 $client = new RawKvClient($pdClient, $grpc);
+```
+
+### Fail-Closed Mode (Require TLS)
+
+By default, if no TLS configuration is provided, the client connects in plaintext
+and logs a warning. To fail-closed — reject any connection that isn't using TLS —
+set `allowInsecure: false` on the `GrpcClient`:
+
+```php
+use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+
+// Insecure connections will throw InvalidStateException
+$grpc = new GrpcClient($logger, tlsConfig: $tlsConfig, allowInsecure: false);
+```
+
+> **Note:** When using `RawKvClient::create()` or `TxnKvClient::create()`, the
+> underlying `GrpcClient` is constructed internally with `allowInsecure: true`.
+> To enforce TLS, use the manual construction path shown above.
 ```
 
 ## Logging

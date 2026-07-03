@@ -61,14 +61,18 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithClientCertFromFiles(): void
     {
+        $caContent = 'test-ca-cert';
         $certContent = 'test-client-cert';
         $keyContent = 'test-client-key';
+        $caPath = $this->tempDir . '/ca.crt';
         $certPath = $this->tempDir . '/client.crt';
         $keyPath = $this->tempDir . '/client.key';
+        file_put_contents($caPath, $caContent);
         file_put_contents($certPath, $certContent);
         file_put_contents($keyPath, $keyContent);
 
         $config = (new TlsConfigBuilder())
+            ->withCaCert($caPath)
             ->withClientCert($certPath, $keyPath)
             ->build();
 
@@ -125,14 +129,18 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithClientCertFileReadsFromPaths(): void
     {
+        $caContent = 'ca-content';
         $certContent = 'cert-content';
         $keyContent = 'key-content';
+        $caPath = $this->tempDir . '/ca.crt';
         $certPath = $this->tempDir . '/client.crt';
         $keyPath = $this->tempDir . '/client.key';
+        file_put_contents($caPath, $caContent);
         file_put_contents($certPath, $certContent);
         file_put_contents($keyPath, $keyContent);
 
         $config = (new TlsConfigBuilder())
+            ->withCaCertFile($caPath)
             ->withClientCertFile($certPath, $keyPath)
             ->build();
 
@@ -142,10 +150,12 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithClientCertPemStoresInlineContent(): void
     {
+        $caPem = 'inline-ca-pem';
         $certPem = 'inline-client-cert';
         $keyPem = 'inline-client-key';
 
         $config = (new TlsConfigBuilder())
+            ->withCaCertPem($caPem)
             ->withClientCertPem($certPem, $keyPem)
             ->build();
 

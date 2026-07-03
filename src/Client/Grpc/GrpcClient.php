@@ -25,11 +25,20 @@ final class GrpcClient implements GrpcClientInterface
     private const DEFAULT_MAX_CHANNELS = 64;
     private const DEFAULT_IDLE_TTL_MS = 600000; // 10 minutes
 
+    /**
+     * @param bool $allowInsecure When true (default), an insecure (plaintext) gRPC channel
+     *                            is created when no TLS configuration is provided or when
+     *                            the TLS configuration has no credentials set. When false,
+     *                            an InvalidStateException is thrown if no TLS credentials
+     *                            are available. Set this to false to ensure all connections
+     *                            use TLS.
+     */
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly ?TlsConfig $tlsConfig = null,
         private readonly int $maxChannels = self::DEFAULT_MAX_CHANNELS,
         private readonly int $idleTtlMs = self::DEFAULT_IDLE_TTL_MS,
+        private readonly bool $allowInsecure = true,
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -255,15 +264,34 @@ final class GrpcClient implements GrpcClientInterface
      */
     private function createChannel(string $address, float $now): Channel
     {
+        $tlsEnabled = $this->tlsConfig instanceof TlsConfig && $this->tlsConfig->isEnabled();
+
         $this->logger->debug('Opening gRPC channel', [
             'address' => $address,
-            'tls' => $this->tlsConfig?->isEnabled() ?? false,
+            'tls' => $tlsEnabled,
         ]);
 
-        $tlsEnabled = $this->tlsConfig instanceof TlsConfig && $this->tlsConfig->isEnabled();
-        $credentials = $tlsEnabled
-            ? $this->createTlsCredentials()
-            : ChannelCredentials::createInsecure();
+        if ($tlsEnabled) {
+            $credentials = $this->createTlsCredentials();
+        } else {
+            if (!$this->allowInsecure) {
+                throw new \CrazyGoat\TiKV\Client\Exception\InvalidStateException(
+                    'Cannot create gRPC channel: TLS is not configured and insecure '
+                    . 'connections are not allowed. Provide a TlsConfig or set '
+                    . 'allowInsecure=true explicitly.'
+                );
+            }
+
+            $this->logger->warning(
+                'Opening insecure (plaintext) gRPC channel — all data will be '
+                . 'transmitted without encryption. To disable this warning and '
+                . 'ensure TLS is always used, configure a TlsConfig and set '
+                . 'allowInsecure=false.',
+                ['address' => $address],
+            );
+
+            $credentials = ChannelCredentials::createInsecure();
+        }
 
         $channel = new Channel($address, [
             'credentials' => $credentials,
