@@ -646,18 +646,20 @@ final readonly class TwoPhaseCommitter
 
         $keysByRegion = $this->groupStringsByRegion($pessimisticKeys);
 
+        $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->startTs;
+
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
             $firstKey = $regionKeys[0] ?? '';
 
-            $retryExecutor->execute($firstKey, function () use ($region, $regionKeys): null {
+            $retryExecutor->execute($firstKey, function () use ($region, $regionKeys, $forUpdateTs): null {
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $request = new PessimisticRollbackRequest();
                 $request->setContext(RegionContextFactory::fromRegionInfo($region));
                 $request->setStartVersion($this->startTs);
-                $request->setForUpdateTs($this->startTs);
+                $request->setForUpdateTs($forUpdateTs);
                 $request->setKeys($regionKeys);
 
                 $this->logger->debug('PessimisticRollback', [

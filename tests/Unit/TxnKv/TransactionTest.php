@@ -1710,4 +1710,92 @@ class TransactionTest extends TestCase
         $this->assertSame(1, $commitCallCount);
         $this->assertSame(TransactionStatus::Active, $txn->getStatus());
     }
+
+    public function testPessimisticRollbackUsesMaxForUpdateTsNotStartTs(): void
+    {
+        $capturedRollbackForUpdateTs = null;
+        $lockCallCount = 0;
+
+        // Set up grpc mock first so Transaction captures it.
+        $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                ?\Google\Protobuf\Internal\Message $request = null,
+            ) use (
+                &$capturedRollbackForUpdateTs,
+                &$lockCallCount,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $lockCallCount++;
+                    return new PessimisticLockResponse();
+                }
+                if (
+                    $method === 'KVPessimisticRollback'
+                    && $request instanceof \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest
+                ) {
+                    $capturedRollbackForUpdateTs = $request->getForUpdateTs();
+                    return new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse();
+                }
+                if ($method === 'KvPrewrite') {
+                    // Simulate a prewrite failure: return a lock conflict that cannot be resolved
+                    // so the commit throws and triggers rollback via __destruct.
+                    $response = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+                    $keyError = new \CrazyGoat\Proto\Kvrpcpb\KeyError();
+                    $keyError->setRetryable('simulated prewrite failure');
+                    $response->setErrors([$keyError]);
+                    return $response;
+                }
+                if ($method === 'KvBatchRollback') {
+                    return new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+                }
+                return match ($method) {
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        // Return a fresh timestamp (5000) that differs from startTs (1000).
+        $this->pdClient->method('getTimestamp')->willReturn(5000);
+
+        // Recreate resolver and lock resolver with the new grpc mock.
+        $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
+        $this->lockResolver = new LockResolver(
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            20000,
+            new \Psr\Log\NullLogger(),
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'startTs' => 1000,
+        ]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+
+        // Commit will: (1) acquire pessimistic locks (sets maxForUpdateTs=5000),
+        // (2) fail during prewrite, (3) propagate TransactionConflictException.
+        try {
+            $txn->commit();
+        } catch (\CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException) {
+            // Expected: prewrite failure.
+        }
+
+        // Explicitly trigger rollback — this is what __destruct would do.
+        // After a failed commit the state is still Active, so rollback proceeds.
+        $txn->rollback();
+
+        $this->assertGreaterThanOrEqual(1, $lockCallCount, 'Pessimistic locks should have been acquired');
+        $this->assertNotNull($capturedRollbackForUpdateTs, 'PessimisticRollbackRequest was not captured');
+        // The forUpdateTs must be the fresh PD timestamp (5000), not startTs (1000).
+        $this->assertSame(5000, $capturedRollbackForUpdateTs);
+    }
 }
