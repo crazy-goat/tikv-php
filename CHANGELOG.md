@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merged `commitOptimistic()` and `commitPessimistic()` into a single `doCommit()` method; removed dead `$firstRegionKeys`/`$isPrimaryRegion` that were never used (#113)
 
 ### Fixed
+- Removed `instanceof PdClient` concrete-class checks from `TimestampOracle`; added `setClusterId()` to `PdClientInterface` so any implementation of the interface can propagate cluster-ID discovery (DIP/LSP compliance) (#110)
 - Replaced bare `\RuntimeException` and `\LogicException` with `InvalidStateException` (extends `TiKvException`) in `RawKvClient::compareAndSwap()`, `Transaction::ensureActive()`, `Transaction::getPrimaryKey()`, and `GrpcClient::createTlsCredentials()`, so all library failures derive from `TiKvException` (#102)
 - Added `@throws` annotations to all public methods in `RawKvClient` and `Transaction`, documenting the typed exceptions they raise (`InvalidArgumentException`, `ClientClosedException`, `InvalidStateException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `TransactionConflictException`, `DeadlockException`) (#102)
 - `PdClient::getRegion()` no longer fabricates `regionId=0`/`leaderStoreId=1` when PD returns no region/leader — it now throws a `TiKvException` on a missing region and reports leader store id `0` ("unknown") for a missing leader, so `resolveStoreAddress()` raises a visible `StoreNotFoundException` instead of silently routing requests to a guessed store on split/merge (#104)
