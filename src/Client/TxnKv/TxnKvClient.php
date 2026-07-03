@@ -28,7 +28,8 @@ final class TxnKvClient
 
     /**
      * @param string[] $pdEndpoints PD addresses (currently only the first is used)
-     * @param array<string, mixed> $options Client options, including 'tls' for TLS configuration and 'timeout' for timeout config
+     * @param array<string, mixed> $options Client options, including 'tls' for TLS
+     *                                      configuration and 'timeout' for timeout config
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
