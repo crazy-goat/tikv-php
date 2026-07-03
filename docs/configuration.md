@@ -337,12 +337,12 @@ The client supports configurable per-operation gRPC timeouts via `TimeoutConfig`
 ```php
 $options = [
     'timeout' => [
-        'readTimeoutMs' => 30000,         // default: 0 (disabled)
-        'writeTimeoutMs' => 30000,        // default: 0 (disabled)
-        'batchReadTimeoutMs' => 60000,    // default: 0 (disabled)
-        'batchWriteTimeoutMs' => 60000,   // default: 0 (disabled)
-        'scanTimeoutMs' => 120000,        // default: 0 (disabled)
-        'deleteRangeTimeoutMs' => 120000, // default: 0 (disabled)
+        'readTimeoutMs' => 5000,         // default: 5000
+        'writeTimeoutMs' => 5000,        // default: 5000
+        'batchReadTimeoutMs' => 10000,   // default: 10000
+        'batchWriteTimeoutMs' => 10000,  // default: 10000
+        'scanTimeoutMs' => 20000,        // default: 20000
+        'deleteRangeTimeoutMs' => 30000, // default: 30000
     ],
 ];
 
@@ -352,11 +352,11 @@ $client = RawKvClient::create(
 );
 ```
 
-When a timeout is set and exceeded, the gRPC call throws `GrpcException` which is caught and retried by the retry executor unless the budget is exhausted.
+When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught and retried by the retry executor unless the budget is exhausted.
 
-### Default Behavior
+### Default Timeouts
 
-By default all timeouts are disabled (`0`), meaning gRPC calls may block indefinitely on a hung TiKV node. It is **strongly recommended** to configure timeouts in production.
+By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range). Set any value to `0` to disable it (not recommended in production).
 
 ### Handling Slow Operations
 
