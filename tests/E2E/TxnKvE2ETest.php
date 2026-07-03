@@ -525,14 +525,14 @@ class TxnKvE2ETest extends TestCase
         $txn = $client->begin(['pessimistic' => false]);
         $txn->set($key, 'value-before-close');
 
-        // Close the client
+        // Close the client — this releases the shared gRPC connection pool.
+        // Any subsequent gRPC calls from the transaction will fail with
+        // InvalidStateException because the underlying transport is closed.
         $client->close();
 
-        // Existing transaction should still be usable
-        $this->assertSame('value-before-close', $txn->get($key));
-        $txn->commit();
-
-        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidStateException::class);
+        $this->expectExceptionMessage('gRPC client is closed');
+        $txn->get($key);
     }
 
     public function testMultiplePostCloseBeginAllThrow(): void
