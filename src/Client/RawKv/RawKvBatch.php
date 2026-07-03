@@ -371,15 +371,59 @@ final readonly class RawKvBatch
         return $retryExecutor->execute($key, function () use (
             $region,
             $keys,
-            $key,
             $columnFamily,
         ): RawBatchGetResponse {
             $fresh = $this->resolveRegion($region, $key);
-            $future = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
-            /** @var RawBatchGetResponse $response */
-            $response = $future->wait();
-            RegionErrorHandler::check($response);
-            return $response;
+
+            // Fast path: all keys still belong to the same region.
+            $allInRegion = true;
+            foreach ($keys as $k) {
+                if (!$this->keyInRegion($k, $fresh)) {
+                    $allInRegion = false;
+                    break;
+                }
+            }
+
+            if ($allInRegion) {
+                $future = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
+                /** @var RawBatchGetResponse $response */
+                $response = $future->wait();
+                RegionErrorHandler::check($response);
+                return $response;
+            }
+
+            // Multi-region path: a region split/merge occurred since the
+            // initial grouping. Re-resolve all keys and dispatch each
+            // sub-group to its own region, then merge the results.
+            $resolved = $this->regionResolver->batchResolveRegions($keys);
+
+            $groups = [];
+            foreach ($keys as $k) {
+                $r = $resolved[$k] ?? null;
+                if ($r === null) {
+                    continue;
+                }
+                $gid = $r->regionId;
+                if (!isset($groups[$gid])) {
+                    $groups[$gid] = ['region' => $r, 'keys' => []];
+                }
+                $groups[$gid]['keys'][] = $k;
+            }
+
+            $allPairs = [];
+            foreach ($groups as $group) {
+                $f = $group['region'];
+                $future = $this->executeBatchGetForRegionAsync($f, $group['keys'], $columnFamily);
+                $response = $future->wait();
+                RegionErrorHandler::check($response);
+                foreach ($response->getPairs() as $pair) {
+                    $allPairs[] = $pair;
+                }
+            }
+
+            $merged = new RawBatchGetResponse();
+            $merged->setPairs($allPairs);
+            return $merged;
         });
     }
 
@@ -405,9 +449,54 @@ final readonly class RawKvBatch
             $columnFamily,
         ): null {
             $fresh = $this->resolveRegion($region, $firstKey);
-            $future = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
-            $response = $future->wait();
-            RegionErrorHandler::check($response);
+
+            // Fast path: all pairs still belong to the same region.
+            $allInRegion = true;
+            foreach ($pairs as $pair) {
+                if (!$this->keyInRegion($pair->getKey(), $fresh)) {
+                    $allInRegion = false;
+                    break;
+                }
+            }
+
+            if ($allInRegion) {
+                $future = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
+                $response = $future->wait();
+                RegionErrorHandler::check($response);
+                return null;
+            }
+
+            // Multi-region path: re-resolve all keys and re-dispatch.
+            $keys = array_map(fn(KvPair $p): string => $p->getKey(), $pairs);
+            $resolved = $this->regionResolver->batchResolveRegions($keys);
+
+            $hasPerKeyTtl = is_array($ttl);
+            $groups = [];
+            foreach ($pairs as $i => $pair) {
+                $k = $pair->getKey();
+                $r = $resolved[$k] ?? null;
+                if ($r === null) {
+                    continue;
+                }
+                $gid = $r->regionId;
+                if (!isset($groups[$gid])) {
+                    $groups[$gid] = ['region' => $r, 'pairs' => [], 'ttls' => []];
+                }
+                $groups[$gid]['pairs'][] = $pair;
+                if ($hasPerKeyTtl) {
+                    $groups[$gid]['ttls'][] = $ttl[$i];
+                }
+            }
+
+            foreach ($groups as $group) {
+                $f = $group['region'];
+                $batchTtls = $group['ttls'];
+                $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
+                $future = $this->executeBatchPutForRegionAsync($f, $group['pairs'], $batchTtl, $forCas, $columnFamily);
+                $response = $future->wait();
+                RegionErrorHandler::check($response);
+            }
+
             return null;
         });
     }
@@ -426,24 +515,71 @@ final readonly class RawKvBatch
         return $retryExecutor->execute($key, function () use (
             $region,
             $keys,
-            $key,
             $forCas,
             $columnFamily,
         ): null {
             $fresh = $this->resolveRegion($region, $key);
-            $future = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
-            $response = $future->wait();
-            RegionErrorHandler::check($response);
+
+            // Fast path: all keys still belong to the same region.
+            $allInRegion = true;
+            foreach ($keys as $k) {
+                if (!$this->keyInRegion($k, $fresh)) {
+                    $allInRegion = false;
+                    break;
+                }
+            }
+
+            if ($allInRegion) {
+                $future = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
+                $response = $future->wait();
+                RegionErrorHandler::check($response);
+                return null;
+            }
+
+            // Multi-region path: re-resolve all keys and re-dispatch.
+            $resolved = $this->regionResolver->batchResolveRegions($keys);
+
+            $groups = [];
+            foreach ($keys as $k) {
+                $r = $resolved[$k] ?? null;
+                if ($r === null) {
+                    continue;
+                }
+                $gid = $r->regionId;
+                if (!isset($groups[$gid])) {
+                    $groups[$gid] = ['region' => $r, 'keys' => []];
+                }
+                $groups[$gid]['keys'][] = $k;
+            }
+
+            foreach ($groups as $group) {
+                $f = $group['region'];
+                $future = $this->executeBatchDeleteForRegionAsync($f, $group['keys'], $forCas, $columnFamily);
+                $response = $future->wait();
+                RegionErrorHandler::check($response);
+            }
+
             return null;
         });
     }
 
+    /**
+     * Check whether a key falls within the half-open range [startKey, endKey)
+     * of the given region. An empty endKey represents +infinity.
+     */
+    private function keyInRegion(string $key, RegionInfo $region): bool
+    {
+        return $key >= $region->startKey
+            && ($region->endKey === '' || $key < $region->endKey);
+    }
+
+    /**
+     * Resolve the current region for a single key. Unlike the old code, this
+     * never returns the stale original when the region has changed — it always
+     * returns the freshly resolved region so the caller can re-group keys.
+     */
     private function resolveRegion(RegionInfo $original, string $key): RegionInfo
     {
-        $current = $this->regionResolver->getRegionInfo($key);
-        if ($current->regionId === $original->regionId) {
-            return $current;
-        }
-        return $original;
+        return $this->regionResolver->getRegionInfo($key);
     }
 }
