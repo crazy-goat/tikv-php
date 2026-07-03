@@ -20,6 +20,8 @@ final class GrpcClient implements GrpcClientInterface
     /** @var array<string, Channel> */
     private array $channels = [];
 
+    private bool $closed = false;
+
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly ?TlsConfig $tlsConfig = null,
@@ -72,6 +74,8 @@ final class GrpcClient implements GrpcClientInterface
 
     public function close(): void
     {
+        $this->closed = true;
+
         $channels = $this->channels;
         $this->channels = [];
 
@@ -98,6 +102,10 @@ final class GrpcClient implements GrpcClientInterface
 
     public function getChannel(string $address): Channel
     {
+        if ($this->closed) {
+            throw new InvalidStateException('gRPC client is closed');
+        }
+
         if (isset($this->channels[$address])) {
             $state = $this->channels[$address]->getConnectivityState();
             if ($state === \Grpc\CHANNEL_FATAL_FAILURE) {

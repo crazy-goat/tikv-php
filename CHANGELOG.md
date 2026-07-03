@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `StoreCache` now has a configurable `$maxEntries` capacity (default 100) with LRU-like eviction of the oldest entry when the limit is exceeded, preventing unbounded memory growth. `StoreCache::clear()` also resets the internal insertion order tracker. (#108)
+- `GrpcClient` now has a `$closed` guard flag set in `close()`, and `getChannel()` throws `InvalidStateException` if called after the client is closed, providing deterministic failure instead of silent reuse. (#108)
+
+### Changed
+- `PdClient::close()` no longer calls `$this->grpc->close()` on the shared `GrpcClient` — ownership belongs exclusively to `RawKvClient`/`TxnKvClient`. Instead it clears its `StoreCache` and releases the TSO oracle. This eliminates the double-close of the shared gRPC channel pool. (#108)
+
+### Added
 - `RegionRangeClipper` in `src/Client/Region/` — centralises the region range-clipping logic that was duplicated across `RawKvScanner`, `RawKvRangeOps` and `Transaction`. All three call sites now delegate to the shared clipper, ensuring consistent half-open `[start, end)` semantics and empty-end-key = +infinity treatment. (#84)
 - Unit tests for `RegionRangeClipper` covering forward/reverse clipping across multiple adjacent regions, empty end key (+infinity), keys at region split points, range outside region, and empty regions array. (#84)
 - Unit tests for `RawKvScanner` multi-region scan boundary clipping, empty-end-key unbounded scan, three-region limit spanning, reverse-scan limit across regions, all-0xFF prefix to empty-end-key conversion, and non-aligned key-range clipping at region split points (#85)
