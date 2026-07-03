@@ -519,20 +519,25 @@ class TxnKvE2ETest extends TestCase
     public function testTransactionBeforeCloseRemainsUsable(): void
     {
         $key = $this->uniqueKey('txn-lifecycle');
+        $otherKey = $this->uniqueKey('txn-lifecycle-other');
         $this->keysToCleanup[] = $key;
+        $this->keysToCleanup[] = $otherKey;
 
         $client = $this->createFreshTxnClient();
         $txn = $client->begin(['pessimistic' => false]);
         $txn->set($key, 'value-before-close');
 
         // Close the client — this releases the shared gRPC connection pool.
-        // Any subsequent gRPC calls from the transaction will fail with
-        // InvalidStateException because the underlying transport is closed.
         $client->close();
 
+        // Reading a key from the local write set does NOT require a gRPC call.
+        $this->assertSame('value-before-close', $txn->get($key));
+
+        // But reading a key NOT in the write set requires a remote gRPC call,
+        // which is blocked by the GrpcClient closed guard.
         $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidStateException::class);
         $this->expectExceptionMessage('gRPC client is closed');
-        $txn->get($key);
+        $txn->get($otherKey);
     }
 
     public function testMultiplePostCloseBeginAllThrow(): void
