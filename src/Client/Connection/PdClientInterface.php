@@ -56,6 +56,15 @@ interface PdClientInterface
     public function getClusterId(): ?int;
 
     /**
+     * Set the cluster ID (learned from PD response headers).
+     *
+     * Called by TimestampOracle and PdClient itself when the cluster ID
+     * is discovered during a cluster-id mismatch retry or from a response
+     * header. Idempotent.
+     */
+    public function setClusterId(int $clusterId): void;
+
+    /**
      * Close the PD connection and release resources.
      */
     public function close(): void;

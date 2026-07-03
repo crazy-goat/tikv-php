@@ -60,11 +60,9 @@ final readonly class TimestampOracle
     private function createHeader(): RequestHeader
     {
         $header = new RequestHeader();
-        if ($this->pdClient instanceof PdClient) {
-            $clusterId = $this->pdClient->getClusterId();
-            if ($clusterId !== null) {
-                $header->setClusterId($clusterId);
-            }
+        $clusterId = $this->pdClient->getClusterId();
+        if ($clusterId !== null) {
+            $header->setClusterId($clusterId);
         }
 
         return $header;
@@ -99,10 +97,6 @@ final readonly class TimestampOracle
                 throw $e;
             }
 
-            if (!$this->pdClient instanceof PdClient) {
-                throw $e;
-            }
-
             $this->logger->warning(
                 'Cluster ID mismatch on TSO, retrying',
                 ['clusterId' => $extractedId],
@@ -126,10 +120,6 @@ final readonly class TimestampOracle
 
     private function learnClusterId(TsoResponse $response): void
     {
-        if (!$this->pdClient instanceof PdClient) {
-            return;
-        }
-
         if ($this->pdClient->getClusterId() !== null) {
             return;
         }
