@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\Retry;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 
 final class ErrorClassifier
 {
@@ -23,7 +24,7 @@ final class ErrorClassifier
     public static function classify(TiKvException $e): ?BackoffType
     {
         // === Primary path: typed error kind on RegionException ===
-        if ($e instanceof RegionException && $e->errorKind instanceof \CrazyGoat\TiKV\Client\Retry\ErrorKind) {
+        if ($e instanceof RegionException && $e->errorKind instanceof ErrorKind) {
             return self::classifyByKind($e->errorKind);
         }
 
