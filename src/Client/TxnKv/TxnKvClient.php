@@ -44,14 +44,40 @@ final class TxnKvClient
             $tlsOptions = $options['tls'];
             $builder = new TlsConfigBuilder();
 
-            if (isset($tlsOptions['caCert']) && is_string($tlsOptions['caCert'])) {
+            // Explicit file-path options take priority
+            if (isset($tlsOptions['caCertFile']) && is_string($tlsOptions['caCertFile'])) {
+                $baseDir = isset($tlsOptions['caCertBaseDir']) && is_string($tlsOptions['caCertBaseDir'])
+                    ? $tlsOptions['caCertBaseDir']
+                    : null;
+                $builder->withCaCertFile($tlsOptions['caCertFile'], $baseDir);
+            } elseif (isset($tlsOptions['caCertPem']) && is_string($tlsOptions['caCertPem'])) {
+                $builder->withCaCertPem($tlsOptions['caCertPem']);
+            } elseif (isset($tlsOptions['caCert']) && is_string($tlsOptions['caCert'])) {
+                // Backward compatibility: guess file path vs inline content
                 $builder->withCaCert($tlsOptions['caCert']);
             }
 
-            if (
+            $hasClientCertFile = isset($tlsOptions['clientCertFile']) && is_string($tlsOptions['clientCertFile']);
+            $hasClientKeyFile = isset($tlsOptions['clientKeyFile']) && is_string($tlsOptions['clientKeyFile']);
+            $hasClientCertPem = isset($tlsOptions['clientCertPem']) && is_string($tlsOptions['clientCertPem']);
+            $hasClientKeyPem = isset($tlsOptions['clientKeyPem']) && is_string($tlsOptions['clientKeyPem']);
+
+            if ($hasClientCertFile && $hasClientKeyFile) {
+                $baseDir = isset($tlsOptions['clientCertBaseDir']) && is_string($tlsOptions['clientCertBaseDir'])
+                    ? $tlsOptions['clientCertBaseDir']
+                    : null;
+                $builder->withClientCertFile(
+                    $tlsOptions['clientCertFile'],
+                    $tlsOptions['clientKeyFile'],
+                    $baseDir,
+                );
+            } elseif ($hasClientCertPem && $hasClientKeyPem) {
+                $builder->withClientCertPem($tlsOptions['clientCertPem'], $tlsOptions['clientKeyPem']);
+            } elseif (
                 isset($tlsOptions['clientCert']) && is_string($tlsOptions['clientCert']) &&
                 isset($tlsOptions['clientKey']) && is_string($tlsOptions['clientKey'])
             ) {
+                // Backward compatibility: guess file path vs inline content
                 $builder->withClientCert($tlsOptions['clientCert'], $tlsOptions['clientKey']);
             }
 
