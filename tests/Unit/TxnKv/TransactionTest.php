@@ -21,8 +21,10 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
@@ -475,7 +477,10 @@ class TransactionTest extends TestCase
         $this->grpc->expects($this->exactly(2))
             ->method('call')
             ->willReturnOnConsecutiveCalls(
-                $this->throwException(new TiKvException('Lock encountered')),
+                $this->throwException(new TxnRetryableException(
+                    'Lock encountered',
+                    BackoffType::TxnLock,
+                )),
                 $response,
             );
 

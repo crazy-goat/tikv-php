@@ -234,10 +234,7 @@ final class PdClient implements PdClientInterface
 
     private function extractClusterIdFromError(string $message): ?int
     {
-        if (!str_contains($message, 'mismatch cluster id')) {
-            return null;
-        }
-        if (preg_match('/need (\d+) but got/', $message, $matches)) {
+        if (preg_match('/mismatch cluster id.*?need (\d+) but got/', $message, $matches)) {
             return (int) $matches[1];
         }
 

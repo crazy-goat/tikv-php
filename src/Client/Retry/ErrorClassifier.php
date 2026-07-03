@@ -13,10 +13,21 @@ final class ErrorClassifier
     /**
      * Classify a TiKvException into a BackoffType.
      *
+     * The primary classification path uses the typed ErrorKind carried by
+     * RegionException, eliminating dependence on message-string matching.
+     * For exceptions that do not carry a typed kind (legacy or non-region
+     * errors), a message-based fallback is used.
+     *
      * @return BackoffType|null BackoffType for retryable errors, null for fatal/non-retryable
      */
     public static function classify(TiKvException $e): ?BackoffType
     {
+        // === Primary path: typed error kind on RegionException ===
+        if ($e instanceof RegionException && $e->errorKind instanceof \CrazyGoat\TiKV\Client\Retry\ErrorKind) {
+            return self::classifyByKind($e->errorKind);
+        }
+
+        // === Fallback: message-text matching for exceptions without a typed kind ===
         $message = $e->getMessage();
 
         // Fatal errors (non-retryable)
@@ -85,5 +96,45 @@ final class ErrorClassifier
         }
 
         return null;
+    }
+
+    /**
+     * Map a typed ErrorKind to the corresponding BackoffType.
+     *
+     * This method is the single source of truth for the error-kind → backoff
+     * mapping.  It is used as the primary classification path and should be
+     * kept in sync with the message-based fallback above for consistency.
+     *
+     * @return BackoffType|null BackoffType for retryable errors, null for fatal
+     */
+    public static function classifyByKind(ErrorKind $kind): ?BackoffType
+    {
+        return match ($kind) {
+            ErrorKind::RaftEntryTooLarge,
+            ErrorKind::KeyNotInRegion,
+            ErrorKind::FlashbackInProgress,
+            ErrorKind::FlashbackNotPrepared => null,
+
+            ErrorKind::EpochNotMatch => BackoffType::None,
+
+            ErrorKind::ServerIsBusy => BackoffType::ServerBusy,
+            ErrorKind::StaleCommand => BackoffType::StaleCmd,
+            ErrorKind::RegionNotFound => BackoffType::RegionMiss,
+            ErrorKind::NotLeader => BackoffType::NotLeader,
+            ErrorKind::DiskFull => BackoffType::DiskFull,
+            ErrorKind::RegionNotInitialized => BackoffType::RegionNotInitialized,
+            ErrorKind::ReadIndexNotReady => BackoffType::ReadIndexNotReady,
+            ErrorKind::ProposalInMergingMode => BackoffType::ProposalInMergingMode,
+            ErrorKind::RecoveryInProgress => BackoffType::RecoveryInProgress,
+            ErrorKind::IsWitness => BackoffType::IsWitness,
+            ErrorKind::MaxTimestampNotSynced => BackoffType::MaxTimestampNotSynced,
+
+            // Unmapped kinds default to region-miss retry.
+            ErrorKind::StoreNotMatch,
+            ErrorKind::DataIsNotReady,
+            ErrorKind::MismatchPeerId,
+            ErrorKind::BucketVersionNotMatch,
+            ErrorKind::UndeterminedResult => BackoffType::RegionMiss,
+        };
     }
 }
