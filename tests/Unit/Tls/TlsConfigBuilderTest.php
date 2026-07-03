@@ -255,6 +255,10 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testExceptionOnUnreadableFileDoesNotLeakPath(): void
     {
+        if (function_exists('posix_getuid') && posix_getuid() === 0) {
+            $this->markTestSkipped('Root can read any file regardless of permissions');
+        }
+
         $path = $this->tempDir . '/unreadable.crt';
         file_put_contents($path, 'content');
         chmod($path, 0000);
