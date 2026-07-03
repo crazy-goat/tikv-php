@@ -7,9 +7,9 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv\Dto;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
-use CrazyGoat\TiKV\Client\RawKv\Dto\PeerInfo;
-use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper;
+use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use PHPUnit\Framework\TestCase;
 
 class RegionInfoMapperTest extends TestCase

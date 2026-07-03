@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace CrazyGoat\TiKV\Client\RawKv;
+namespace CrazyGoat\TiKV\Client\Region;
 
-use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 
 final class RegionGrouper

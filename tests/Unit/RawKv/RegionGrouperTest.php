@@ -6,8 +6,8 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
-use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
-use CrazyGoat\TiKV\Client\RawKv\RegionGrouper;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use PHPUnit\Framework\TestCase;
 
@@ -23,7 +23,7 @@ class RegionGrouperTest extends TestCase
 
     public function testGroupKeysByRegionSingleRegion(): void
     {
-        $resolver = fn(string $k): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => new RegionInfo(1, 1, 1, 1, 1);
+        $resolver = fn(string $k): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => new RegionInfo(1, 1, 1, 1, 1);
         $result = RegionGrouper::groupKeysByRegion(['a', 'b', 'c'], $resolver);
         $this->assertCount(1, $result);
         $this->assertSame(['a', 'b', 'c'], $result[1]['keys']);
@@ -31,7 +31,7 @@ class RegionGrouperTest extends TestCase
 
     public function testGroupKeysByRegionMultipleRegions(): void
     {
-        $resolver = fn(string $k): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => new RegionInfo(
+        $resolver = fn(string $k): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => new RegionInfo(
             regionId: $k === 'a' || $k === 'b' ? 1 : 2,
             leaderPeerId: 1,
             leaderStoreId: 1,
@@ -46,7 +46,7 @@ class RegionGrouperTest extends TestCase
 
     public function testGroupKeysByRegionPreservesOrder(): void
     {
-        $resolver = fn(string $k): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => new RegionInfo(
+        $resolver = fn(string $k): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => new RegionInfo(
             regionId: $k === 'c' ? 2 : 1,
             leaderPeerId: 1,
             leaderStoreId: 1,

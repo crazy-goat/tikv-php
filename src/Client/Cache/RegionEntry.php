@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Cache;
 
-use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 
 final class RegionEntry
 {

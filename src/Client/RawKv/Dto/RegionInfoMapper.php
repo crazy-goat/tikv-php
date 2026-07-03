@@ -6,6 +6,8 @@ namespace CrazyGoat\TiKV\Client\RawKv\Dto;
 
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Region;
+use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 
 /**
  * Maps PD's protobuf Region/Peer messages onto the {@see RegionInfo} DTO.

@@ -19,7 +19,7 @@ use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
-use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
@@ -1180,12 +1180,12 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k3', '');
 
         $this->regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
         );
         $this->pdClient->method('getTimestamp')->willReturn(3000);
 
@@ -1216,12 +1216,12 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k3', '');
 
         $this->regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
         );
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getTimestamp')->willReturn(4000);

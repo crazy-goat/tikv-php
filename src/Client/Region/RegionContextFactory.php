@@ -7,7 +7,7 @@ namespace CrazyGoat\TiKV\Client\Region;
 use CrazyGoat\Proto\Kvrpcpb\Context;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
-use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 
 final class RegionContextFactory
 {

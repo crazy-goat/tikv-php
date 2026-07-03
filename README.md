@@ -286,7 +286,14 @@ src/
 │   │   ├── CasResult.php            # CompareAndSwap result
 │   │   ├── ChecksumResult.php       # Checksum result
 │   │   ├── ScanIterator.php         # Lazy auto-paginating scan iterator
-│   │   └── Dto/                     # Shared DTOs (KeyValue, RegionInfo, PeerInfo)
+│   │   └── Dto/                     # Shared DTOs (KeyValue)
+│   ├── Region/
+│   │   ├── RegionResolver.php       # Region resolution & caching
+│   │   ├── RegionContextFactory.php  # Region context factory
+│   │   ├── RegionRangeClipper.php   # Range clipping
+│   │   ├── RegionGrouper.php        # Group keys by region
+│   │   ├── RegionErrorHandler.php   # Region error checking
+│   │   └── Dto/                     # Region DTOs (RegionInfo, PeerInfo)
 │   ├── Retry/
 │   │   └── BackoffType.php          # Retry backoff strategies
 │   └── Tls/

@@ -11,7 +11,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
-use CrazyGoat\TiKV\Client\RawKv\RegionErrorHandler;
+use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use PHPUnit\Framework\TestCase;
 
 class RegionErrorHandlerTest extends TestCase

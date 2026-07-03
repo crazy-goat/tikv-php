@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 

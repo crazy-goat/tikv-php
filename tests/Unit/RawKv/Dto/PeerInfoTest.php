@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv\Dto;
 
-use CrazyGoat\TiKV\Client\RawKv\Dto\PeerInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use PHPUnit\Framework\TestCase;
 
 class PeerInfoTest extends TestCase
