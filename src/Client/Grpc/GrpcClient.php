@@ -124,14 +124,24 @@ final class GrpcClient implements GrpcClientInterface
 
         // Check existing channel
         if (isset($this->channels[$address])) {
-            $state = $this->channels[$address]['channel']->getConnectivityState();
+            try {
+                $state = $this->channels[$address]['channel']->getConnectivityState();
+            } catch (\Throwable $e) {
+                // Channel might be closed already; treat as non-ready
+                $this->logger->warning('Failed to get channel connectivity state, reconnecting', [
+                    'address' => $address,
+                    'exception' => $e,
+                ]);
+                $this->closeChannelEntry($address);
+                unset($this->channels[$address]);
+                return $this->createChannel($address, $now);
+            }
 
             // Reap channels in non-ready states to force reconnect on next use
             if (
                 in_array($state, [
-                \Grpc\CHANNEL_FATAL_FAILURE,
-                \Grpc\CHANNEL_TRANSIENT_FAILURE,
-                \Grpc\CHANNEL_SHUTDOWN,
+                    \Grpc\CHANNEL_FATAL_FAILURE,
+                    \Grpc\CHANNEL_TRANSIENT_FAILURE,
                 ], true)
             ) {
                 $this->logger->warning('Channel in non-ready state, reconnecting', [
@@ -153,27 +163,7 @@ final class GrpcClient implements GrpcClientInterface
         // Enforce max channels cap (LRU eviction if at capacity)
         $this->enforceMaxChannels();
 
-        $this->logger->debug('Opening gRPC channel', [
-            'address' => $address,
-            'tls' => $this->tlsConfig?->isEnabled() ?? false,
-        ]);
-
-        $tlsEnabled = $this->tlsConfig instanceof TlsConfig && $this->tlsConfig->isEnabled();
-        $credentials = $tlsEnabled
-            ? $this->createTlsCredentials()
-            : ChannelCredentials::createInsecure();
-
-        $channel = new Channel($address, [
-            'credentials' => $credentials,
-        ]);
-
-        $this->channels[$address] = [
-            'channel' => $channel,
-            'lastUsed' => $now,
-            'createdAt' => $now,
-        ];
-
-        return $channel;
+        return $this->createChannel($address, $now);
     }
 
     /**
@@ -246,6 +236,34 @@ final class GrpcClient implements GrpcClientInterface
                 'exception' => $e,
             ]);
         }
+    }
+
+    /**
+     * Create a new gRPC channel for the given address and store it in the cache.
+     */
+    private function createChannel(string $address, float $now): Channel
+    {
+        $this->logger->debug('Opening gRPC channel', [
+            'address' => $address,
+            'tls' => $this->tlsConfig?->isEnabled() ?? false,
+        ]);
+
+        $tlsEnabled = $this->tlsConfig instanceof TlsConfig && $this->tlsConfig->isEnabled();
+        $credentials = $tlsEnabled
+            ? $this->createTlsCredentials()
+            : ChannelCredentials::createInsecure();
+
+        $channel = new Channel($address, [
+            'credentials' => $credentials,
+        ]);
+
+        $this->channels[$address] = [
+            'channel' => $channel,
+            'lastUsed' => $now,
+            'createdAt' => $now,
+        ];
+
+        return $channel;
     }
 
     private function now(): float
