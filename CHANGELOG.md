@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `RegionRangeClipper` in `src/Client/Region/` — centralises the region range-clipping logic that was duplicated across `RawKvScanner`, `RawKvRangeOps` and `Transaction`. All three call sites now delegate to the shared clipper, ensuring consistent half-open `[start, end)` semantics and empty-end-key = +infinity treatment. (#84)
+- Unit tests for `RegionRangeClipper` covering forward/reverse clipping across multiple adjacent regions, empty end key (+infinity), keys at region split points, range outside region, and empty regions array. (#84)
 - Unit tests for `RawKvScanner` multi-region scan boundary clipping, empty-end-key unbounded scan, three-region limit spanning, reverse-scan limit across regions, all-0xFF prefix to empty-end-key conversion, and non-aligned key-range clipping at region split points (#85)
 - Exposed cluster ID from PD via `RawKvClient::getClusterId()` and `TxnKvClient::getClusterId()`, delegating to `PdClientInterface::getClusterId()` (#27)
 - Atomic mode for Compare-And-Swap (CAS): CAS and Put-If-Absent now require `setAtomicForCAS(true)` to be called first, enabling the TiKV `for_cas` atomic code path. Disabled by default for performance. (#103)
