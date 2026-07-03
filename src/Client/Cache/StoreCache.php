@@ -33,7 +33,7 @@ class StoreCache implements StoreCacheInterface
         $entry = $this->entries[$storeId];
 
         if ($this->now() >= $entry->expiresAt) {
-            unset($this->entries[$storeId]);
+            $this->removeEntry($storeId);
             $this->logger->debug('Store cache expired', ['storeId' => $storeId]);
             return null;
         }
@@ -80,7 +80,7 @@ class StoreCache implements StoreCacheInterface
     public function invalidate(int $storeId): void
     {
         $this->logger->info('Store invalidated', ['storeId' => $storeId]);
-        unset($this->entries[$storeId]);
+        $this->removeEntry($storeId);
     }
 
     public function clear(): void
@@ -92,6 +92,16 @@ class StoreCache implements StoreCacheInterface
     protected function now(): int
     {
         return time();
+    }
+
+    private function removeEntry(int $storeId): void
+    {
+        unset($this->entries[$storeId]);
+
+        $orderPos = array_search($storeId, $this->order, true);
+        if ($orderPos !== false) {
+            unset($this->order[$orderPos]);
+        }
     }
 
     private function jitter(): int
