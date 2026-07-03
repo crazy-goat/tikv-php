@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `TlsConfigBuilder::withCaCertFile()`, `withCaCertPem()`, `withClientCertFile()`, `withClientCertPem()` — explicit API to distinguish file paths from inline PEM content, replacing the ambiguous `file_exists()` guessing in legacy methods. The new methods support an optional `$baseDir` parameter to restrict allowed directories. The legacy `withCaCert()` and `withClientCert()` are deprecated. (#87)
 - `RegionRangeClipper` in `src/Client/Region/` — centralises the region range-clipping logic that was duplicated across `RawKvScanner`, `RawKvRangeOps` and `Transaction`. All three call sites now delegate to the shared clipper, ensuring consistent half-open `[start, end)` semantics and empty-end-key = +infinity treatment. (#84)
 - Unit tests for `RegionRangeClipper` covering forward/reverse clipping across multiple adjacent regions, empty end key (+infinity), keys at region split points, range outside region, and empty regions array. (#84)
 - Unit tests for `RawKvScanner` multi-region scan boundary clipping, empty-end-key unbounded scan, three-region limit spanning, reverse-scan limit across regions, all-0xFF prefix to empty-end-key conversion, and non-aligned key-range clipping at region split points (#85)
@@ -25,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Error classification now uses typed `ErrorKind` enum instead of message-string matching.** Added `ErrorKind` enum covering all 21 `Errorpb\Error` oneof variants; `RegionException` auto-detects the kind from the proto `Error` message; `ErrorClassifier::classifyByKind()` is the single source of truth for the error→backoff mapping; `Transaction::classifyError()` uses `TxnRetryableException` carrying `BackoffType` directly; `PdClient::extractClusterIdFromError()` uses pure regex without `str_contains()` (#93)
 
 ### Fixed
+- **Security**: TLS file path inputs are now canonicalized with `realpath()` and validated against an optional allowed base directory, preventing path traversal via `../` and symlink attacks. Exception messages no longer leak the resolved filesystem path. The legacy `withCaCert()` and `withClientCert()` methods that guess between file path and inline PEM via `file_exists()` are deprecated in favor of the new explicit `*File()` and `*Pem()` methods. (#87)
 - Removed `instanceof PdClient` concrete-class checks from `TimestampOracle`; added `setClusterId()` to `PdClientInterface` so any implementation of the interface can propagate cluster-ID discovery (DIP/LSP compliance) (#110)
 - Replaced bare `\RuntimeException` and `\LogicException` with `InvalidStateException` (extends `TiKvException`) in `RawKvClient::compareAndSwap()`, `Transaction::ensureActive()`, `Transaction::getPrimaryKey()`, and `GrpcClient::createTlsCredentials()`, so all library failures derive from `TiKvException` (#102)
 - TxnKv RPCs now have per-operation deadlines via `TimeoutConfig`, threaded from `TxnKvClient::create()` `options['timeout']` into `Transaction`, preventing indefinite blocking on hung TiKV nodes (#79)
