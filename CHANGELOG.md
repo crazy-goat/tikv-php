@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Unit tests for `RawKvScanner` multi-region scan boundary clipping, empty-end-key unbounded scan, three-region limit spanning, reverse-scan limit across regions, all-0xFF prefix to empty-end-key conversion, and non-aligned key-range clipping at region split points (#85)
 - Exposed cluster ID from PD via `RawKvClient::getClusterId()` and `TxnKvClient::getClusterId()`, delegating to `PdClientInterface::getClusterId()` (#27)
 - Atomic mode for Compare-And-Swap (CAS): CAS and Put-If-Absent now require `setAtomicForCAS(true)` to be called first, enabling the TiKV `for_cas` atomic code path. Disabled by default for performance. (#103)
 - Dedicated CI lane for gRPC-dependent unit tests with the PHP gRPC extension loaded and skipped tests failing (#117)
