@@ -33,6 +33,7 @@ use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\RawKv\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -74,6 +75,7 @@ final class Transaction
         private readonly RegionResolver $regionResolver,
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
+        private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
     ) {
     }
 
@@ -138,6 +140,7 @@ final class Transaction
                 'KvGet',
                 $request,
                 GetResponse::class,
+                $this->timeoutMs('read'),
             );
 
             $this->handleRegionError($response, $region);
@@ -379,6 +382,7 @@ final class Transaction
                 'KvTxnHeartBeat',
                 $request,
                 TxnHeartBeatResponse::class,
+                $this->timeoutMs('write'),
             );
 
             $this->handleRegionError($response, $region);
@@ -475,6 +479,7 @@ final class Transaction
             'KvPrewrite',
             $request,
             PrewriteResponse::class,
+            $this->timeoutMs('write'),
         );
         $this->handleRegionError($response, $region);
 
@@ -574,6 +579,7 @@ final class Transaction
             'KvCommit',
             $request,
             CommitResponse::class,
+            $this->timeoutMs('write'),
         );
         $this->handleRegionError($response, $region);
 
@@ -612,6 +618,7 @@ final class Transaction
                 'KvBatchRollback',
                 $request,
                 BatchRollbackResponse::class,
+                $this->timeoutMs('write'),
             );
         }
     }
@@ -665,6 +672,7 @@ final class Transaction
                     'KvPessimisticLock',
                     $request,
                     PessimisticLockResponse::class,
+                    $this->timeoutMs('write'),
                 );
 
                 $this->handleRegionError($response, $region);
@@ -742,6 +750,7 @@ final class Transaction
                 'KVPessimisticRollback',
                 $request,
                 PessimisticRollbackResponse::class,
+                $this->timeoutMs('write'),
             );
         }
     }
@@ -772,6 +781,7 @@ final class Transaction
                 'KvBatchGet',
                 $request,
                 BatchGetResponse::class,
+                $this->timeoutMs('batch_read'),
             );
             $this->handleRegionError($response, $region);
 
@@ -818,6 +828,7 @@ final class Transaction
                 'KvScan',
                 $request,
                 ScanResponse::class,
+                $this->timeoutMs('scan'),
             );
             $this->handleRegionError($response, $region);
 
@@ -844,6 +855,18 @@ final class Transaction
 
             return $results;
         });
+    }
+
+    private function timeoutMs(string $operationType): ?int
+    {
+        return match ($operationType) {
+            'read' => $this->timeoutConfig->readTimeoutMs,
+            'write' => $this->timeoutConfig->writeTimeoutMs,
+            'batch_read' => $this->timeoutConfig->batchReadTimeoutMs,
+            'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
+            'scan' => $this->timeoutConfig->scanTimeoutMs,
+            default => null,
+        };
     }
 
     private function getPrimaryKey(): string
