@@ -17,13 +17,23 @@ use Psr\Log\NullLogger;
 
 final class GrpcClient implements GrpcClientInterface
 {
-    /** @var array<string, Channel> */
+    /** @var array<string, array{channel: Channel, lastUsed: float, createdAt: float}> */
     private array $channels = [];
+
+    private const DEFAULT_MAX_CHANNELS = 64;
+    private const DEFAULT_IDLE_TTL_MS = 600000; // 10 minutes
 
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly ?TlsConfig $tlsConfig = null,
+        private readonly int $maxChannels = self::DEFAULT_MAX_CHANNELS,
+        private readonly int $idleTtlMs = self::DEFAULT_IDLE_TTL_MS,
     ) {
+        if ($this->maxChannels < 1) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                'maxChannels must be at least 1',
+            );
+        }
     }
 
     public function call(
@@ -70,14 +80,19 @@ final class GrpcClient implements GrpcClientInterface
         return GrpcResponseParser::deserialize($event, $responseClass);
     }
 
+    public function __destruct()
+    {
+        $this->close();
+    }
+
     public function close(): void
     {
         $channels = $this->channels;
         $this->channels = [];
 
-        foreach ($channels as $address => $channel) {
+        foreach ($channels as $address => $entry) {
             try {
-                $channel->close();
+                $entry['channel']->close();
             } catch (\Throwable $e) {
                 $this->logger->error('Failed to close gRPC channel', [
                     'address' => $address,
@@ -91,38 +106,151 @@ final class GrpcClient implements GrpcClientInterface
     {
         if (isset($this->channels[$address])) {
             $this->logger->debug('Channel closed', ['address' => $address]);
-            $this->channels[$address]->close();
+            try {
+                $this->channels[$address]['channel']->close();
+            } catch (\Throwable $e) {
+                $this->logger->error('Failed to close gRPC channel', [
+                    'address' => $address,
+                    'exception' => $e,
+                ]);
+            }
             unset($this->channels[$address]);
         }
     }
 
     public function getChannel(string $address): Channel
     {
+        $now = $this->now();
+
+        // Check existing channel
         if (isset($this->channels[$address])) {
-            $state = $this->channels[$address]->getConnectivityState();
-            if ($state === \Grpc\CHANNEL_FATAL_FAILURE) {
-                $this->logger->warning('Channel in fatal failure, reconnecting', ['address' => $address]);
-                $this->closeChannel($address);
+            $state = $this->channels[$address]['channel']->getConnectivityState();
+
+            // Reap channels in non-ready states to force reconnect on next use
+            if (
+                in_array($state, [
+                \Grpc\CHANNEL_FATAL_FAILURE,
+                \Grpc\CHANNEL_TRANSIENT_FAILURE,
+                \Grpc\CHANNEL_SHUTDOWN,
+                ], true)
+            ) {
+                $this->logger->warning('Channel in non-ready state, reconnecting', [
+                    'address' => $address,
+                    'state' => $state,
+                ]);
+                $this->closeChannelEntry($address);
+                unset($this->channels[$address]);
+            } else {
+                // Update last-used timestamp
+                $this->channels[$address]['lastUsed'] = $now;
+                return $this->channels[$address]['channel'];
             }
         }
 
+        // Evict idle channels before creating a new one
+        $this->evictIdleChannels($now);
+
+        // Enforce max channels cap (LRU eviction if at capacity)
+        $this->enforceMaxChannels();
+
+        $this->logger->debug('Opening gRPC channel', [
+            'address' => $address,
+            'tls' => $this->tlsConfig?->isEnabled() ?? false,
+        ]);
+
+        $tlsEnabled = $this->tlsConfig instanceof TlsConfig && $this->tlsConfig->isEnabled();
+        $credentials = $tlsEnabled
+            ? $this->createTlsCredentials()
+            : ChannelCredentials::createInsecure();
+
+        $channel = new Channel($address, [
+            'credentials' => $credentials,
+        ]);
+
+        $this->channels[$address] = [
+            'channel' => $channel,
+            'lastUsed' => $now,
+            'createdAt' => $now,
+        ];
+
+        return $channel;
+    }
+
+    /**
+     * Get the current number of cached channels.
+     */
+    public function getChannelCount(): int
+    {
+        return count($this->channels);
+    }
+
+    /**
+     * Evict channels that have been idle longer than the configured TTL.
+     */
+    private function evictIdleChannels(float $now): void
+    {
+        $idleThreshold = $now - ($this->idleTtlMs / 1000);
+
+        foreach ($this->channels as $address => $entry) {
+            if ($entry['lastUsed'] < $idleThreshold) {
+                $this->logger->debug('Evicting idle channel', [
+                    'address' => $address,
+                    'idleSeconds' => round($now - $entry['lastUsed'], 1),
+                ]);
+                $this->closeChannelEntry($address);
+                unset($this->channels[$address]);
+            }
+        }
+    }
+
+    /**
+     * If the channel cache is at capacity, evict the least recently used channel.
+     */
+    private function enforceMaxChannels(): void
+    {
+        if (count($this->channels) < $this->maxChannels) {
+            return;
+        }
+        // Find the least recently used channel.
+        // Guaranteed to find one since count($this->channels) >= maxChannels >= 1.
+        $lruAddress = array_key_first($this->channels);
+        $lruTime = $this->channels[$lruAddress]['lastUsed'];
+        foreach ($this->channels as $address => $entry) {
+            if ($entry['lastUsed'] < $lruTime) {
+                $lruTime = $entry['lastUsed'];
+                $lruAddress = $address;
+            }
+        }
+        $this->logger->debug('Evicting LRU channel to enforce max channels', [
+            'address' => $lruAddress,
+            'maxChannels' => $this->maxChannels,
+        ]);
+        $this->closeChannelEntry($lruAddress);
+        unset($this->channels[$lruAddress]);
+    }
+
+    /**
+     * Close a channel entry by address, catching and logging any exceptions.
+     */
+    private function closeChannelEntry(string $address): void
+    {
         if (!isset($this->channels[$address])) {
-            $this->logger->debug('Opening gRPC channel', [
-                'address' => $address,
-                'tls' => $this->tlsConfig?->isEnabled() ?? false,
-            ]);
-
-            $tlsEnabled = $this->tlsConfig instanceof TlsConfig && $this->tlsConfig->isEnabled();
-            $credentials = $tlsEnabled
-                ? $this->createTlsCredentials()
-                : ChannelCredentials::createInsecure();
-
-            $this->channels[$address] = new Channel($address, [
-                'credentials' => $credentials,
-            ]);
+            return;
         }
 
-        return $this->channels[$address];
+        try {
+            $this->channels[$address]['channel']->close();
+        } catch (\Throwable $e) {
+            $this->logger->error('Failed to close gRPC channel', [
+                'address' => $address,
+                'exception' => $e,
+            ]);
+        }
+    }
+
+    private function now(): float
+    {
+        return microtime(true);
     }
 
     private function createTlsCredentials(): ChannelCredentials
