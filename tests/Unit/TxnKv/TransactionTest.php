@@ -405,12 +405,10 @@ class TransactionTest extends TestCase
 
         $this->grpc->method('call')
             ->willReturnCallback(
-                function (string $addr, string $svc, string $method) use ($scanResponse, $rollbackResponse): object {
-                    return match ($method) {
-                        'KvScan' => $scanResponse,
-                        'KvBatchRollback' => $rollbackResponse,
-                        default => throw new \RuntimeException("Unexpected method: $method"),
-                    };
+                fn(string $addr, string $svc, string $method): object => match ($method) {
+                    'KvScan' => $scanResponse,
+                    'KvBatchRollback' => $rollbackResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
                 }
             );
 
