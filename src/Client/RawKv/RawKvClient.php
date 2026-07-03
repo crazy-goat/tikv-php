@@ -651,6 +651,11 @@ final class RawKvClient
     // Lifecycle
     // ========================================================================
 
+    public function __destruct()
+    {
+        $this->close();
+    }
+
     public function close(): void
     {
         if ($this->closed) {

@@ -70,6 +70,11 @@ final class GrpcClient implements GrpcClientInterface
         return GrpcResponseParser::deserialize($event, $responseClass);
     }
 
+    public function __destruct()
+    {
+        $this->close();
+    }
+
     public function close(): void
     {
         $channels = $this->channels;
