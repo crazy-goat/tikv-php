@@ -29,6 +29,7 @@ use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -106,6 +107,13 @@ final class Transaction
         return $this->priority;
     }
 
+    /**
+     * @throws InvalidStateException
+     * @throws TiKvException
+     * @throws TransactionConflictException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function get(string $key): ?string
     {
         $this->ensureActive();
@@ -166,6 +174,12 @@ final class Transaction
     /**
      * @param string[] $keys
      * @return array<string, ?string>
+     *
+     * @throws InvalidStateException
+     * @throws TiKvException
+     * @throws TransactionConflictException
+     * @throws RegionException
+     * @throws GrpcException
      */
     public function batchGet(array $keys): array
     {
@@ -193,6 +207,9 @@ final class Transaction
         return $ordered;
     }
 
+    /**
+     * @throws InvalidStateException
+     */
     public function set(string $key, string $value): void
     {
         $this->ensureActive();
@@ -204,6 +221,9 @@ final class Transaction
         $this->writeSet[$key] = $value;
     }
 
+    /**
+     * @throws InvalidStateException
+     */
     public function delete(string $key): void
     {
         $this->ensureActive();
@@ -217,6 +237,12 @@ final class Transaction
 
     /**
      * @return array<array{key: string, value: ?string}>
+     *
+     * @throws InvalidStateException
+     * @throws TiKvException
+     * @throws TransactionConflictException
+     * @throws RegionException
+     * @throws GrpcException
      */
     public function scan(string $startKey, string $endKey, int $limit = 0): array
     {
@@ -268,6 +294,14 @@ final class Transaction
         return $merged;
     }
 
+    /**
+     * @throws InvalidStateException
+     * @throws TiKvException
+     * @throws TransactionConflictException
+     * @throws DeadlockException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function commit(): void
     {
         $this->ensureActive();
@@ -281,6 +315,12 @@ final class Transaction
         $this->doCommit();
     }
 
+    /**
+     * @throws InvalidStateException
+     * @throws TiKvException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function rollback(): void
     {
         $this->ensureActive();
@@ -304,6 +344,12 @@ final class Transaction
         $this->closeTransaction();
     }
 
+    /**
+     * @throws InvalidStateException
+     * @throws TiKvException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function heartbeat(int $adviseLockTtlMs = 10000): int
     {
         $this->ensureActive();
@@ -804,7 +850,7 @@ final class Transaction
     {
         $key = array_key_first($this->writeSet);
         if ($key === null) {
-            throw new \LogicException('Write set is empty, no primary key');
+            throw new InvalidStateException('Write set is empty, no primary key');
         }
         return $key;
     }
@@ -893,10 +939,10 @@ final class Transaction
     private function ensureActive(): void
     {
         if ($this->closed) {
-            throw new \RuntimeException('Transaction is not active');
+            throw new InvalidStateException('Transaction is not active');
         }
         if ($this->status !== TransactionStatus::Active) {
-            throw new \RuntimeException('Transaction is not active');
+            throw new InvalidStateException('Transaction is not active');
         }
     }
 

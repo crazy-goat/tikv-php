@@ -9,8 +9,12 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Cache\StoreCache;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -62,6 +66,8 @@ final class RawKvClient
     /**
      * @param string[] $pdEndpoints
      * @param array<string, mixed> $options
+     *
+     * @throws InvalidArgumentException if PD endpoints array is empty
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
@@ -258,6 +264,12 @@ final class RawKvClient
     // Single-key operations
     // ========================================================================
 
+    /**
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function get(string $key): ?string
     {
         $this->ensureOpen();
@@ -267,6 +279,12 @@ final class RawKvClient
         return $this->crud->get($key, $this->createRetryExecutor(), $this->columnFamily);
     }
 
+    /**
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function put(string $key, string $value, int $ttl = 0): void
     {
         $this->ensureOpen();
@@ -277,6 +295,12 @@ final class RawKvClient
         $this->crud->put($key, $value, $ttl, $this->createRetryExecutor(), $this->atomicForCAS, $this->columnFamily);
     }
 
+    /**
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function delete(string $key): void
     {
         $this->ensureOpen();
@@ -286,6 +310,12 @@ final class RawKvClient
         $this->crud->delete($key, $this->createRetryExecutor(), $this->atomicForCAS, $this->columnFamily);
     }
 
+    /**
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function getKeyTTL(string $key): ?int
     {
         $this->ensureOpen();
@@ -299,6 +329,13 @@ final class RawKvClient
     // Atomic operations
     // ========================================================================
 
+    /**
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws InvalidStateException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function compareAndSwap(string $key, ?string $expectedValue, string $newValue, int $ttl = 0): CasResult
     {
         $this->ensureOpen();
@@ -307,7 +344,7 @@ final class RawKvClient
         $this->validateValueSize($newValue, 'compareAndSwap');
 
         if (!$this->atomicForCAS) {
-            throw new \RuntimeException('CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))');
+            throw new InvalidStateException('CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))');
         }
 
         return $this->atomic->compareAndSwap(
@@ -320,6 +357,13 @@ final class RawKvClient
         );
     }
 
+    /**
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws InvalidStateException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function putIfAbsent(string $key, string $value, int $ttl = 0): ?string
     {
         $result = $this->compareAndSwap($key, null, $value, $ttl);
@@ -334,6 +378,12 @@ final class RawKvClient
     /**
      * @param string[] $keys
      * @return array<string, ?string>
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws BatchPartialFailureException
      */
     public function batchGet(array $keys): array
     {
@@ -354,6 +404,12 @@ final class RawKvClient
     /**
      * @param array<string, string> $keyValuePairs
      * @param int|array<array-key, int> $ttl
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws BatchPartialFailureException
      */
     public function batchPut(array $keyValuePairs, int|array $ttl = 0): void
     {
@@ -380,6 +436,12 @@ final class RawKvClient
 
     /**
      * @param string[] $keys
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws BatchPartialFailureException
      */
     public function batchDelete(array $keys): void
     {
@@ -401,6 +463,9 @@ final class RawKvClient
     // Scan operations
     // ========================================================================
 
+    /**
+     * @throws ClientClosedException
+     */
     public function scanIterator(
         string $startKey,
         string $endKey,
@@ -412,6 +477,9 @@ final class RawKvClient
         return $this->scanner->scanIterator($startKey, $endKey, $batchSize, $keyOnly, $this->columnFamily);
     }
 
+    /**
+     * @throws ClientClosedException
+     */
     public function scanPrefixIterator(string $prefix, int $batchSize = 256, bool $keyOnly = false): ScanIterator
     {
         $this->ensureOpen();
@@ -421,6 +489,11 @@ final class RawKvClient
 
     /**
      * @return array<array{key: string, value: ?string}>
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
      */
     public function scan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {
@@ -435,6 +508,10 @@ final class RawKvClient
 
     /**
      * @return array<array{key: string, value: ?string}>
+     *
+     * @throws ClientClosedException
+     * @throws RegionException
+     * @throws GrpcException
      */
     public function scanPrefix(string $prefix, int $limit = 0, bool $keyOnly = false): array
     {
@@ -445,6 +522,11 @@ final class RawKvClient
 
     /**
      * @return array<array{key: string, value: ?string}>
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
      */
     public function reverseScan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {
@@ -460,6 +542,11 @@ final class RawKvClient
     /**
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly = false): array
     {
@@ -476,6 +563,11 @@ final class RawKvClient
     // Range operations
     // ========================================================================
 
+    /**
+     * @throws ClientClosedException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function deleteRange(string $startKey, string $endKey): void
     {
         $this->ensureOpen();
@@ -483,6 +575,10 @@ final class RawKvClient
         $this->rangeOps->deleteRange($startKey, $endKey, $this->columnFamily);
     }
 
+    /**
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     */
     public function deletePrefix(string $prefix): void
     {
         $this->ensureOpen();
@@ -501,6 +597,11 @@ final class RawKvClient
         $this->rangeOps->deletePrefix($prefix, $this->columnFamily);
     }
 
+    /**
+     * @throws ClientClosedException
+     * @throws RegionException
+     * @throws GrpcException
+     */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
         $this->ensureOpen();

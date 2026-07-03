@@ -15,6 +15,7 @@ use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -138,7 +139,7 @@ class TransactionTest extends TestCase
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->rollback();
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(InvalidStateException::class);
         $txn->set('key1', 'value1');
     }
 
@@ -232,7 +233,7 @@ class TransactionTest extends TestCase
     {
         $txn = $this->createTransaction(['pessimistic' => true]);
 
-        $this->expectException(\LogicException::class);
+        $this->expectException(InvalidStateException::class);
         $txn->heartbeat();
     }
 
@@ -241,7 +242,7 @@ class TransactionTest extends TestCase
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->commit();
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('Transaction is not active');
         $txn->heartbeat();
     }

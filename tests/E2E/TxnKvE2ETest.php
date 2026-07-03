@@ -423,7 +423,7 @@ class TxnKvE2ETest extends TestCase
         $txn->set($key, 'value');
         $txn->commit();
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidStateException::class);
         $this->expectExceptionMessage('Transaction is not active');
         $txn->set($key, 'another');
     }
@@ -433,7 +433,7 @@ class TxnKvE2ETest extends TestCase
         $txn = $this->testClient->begin(['pessimistic' => false]);
         $txn->rollback();
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidStateException::class);
         $this->expectExceptionMessage('Transaction is not active');
         $txn->get('any-key');
     }
