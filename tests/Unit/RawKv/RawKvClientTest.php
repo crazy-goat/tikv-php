@@ -162,6 +162,29 @@ class RawKvClientTest extends TestCase
         $this->client->close();
     }
 
+    public function testDestructCallsClose(): void
+    {
+        $this->grpc->expects($this->once())->method('close');
+        $this->pdClient->expects($this->once())->method('close');
+
+        $this->client = new \CrazyGoat\TiKV\Client\RawKv\RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+        );
+    }
+
+    public function testDestructIsIdempotentWhenAlreadyClosed(): void
+    {
+        $this->grpc->expects($this->once())->method('close');
+        $this->pdClient->expects($this->once())->method('close');
+
+        $client = new \CrazyGoat\TiKV\Client\RawKv\RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+        );
+        $client->close();
+    }
+
     // ========================================================================
     // ClientClosedException on all operations
     // ========================================================================

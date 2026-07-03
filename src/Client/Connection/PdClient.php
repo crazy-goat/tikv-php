@@ -27,13 +27,16 @@ final class PdClient implements PdClientInterface
 {
     private ?int $clusterId = null;
     private ?TimestampOracle $tso = null;
+    private readonly ClusterIdHolder $clusterIdHolder;
 
     public function __construct(
         private readonly GrpcClientInterface $grpc,
         private readonly string $pdAddress,
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly ?StoreCacheInterface $storeCache = null,
+        ?ClusterIdHolder $clusterIdHolder = null,
     ) {
+        $this->clusterIdHolder = $clusterIdHolder ?? new ClusterIdHolder();
     }
 
     public function getTimestamp(): int
@@ -42,7 +45,7 @@ final class PdClient implements PdClientInterface
             $this->tso = new TimestampOracle(
                 $this->grpc,
                 $this->pdAddress,
-                $this,
+                $this->clusterIdHolder,
                 $this->logger,
             );
         }
@@ -135,11 +138,12 @@ final class PdClient implements PdClientInterface
 
     public function getClusterId(): ?int
     {
-        return $this->clusterId;
+        return $this->clusterIdHolder->get();
     }
 
     public function setClusterId(int $clusterId): void
     {
+        $this->clusterIdHolder->set($clusterId);
         $this->clusterId = $clusterId;
     }
 
@@ -191,7 +195,7 @@ final class PdClient implements PdClientInterface
                     'Cluster ID mismatch, retrying',
                     ['method' => $method, 'clusterId' => $extractedId],
                 );
-                $this->clusterId = $extractedId;
+                $this->setClusterId($extractedId);
                 /** @phpstan-ignore method.notFound */
                 $request->setHeader($this->createHeader());
 
@@ -226,7 +230,7 @@ final class PdClient implements PdClientInterface
             if (is_object($header) && method_exists($header, 'getClusterId')) {
                 /** @var int $clusterId */
                 $clusterId = $header->getClusterId();
-                $this->clusterId = $clusterId;
+                $this->setClusterId($clusterId);
                 $this->logger->info('Learned cluster ID', ['clusterId' => $clusterId]);
             }
         }

@@ -15,10 +15,15 @@ use Psr\Log\NullLogger;
 
 final readonly class TimestampOracle
 {
+    /**
+     * @param ClusterIdHolder $clusterIdHolder Shared mutable cluster ID holder,
+     *        used instead of a PdClientInterface reference to avoid the
+     *        PdClient → TimestampOracle → PdClient reference cycle.
+     */
     public function __construct(
         private GrpcClientInterface $grpc,
         private string $pdAddress,
-        private PdClientInterface $pdClient,
+        private ClusterIdHolder $clusterIdHolder,
         private LoggerInterface $logger = new NullLogger(),
     ) {
     }
@@ -60,7 +65,7 @@ final readonly class TimestampOracle
     private function createHeader(): RequestHeader
     {
         $header = new RequestHeader();
-        $clusterId = $this->pdClient->getClusterId();
+        $clusterId = $this->clusterIdHolder->get();
         if ($clusterId !== null) {
             $header->setClusterId($clusterId);
         }
@@ -101,7 +106,7 @@ final readonly class TimestampOracle
                 'Cluster ID mismatch on TSO, retrying',
                 ['clusterId' => $extractedId],
             );
-            $this->pdClient->setClusterId($extractedId);
+            $this->clusterIdHolder->set($extractedId);
             $request->setHeader($this->createHeader());
 
             $response = $this->grpc->call(
@@ -120,13 +125,13 @@ final readonly class TimestampOracle
 
     private function learnClusterId(TsoResponse $response): void
     {
-        if ($this->pdClient->getClusterId() !== null) {
+        if ($this->clusterIdHolder->get() !== null) {
             return;
         }
 
         $header = $response->getHeader();
         if ($header !== null) {
-            $this->pdClient->setClusterId((int) $header->getClusterId());
+            $this->clusterIdHolder->set((int) $header->getClusterId());
             $this->logger->info('Learned cluster ID', ['clusterId' => $header->getClusterId()]);
         }
     }

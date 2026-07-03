@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `__destruct()` on `RawKvClient`, `TxnKvClient`, `Transaction`, and `GrpcClient` — deterministic resource cleanup when references are dropped without an explicit `close()`/`rollback()` call. Destructors are idempotent, exception-safe, and log failures instead of throwing. (#91)
+- `ClusterIdHolder` — mutable value object shared between `PdClient` and `TimestampOracle`, breaking the reference cycle that previously prevented prompt garbage collection of the PD connection layer. (#91)
 - `GrpcResponseParser::setMaxMessageSize()` — configurable maximum protobuf message size guard before `mergeFromString()`, preventing potential DoS from oversized messages (defense in depth for CVE-2026-6409). Default is 0 (unlimited). (#75)
 - Unit tests for `GrpcResponseParser` max message size: within limit, exceeds limit, null message, zero disables limit. (#75)
 - `TlsConfigBuilder::withCaCertFile()`, `withCaCertPem()`, `withClientCertFile()`, `withClientCertPem()` — explicit API to distinguish file paths from inline PEM content, replacing the ambiguous `file_exists()` guessing in legacy methods. The new methods support an optional `$baseDir` parameter to restrict allowed directories. The legacy `withCaCert()` and `withClientCert()` are deprecated. (#87)

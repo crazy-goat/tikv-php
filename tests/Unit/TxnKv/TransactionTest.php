@@ -401,7 +401,7 @@ class TransactionTest extends TestCase
             'k2' => 'scanned-v2',
         ]);
 
-        $this->grpc->expects($this->once())->method('call')->willReturn($response);
+        $this->grpc->expects($this->exactly(2))->method('call')->willReturn($response);
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'local-v1');
@@ -410,6 +410,8 @@ class TransactionTest extends TestCase
         $this->assertCount(2, $result);
         $this->assertSame('local-v1', $result[0]['value']);
         $this->assertSame('scanned-v2', $result[1]['value']);
+
+        $txn->rollback(); // explicit cleanup to avoid extra call from __destruct
     }
 
     public function testScanWithLimitZeroAndNoResultsReturnsEmpty(): void
@@ -1361,5 +1363,95 @@ class TransactionTest extends TestCase
         $this->assertNotNull($capturedRequest);
         $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $capturedRequest);
         $this->assertCount(1, $capturedRequest->getMutations());
+    }
+
+    // ========================================================================
+    // __destruct
+    // ========================================================================
+
+    public function testDestructCallsRollbackWhenActiveWithKeys(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $this->grpc->expects($this->atLeastOnce())
+            ->method('call')
+            ->willReturn(new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse());
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key', 'value');
+        // Destructor triggers rollback when object goes out of scope
+        // (at the end of this test method).
+        unset($txn);
+    }
+
+    public function testDestructDoesNotThrowWhenAlreadyCommitted(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $callCount = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function () use ($prewriteResponse, $commitResponse, &$callCount): object {
+                $callCount++;
+                return match ($callCount) {
+                    1 => $prewriteResponse,
+                    2 => $commitResponse,
+                    default => throw new \RuntimeException('Unexpected call'),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key', 'value');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        // Destructor should not throw or call rollback on committed txn.
+    }
+
+    public function testDestructDoesNotThrowWhenAlreadyRolledBack(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $this->grpc->method('call')
+            ->willReturn(new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse());
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key', 'value');
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        // Destructor should not throw on already-rolled-back txn.
+    }
+
+    public function testDestructDoesNothingOnEmptyWriteSet(): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        // Destructor should not call rollback (writeSet is empty).
     }
 }

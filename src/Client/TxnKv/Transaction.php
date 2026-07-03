@@ -970,6 +970,20 @@ final class Transaction
         }
     }
 
+    public function __destruct()
+    {
+        if (!$this->closed && $this->status === TransactionStatus::Active && $this->writeSet !== []) {
+            try {
+                $this->rollback();
+            } catch (\Throwable $e) {
+                $this->logger->warning('Transaction destructor rollback failed', [
+                    'txnId' => $this->txnId,
+                    'exception' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
     private function closeTransaction(): void
     {
         $this->closed = true;

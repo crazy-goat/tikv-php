@@ -194,6 +194,33 @@ class TxnKvClientTest extends TestCase
         $client->close();
     }
 
+    public function testDestructCallsClose(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->expects($this->once())->method('close');
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('close');
+
+        $client = new TxnKvClient($pdClient, $grpc);
+    }
+
+    public function testDestructIsIdempotentWhenAlreadyClosed(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->expects($this->once())->method('close');
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('close');
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+    }
+
     // ========================================================================
     // begin() — priority propagation
     // ========================================================================

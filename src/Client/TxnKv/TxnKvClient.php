@@ -176,6 +176,11 @@ final class TxnKvClient
         return $this->pdClient->getClusterId();
     }
 
+    public function __destruct()
+    {
+        $this->close();
+    }
+
     public function close(): void
     {
         if ($this->closed) {
