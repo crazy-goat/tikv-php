@@ -255,13 +255,16 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testExceptionOnUnreadableFileDoesNotLeakPath(): void
     {
-        if (function_exists('posix_getuid') && posix_getuid() === 0) {
-            $this->markTestSkipped('Root can read any file regardless of permissions');
-        }
-
         $path = $this->tempDir . '/unreadable.crt';
         file_put_contents($path, 'content');
         chmod($path, 0000);
+
+        // Root (uid 0) can read any file regardless of permissions,
+        // so the test is not meaningful in that environment.
+        if (@file_get_contents($path) !== false) {
+            chmod($path, 0644);
+            $this->markTestSkipped('Running as root — chmod 0000 has no effect');
+        }
 
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Cannot read TLS file');
