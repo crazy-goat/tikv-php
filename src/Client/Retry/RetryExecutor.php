@@ -118,7 +118,10 @@ final class RetryExecutor
                     }
 
                     if (!$backoffType instanceof BackoffType) {
-                        $this->logger->error('Fatal error, not retrying', ['key' => $key, 'error' => $e->getMessage()]);
+                        $this->logger->error('Fatal error, not retrying', [
+                            'key' => KeyRedactor::redact($key),
+                            'error' => $e->getMessage(),
+                        ]);
                         throw $e;
                     }
 
