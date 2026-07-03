@@ -404,13 +404,15 @@ class TransactionTest extends TestCase
         $rollbackResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
 
         $this->grpc->method('call')
-            ->willReturnCallback(function (string $addr, string $svc, string $method) use ($scanResponse, $rollbackResponse): object {
-                return match ($method) {
-                    'KvScan' => $scanResponse,
-                    'KvBatchRollback' => $rollbackResponse,
-                    default => throw new \RuntimeException("Unexpected method: $method"),
-                };
-            });
+            ->willReturnCallback(
+                function (string $addr, string $svc, string $method) use ($scanResponse, $rollbackResponse): object {
+                    return match ($method) {
+                        'KvScan' => $scanResponse,
+                        'KvBatchRollback' => $rollbackResponse,
+                        default => throw new \RuntimeException("Unexpected method: $method"),
+                    };
+                }
+            );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'local-v1');
