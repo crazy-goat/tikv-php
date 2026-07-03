@@ -86,6 +86,32 @@ class TxnKvClientTest extends TestCase
     }
 
     // ========================================================================
+    // Cluster ID
+    // ========================================================================
+
+    public function testGetClusterIdReturnsNullWhenNotDiscovered(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+
+        $this->assertNull($client->getClusterId());
+    }
+
+    public function testGetClusterIdReturnsDiscoveredId(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getClusterId')->willReturn(67890);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+
+        $this->assertSame(67890, $client->getClusterId());
+    }
+
+    // ========================================================================
     // close()
     // ========================================================================
 

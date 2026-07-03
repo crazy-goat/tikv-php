@@ -77,6 +77,24 @@ class RawKvClientTest extends TestCase
     }
 
     // ========================================================================
+    // Cluster ID
+    // ========================================================================
+
+    public function testGetClusterIdReturnsNullWhenNotDiscovered(): void
+    {
+        $this->pdClient->method('getClusterId')->willReturn(null);
+
+        $this->assertNull($this->client->getClusterId());
+    }
+
+    public function testGetClusterIdReturnsDiscoveredId(): void
+    {
+        $this->pdClient->method('getClusterId')->willReturn(12345);
+
+        $this->assertSame(12345, $this->client->getClusterId());
+    }
+
+    // ========================================================================
     // Lifecycle
     // ========================================================================
 
