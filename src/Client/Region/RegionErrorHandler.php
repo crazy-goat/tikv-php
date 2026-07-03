@@ -57,8 +57,12 @@ final class RegionErrorHandler
     /**
      * Build a human-readable description from a KeyError.
      */
-    private static function describeKeyError(string $key, object $keyError): string
+    private static function describeKeyError(string $key, ?object $keyError): string
     {
+        if ($keyError === null) {
+            return sprintf('per-pair error for key "%s": null', $key);
+        }
+
         $parts = [];
 
         // Check oneof string fields

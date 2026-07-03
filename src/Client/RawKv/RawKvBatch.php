@@ -65,7 +65,6 @@ final readonly class RawKvBatch
             );
             foreach ($subBatches as $subBatch) {
                 $regionCalls[] = fn(): RawBatchGetResponse => $this->batchGetWithRetry(
-                    $regionData['region'],
                     $subBatch,
                     $retryExecutor,
                     $columnFamily,
@@ -163,7 +162,6 @@ final readonly class RawKvBatch
                 $batchTtls = $subBatch['ttls'];
                 $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
                 $regionCalls[] = fn(): null => $this->batchPutWithRetry(
-                    $regionData['region'],
                     $subBatch['pairs'],
                     $batchTtl,
                     $retryExecutor,
@@ -203,7 +201,6 @@ final readonly class RawKvBatch
             );
             foreach ($subBatches as $subBatch) {
                 $regionCalls[] = fn(): null => $this->batchDeleteWithRetry(
-                    $regionData['region'],
                     $subBatch,
                     $retryExecutor,
                     $forCas,
@@ -362,18 +359,17 @@ final readonly class RawKvBatch
      * @param string[] $keys
      */
     private function batchGetWithRetry(
-        RegionInfo $region,
         array $keys,
         RetryExecutor $retryExecutor,
         string $columnFamily = '',
     ): RawBatchGetResponse {
         $key = $keys[0] ?? '';
         return $retryExecutor->execute($key, function () use (
-            $region,
             $keys,
+            $key,
             $columnFamily,
         ): RawBatchGetResponse {
-            $fresh = $this->resolveRegion($region, $key);
+            $fresh = $this->resolveRegion($key);
 
             // Fast path: all keys still belong to the same region.
             $allInRegion = true;
@@ -414,6 +410,7 @@ final readonly class RawKvBatch
             foreach ($groups as $group) {
                 $f = $group['region'];
                 $future = $this->executeBatchGetForRegionAsync($f, $group['keys'], $columnFamily);
+                /** @var RawBatchGetResponse $response */
                 $response = $future->wait();
                 RegionErrorHandler::check($response);
                 foreach ($response->getPairs() as $pair) {
@@ -432,7 +429,6 @@ final readonly class RawKvBatch
      * @param int|int[] $ttl
      */
     private function batchPutWithRetry(
-        RegionInfo $region,
         array $pairs,
         int|array $ttl,
         RetryExecutor $retryExecutor,
@@ -441,14 +437,13 @@ final readonly class RawKvBatch
     ): null {
         $firstKey = $pairs !== [] ? $pairs[0]->getKey() : '';
         return $retryExecutor->execute($firstKey, function () use (
-            $region,
             $pairs,
             $ttl,
             $firstKey,
             $forCas,
             $columnFamily,
         ): null {
-            $fresh = $this->resolveRegion($region, $firstKey);
+            $fresh = $this->resolveRegion($firstKey);
 
             // Fast path: all pairs still belong to the same region.
             $allInRegion = true;
@@ -505,7 +500,6 @@ final readonly class RawKvBatch
      * @param string[] $keys
      */
     private function batchDeleteWithRetry(
-        RegionInfo $region,
         array $keys,
         RetryExecutor $retryExecutor,
         bool $forCas = false,
@@ -513,12 +507,12 @@ final readonly class RawKvBatch
     ): null {
         $key = $keys[0] ?? '';
         return $retryExecutor->execute($key, function () use (
-            $region,
             $keys,
+            $key,
             $forCas,
             $columnFamily,
         ): null {
-            $fresh = $this->resolveRegion($region, $key);
+            $fresh = $this->resolveRegion($key);
 
             // Fast path: all keys still belong to the same region.
             $allInRegion = true;
@@ -578,7 +572,7 @@ final readonly class RawKvBatch
      * never returns the stale original when the region has changed — it always
      * returns the freshly resolved region so the caller can re-group keys.
      */
-    private function resolveRegion(RegionInfo $original, string $key): RegionInfo
+    private function resolveRegion(string $key): RegionInfo
     {
         return $this->regionResolver->getRegionInfo($key);
     }
