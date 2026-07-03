@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Transaction SRP decomposition** — broke up the 944-line `Transaction` god object into three focused collaborators: `TransactionState` (mutable state), `TxnReader` (get/batchGet/scan), and `TwoPhaseCommitter` (commit/rollback/pessimistic lock/heartbeat). The public `Transaction` API is preserved as a thin façade delegating to these classes, following the same decomposition pattern already established in the RawKv module (`RawKvCrud`, `RawKvBatch`, etc.). (#83)
+
 ### Added
 - `ConnectionFactory` and `ConnectionBundle` in `src/Client/Connection/` — extract the shared TLS parsing, gRPC/PD wiring and timeout-config construction that was duplicated between `RawKvClient::create()` and `TxnKvClient::create()`. Both `create()` methods now delegate to `ConnectionFactory::create()`, eliminating ~100 lines of copy-paste bootstrap code. (#94)
 - `RegionGrouper::groupItemsByRegion()` — a generic region grouping method that accepts any item array with a key-extractor callable, allowing `Transaction::groupMutationsByRegion()` to delegate to the shared grouper instead of reimplementing the same batch-resolution loop. (#94)
