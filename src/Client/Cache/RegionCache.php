@@ -17,9 +17,18 @@ class RegionCache implements RegionCacheInterface
     /** @var array<int, int> regionId => index */
     private array $idToIndex = [];
 
+    /** @var array<int, int> regionId => LRU order (higher = more recent) */
+    private array $lruOrder = [];
+
+    private int $lruCounter = 0;
+
+    private int $putCountSinceSweep = 0;
+
     public function __construct(
         private readonly int $ttlSeconds = 600,
         private readonly int $jitterSeconds = 60,
+        private readonly int $maxEntries = 10000,
+        private readonly int $sweepInterval = 100,
         private readonly LoggerInterface $logger = new NullLogger(),
     ) {
     }
@@ -45,6 +54,9 @@ class RegionCache implements RegionCacheInterface
             return null;
         }
 
+        // Mark as recently used
+        $this->lruOrder[$entry->region->regionId] = ++$this->lruCounter;
+
         $this->logger->debug('Region cache hit', ['key' => KeyRedactor::redact($key), 'regionId' => $entry->region->regionId]);
 
         return $this->resolveRegionInfo($entry);
@@ -56,8 +68,27 @@ class RegionCache implements RegionCacheInterface
 
         $position = $this->findInsertPosition($region->startKey);
         $entry = new RegionEntry($region, $this->now() + $this->ttlSeconds + $this->jitter());
+
         array_splice($this->entries, $position, 0, [$entry]);
-        $this->rebuildIdToIndex();
+
+        // Update idToIndex incrementally: shift indices >= position by 1
+        $this->shiftIdToIndex($position, 1);
+        $this->idToIndex[$region->regionId] = $position;
+
+        // Mark as recently used
+        $this->lruOrder[$region->regionId] = ++$this->lruCounter;
+
+        // Evict LRU if at capacity
+        if (count($this->entries) > $this->maxEntries) {
+            $this->evictLru();
+        }
+
+        // Periodic sweep of expired entries
+        $this->putCountSinceSweep++;
+        if ($this->putCountSinceSweep >= $this->sweepInterval) {
+            $this->sweepExpired();
+            $this->putCountSinceSweep = 0;
+        }
 
         $this->logger->debug('Region cached', [
             'regionId' => $region->regionId,
@@ -80,6 +111,9 @@ class RegionCache implements RegionCacheInterface
             return false;
         }
 
+        // Mark as recently used
+        $this->lruOrder[$regionId] = ++$this->lruCounter;
+
         $entry = $this->entries[$index];
         $result = $entry->switchLeader($leaderStoreId);
         if ($result) {
@@ -95,11 +129,89 @@ class RegionCache implements RegionCacheInterface
     {
         $this->entries = [];
         $this->idToIndex = [];
+        $this->lruOrder = [];
+        $this->lruCounter = 0;
+        $this->putCountSinceSweep = 0;
+    }
+
+    public function count(): int
+    {
+        return count($this->entries);
     }
 
     protected function now(): int
     {
         return time();
+    }
+
+    /**
+     * Sweep expired entries from the cache.
+     * Returns the number of entries removed.
+     */
+    private function sweepExpired(): int
+    {
+        $now = $this->now();
+        $removed = 0;
+        $toRemove = [];
+
+        foreach ($this->entries as $index => $entry) {
+            if ($now >= $entry->expiresAt) {
+                $toRemove[] = $index;
+            }
+        }
+
+        // Remove in reverse order to preserve indices
+        for ($i = count($toRemove) - 1; $i >= 0; $i--) {
+            $this->removeByIndex($toRemove[$i]);
+            $removed++;
+        }
+
+        if ($removed > 0) {
+            $this->logger->debug('Swept expired region entries', ['removed' => $removed]);
+        }
+
+        return $removed;
+    }
+
+    /**
+     * Evict the least recently used entry from the cache.
+     */
+    private function evictLru(): void
+    {
+        if ($this->entries === []) {
+            return;
+        }
+
+        // Find the region ID with the smallest LRU order (least recently used)
+        $lruId = null;
+        $lruOrder = PHP_INT_MAX;
+
+        foreach ($this->lruOrder as $regionId => $order) {
+            if ($order < $lruOrder) {
+                $lruOrder = $order;
+                $lruId = $regionId;
+            }
+        }
+
+        if ($lruId === null) {
+            // Fallback: evict the first entry
+            $lruId = $this->entries[0]->region->regionId;
+        }
+
+        $this->logger->debug('Evicting LRU region from cache', ['regionId' => $lruId]);
+        $this->removeById($lruId);
+    }
+
+    /**
+     * Shift idToIndex values >= $from by $delta.
+     */
+    private function shiftIdToIndex(int $from, int $delta): void
+    {
+        foreach ($this->idToIndex as $regionId => $index) {
+            if ($index >= $from) {
+                $this->idToIndex[$regionId] = $index + $delta;
+            }
+        }
     }
 
     private function binarySearch(string $key): ?int
@@ -150,18 +262,20 @@ class RegionCache implements RegionCacheInterface
 
     private function removeByIndex(int $index): void
     {
-        if (isset($this->entries[$index])) {
-            array_splice($this->entries, $index, 1);
-            $this->rebuildIdToIndex();
+        if (!isset($this->entries[$index])) {
+            return;
         }
-    }
 
-    private function rebuildIdToIndex(): void
-    {
-        $this->idToIndex = [];
-        foreach ($this->entries as $index => $entry) {
-            $this->idToIndex[$entry->region->regionId] = $index;
-        }
+        $regionId = $this->entries[$index]->region->regionId;
+        unset($this->lruOrder[$regionId]);
+
+        array_splice($this->entries, $index, 1);
+
+        // Remove from idToIndex
+        unset($this->idToIndex[$regionId]);
+
+        // Shift remaining indices
+        $this->shiftIdToIndex($index, -1);
     }
 
     private function isExpired(RegionEntry $entry): bool
