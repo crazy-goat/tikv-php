@@ -15,7 +15,6 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
-use Psr\Log\NullLogger;
 
 class RetryExecutorTest extends TestCase
 {
@@ -89,7 +88,7 @@ class RetryExecutorTest extends TestCase
         // attempt 0: sleepMs=2, totalBackoffMs=0+2=2, 2<=10 → retry
         // attempt 1: sleepMs=4, totalBackoffMs=2+4=6, 6<=10 → retry
         // attempt 2: sleepMs=8, totalBackoffMs=6+8=14, 14>10 → throw
-        $operation = function () {
+        $operation = function (): void {
             throw new TiKvException('test error');
         };
 
@@ -114,7 +113,7 @@ class RetryExecutorTest extends TestCase
 
         $classifier = fn(TiKvException $e): BackoffType => BackoffType::RegionMiss;
 
-        $operation = function () {
+        $operation = function (): void {
             throw new TiKvException('test error');
         };
 
@@ -141,7 +140,7 @@ class RetryExecutorTest extends TestCase
         // serverBusyBackoffMs = 0 + >=1000 > 100 → throw on first retry
         $classifier = fn(TiKvException $e): BackoffType => BackoffType::ServerBusy;
 
-        $operation = function () {
+        $operation = function (): void {
             throw new TiKvException('server busy');
         };
 
@@ -166,7 +165,7 @@ class RetryExecutorTest extends TestCase
 
         $classifier = fn(TiKvException $e): BackoffType => BackoffType::ServerBusy;
 
-        $operation = function () {
+        $operation = function (): void {
             throw new TiKvException('server busy');
         };
 
@@ -191,7 +190,7 @@ class RetryExecutorTest extends TestCase
 
         $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
 
-        $operation = function () {
+        $operation = function (): void {
             throw new TiKvException('test error');
         };
 
@@ -212,18 +211,20 @@ class RetryExecutorTest extends TestCase
         $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
 
         $lastError = new TiKvException('last error message');
-        $operation = function () use ($lastError): never {
+        $operation = function () use ($lastError): void {
             throw $lastError;
         };
 
+        $this->expectException(RetryBudgetExhaustedException::class);
+
         try {
             $executor->execute('test_key', $operation, $classifier);
-            $this->fail('Expected RetryBudgetExhaustedException');
         } catch (RetryBudgetExhaustedException $e) {
             $this->assertSame(3, $e->attempts());
             $this->assertStringContainsString('test_key', $e->getMessage());
             $previous = $e->getPrevious();
             $this->assertSame($lastError, $previous);
+            throw $e;
         }
     }
 
@@ -243,7 +244,7 @@ class RetryExecutorTest extends TestCase
         // Use None backoff (sleepMs=0) so the loop iterates without delay
         $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
 
-        $operation = function () {
+        $operation = function (): void {
             throw new TiKvException('test error');
         };
 
@@ -276,11 +277,11 @@ class RetryExecutorTest extends TestCase
             maxAttempts: 2,
         );
 
-        $operation = function () {
+        $operation = function (): void {
             throw new TiKvException('CustomError');
         };
 
-        $classifier = function (TiKvException $e): ?BackoffType {
+        $classifier = function (TiKvException $e): \CrazyGoat\TiKV\Client\Retry\BackoffType {
             $this->assertStringContainsString('CustomError', $e->getMessage());
             return BackoffType::ServerBusy;
         };
