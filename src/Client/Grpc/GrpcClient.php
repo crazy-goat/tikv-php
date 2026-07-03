@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Grpc;
 
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Tls\TlsConfig;
 use Google\Protobuf\Internal\Message;
 use Grpc\Call;
@@ -127,7 +128,7 @@ final class GrpcClient implements GrpcClientInterface
     private function createTlsCredentials(): ChannelCredentials
     {
         if (!$this->tlsConfig instanceof \CrazyGoat\TiKV\Client\Tls\TlsConfig) {
-            throw new \RuntimeException('TLS config is required for TLS credentials');
+            throw new InvalidStateException('TLS config is required for TLS credentials');
         }
 
         $certChain = $this->tlsConfig->clientCert;
