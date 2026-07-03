@@ -29,7 +29,7 @@ final class GrpcClient implements GrpcClientInterface
      * @param bool $allowInsecure When true (default), an insecure (plaintext) gRPC channel
      *                            is created when no TLS configuration is provided or when
      *                            the TLS configuration has no credentials set. When false,
-     *                            a MissingTlsConfigException is thrown if no TLS credentials
+     *                            an InvalidStateException is thrown if no TLS credentials
      *                            are available. Set this to false to ensure all connections
      *                            use TLS.
      */
