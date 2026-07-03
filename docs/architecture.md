@@ -646,21 +646,23 @@ $channel2 = $grpc->getChannel('127.0.0.1:20160');
 - HTTP/2 multiplexing
 - Keep-alive handling
 
-### 2. Batch Parallelization
+### 2. Batch Concurrent Fan-Out
 
-**Strategy**: Execute batch operations across regions in parallel.
+**Strategy**: Issue every per-region gRPC send RPC before any response is awaited, so server-side latencies for distinct regions overlap on their respective channels. Response collection then proceeds in declaration order.
 
 ```php
-// BatchGet to 3 regions happens concurrently
+// BatchGet to 3 regions dispatches all 3 sends before any wait begins
 $keys = [...];  // Keys in 3 different regions
-$client->batchGet($keys);  // 3 parallel requests
+$client->batchGet($keys);  // 3 concurrent sends, responses collected in order
 ```
 
 **Implementation**:
-- Group keys by region
-- Create async gRPC calls
-- Wait for all with timeout
-- Merge results
+- Group keys by region (sub-batched under the per-region RawKV caps)
+- Issue sends via `executeBatch*ForRegionAsync()`, returning un-waited `GrpcFuture` objects wrapped in `CheckedGrpcFuture`
+- `BatchAsyncExecutor::executeParallel()` invokes every per-region callable in the dispatch phase, then awaits responses in the wait phase
+- An optional `$deadlineMs` caps the wall-clock time for dispatch + wait; on overrun the executor raises `BatchDeadlineExceededException` and cancels any still-unfinished futures
+- On the first wait-phase failure, remaining futures are cancelled to prevent gRPC channel/completion-queue leaks
+- The rare split/merge slow path re-dispatches every sub-region's send during the dispatch phase and merges responses in the wait phase
 
 ### 3. Region Cache
 

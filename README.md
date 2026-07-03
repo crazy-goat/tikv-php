@@ -272,7 +272,8 @@ try {
 src/
 ├── Client/
 │   ├── Batch/
-│   │   ├── BatchAsyncExecutor.php   # Parallel batch execution
+│   │   ├── BatchAsyncExecutor.php   # Concurrent fan-out with deadline-bounded collection
+│   │   ├── CheckedGrpcFuture.php    # Lazy region-error check around dispatch futures
 │   │   └── GrpcFuture.php           # Async gRPC operations
 │   ├── Cache/
 │   │   ├── RegionCache.php          # Region metadata cache
