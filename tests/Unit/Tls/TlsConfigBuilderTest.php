@@ -414,7 +414,6 @@ class TlsConfigBuilderTest extends TestCase
         $builder = new TlsConfigBuilder();
         // Use reflection to set clientKey directly (simulating partial config)
         $prop = new \ReflectionProperty(TlsConfigBuilder::class, 'clientKey');
-        $prop->setAccessible(true);
         $prop->setValue($builder, 'some-key');
         $builder->build();
     }
