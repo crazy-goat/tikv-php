@@ -77,9 +77,8 @@ class RawChecksumResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -99,9 +98,9 @@ class RawChecksumResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->error = $var;
 
         return $this;
@@ -121,7 +120,7 @@ class RawChecksumResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setChecksum($var)
+    public function setChecksum(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->checksum = $var;
@@ -143,7 +142,7 @@ class RawChecksumResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTotalKvs($var)
+    public function setTotalKvs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->total_kvs = $var;
@@ -165,7 +164,7 @@ class RawChecksumResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTotalBytes($var)
+    public function setTotalBytes(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->total_bytes = $var;

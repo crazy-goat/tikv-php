@@ -77,7 +77,7 @@ class RUV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKvEngineCacheMiss($var)
+    public function setKvEngineCacheMiss(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->kv_engine_cache_miss = $var;
@@ -109,9 +109,8 @@ class RUV2 extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ExecutorInputs $var
      * @return $this
      */
-    public function setExecutorInputs($var)
+    public function setExecutorInputs(\CrazyGoat\Proto\Kvrpcpb\ExecutorInputs|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ExecutorInputs::class);
         $this->executor_inputs = $var;
 
         return $this;
@@ -131,7 +130,7 @@ class RUV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCoprocessorExecutorIterations($var)
+    public function setCoprocessorExecutorIterations(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->coprocessor_executor_iterations = $var;
@@ -153,7 +152,7 @@ class RUV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCoprocessorResponseBytes($var)
+    public function setCoprocessorResponseBytes(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->coprocessor_response_bytes = $var;
@@ -175,7 +174,7 @@ class RUV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRaftstoreStoreWriteTriggerWbBytes($var)
+    public function setRaftstoreStoreWriteTriggerWbBytes(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->raftstore_store_write_trigger_wb_bytes = $var;
@@ -197,7 +196,7 @@ class RUV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStorageProcessedKeysBatchGet($var)
+    public function setStorageProcessedKeysBatchGet(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->storage_processed_keys_batch_get = $var;
@@ -219,7 +218,7 @@ class RUV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStorageProcessedKeysGet($var)
+    public function setStorageProcessedKeysGet(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->storage_processed_keys_get = $var;

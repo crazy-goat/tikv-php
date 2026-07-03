@@ -106,9 +106,8 @@ class EstablishDisaggTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\DisaggTaskMeta $var
      * @return $this
      */
-    public function setMeta($var)
+    public function setMeta(\CrazyGoat\Proto\Disaggregated\DisaggTaskMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\DisaggTaskMeta::class);
         $this->meta = $var;
 
         return $this;
@@ -132,9 +131,9 @@ class EstablishDisaggTaskRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setAddress($var)
+    public function setAddress(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->address = $var;
 
         return $this;
@@ -162,7 +161,7 @@ class EstablishDisaggTaskRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTimeoutS($var)
+    public function setTimeoutS(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->timeout_s = $var;
@@ -188,7 +187,7 @@ class EstablishDisaggTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\RegionInfo[] $var
      * @return $this
      */
-    public function setRegions($var)
+    public function setRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\RegionInfo::class);
         $this->regions = $arr;
@@ -210,7 +209,7 @@ class EstablishDisaggTaskRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSchemaVer($var)
+    public function setSchemaVer(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->schema_ver = $var;
@@ -236,7 +235,7 @@ class EstablishDisaggTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\TableRegions[] $var
      * @return $this
      */
-    public function setTableRegions($var)
+    public function setTableRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\TableRegions::class);
         $this->table_regions = $arr;
@@ -262,9 +261,9 @@ class EstablishDisaggTaskRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEncodedPlan($var)
+    public function setEncodedPlan(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->encoded_plan = $var;
 
         return $this;

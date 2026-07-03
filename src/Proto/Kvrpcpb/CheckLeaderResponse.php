@@ -52,7 +52,7 @@ class CheckLeaderResponse extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setRegions($var)
+    public function setRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->regions = $arr;
@@ -74,7 +74,7 @@ class CheckLeaderResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTs($var)
+    public function setTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->ts = $var;

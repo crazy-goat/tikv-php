@@ -90,7 +90,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.Op type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Op}
      */
     public function getType()
     {
@@ -99,10 +99,10 @@ class MvccLock extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.Op type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Op}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\Op::class);
         $this->type = $var;
@@ -124,7 +124,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -146,9 +146,9 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimary($var)
+    public function setPrimary(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary = $var;
 
         return $this;
@@ -168,9 +168,9 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setShortValue($var)
+    public function setShortValue(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->short_value = $var;
 
         return $this;
@@ -190,7 +190,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTtl($var)
+    public function setTtl(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->ttl = $var;
@@ -212,7 +212,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setForUpdateTs($var)
+    public function setForUpdateTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->for_update_ts = $var;
@@ -234,7 +234,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTxnSize($var)
+    public function setTxnSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->txn_size = $var;
@@ -256,9 +256,8 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setUseAsyncCommit($var)
+    public function setUseAsyncCommit(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->use_async_commit = $var;
 
         return $this;
@@ -278,7 +277,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setSecondaries($var)
+    public function setSecondaries(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->secondaries = $arr;
@@ -300,7 +299,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setRollbackTs($var)
+    public function setRollbackTs(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->rollback_ts = $arr;
@@ -322,7 +321,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLastChangeTs($var)
+    public function setLastChangeTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->last_change_ts = $var;
@@ -344,7 +343,7 @@ class MvccLock extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setVersionsToLastChange($var)
+    public function setVersionsToLastChange(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->versions_to_last_change = $var;

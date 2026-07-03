@@ -45,7 +45,7 @@ class GrantedRawResourceTokenBucket extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.RawResourceType type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\ResourceManager\RawResourceType}
      */
     public function getType()
     {
@@ -54,10 +54,10 @@ class GrantedRawResourceTokenBucket extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.RawResourceType type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\ResourceManager\RawResourceType}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\ResourceManager\RawResourceType::class);
         $this->type = $var;
@@ -89,9 +89,8 @@ class GrantedRawResourceTokenBucket extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucket $var
      * @return $this
      */
-    public function setGrantedTokens($var)
+    public function setGrantedTokens(\CrazyGoat\Proto\ResourceManager\TokenBucket|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\TokenBucket::class);
         $this->granted_tokens = $var;
 
         return $this;
@@ -111,7 +110,7 @@ class GrantedRawResourceTokenBucket extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTrickleTimeMs($var)
+    public function setTrickleTimeMs(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->trickle_time_ms = $var;

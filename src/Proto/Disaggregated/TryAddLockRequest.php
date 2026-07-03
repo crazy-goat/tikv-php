@@ -70,9 +70,9 @@ class TryAddLockRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setDataFileKey($var)
+    public function setDataFileKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data_file_key = $var;
 
         return $this;
@@ -96,7 +96,7 @@ class TryAddLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockStoreId($var)
+    public function setLockStoreId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_store_id = $var;
@@ -122,7 +122,7 @@ class TryAddLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockSeq($var)
+    public function setLockSeq(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_seq = $var;

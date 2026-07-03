@@ -10,10 +10,13 @@ use Google\Protobuf\Internal\GPBUtil;
 use Google\Protobuf\RepeatedField;
 
 /**
+ * Master key config.
+ *
  * Generated from protobuf message <code>encryptionpb.MasterKey</code>
  */
 class MasterKey extends \Google\Protobuf\Internal\Message
 {
+    protected $backend;
 
     /**
      * Constructor.
@@ -21,11 +24,100 @@ class MasterKey extends \Google\Protobuf\Internal\Message
      * @param array $data {
      *     Optional. Data for populating the Message object.
      *
+     *     @type \CrazyGoat\Proto\Encryptionpb\MasterKeyPlaintext $plaintext
+     *     @type \CrazyGoat\Proto\Encryptionpb\MasterKeyFile $file
+     *     @type \CrazyGoat\Proto\Encryptionpb\MasterKeyKms $kms
      * }
      */
     public function __construct($data = NULL) {
         \CrazyGoat\Proto\GPBMetadata\Encryptionpb::initOnce();
         parent::__construct($data);
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.MasterKeyPlaintext plaintext = 1;</code>
+     * @return \CrazyGoat\Proto\Encryptionpb\MasterKeyPlaintext|null
+     */
+    public function getPlaintext()
+    {
+        return $this->readOneof(1);
+    }
+
+    public function hasPlaintext()
+    {
+        return $this->hasOneof(1);
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.MasterKeyPlaintext plaintext = 1;</code>
+     * @param \CrazyGoat\Proto\Encryptionpb\MasterKeyPlaintext $var
+     * @return $this
+     */
+    public function setPlaintext(\CrazyGoat\Proto\Encryptionpb\MasterKeyPlaintext|null $var)
+    {
+        $this->writeOneof(1, $var);
+
+        return $this;
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.MasterKeyFile file = 2;</code>
+     * @return \CrazyGoat\Proto\Encryptionpb\MasterKeyFile|null
+     */
+    public function getFile()
+    {
+        return $this->readOneof(2);
+    }
+
+    public function hasFile()
+    {
+        return $this->hasOneof(2);
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.MasterKeyFile file = 2;</code>
+     * @param \CrazyGoat\Proto\Encryptionpb\MasterKeyFile $var
+     * @return $this
+     */
+    public function setFile(\CrazyGoat\Proto\Encryptionpb\MasterKeyFile|null $var)
+    {
+        $this->writeOneof(2, $var);
+
+        return $this;
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.MasterKeyKms kms = 3;</code>
+     * @return \CrazyGoat\Proto\Encryptionpb\MasterKeyKms|null
+     */
+    public function getKms()
+    {
+        return $this->readOneof(3);
+    }
+
+    public function hasKms()
+    {
+        return $this->hasOneof(3);
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.MasterKeyKms kms = 3;</code>
+     * @param \CrazyGoat\Proto\Encryptionpb\MasterKeyKms $var
+     * @return $this
+     */
+    public function setKms(\CrazyGoat\Proto\Encryptionpb\MasterKeyKms|null $var)
+    {
+        $this->writeOneof(3, $var);
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getBackend()
+    {
+        return $this->whichOneof("backend");
     }
 
 }

@@ -96,9 +96,8 @@ class ResolveLockRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -118,7 +117,7 @@ class ResolveLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartVersion($var)
+    public function setStartVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_version = $var;
@@ -146,7 +145,7 @@ class ResolveLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitVersion($var)
+    public function setCommitVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_version = $var;
@@ -168,7 +167,7 @@ class ResolveLockRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\TxnInfo[] $var
      * @return $this
      */
-    public function setTxnInfos($var)
+    public function setTxnInfos(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\TxnInfo::class);
         $this->txn_infos = $arr;
@@ -194,7 +193,7 @@ class ResolveLockRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setKeys($var)
+    public function setKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->keys = $arr;
@@ -220,9 +219,8 @@ class ResolveLockRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTxnFile($var)
+    public function setIsTxnFile(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_txn_file = $var;
 
         return $this;

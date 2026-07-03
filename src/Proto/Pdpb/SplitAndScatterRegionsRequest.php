@@ -72,9 +72,8 @@ class SplitAndScatterRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -94,7 +93,7 @@ class SplitAndScatterRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setSplitKeys($var)
+    public function setSplitKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->split_keys = $arr;
@@ -116,9 +115,9 @@ class SplitAndScatterRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setGroup($var)
+    public function setGroup(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->group = $var;
 
         return $this;
@@ -138,7 +137,7 @@ class SplitAndScatterRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRetryLimit($var)
+    public function setRetryLimit(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->retry_limit = $var;

@@ -40,7 +40,7 @@ class RequestUnitItem extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.RequestUnitType type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\ResourceManager\RequestUnitType}
      */
     public function getType()
     {
@@ -49,10 +49,10 @@ class RequestUnitItem extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.RequestUnitType type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\ResourceManager\RequestUnitType}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\ResourceManager\RequestUnitType::class);
         $this->type = $var;
@@ -74,9 +74,8 @@ class RequestUnitItem extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setValue($var)
+    public function setValue(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->value = $var;
 
         return $this;

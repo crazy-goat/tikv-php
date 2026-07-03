@@ -68,7 +68,7 @@ class TabletSnapshotFileMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFileSize($var)
+    public function setFileSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->file_size = $var;
@@ -90,9 +90,9 @@ class TabletSnapshotFileMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setFileName($var)
+    public function setFileName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->file_name = $var;
 
         return $this;
@@ -116,9 +116,9 @@ class TabletSnapshotFileMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setHeadChunk($var)
+    public function setHeadChunk(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->head_chunk = $var;
 
         return $this;
@@ -142,9 +142,9 @@ class TabletSnapshotFileMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setTrailingChunk($var)
+    public function setTrailingChunk(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->trailing_chunk = $var;
 
         return $this;

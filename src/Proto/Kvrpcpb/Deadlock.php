@@ -73,7 +73,7 @@ class Deadlock extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockTs($var)
+    public function setLockTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_ts = $var;
@@ -95,9 +95,9 @@ class Deadlock extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setLockKey($var)
+    public function setLockKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->lock_key = $var;
 
         return $this;
@@ -121,7 +121,7 @@ class Deadlock extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setDeadlockKeyHash($var)
+    public function setDeadlockKeyHash(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->deadlock_key_hash = $var;
@@ -143,7 +143,7 @@ class Deadlock extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Deadlock\WaitForEntry[] $var
      * @return $this
      */
-    public function setWaitChain($var)
+    public function setWaitChain(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Deadlock\WaitForEntry::class);
         $this->wait_chain = $arr;
@@ -169,9 +169,9 @@ class Deadlock extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setDeadlockKey($var)
+    public function setDeadlockKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->deadlock_key = $var;
 
         return $this;

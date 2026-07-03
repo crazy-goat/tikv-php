@@ -43,6 +43,16 @@ interface PdClientInterface
     public function scanRegions(string $startKey, string $endKey, int $limit = 0): array;
 
     /**
+     * Get all stores from PD.
+     *
+     * @return Store[]
+     *
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD error
+     */
+    public function getAllStores(): array;
+
+    /**
      * Get a monotonically increasing timestamp from PD.
      *
      * @throws GrpcException On transport error

@@ -62,9 +62,8 @@ class GetResourceGroupResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\Error $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\ResourceManager\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\Error::class);
         $this->error = $var;
 
         return $this;
@@ -94,9 +93,8 @@ class GetResourceGroupResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\ResourceGroup $var
      * @return $this
      */
-    public function setGroup($var)
+    public function setGroup(\CrazyGoat\Proto\ResourceManager\ResourceGroup|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\ResourceGroup::class);
         $this->group = $var;
 
         return $this;

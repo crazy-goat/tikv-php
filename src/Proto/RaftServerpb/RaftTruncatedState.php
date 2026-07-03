@@ -52,7 +52,7 @@ class RaftTruncatedState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setIndex($var)
+    public function setIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->index = $var;
@@ -74,7 +74,7 @@ class RaftTruncatedState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTerm($var)
+    public function setTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->term = $var;

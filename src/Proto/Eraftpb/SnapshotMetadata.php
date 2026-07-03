@@ -80,9 +80,8 @@ class SnapshotMetadata extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Eraftpb\ConfState $var
      * @return $this
      */
-    public function setConfState($var)
+    public function setConfState(\CrazyGoat\Proto\Eraftpb\ConfState|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Eraftpb\ConfState::class);
         $this->conf_state = $var;
 
         return $this;
@@ -106,7 +105,7 @@ class SnapshotMetadata extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setIndex($var)
+    public function setIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->index = $var;
@@ -132,7 +131,7 @@ class SnapshotMetadata extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTerm($var)
+    public function setTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->term = $var;

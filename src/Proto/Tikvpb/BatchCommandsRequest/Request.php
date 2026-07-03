@@ -84,9 +84,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\GetRequest $var
      * @return $this
      */
-    public function setGet($var)
+    public function setGet(\CrazyGoat\Proto\Kvrpcpb\GetRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\GetRequest::class);
         $this->writeOneof(1, $var);
 
         return $this;
@@ -111,9 +110,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ScanRequest $var
      * @return $this
      */
-    public function setScan($var)
+    public function setScan(\CrazyGoat\Proto\Kvrpcpb\ScanRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ScanRequest::class);
         $this->writeOneof(2, $var);
 
         return $this;
@@ -138,9 +136,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\PrewriteRequest $var
      * @return $this
      */
-    public function setPrewrite($var)
+    public function setPrewrite(\CrazyGoat\Proto\Kvrpcpb\PrewriteRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\PrewriteRequest::class);
         $this->writeOneof(3, $var);
 
         return $this;
@@ -165,9 +162,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CommitRequest $var
      * @return $this
      */
-    public function setCommit($var)
+    public function setCommit(\CrazyGoat\Proto\Kvrpcpb\CommitRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CommitRequest::class);
         $this->writeOneof(4, $var);
 
         return $this;
@@ -192,9 +188,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ImportRequest $var
      * @return $this
      */
-    public function setImport($var)
+    public function setImport(\CrazyGoat\Proto\Kvrpcpb\ImportRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ImportRequest::class);
         $this->writeOneof(5, $var);
 
         return $this;
@@ -219,9 +214,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CleanupRequest $var
      * @return $this
      */
-    public function setCleanup($var)
+    public function setCleanup(\CrazyGoat\Proto\Kvrpcpb\CleanupRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CleanupRequest::class);
         $this->writeOneof(6, $var);
 
         return $this;
@@ -246,9 +240,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\BatchGetRequest $var
      * @return $this
      */
-    public function setBatchGet($var)
+    public function setBatchGet(\CrazyGoat\Proto\Kvrpcpb\BatchGetRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\BatchGetRequest::class);
         $this->writeOneof(7, $var);
 
         return $this;
@@ -273,9 +266,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest $var
      * @return $this
      */
-    public function setBatchRollback($var)
+    public function setBatchRollback(\CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest::class);
         $this->writeOneof(8, $var);
 
         return $this;
@@ -300,9 +292,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ScanLockRequest $var
      * @return $this
      */
-    public function setScanLock($var)
+    public function setScanLock(\CrazyGoat\Proto\Kvrpcpb\ScanLockRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ScanLockRequest::class);
         $this->writeOneof(9, $var);
 
         return $this;
@@ -327,9 +318,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest $var
      * @return $this
      */
-    public function setResolveLock($var)
+    public function setResolveLock(\CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest::class);
         $this->writeOneof(10, $var);
 
         return $this;
@@ -354,9 +344,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\GCRequest $var
      * @return $this
      */
-    public function setGC($var)
+    public function setGC(\CrazyGoat\Proto\Kvrpcpb\GCRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\GCRequest::class);
         $this->writeOneof(11, $var);
 
         return $this;
@@ -381,9 +370,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\DeleteRangeRequest $var
      * @return $this
      */
-    public function setDeleteRange($var)
+    public function setDeleteRange(\CrazyGoat\Proto\Kvrpcpb\DeleteRangeRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\DeleteRangeRequest::class);
         $this->writeOneof(12, $var);
 
         return $this;
@@ -408,9 +396,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawGetRequest $var
      * @return $this
      */
-    public function setRawGet($var)
+    public function setRawGet(\CrazyGoat\Proto\Kvrpcpb\RawGetRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class);
         $this->writeOneof(13, $var);
 
         return $this;
@@ -435,9 +422,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest $var
      * @return $this
      */
-    public function setRawBatchGet($var)
+    public function setRawBatchGet(\CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest::class);
         $this->writeOneof(14, $var);
 
         return $this;
@@ -462,9 +448,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawPutRequest $var
      * @return $this
      */
-    public function setRawPut($var)
+    public function setRawPut(\CrazyGoat\Proto\Kvrpcpb\RawPutRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawPutRequest::class);
         $this->writeOneof(15, $var);
 
         return $this;
@@ -489,9 +474,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest $var
      * @return $this
      */
-    public function setRawBatchPut($var)
+    public function setRawBatchPut(\CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest::class);
         $this->writeOneof(16, $var);
 
         return $this;
@@ -516,9 +500,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawDeleteRequest $var
      * @return $this
      */
-    public function setRawDelete($var)
+    public function setRawDelete(\CrazyGoat\Proto\Kvrpcpb\RawDeleteRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawDeleteRequest::class);
         $this->writeOneof(17, $var);
 
         return $this;
@@ -543,9 +526,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteRequest $var
      * @return $this
      */
-    public function setRawBatchDelete($var)
+    public function setRawBatchDelete(\CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteRequest::class);
         $this->writeOneof(18, $var);
 
         return $this;
@@ -570,9 +552,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawScanRequest $var
      * @return $this
      */
-    public function setRawScan($var)
+    public function setRawScan(\CrazyGoat\Proto\Kvrpcpb\RawScanRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawScanRequest::class);
         $this->writeOneof(19, $var);
 
         return $this;
@@ -597,9 +578,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeRequest $var
      * @return $this
      */
-    public function setRawDeleteRange($var)
+    public function setRawDeleteRange(\CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeRequest::class);
         $this->writeOneof(20, $var);
 
         return $this;
@@ -624,9 +604,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest $var
      * @return $this
      */
-    public function setRawBatchScan($var)
+    public function setRawBatchScan(\CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest::class);
         $this->writeOneof(21, $var);
 
         return $this;
@@ -651,9 +630,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\Request $var
      * @return $this
      */
-    public function setCoprocessor($var)
+    public function setCoprocessor(\CrazyGoat\Proto\Coprocessor\Request|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Coprocessor\Request::class);
         $this->writeOneof(22, $var);
 
         return $this;
@@ -678,9 +656,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest $var
      * @return $this
      */
-    public function setPessimisticLock($var)
+    public function setPessimisticLock(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class);
         $this->writeOneof(23, $var);
 
         return $this;
@@ -705,9 +682,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest $var
      * @return $this
      */
-    public function setPessimisticRollback($var)
+    public function setPessimisticRollback(\CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest::class);
         $this->writeOneof(24, $var);
 
         return $this;
@@ -732,9 +708,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest $var
      * @return $this
      */
-    public function setCheckTxnStatus($var)
+    public function setCheckTxnStatus(\CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest::class);
         $this->writeOneof(25, $var);
 
         return $this;
@@ -759,9 +734,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatRequest $var
      * @return $this
      */
-    public function setTxnHeartBeat($var)
+    public function setTxnHeartBeat(\CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatRequest::class);
         $this->writeOneof(26, $var);
 
         return $this;
@@ -786,9 +760,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksRequest $var
      * @return $this
      */
-    public function setCheckSecondaryLocks($var)
+    public function setCheckSecondaryLocks(\CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksRequest::class);
         $this->writeOneof(33, $var);
 
         return $this;
@@ -813,9 +786,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RawCoprocessorRequest $var
      * @return $this
      */
-    public function setRawCoprocessor($var)
+    public function setRawCoprocessor(\CrazyGoat\Proto\Kvrpcpb\RawCoprocessorRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RawCoprocessorRequest::class);
         $this->writeOneof(34, $var);
 
         return $this;
@@ -840,9 +812,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\FlashbackToVersionRequest $var
      * @return $this
      */
-    public function setFlashbackToVersion($var)
+    public function setFlashbackToVersion(\CrazyGoat\Proto\Kvrpcpb\FlashbackToVersionRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\FlashbackToVersionRequest::class);
         $this->writeOneof(35, $var);
 
         return $this;
@@ -867,9 +838,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\PrepareFlashbackToVersionRequest $var
      * @return $this
      */
-    public function setPrepareFlashbackToVersion($var)
+    public function setPrepareFlashbackToVersion(\CrazyGoat\Proto\Kvrpcpb\PrepareFlashbackToVersionRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\PrepareFlashbackToVersionRequest::class);
         $this->writeOneof(36, $var);
 
         return $this;
@@ -894,9 +864,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\FlushRequest $var
      * @return $this
      */
-    public function setFlush($var)
+    public function setFlush(\CrazyGoat\Proto\Kvrpcpb\FlushRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\FlushRequest::class);
         $this->writeOneof(37, $var);
 
         return $this;
@@ -921,9 +890,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\BufferBatchGetRequest $var
      * @return $this
      */
-    public function setBufferBatchGet($var)
+    public function setBufferBatchGet(\CrazyGoat\Proto\Kvrpcpb\BufferBatchGetRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\BufferBatchGetRequest::class);
         $this->writeOneof(38, $var);
 
         return $this;
@@ -948,9 +916,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\GetHealthFeedbackRequest $var
      * @return $this
      */
-    public function setGetHealthFeedback($var)
+    public function setGetHealthFeedback(\CrazyGoat\Proto\Kvrpcpb\GetHealthFeedbackRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\GetHealthFeedbackRequest::class);
         $this->writeOneof(39, $var);
 
         return $this;
@@ -975,9 +942,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\BroadcastTxnStatusRequest $var
      * @return $this
      */
-    public function setBroadcastTxnStatus($var)
+    public function setBroadcastTxnStatus(\CrazyGoat\Proto\Kvrpcpb\BroadcastTxnStatusRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\BroadcastTxnStatusRequest::class);
         $this->writeOneof(40, $var);
 
         return $this;
@@ -1006,9 +972,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tikvpb\BatchCommandsEmptyRequest $var
      * @return $this
      */
-    public function setEmpty($var)
+    public function setEmpty(\CrazyGoat\Proto\Tikvpb\BatchCommandsEmptyRequest|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Tikvpb\BatchCommandsEmptyRequest::class);
         $this->writeOneof(255, $var);
 
         return $this;

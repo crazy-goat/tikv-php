@@ -35,7 +35,7 @@ class ControlGrpc extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.ControlGrpcEvent ctrl_event = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Pdpb\ControlGrpcEvent}
      */
     public function getCtrlEvent()
     {
@@ -44,10 +44,10 @@ class ControlGrpc extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.ControlGrpcEvent ctrl_event = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Pdpb\ControlGrpcEvent}
      * @return $this
      */
-    public function setCtrlEvent($var)
+    public function setCtrlEvent(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Pdpb\ControlGrpcEvent::class);
         $this->ctrl_event = $var;

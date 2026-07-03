@@ -62,9 +62,8 @@ class TransferLeader extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setPeer($var)
+    public function setPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->peer = $var;
 
         return $this;
@@ -84,7 +83,7 @@ class TransferLeader extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setPeers($var)
+    public function setPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->peers = $arr;

@@ -183,7 +183,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -209,7 +209,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTaskId($var)
+    public function setTaskId(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->task_id = $var;
@@ -235,7 +235,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPartitionId($var)
+    public function setPartitionId(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->partition_id = $var;
@@ -261,9 +261,9 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setAddress($var)
+    public function setAddress(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->address = $var;
 
         return $this;
@@ -287,7 +287,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGatherId($var)
+    public function setGatherId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->gather_id = $var;
@@ -313,7 +313,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setQueryTs($var)
+    public function setQueryTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->query_ts = $var;
@@ -339,7 +339,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLocalQueryId($var)
+    public function setLocalQueryId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->local_query_id = $var;
@@ -365,7 +365,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setServerId($var)
+    public function setServerId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->server_id = $var;
@@ -391,7 +391,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMppVersion($var)
+    public function setMppVersion(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->mpp_version = $var;
@@ -417,7 +417,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;
@@ -443,9 +443,9 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCoordinatorAddress($var)
+    public function setCoordinatorAddress(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->coordinator_address = $var;
 
         return $this;
@@ -469,9 +469,8 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setReportExecutionSummary($var)
+    public function setReportExecutionSummary(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->report_execution_summary = $var;
 
         return $this;
@@ -481,7 +480,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * API version of the request
      *
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 16;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      */
     public function getApiVersion()
     {
@@ -492,10 +491,10 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * API version of the request
      *
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 16;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      * @return $this
      */
-    public function setApiVersion($var)
+    public function setApiVersion(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\APIVersion::class);
         $this->api_version = $var;
@@ -517,9 +516,9 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setResourceGroupName($var)
+    public function setResourceGroupName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->resource_group_name = $var;
 
         return $this;
@@ -543,7 +542,7 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setConnectionId($var)
+    public function setConnectionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->connection_id = $var;
@@ -569,9 +568,9 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setConnectionAlias($var)
+    public function setConnectionAlias(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->connection_alias = $var;
 
         return $this;
@@ -591,9 +590,9 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setSqlDigest($var)
+    public function setSqlDigest(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->sql_digest = $var;
 
         return $this;
@@ -613,9 +612,9 @@ class TaskMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPlanDigest($var)
+    public function setPlanDigest(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->plan_digest = $var;
 
         return $this;

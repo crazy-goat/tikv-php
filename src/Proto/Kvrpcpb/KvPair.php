@@ -77,9 +77,8 @@ class KvPair extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyError $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Kvrpcpb\KeyError|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\KeyError::class);
         $this->error = $var;
 
         return $this;
@@ -99,9 +98,9 @@ class KvPair extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -121,9 +120,9 @@ class KvPair extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setValue($var)
+    public function setValue(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->value = $var;
 
         return $this;
@@ -149,7 +148,7 @@ class KvPair extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitTs($var)
+    public function setCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_ts = $var;

@@ -31,8 +31,7 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * Now it's substituted by reusing recovery_plan field. PD will send a empty
      * recovery plan instead to request store report.
      *
-     * Generated from protobuf field <code>bool require_detailed_report = 4 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>bool require_detailed_report = 4;</code>
      */
     protected $require_detailed_report = false;
     /**
@@ -114,9 +113,8 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -146,9 +144,8 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ReplicationModepb\ReplicationStatus $var
      * @return $this
      */
-    public function setReplicationStatus($var)
+    public function setReplicationStatus(\CrazyGoat\Proto\ReplicationModepb\ReplicationStatus|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ReplicationModepb\ReplicationStatus::class);
         $this->replication_status = $var;
 
         return $this;
@@ -168,9 +165,9 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setClusterVersion($var)
+    public function setClusterVersion(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->cluster_version = $var;
 
         return $this;
@@ -181,15 +178,11 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * Now it's substituted by reusing recovery_plan field. PD will send a empty
      * recovery plan instead to request store report.
      *
-     * Generated from protobuf field <code>bool require_detailed_report = 4 [deprecated = true];</code>
+     * Generated from protobuf field <code>bool require_detailed_report = 4;</code>
      * @return bool
-     * @deprecated
      */
     public function getRequireDetailedReport()
     {
-        if ($this->require_detailed_report !== false) {
-            @trigger_error('require_detailed_report is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->require_detailed_report;
     }
 
@@ -198,15 +191,12 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * Now it's substituted by reusing recovery_plan field. PD will send a empty
      * recovery plan instead to request store report.
      *
-     * Generated from protobuf field <code>bool require_detailed_report = 4 [deprecated = true];</code>
+     * Generated from protobuf field <code>bool require_detailed_report = 4;</code>
      * @param bool $var
      * @return $this
-     * @deprecated
      */
-    public function setRequireDetailedReport($var)
+    public function setRequireDetailedReport(bool $var)
     {
-        @trigger_error('require_detailed_report is deprecated.', E_USER_DEPRECATED);
-        GPBUtil::checkBool($var);
         $this->require_detailed_report = $var;
 
         return $this;
@@ -242,9 +232,8 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RecoveryPlan $var
      * @return $this
      */
-    public function setRecoveryPlan($var)
+    public function setRecoveryPlan(\CrazyGoat\Proto\Pdpb\RecoveryPlan|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RecoveryPlan::class);
         $this->recovery_plan = $var;
 
         return $this;
@@ -278,9 +267,8 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\AwakenRegions $var
      * @return $this
      */
-    public function setAwakenRegions($var)
+    public function setAwakenRegions(\CrazyGoat\Proto\Pdpb\AwakenRegions|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\AwakenRegions::class);
         $this->awaken_regions = $var;
 
         return $this;
@@ -314,9 +302,8 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ControlGrpc $var
      * @return $this
      */
-    public function setControlGrpc($var)
+    public function setControlGrpc(\CrazyGoat\Proto\Pdpb\ControlGrpc|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ControlGrpc::class);
         $this->control_grpc = $var;
 
         return $this;
@@ -326,7 +313,7 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * NodeState is going to mark the state of the store.
      *
      * Generated from protobuf field <code>.metapb.NodeState state = 8;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Metapb\NodeState}
      */
     public function getState()
     {
@@ -337,10 +324,10 @@ class StoreHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * NodeState is going to mark the state of the store.
      *
      * Generated from protobuf field <code>.metapb.NodeState state = 8;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Metapb\NodeState}
      * @return $this
      */
-    public function setState($var)
+    public function setState(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Metapb\NodeState::class);
         $this->state = $var;

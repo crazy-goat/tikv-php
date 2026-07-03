@@ -57,7 +57,7 @@ class TokenLimitSettings extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFillRate($var)
+    public function setFillRate(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->fill_rate = $var;
@@ -79,7 +79,7 @@ class TokenLimitSettings extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBurstLimit($var)
+    public function setBurstLimit(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->burst_limit = $var;
@@ -101,9 +101,8 @@ class TokenLimitSettings extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setMaxTokens($var)
+    public function setMaxTokens(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->max_tokens = $var;
 
         return $this;

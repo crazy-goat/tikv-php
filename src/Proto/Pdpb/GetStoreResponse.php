@@ -67,9 +67,8 @@ class GetStoreResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -99,9 +98,8 @@ class GetStoreResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Store $var
      * @return $this
      */
-    public function setStore($var)
+    public function setStore(\CrazyGoat\Proto\Metapb\Store|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Store::class);
         $this->store = $var;
 
         return $this;
@@ -131,9 +129,8 @@ class GetStoreResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\StoreStats $var
      * @return $this
      */
-    public function setStats($var)
+    public function setStats(\CrazyGoat\Proto\Pdpb\StoreStats|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\StoreStats::class);
         $this->stats = $var;
 
         return $this;

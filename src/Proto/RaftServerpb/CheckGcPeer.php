@@ -82,7 +82,7 @@ class CheckGcPeer extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFromRegionId($var)
+    public function setFromRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->from_region_id = $var;
@@ -108,7 +108,7 @@ class CheckGcPeer extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCheckRegionId($var)
+    public function setCheckRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->check_region_id = $var;
@@ -144,9 +144,8 @@ class CheckGcPeer extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setCheckRegionEpoch($var)
+    public function setCheckRegionEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->check_region_epoch = $var;
 
         return $this;
@@ -180,9 +179,8 @@ class CheckGcPeer extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setCheckPeer($var)
+    public function setCheckPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->check_peer = $var;
 
         return $this;

@@ -19,8 +19,7 @@ class ScatterRegionRequest extends \Google\Protobuf\Internal\Message
      */
     protected $header = null;
     /**
-     * Generated from protobuf field <code>uint64 region_id = 2 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>uint64 region_id = 2;</code>
      */
     protected $region_id = 0;
     /**
@@ -106,36 +105,29 @@ class ScatterRegionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
     }
 
     /**
-     * Generated from protobuf field <code>uint64 region_id = 2 [deprecated = true];</code>
+     * Generated from protobuf field <code>uint64 region_id = 2;</code>
      * @return int|string
-     * @deprecated
      */
     public function getRegionId()
     {
-        if ($this->region_id !== 0) {
-            @trigger_error('region_id is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->region_id;
     }
 
     /**
-     * Generated from protobuf field <code>uint64 region_id = 2 [deprecated = true];</code>
+     * Generated from protobuf field <code>uint64 region_id = 2;</code>
      * @param int|string $var
      * @return $this
-     * @deprecated
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
-        @trigger_error('region_id is deprecated.', E_USER_DEPRECATED);
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
 
@@ -172,9 +164,8 @@ class ScatterRegionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setRegion($var)
+    public function setRegion(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->region = $var;
 
         return $this;
@@ -204,9 +195,8 @@ class ScatterRegionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setLeader($var)
+    public function setLeader(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->leader = $var;
 
         return $this;
@@ -232,9 +222,9 @@ class ScatterRegionRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setGroup($var)
+    public function setGroup(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->group = $var;
 
         return $this;
@@ -258,7 +248,7 @@ class ScatterRegionRequest extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setRegionsId($var)
+    public function setRegionsId(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->regions_id = $arr;
@@ -280,7 +270,7 @@ class ScatterRegionRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRetryLimit($var)
+    public function setRetryLimit(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->retry_limit = $var;
@@ -302,9 +292,8 @@ class ScatterRegionRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setSkipStoreLimit($var)
+    public function setSkipStoreLimit(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->skip_store_limit = $var;
 
         return $this;

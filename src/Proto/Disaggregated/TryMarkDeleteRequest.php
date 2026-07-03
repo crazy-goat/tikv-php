@@ -54,9 +54,9 @@ class TryMarkDeleteRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setDataFileKey($var)
+    public function setDataFileKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data_file_key = $var;
 
         return $this;

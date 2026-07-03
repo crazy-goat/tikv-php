@@ -114,7 +114,7 @@ class TimeDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWaitWallTimeNs($var)
+    public function setWaitWallTimeNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->wait_wall_time_ns = $var;
@@ -148,7 +148,7 @@ class TimeDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProcessWallTimeNs($var)
+    public function setProcessWallTimeNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->process_wall_time_ns = $var;
@@ -174,7 +174,7 @@ class TimeDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProcessSuspendWallTimeNs($var)
+    public function setProcessSuspendWallTimeNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->process_suspend_wall_time_ns = $var;
@@ -200,7 +200,7 @@ class TimeDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKvReadWallTimeNs($var)
+    public function setKvReadWallTimeNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->kv_read_wall_time_ns = $var;
@@ -226,7 +226,7 @@ class TimeDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTotalRpcWallTimeNs($var)
+    public function setTotalRpcWallTimeNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->total_rpc_wall_time_ns = $var;
@@ -252,7 +252,7 @@ class TimeDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKvGrpcProcessTimeNs($var)
+    public function setKvGrpcProcessTimeNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->kv_grpc_process_time_ns = $var;
@@ -278,7 +278,7 @@ class TimeDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKvGrpcWaitTimeNs($var)
+    public function setKvGrpcWaitTimeNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->kv_grpc_wait_time_ns = $var;

@@ -118,9 +118,9 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setName($var)
+    public function setName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->name = $var;
 
         return $this;
@@ -128,7 +128,7 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.GroupMode mode = 2;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\ResourceManager\GroupMode}
      */
     public function getMode()
     {
@@ -137,10 +137,10 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.GroupMode mode = 2;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\ResourceManager\GroupMode}
      * @return $this
      */
-    public function setMode($var)
+    public function setMode(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\ResourceManager\GroupMode::class);
         $this->mode = $var;
@@ -176,9 +176,8 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\GroupRequestUnitSettings $var
      * @return $this
      */
-    public function setRUSettings($var)
+    public function setRUSettings(\CrazyGoat\Proto\ResourceManager\GroupRequestUnitSettings|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\GroupRequestUnitSettings::class);
         $this->r_u_settings = $var;
 
         return $this;
@@ -212,9 +211,8 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\GroupRawResourceSettings $var
      * @return $this
      */
-    public function setRawResourceSettings($var)
+    public function setRawResourceSettings(\CrazyGoat\Proto\ResourceManager\GroupRawResourceSettings|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\GroupRawResourceSettings::class);
         $this->raw_resource_settings = $var;
 
         return $this;
@@ -238,7 +236,7 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setPriority($var)
+    public function setPriority(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->priority = $var;
@@ -274,9 +272,8 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\RunawaySettings $var
      * @return $this
      */
-    public function setRunawaySettings($var)
+    public function setRunawaySettings(\CrazyGoat\Proto\ResourceManager\RunawaySettings|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\RunawaySettings::class);
         $this->runaway_settings = $var;
 
         return $this;
@@ -310,9 +307,8 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\BackgroundSettings $var
      * @return $this
      */
-    public function setBackgroundSettings($var)
+    public function setBackgroundSettings(\CrazyGoat\Proto\ResourceManager\BackgroundSettings|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\BackgroundSettings::class);
         $this->background_settings = $var;
 
         return $this;
@@ -346,9 +342,8 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\Consumption $var
      * @return $this
      */
-    public function setRUStats($var)
+    public function setRUStats(\CrazyGoat\Proto\ResourceManager\Consumption|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\Consumption::class);
         $this->RUStats = $var;
 
         return $this;
@@ -390,9 +385,8 @@ class ResourceGroup extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\KeyspaceIDValue $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(\CrazyGoat\Proto\ResourceManager\KeyspaceIDValue|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\KeyspaceIDValue::class);
         $this->keyspace_id = $var;
 
         return $this;

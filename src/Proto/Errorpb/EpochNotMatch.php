@@ -58,7 +58,7 @@ class EpochNotMatch extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region[] $var
      * @return $this
      */
-    public function setCurrentRegions($var)
+    public function setCurrentRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Region::class);
         $this->current_regions = $arr;

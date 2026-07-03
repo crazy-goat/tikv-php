@@ -77,7 +77,7 @@ class StoreBatchTask extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -109,9 +109,8 @@ class StoreBatchTask extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setRegionEpoch($var)
+    public function setRegionEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->region_epoch = $var;
 
         return $this;
@@ -141,9 +140,8 @@ class StoreBatchTask extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setPeer($var)
+    public function setPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->peer = $var;
 
         return $this;
@@ -163,7 +161,7 @@ class StoreBatchTask extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\KeyRange[] $var
      * @return $this
      */
-    public function setRanges($var)
+    public function setRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\KeyRange::class);
         $this->ranges = $arr;
@@ -185,7 +183,7 @@ class StoreBatchTask extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTaskId($var)
+    public function setTaskId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->task_id = $var;
@@ -213,7 +211,7 @@ class StoreBatchTask extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\VersionedKeyRange[] $var
      * @return $this
      */
-    public function setVersionedRanges($var)
+    public function setVersionedRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\VersionedKeyRange::class);
         $this->versioned_ranges = $arr;

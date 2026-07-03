@@ -65,7 +65,7 @@ class BatchCommandsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tikvpb\BatchCommandsResponse\Response[] $var
      * @return $this
      */
-    public function setResponses($var)
+    public function setResponses(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Tikvpb\BatchCommandsResponse\Response::class);
         $this->responses = $arr;
@@ -87,7 +87,7 @@ class BatchCommandsResponse extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setRequestIds($var)
+    public function setRequestIds(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->request_ids = $arr;
@@ -113,7 +113,7 @@ class BatchCommandsResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTransportLayerLoad($var)
+    public function setTransportLayerLoad(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->transport_layer_load = $var;
@@ -145,9 +145,8 @@ class BatchCommandsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\HealthFeedback $var
      * @return $this
      */
-    public function setHealthFeedback($var)
+    public function setHealthFeedback(\CrazyGoat\Proto\Kvrpcpb\HealthFeedback|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\HealthFeedback::class);
         $this->health_feedback = $var;
 
         return $this;

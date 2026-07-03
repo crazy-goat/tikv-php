@@ -54,7 +54,7 @@ class Report extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tracepb\RemoteParentSpan[] $var
      * @return $this
      */
-    public function setRemoteParentSpans($var)
+    public function setRemoteParentSpans(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Tracepb\RemoteParentSpan::class);
         $this->remote_parent_spans = $arr;
@@ -76,7 +76,7 @@ class Report extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tracepb\Span[] $var
      * @return $this
      */
-    public function setSpans($var)
+    public function setSpans(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Tracepb\Span::class);
         $this->spans = $arr;

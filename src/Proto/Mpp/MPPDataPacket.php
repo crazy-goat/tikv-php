@@ -73,9 +73,9 @@ class MPPDataPacket extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;
@@ -105,9 +105,8 @@ class MPPDataPacket extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Mpp\Error $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Mpp\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Mpp\Error::class);
         $this->error = $var;
 
         return $this;
@@ -127,7 +126,7 @@ class MPPDataPacket extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setChunks($var)
+    public function setChunks(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->chunks = $arr;
@@ -149,7 +148,7 @@ class MPPDataPacket extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setStreamIds($var)
+    public function setStreamIds(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->stream_ids = $arr;
@@ -175,7 +174,7 @@ class MPPDataPacket extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setVersion($var)
+    public function setVersion(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->version = $var;

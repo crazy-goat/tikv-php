@@ -94,9 +94,8 @@ class PrewriteResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -116,7 +115,7 @@ class PrewriteResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyError[] $var
      * @return $this
      */
-    public function setErrors($var)
+    public function setErrors(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\KeyError::class);
         $this->errors = $arr;
@@ -146,7 +145,7 @@ class PrewriteResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinCommitTs($var)
+    public function setMinCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_commit_ts = $var;
@@ -176,7 +175,7 @@ class PrewriteResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setOnePcCommitTs($var)
+    public function setOnePcCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->one_pc_commit_ts = $var;
@@ -212,9 +211,8 @@ class PrewriteResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2 $var
      * @return $this
      */
-    public function setExecDetailsV2($var)
+    public function setExecDetailsV2(\CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2::class);
         $this->exec_details_v2 = $var;
 
         return $this;

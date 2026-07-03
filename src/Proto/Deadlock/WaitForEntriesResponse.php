@@ -47,7 +47,7 @@ class WaitForEntriesResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Deadlock\WaitForEntry[] $var
      * @return $this
      */
-    public function setEntries($var)
+    public function setEntries(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Deadlock\WaitForEntry::class);
         $this->entries = $arr;

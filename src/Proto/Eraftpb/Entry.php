@@ -74,7 +74,7 @@ class Entry extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.eraftpb.EntryType entry_type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Eraftpb\EntryType}
      */
     public function getEntryType()
     {
@@ -83,10 +83,10 @@ class Entry extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.eraftpb.EntryType entry_type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Eraftpb\EntryType}
      * @return $this
      */
-    public function setEntryType($var)
+    public function setEntryType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Eraftpb\EntryType::class);
         $this->entry_type = $var;
@@ -108,7 +108,7 @@ class Entry extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTerm($var)
+    public function setTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->term = $var;
@@ -130,7 +130,7 @@ class Entry extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setIndex($var)
+    public function setIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->index = $var;
@@ -152,9 +152,9 @@ class Entry extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;
@@ -174,9 +174,9 @@ class Entry extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->context = $var;
 
         return $this;
@@ -202,9 +202,8 @@ class Entry extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setSyncLog($var)
+    public function setSyncLog(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->sync_log = $var;
 
         return $this;

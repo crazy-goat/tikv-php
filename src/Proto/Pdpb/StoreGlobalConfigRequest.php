@@ -52,7 +52,7 @@ class StoreGlobalConfigRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\GlobalConfigItem[] $var
      * @return $this
      */
-    public function setChanges($var)
+    public function setChanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\GlobalConfigItem::class);
         $this->changes = $arr;
@@ -74,9 +74,9 @@ class StoreGlobalConfigRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setConfigPath($var)
+    public function setConfigPath(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->config_path = $var;
 
         return $this;

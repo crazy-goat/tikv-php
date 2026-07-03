@@ -82,7 +82,7 @@ class PeerStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -104,7 +104,7 @@ class PeerStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadKeys($var)
+    public function setReadKeys(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->read_keys = $var;
@@ -126,7 +126,7 @@ class PeerStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadBytes($var)
+    public function setReadBytes(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->read_bytes = $var;
@@ -158,9 +158,8 @@ class PeerStat extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\QueryStats $var
      * @return $this
      */
-    public function setQueryStats($var)
+    public function setQueryStats(\CrazyGoat\Proto\Pdpb\QueryStats|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\QueryStats::class);
         $this->query_stats = $var;
 
         return $this;
@@ -180,7 +179,7 @@ class PeerStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWrittenKeys($var)
+    public function setWrittenKeys(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->written_keys = $var;
@@ -202,7 +201,7 @@ class PeerStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWrittenBytes($var)
+    public function setWrittenBytes(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->written_bytes = $var;
@@ -240,9 +239,8 @@ class PeerStat extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\CPUStats $var
      * @return $this
      */
-    public function setCpuStats($var)
+    public function setCpuStats(\CrazyGoat\Proto\Pdpb\CPUStats|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\CPUStats::class);
         $this->cpu_stats = $var;
 
         return $this;

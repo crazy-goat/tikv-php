@@ -57,9 +57,8 @@ class PrimaryMismatch extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\LockInfo $var
      * @return $this
      */
-    public function setLockInfo($var)
+    public function setLockInfo(\CrazyGoat\Proto\Kvrpcpb\LockInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\LockInfo::class);
         $this->lock_info = $var;
 
         return $this;

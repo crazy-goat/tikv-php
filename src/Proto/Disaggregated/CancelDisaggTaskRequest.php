@@ -57,9 +57,8 @@ class CancelDisaggTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\DisaggTaskMeta $var
      * @return $this
      */
-    public function setMeta($var)
+    public function setMeta(\CrazyGoat\Proto\Disaggregated\DisaggTaskMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\DisaggTaskMeta::class);
         $this->meta = $var;
 
         return $this;

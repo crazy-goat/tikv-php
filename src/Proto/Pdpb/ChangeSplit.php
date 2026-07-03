@@ -54,9 +54,8 @@ class ChangeSplit extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setAutoSplitEnabled($var)
+    public function setAutoSplitEnabled(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->auto_split_enabled = $var;
 
         return $this;

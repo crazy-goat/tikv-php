@@ -57,9 +57,8 @@ class GetDisaggConfigResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\DisaggS3Config $var
      * @return $this
      */
-    public function setS3Config($var)
+    public function setS3Config(\CrazyGoat\Proto\Disaggregated\DisaggS3Config|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\DisaggS3Config::class);
         $this->s3_config = $var;
 
         return $this;

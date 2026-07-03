@@ -102,9 +102,8 @@ class CheckTxnStatusResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -134,9 +133,8 @@ class CheckTxnStatusResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyError $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Kvrpcpb\KeyError|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\KeyError::class);
         $this->error = $var;
 
         return $this;
@@ -166,7 +164,7 @@ class CheckTxnStatusResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockTtl($var)
+    public function setLockTtl(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_ttl = $var;
@@ -188,7 +186,7 @@ class CheckTxnStatusResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitVersion($var)
+    public function setCommitVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_version = $var;
@@ -200,7 +198,7 @@ class CheckTxnStatusResponse extends \Google\Protobuf\Internal\Message
      * The action performed by TiKV (and why if the action is to rollback).
      *
      * Generated from protobuf field <code>.kvrpcpb.Action action = 5;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Action}
      */
     public function getAction()
     {
@@ -211,10 +209,10 @@ class CheckTxnStatusResponse extends \Google\Protobuf\Internal\Message
      * The action performed by TiKV (and why if the action is to rollback).
      *
      * Generated from protobuf field <code>.kvrpcpb.Action action = 5;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Action}
      * @return $this
      */
-    public function setAction($var)
+    public function setAction(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\Action::class);
         $this->action = $var;
@@ -246,9 +244,8 @@ class CheckTxnStatusResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\LockInfo $var
      * @return $this
      */
-    public function setLockInfo($var)
+    public function setLockInfo(\CrazyGoat\Proto\Kvrpcpb\LockInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\LockInfo::class);
         $this->lock_info = $var;
 
         return $this;
@@ -282,9 +279,8 @@ class CheckTxnStatusResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2 $var
      * @return $this
      */
-    public function setExecDetailsV2($var)
+    public function setExecDetailsV2(\CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2::class);
         $this->exec_details_v2 = $var;
 
         return $this;

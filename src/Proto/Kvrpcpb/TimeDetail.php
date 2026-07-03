@@ -90,7 +90,7 @@ class TimeDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWaitWallTimeMs($var)
+    public function setWaitWallTimeMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->wait_wall_time_ms = $var;
@@ -124,7 +124,7 @@ class TimeDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProcessWallTimeMs($var)
+    public function setProcessWallTimeMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->process_wall_time_ms = $var;
@@ -150,7 +150,7 @@ class TimeDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKvReadWallTimeMs($var)
+    public function setKvReadWallTimeMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->kv_read_wall_time_ms = $var;
@@ -176,7 +176,7 @@ class TimeDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTotalRpcWallTimeNs($var)
+    public function setTotalRpcWallTimeNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->total_rpc_wall_time_ns = $var;

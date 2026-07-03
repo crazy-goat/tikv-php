@@ -67,9 +67,8 @@ class MvccInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\MvccLock $var
      * @return $this
      */
-    public function setLock($var)
+    public function setLock(\CrazyGoat\Proto\Kvrpcpb\MvccLock|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\MvccLock::class);
         $this->lock = $var;
 
         return $this;
@@ -89,7 +88,7 @@ class MvccInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\MvccWrite[] $var
      * @return $this
      */
-    public function setWrites($var)
+    public function setWrites(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\MvccWrite::class);
         $this->writes = $arr;
@@ -111,7 +110,7 @@ class MvccInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\MvccValue[] $var
      * @return $this
      */
-    public function setValues($var)
+    public function setValues(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\MvccValue::class);
         $this->values = $arr;

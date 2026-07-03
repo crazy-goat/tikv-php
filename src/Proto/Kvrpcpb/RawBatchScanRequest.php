@@ -88,9 +88,8 @@ class RawBatchScanRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -114,7 +113,7 @@ class RawBatchScanRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyRange[] $var
      * @return $this
      */
-    public function setRanges($var)
+    public function setRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\KeyRange::class);
         $this->ranges = $arr;
@@ -140,7 +139,7 @@ class RawBatchScanRequest extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setEachLimit($var)
+    public function setEachLimit(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->each_limit = $var;
@@ -162,9 +161,8 @@ class RawBatchScanRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setKeyOnly($var)
+    public function setKeyOnly(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->key_only = $var;
 
         return $this;
@@ -184,9 +182,9 @@ class RawBatchScanRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCf($var)
+    public function setCf(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->cf = $var;
 
         return $this;
@@ -206,9 +204,8 @@ class RawBatchScanRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setReverse($var)
+    public function setReverse(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->reverse = $var;
 
         return $this;

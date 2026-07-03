@@ -64,9 +64,8 @@ class DispatchTaskResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Mpp\Error $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Mpp\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Mpp\Error::class);
         $this->error = $var;
 
         return $this;
@@ -86,7 +85,7 @@ class DispatchTaskResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region[] $var
      * @return $this
      */
-    public function setRetryRegions($var)
+    public function setRetryRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Region::class);
         $this->retry_regions = $arr;

@@ -21,15 +21,13 @@ class SplitRegionResponse extends \Google\Protobuf\Internal\Message
     /**
      * set when there are only 2 result regions.
      *
-     * Generated from protobuf field <code>.metapb.Region left = 2 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>.metapb.Region left = 2;</code>
      */
     protected $left = null;
     /**
      * set when there are only 2 result regions.
      *
-     * Generated from protobuf field <code>.metapb.Region right = 3 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>.metapb.Region right = 3;</code>
      */
     protected $right = null;
     /**
@@ -91,9 +89,8 @@ class SplitRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -102,44 +99,33 @@ class SplitRegionResponse extends \Google\Protobuf\Internal\Message
     /**
      * set when there are only 2 result regions.
      *
-     * Generated from protobuf field <code>.metapb.Region left = 2 [deprecated = true];</code>
+     * Generated from protobuf field <code>.metapb.Region left = 2;</code>
      * @return \CrazyGoat\Proto\Metapb\Region|null
-     * @deprecated
      */
     public function getLeft()
     {
-        if (isset($this->left)) {
-            @trigger_error('left is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->left;
     }
 
     public function hasLeft()
     {
-        if (isset($this->left)) {
-            @trigger_error('left is deprecated.', E_USER_DEPRECATED);
-        }
         return isset($this->left);
     }
 
     public function clearLeft()
     {
-        @trigger_error('left is deprecated.', E_USER_DEPRECATED);
         unset($this->left);
     }
 
     /**
      * set when there are only 2 result regions.
      *
-     * Generated from protobuf field <code>.metapb.Region left = 2 [deprecated = true];</code>
+     * Generated from protobuf field <code>.metapb.Region left = 2;</code>
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
-     * @deprecated
      */
-    public function setLeft($var)
+    public function setLeft(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        @trigger_error('left is deprecated.', E_USER_DEPRECATED);
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->left = $var;
 
         return $this;
@@ -148,44 +134,33 @@ class SplitRegionResponse extends \Google\Protobuf\Internal\Message
     /**
      * set when there are only 2 result regions.
      *
-     * Generated from protobuf field <code>.metapb.Region right = 3 [deprecated = true];</code>
+     * Generated from protobuf field <code>.metapb.Region right = 3;</code>
      * @return \CrazyGoat\Proto\Metapb\Region|null
-     * @deprecated
      */
     public function getRight()
     {
-        if (isset($this->right)) {
-            @trigger_error('right is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->right;
     }
 
     public function hasRight()
     {
-        if (isset($this->right)) {
-            @trigger_error('right is deprecated.', E_USER_DEPRECATED);
-        }
         return isset($this->right);
     }
 
     public function clearRight()
     {
-        @trigger_error('right is deprecated.', E_USER_DEPRECATED);
         unset($this->right);
     }
 
     /**
      * set when there are only 2 result regions.
      *
-     * Generated from protobuf field <code>.metapb.Region right = 3 [deprecated = true];</code>
+     * Generated from protobuf field <code>.metapb.Region right = 3;</code>
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
-     * @deprecated
      */
-    public function setRight($var)
+    public function setRight(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        @trigger_error('right is deprecated.', E_USER_DEPRECATED);
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->right = $var;
 
         return $this;
@@ -209,7 +184,7 @@ class SplitRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region[] $var
      * @return $this
      */
-    public function setRegions($var)
+    public function setRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Region::class);
         $this->regions = $arr;
@@ -235,7 +210,7 @@ class SplitRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyError[] $var
      * @return $this
      */
-    public function setErrors($var)
+    public function setErrors(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\KeyError::class);
         $this->errors = $arr;

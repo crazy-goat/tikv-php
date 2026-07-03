@@ -62,9 +62,8 @@ class TabletSnapshotHead extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\RaftMessage $var
      * @return $this
      */
-    public function setMessage($var)
+    public function setMessage(\CrazyGoat\Proto\RaftServerpb\RaftMessage|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\RaftMessage::class);
         $this->message = $var;
 
         return $this;
@@ -84,9 +83,8 @@ class TabletSnapshotHead extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setUseCache($var)
+    public function setUseCache(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->use_cache = $var;
 
         return $this;

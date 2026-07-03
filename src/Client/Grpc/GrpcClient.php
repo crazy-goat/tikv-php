@@ -110,6 +110,79 @@ final class GrpcClient implements GrpcClientInterface
         }
     }
 
+    public function callStreaming(
+        string $address,
+        string $service,
+        string $method,
+        array $requests,
+        string $responseClass,
+        ?int $timeoutMs = null,
+    ): Message {
+        if ($this->closed) {
+            throw new InvalidStateException('gRPC client is closed');
+        }
+
+        $operation = $service . '/' . $method;
+        $this->metrics->rpcStarted($operation);
+        $startMs = microtime(true);
+
+        $channel = $this->getChannel($address);
+
+        $deadline = $timeoutMs !== null && $timeoutMs > 0
+            ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
+            : Timeval::infFuture();
+
+        $call = new Call(
+            $channel,
+            "/{$service}/{$method}",
+            $deadline,
+        );
+
+        // Send initial metadata first.
+        $call->startBatch([
+            \Grpc\OP_SEND_INITIAL_METADATA => [],
+        ]);
+
+        // Send each request message in its own batch (gRPC PHP extension
+        // limitation: one OP_SEND_MESSAGE per batch).
+        foreach ($requests as $request) {
+            $call->startBatch([
+                \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
+            ]);
+        }
+
+        // Close the client side of the stream.
+        $call->startBatch([
+            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
+        ]);
+
+        // Receive the response.
+        $event = $call->startBatch([
+            \Grpc\OP_RECV_INITIAL_METADATA => true,
+            \Grpc\OP_RECV_MESSAGE => true,
+            \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+        ]);
+
+        $success = false;
+        try {
+            $status = GrpcResponseParser::extractStatus($event);
+
+            if ($status['code'] !== \Grpc\STATUS_OK) {
+                throw new GrpcException(
+                    details: $status['details'],
+                    grpcStatusCode: $status['code'],
+                );
+            }
+
+            $success = true;
+
+            return GrpcResponseParser::deserialize($event, $responseClass);
+        } finally {
+            $durationMs = (microtime(true) - $startMs) * 1000.0;
+            $this->metrics->rpcCompleted($operation, $durationMs, $success);
+        }
+    }
+
     public function __destruct()
     {
         $this->close();

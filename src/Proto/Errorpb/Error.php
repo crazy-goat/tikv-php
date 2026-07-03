@@ -187,9 +187,9 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setMessage($var)
+    public function setMessage(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->message = $var;
 
         return $this;
@@ -219,9 +219,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\NotLeader $var
      * @return $this
      */
-    public function setNotLeader($var)
+    public function setNotLeader(\CrazyGoat\Proto\Errorpb\NotLeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\NotLeader::class);
         $this->not_leader = $var;
 
         return $this;
@@ -251,9 +250,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\RegionNotFound $var
      * @return $this
      */
-    public function setRegionNotFound($var)
+    public function setRegionNotFound(\CrazyGoat\Proto\Errorpb\RegionNotFound|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\RegionNotFound::class);
         $this->region_not_found = $var;
 
         return $this;
@@ -283,9 +281,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\KeyNotInRegion $var
      * @return $this
      */
-    public function setKeyNotInRegion($var)
+    public function setKeyNotInRegion(\CrazyGoat\Proto\Errorpb\KeyNotInRegion|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\KeyNotInRegion::class);
         $this->key_not_in_region = $var;
 
         return $this;
@@ -315,9 +312,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\EpochNotMatch $var
      * @return $this
      */
-    public function setEpochNotMatch($var)
+    public function setEpochNotMatch(\CrazyGoat\Proto\Errorpb\EpochNotMatch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\EpochNotMatch::class);
         $this->epoch_not_match = $var;
 
         return $this;
@@ -347,9 +343,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\ServerIsBusy $var
      * @return $this
      */
-    public function setServerIsBusy($var)
+    public function setServerIsBusy(\CrazyGoat\Proto\Errorpb\ServerIsBusy|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\ServerIsBusy::class);
         $this->server_is_busy = $var;
 
         return $this;
@@ -379,9 +374,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\StaleCommand $var
      * @return $this
      */
-    public function setStaleCommand($var)
+    public function setStaleCommand(\CrazyGoat\Proto\Errorpb\StaleCommand|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\StaleCommand::class);
         $this->stale_command = $var;
 
         return $this;
@@ -411,9 +405,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\StoreNotMatch $var
      * @return $this
      */
-    public function setStoreNotMatch($var)
+    public function setStoreNotMatch(\CrazyGoat\Proto\Errorpb\StoreNotMatch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\StoreNotMatch::class);
         $this->store_not_match = $var;
 
         return $this;
@@ -443,9 +436,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\RaftEntryTooLarge $var
      * @return $this
      */
-    public function setRaftEntryTooLarge($var)
+    public function setRaftEntryTooLarge(\CrazyGoat\Proto\Errorpb\RaftEntryTooLarge|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\RaftEntryTooLarge::class);
         $this->raft_entry_too_large = $var;
 
         return $this;
@@ -475,9 +467,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\MaxTimestampNotSynced $var
      * @return $this
      */
-    public function setMaxTimestampNotSynced($var)
+    public function setMaxTimestampNotSynced(\CrazyGoat\Proto\Errorpb\MaxTimestampNotSynced|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\MaxTimestampNotSynced::class);
         $this->max_timestamp_not_synced = $var;
 
         return $this;
@@ -507,9 +498,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\ReadIndexNotReady $var
      * @return $this
      */
-    public function setReadIndexNotReady($var)
+    public function setReadIndexNotReady(\CrazyGoat\Proto\Errorpb\ReadIndexNotReady|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\ReadIndexNotReady::class);
         $this->read_index_not_ready = $var;
 
         return $this;
@@ -539,9 +529,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\ProposalInMergingMode $var
      * @return $this
      */
-    public function setProposalInMergingMode($var)
+    public function setProposalInMergingMode(\CrazyGoat\Proto\Errorpb\ProposalInMergingMode|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\ProposalInMergingMode::class);
         $this->proposal_in_merging_mode = $var;
 
         return $this;
@@ -571,9 +560,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\DataIsNotReady $var
      * @return $this
      */
-    public function setDataIsNotReady($var)
+    public function setDataIsNotReady(\CrazyGoat\Proto\Errorpb\DataIsNotReady|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\DataIsNotReady::class);
         $this->data_is_not_ready = $var;
 
         return $this;
@@ -603,9 +591,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\RegionNotInitialized $var
      * @return $this
      */
-    public function setRegionNotInitialized($var)
+    public function setRegionNotInitialized(\CrazyGoat\Proto\Errorpb\RegionNotInitialized|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\RegionNotInitialized::class);
         $this->region_not_initialized = $var;
 
         return $this;
@@ -635,9 +622,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\DiskFull $var
      * @return $this
      */
-    public function setDiskFull($var)
+    public function setDiskFull(\CrazyGoat\Proto\Errorpb\DiskFull|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\DiskFull::class);
         $this->disk_full = $var;
 
         return $this;
@@ -671,9 +657,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\RecoveryInProgress $var
      * @return $this
      */
-    public function setRecoveryInProgress($var)
+    public function setRecoveryInProgress(\CrazyGoat\Proto\Errorpb\RecoveryInProgress|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\RecoveryInProgress::class);
         $this->RecoveryInProgress = $var;
 
         return $this;
@@ -709,9 +694,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\FlashbackInProgress $var
      * @return $this
      */
-    public function setFlashbackInProgress($var)
+    public function setFlashbackInProgress(\CrazyGoat\Proto\Errorpb\FlashbackInProgress|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\FlashbackInProgress::class);
         $this->FlashbackInProgress = $var;
 
         return $this;
@@ -749,9 +733,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\FlashbackNotPrepared $var
      * @return $this
      */
-    public function setFlashbackNotPrepared($var)
+    public function setFlashbackNotPrepared(\CrazyGoat\Proto\Errorpb\FlashbackNotPrepared|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\FlashbackNotPrepared::class);
         $this->FlashbackNotPrepared = $var;
 
         return $this;
@@ -787,9 +770,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\IsWitness $var
      * @return $this
      */
-    public function setIsWitness($var)
+    public function setIsWitness(\CrazyGoat\Proto\Errorpb\IsWitness|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\IsWitness::class);
         $this->is_witness = $var;
 
         return $this;
@@ -819,9 +801,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\MismatchPeerId $var
      * @return $this
      */
-    public function setMismatchPeerId($var)
+    public function setMismatchPeerId(\CrazyGoat\Proto\Errorpb\MismatchPeerId|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\MismatchPeerId::class);
         $this->mismatch_peer_id = $var;
 
         return $this;
@@ -855,9 +836,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\BucketVersionNotMatch $var
      * @return $this
      */
-    public function setBucketVersionNotMatch($var)
+    public function setBucketVersionNotMatch(\CrazyGoat\Proto\Errorpb\BucketVersionNotMatch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\BucketVersionNotMatch::class);
         $this->bucket_version_not_match = $var;
 
         return $this;
@@ -891,9 +871,8 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\UndeterminedResult $var
      * @return $this
      */
-    public function setUndeterminedResult($var)
+    public function setUndeterminedResult(\CrazyGoat\Proto\Errorpb\UndeterminedResult|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\UndeterminedResult::class);
         $this->undetermined_result = $var;
 
         return $this;

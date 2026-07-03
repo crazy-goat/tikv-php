@@ -62,7 +62,7 @@ class ForceLeader extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setFailedStores($var)
+    public function setFailedStores(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->failed_stores = $arr;
@@ -88,7 +88,7 @@ class ForceLeader extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setEnterForceLeaders($var)
+    public function setEnterForceLeaders(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->enter_force_leaders = $arr;

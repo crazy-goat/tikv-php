@@ -47,7 +47,7 @@ class RequestRU extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\RequestUnitItem[] $var
      * @return $this
      */
-    public function setRequestRU($var)
+    public function setRequestRU(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\ResourceManager\RequestUnitItem::class);
         $this->request_r_u = $arr;

@@ -77,9 +77,8 @@ class CompactResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CompactError $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Kvrpcpb\CompactError|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CompactError::class);
         $this->error = $var;
 
         return $this;
@@ -105,9 +104,8 @@ class CompactResponse extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setHasRemaining($var)
+    public function setHasRemaining(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->has_remaining = $var;
 
         return $this;
@@ -127,9 +125,9 @@ class CompactResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCompactedStartKey($var)
+    public function setCompactedStartKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->compacted_start_key = $var;
 
         return $this;
@@ -149,9 +147,9 @@ class CompactResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCompactedEndKey($var)
+    public function setCompactedEndKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->compacted_end_key = $var;
 
         return $this;

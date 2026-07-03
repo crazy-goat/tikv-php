@@ -54,7 +54,7 @@ class ImportRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Mutation[] $var
      * @return $this
      */
-    public function setMutations($var)
+    public function setMutations(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\Mutation::class);
         $this->mutations = $arr;
@@ -76,7 +76,7 @@ class ImportRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitVersion($var)
+    public function setCommitVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_version = $var;

@@ -161,9 +161,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -223,9 +222,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ChangePeer $var
      * @return $this
      */
-    public function setChangePeer($var)
+    public function setChangePeer(\CrazyGoat\Proto\Pdpb\ChangePeer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ChangePeer::class);
         $this->change_peer = $var;
 
         return $this;
@@ -259,9 +257,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\TransferLeader $var
      * @return $this
      */
-    public function setTransferLeader($var)
+    public function setTransferLeader(\CrazyGoat\Proto\Pdpb\TransferLeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\TransferLeader::class);
         $this->transfer_leader = $var;
 
         return $this;
@@ -285,7 +282,7 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -317,9 +314,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setRegionEpoch($var)
+    public function setRegionEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->region_epoch = $var;
 
         return $this;
@@ -353,9 +349,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setTargetPeer($var)
+    public function setTargetPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->target_peer = $var;
 
         return $this;
@@ -385,9 +380,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Merge $var
      * @return $this
      */
-    public function setMerge($var)
+    public function setMerge(\CrazyGoat\Proto\Pdpb\Merge|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Merge::class);
         $this->merge = $var;
 
         return $this;
@@ -421,9 +415,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\SplitRegion $var
      * @return $this
      */
-    public function setSplitRegion($var)
+    public function setSplitRegion(\CrazyGoat\Proto\Pdpb\SplitRegion|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\SplitRegion::class);
         $this->split_region = $var;
 
         return $this;
@@ -467,9 +460,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ChangePeerV2 $var
      * @return $this
      */
-    public function setChangePeerV2($var)
+    public function setChangePeerV2(\CrazyGoat\Proto\Pdpb\ChangePeerV2|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ChangePeerV2::class);
         $this->change_peer_v2 = $var;
 
         return $this;
@@ -499,9 +491,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\BatchSwitchWitness $var
      * @return $this
      */
-    public function setSwitchWitnesses($var)
+    public function setSwitchWitnesses(\CrazyGoat\Proto\Pdpb\BatchSwitchWitness|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\BatchSwitchWitness::class);
         $this->switch_witnesses = $var;
 
         return $this;
@@ -531,9 +522,8 @@ class RegionHeartbeatResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ChangeSplit $var
      * @return $this
      */
-    public function setChangeSplit($var)
+    public function setChangeSplit(\CrazyGoat\Proto\Pdpb\ChangeSplit|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ChangeSplit::class);
         $this->change_split = $var;
 
         return $this;

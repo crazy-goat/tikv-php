@@ -89,9 +89,9 @@ class TokenBucketRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setResourceGroupName($var)
+    public function setResourceGroupName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->resource_group_name = $var;
 
         return $this;
@@ -120,9 +120,8 @@ class TokenBucketRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucketRequest\RequestRU $var
      * @return $this
      */
-    public function setRuItems($var)
+    public function setRuItems(\CrazyGoat\Proto\ResourceManager\TokenBucketRequest\RequestRU|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\TokenBucketRequest\RequestRU::class);
         $this->writeOneof(2, $var);
 
         return $this;
@@ -151,9 +150,8 @@ class TokenBucketRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucketRequest\RequestRawResource $var
      * @return $this
      */
-    public function setRawResourceItems($var)
+    public function setRawResourceItems(\CrazyGoat\Proto\ResourceManager\TokenBucketRequest\RequestRawResource|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\TokenBucketRequest\RequestRawResource::class);
         $this->writeOneof(3, $var);
 
         return $this;
@@ -187,9 +185,8 @@ class TokenBucketRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\Consumption $var
      * @return $this
      */
-    public function setConsumptionSinceLastRequest($var)
+    public function setConsumptionSinceLastRequest(\CrazyGoat\Proto\ResourceManager\Consumption|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\Consumption::class);
         $this->consumption_since_last_request = $var;
 
         return $this;
@@ -213,9 +210,8 @@ class TokenBucketRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsBackground($var)
+    public function setIsBackground(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_background = $var;
 
         return $this;
@@ -235,9 +231,8 @@ class TokenBucketRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTiflash($var)
+    public function setIsTiflash(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_tiflash = $var;
 
         return $this;
@@ -279,9 +274,8 @@ class TokenBucketRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\KeyspaceIDValue $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(\CrazyGoat\Proto\ResourceManager\KeyspaceIDValue|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\KeyspaceIDValue::class);
         $this->keyspace_id = $var;
 
         return $this;

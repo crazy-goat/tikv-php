@@ -62,7 +62,7 @@ class BackgroundSettings extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setJobTypes($var)
+    public function setJobTypes(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::STRING);
         $this->job_types = $arr;
@@ -88,7 +88,7 @@ class BackgroundSettings extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setUtilizationLimit($var)
+    public function setUtilizationLimit(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->utilization_limit = $var;

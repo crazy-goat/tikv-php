@@ -77,9 +77,8 @@ class GetMembersResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -99,7 +98,7 @@ class GetMembersResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Member[] $var
      * @return $this
      */
-    public function setMembers($var)
+    public function setMembers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\Member::class);
         $this->members = $arr;
@@ -131,9 +130,8 @@ class GetMembersResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Member $var
      * @return $this
      */
-    public function setLeader($var)
+    public function setLeader(\CrazyGoat\Proto\Pdpb\Member|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Member::class);
         $this->leader = $var;
 
         return $this;
@@ -163,9 +161,8 @@ class GetMembersResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Member $var
      * @return $this
      */
-    public function setEtcdLeader($var)
+    public function setEtcdLeader(\CrazyGoat\Proto\Pdpb\Member|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Member::class);
         $this->etcd_leader = $var;
 
         return $this;
@@ -185,7 +182,7 @@ class GetMembersResponse extends \Google\Protobuf\Internal\Message
      * @param array|\Google\Protobuf\Internal\MapField $var
      * @return $this
      */
-    public function setTsoAllocatorLeaders($var)
+    public function setTsoAllocatorLeaders(array|\Google\Protobuf\Internal\MapField $var)
     {
         $arr = GPBUtil::checkMapField($var, \Google\Protobuf\Internal\GPBType::STRING, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\Member::class);
         $this->tso_allocator_leaders = $arr;

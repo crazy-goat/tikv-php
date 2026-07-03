@@ -72,9 +72,8 @@ class UpdateServiceGCSafePointResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -94,9 +93,9 @@ class UpdateServiceGCSafePointResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setServiceId($var)
+    public function setServiceId(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->service_id = $var;
 
         return $this;
@@ -116,7 +115,7 @@ class UpdateServiceGCSafePointResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTTL($var)
+    public function setTTL(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->TTL = $var;
@@ -138,7 +137,7 @@ class UpdateServiceGCSafePointResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinSafePoint($var)
+    public function setMinSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_safe_point = $var;

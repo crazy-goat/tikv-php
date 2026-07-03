@@ -68,9 +68,8 @@ class StoreSafeTSRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyRange $var
      * @return $this
      */
-    public function setKeyRange($var)
+    public function setKeyRange(\CrazyGoat\Proto\Kvrpcpb\KeyRange|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\KeyRange::class);
         $this->key_range = $var;
 
         return $this;

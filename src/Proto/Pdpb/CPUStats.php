@@ -64,7 +64,7 @@ class CPUStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setUnifiedRead($var)
+    public function setUnifiedRead(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->UnifiedRead = $var;
@@ -90,7 +90,7 @@ class CPUStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setScheduler($var)
+    public function setScheduler(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Scheduler = $var;

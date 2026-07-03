@@ -81,9 +81,9 @@ class KeyNotInRegion extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -107,7 +107,7 @@ class KeyNotInRegion extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -133,9 +133,9 @@ class KeyNotInRegion extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setStartKey($var)
+    public function setStartKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->start_key = $var;
 
         return $this;
@@ -159,9 +159,9 @@ class KeyNotInRegion extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEndKey($var)
+    public function setEndKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->end_key = $var;
 
         return $this;

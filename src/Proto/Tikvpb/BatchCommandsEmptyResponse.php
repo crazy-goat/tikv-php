@@ -54,7 +54,7 @@ class BatchCommandsEmptyResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTestId($var)
+    public function setTestId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->test_id = $var;

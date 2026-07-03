@@ -51,9 +51,8 @@ class S3LockResult extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\Success $var
      * @return $this
      */
-    public function setSuccess($var)
+    public function setSuccess(\CrazyGoat\Proto\Disaggregated\Success|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\Success::class);
         $this->writeOneof(1, $var);
 
         return $this;
@@ -78,9 +77,8 @@ class S3LockResult extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\NotOwner $var
      * @return $this
      */
-    public function setNotOwner($var)
+    public function setNotOwner(\CrazyGoat\Proto\Disaggregated\NotOwner|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\NotOwner::class);
         $this->writeOneof(2, $var);
 
         return $this;
@@ -105,9 +103,8 @@ class S3LockResult extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\Conflict $var
      * @return $this
      */
-    public function setConflict($var)
+    public function setConflict(\CrazyGoat\Proto\Disaggregated\Conflict|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\Conflict::class);
         $this->writeOneof(3, $var);
 
         return $this;

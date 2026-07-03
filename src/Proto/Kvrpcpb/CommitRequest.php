@@ -120,9 +120,8 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -146,7 +145,7 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartVersion($var)
+    public function setStartVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_version = $var;
@@ -172,7 +171,7 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setKeys($var)
+    public function setKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->keys = $arr;
@@ -198,7 +197,7 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitVersion($var)
+    public function setCommitVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_version = $var;
@@ -211,7 +210,7 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * It's value maybe `Unknown` when using a client with an old version.
      *
      * Generated from protobuf field <code>.kvrpcpb.CommitRole commit_role = 6;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\CommitRole}
      */
     public function getCommitRole()
     {
@@ -223,10 +222,10 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * It's value maybe `Unknown` when using a client with an old version.
      *
      * Generated from protobuf field <code>.kvrpcpb.CommitRole commit_role = 6;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\CommitRole}
      * @return $this
      */
-    public function setCommitRole($var)
+    public function setCommitRole(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\CommitRole::class);
         $this->commit_role = $var;
@@ -254,9 +253,9 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimaryKey($var)
+    public function setPrimaryKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary_key = $var;
 
         return $this;
@@ -280,9 +279,8 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setUseAsyncCommit($var)
+    public function setUseAsyncCommit(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->use_async_commit = $var;
 
         return $this;
@@ -306,9 +304,8 @@ class CommitRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTxnFile($var)
+    public function setIsTxnFile(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_txn_file = $var;
 
         return $this;

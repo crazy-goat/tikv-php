@@ -57,9 +57,9 @@ class SnapshotCFFile extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCf($var)
+    public function setCf(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->cf = $var;
 
         return $this;
@@ -79,7 +79,7 @@ class SnapshotCFFile extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSize($var)
+    public function setSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->size = $var;
@@ -101,7 +101,7 @@ class SnapshotCFFile extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setChecksum($var)
+    public function setChecksum(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->checksum = $var;

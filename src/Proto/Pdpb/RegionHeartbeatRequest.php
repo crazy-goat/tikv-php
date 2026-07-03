@@ -100,8 +100,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * which is calculated by cpu_time_delta/heartbeat_reported_interval.
      * Deprecated: use cpu_stats instead.
      *
-     * Generated from protobuf field <code>uint64 cpu_usage = 17 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>uint64 cpu_usage = 17;</code>
      */
     protected $cpu_usage = 0;
     /**
@@ -210,9 +209,8 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -242,9 +240,8 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setRegion($var)
+    public function setRegion(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->region = $var;
 
         return $this;
@@ -278,9 +275,8 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setLeader($var)
+    public function setLeader(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->leader = $var;
 
         return $this;
@@ -304,7 +300,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\PeerStats[] $var
      * @return $this
      */
-    public function setDownPeers($var)
+    public function setDownPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\PeerStats::class);
         $this->down_peers = $arr;
@@ -332,7 +328,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setPendingPeers($var)
+    public function setPendingPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->pending_peers = $arr;
@@ -358,7 +354,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBytesWritten($var)
+    public function setBytesWritten(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->bytes_written = $var;
@@ -380,7 +376,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBytesRead($var)
+    public function setBytesRead(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->bytes_read = $var;
@@ -406,7 +402,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKeysWritten($var)
+    public function setKeysWritten(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->keys_written = $var;
@@ -428,7 +424,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKeysRead($var)
+    public function setKeysRead(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->keys_read = $var;
@@ -454,7 +450,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApproximateSize($var)
+    public function setApproximateSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->approximate_size = $var;
@@ -490,9 +486,8 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\TimeInterval $var
      * @return $this
      */
-    public function setInterval($var)
+    public function setInterval(\CrazyGoat\Proto\Pdpb\TimeInterval|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\TimeInterval::class);
         $this->interval = $var;
 
         return $this;
@@ -516,7 +511,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApproximateKeys($var)
+    public function setApproximateKeys(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->approximate_keys = $var;
@@ -542,7 +537,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTerm($var)
+    public function setTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->term = $var;
@@ -574,9 +569,8 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ReplicationModepb\RegionReplicationStatus $var
      * @return $this
      */
-    public function setReplicationStatus($var)
+    public function setReplicationStatus(\CrazyGoat\Proto\ReplicationModepb\RegionReplicationStatus|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ReplicationModepb\RegionReplicationStatus::class);
         $this->replication_status = $var;
 
         return $this;
@@ -610,9 +604,8 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\QueryStats $var
      * @return $this
      */
-    public function setQueryStats($var)
+    public function setQueryStats(\CrazyGoat\Proto\Pdpb\QueryStats|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\QueryStats::class);
         $this->query_stats = $var;
 
         return $this;
@@ -623,15 +616,11 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * which is calculated by cpu_time_delta/heartbeat_reported_interval.
      * Deprecated: use cpu_stats instead.
      *
-     * Generated from protobuf field <code>uint64 cpu_usage = 17 [deprecated = true];</code>
+     * Generated from protobuf field <code>uint64 cpu_usage = 17;</code>
      * @return int|string
-     * @deprecated
      */
     public function getCpuUsage()
     {
-        if ($this->cpu_usage !== 0) {
-            @trigger_error('cpu_usage is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->cpu_usage;
     }
 
@@ -640,14 +629,12 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * which is calculated by cpu_time_delta/heartbeat_reported_interval.
      * Deprecated: use cpu_stats instead.
      *
-     * Generated from protobuf field <code>uint64 cpu_usage = 17 [deprecated = true];</code>
+     * Generated from protobuf field <code>uint64 cpu_usage = 17;</code>
      * @param int|string $var
      * @return $this
-     * @deprecated
      */
-    public function setCpuUsage($var)
+    public function setCpuUsage(int|string $var)
     {
-        @trigger_error('cpu_usage is deprecated.', E_USER_DEPRECATED);
         GPBUtil::checkUint64($var);
         $this->cpu_usage = $var;
 
@@ -684,9 +671,8 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\CPUStats $var
      * @return $this
      */
-    public function setCpuStats($var)
+    public function setCpuStats(\CrazyGoat\Proto\Pdpb\CPUStats|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\CPUStats::class);
         $this->cpu_stats = $var;
 
         return $this;
@@ -712,7 +698,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApproximateKvSize($var)
+    public function setApproximateKvSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->approximate_kv_size = $var;
@@ -740,7 +726,7 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApproximateColumnarKvSize($var)
+    public function setApproximateColumnarKvSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->approximate_columnar_kv_size = $var;
@@ -776,9 +762,8 @@ class RegionHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\BucketMeta $var
      * @return $this
      */
-    public function setBucketMeta($var)
+    public function setBucketMeta(\CrazyGoat\Proto\Metapb\BucketMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\BucketMeta::class);
         $this->bucket_meta = $var;
 
         return $this;

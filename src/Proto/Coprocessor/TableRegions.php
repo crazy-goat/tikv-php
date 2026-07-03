@@ -52,7 +52,7 @@ class TableRegions extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPhysicalTableId($var)
+    public function setPhysicalTableId(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->physical_table_id = $var;
@@ -74,7 +74,7 @@ class TableRegions extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\RegionInfo[] $var
      * @return $this
      */
-    public function setRegions($var)
+    public function setRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\RegionInfo::class);
         $this->regions = $arr;

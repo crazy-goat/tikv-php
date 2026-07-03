@@ -72,7 +72,7 @@ class ConfChangeV2 extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.eraftpb.ConfChangeTransition transition = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Eraftpb\ConfChangeTransition}
      */
     public function getTransition()
     {
@@ -81,10 +81,10 @@ class ConfChangeV2 extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.eraftpb.ConfChangeTransition transition = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Eraftpb\ConfChangeTransition}
      * @return $this
      */
-    public function setTransition($var)
+    public function setTransition(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Eraftpb\ConfChangeTransition::class);
         $this->transition = $var;
@@ -106,7 +106,7 @@ class ConfChangeV2 extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Eraftpb\ConfChangeSingle[] $var
      * @return $this
      */
-    public function setChanges($var)
+    public function setChanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Eraftpb\ConfChangeSingle::class);
         $this->changes = $arr;
@@ -128,9 +128,9 @@ class ConfChangeV2 extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->context = $var;
 
         return $this;

@@ -59,7 +59,7 @@ class ResponseHeader extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setClusterId($var)
+    public function setClusterId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->cluster_id = $var;
@@ -91,9 +91,8 @@ class ResponseHeader extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Error $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Pdpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Error::class);
         $this->error = $var;
 
         return $this;

@@ -62,9 +62,8 @@ class WatchGCSafePointV2Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -84,7 +83,7 @@ class WatchGCSafePointV2Request extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRevision($var)
+    public function setRevision(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->revision = $var;

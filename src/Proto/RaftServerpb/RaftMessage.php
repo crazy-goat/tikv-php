@@ -111,7 +111,7 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -143,9 +143,8 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setFromPeer($var)
+    public function setFromPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->from_peer = $var;
 
         return $this;
@@ -175,9 +174,8 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setToPeer($var)
+    public function setToPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->to_peer = $var;
 
         return $this;
@@ -207,9 +205,8 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Eraftpb\Message $var
      * @return $this
      */
-    public function setMessage($var)
+    public function setMessage(\CrazyGoat\Proto\Eraftpb\Message|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Eraftpb\Message::class);
         $this->message = $var;
 
         return $this;
@@ -239,9 +236,8 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setRegionEpoch($var)
+    public function setRegionEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->region_epoch = $var;
 
         return $this;
@@ -265,9 +261,8 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTombstone($var)
+    public function setIsTombstone(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_tombstone = $var;
 
         return $this;
@@ -291,9 +286,9 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setStartKey($var)
+    public function setStartKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->start_key = $var;
 
         return $this;
@@ -313,9 +308,9 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEndKey($var)
+    public function setEndKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->end_key = $var;
 
         return $this;
@@ -349,9 +344,8 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setMergeTarget($var)
+    public function setMergeTarget(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->merge_target = $var;
 
         return $this;
@@ -381,9 +375,8 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\ExtraMessage $var
      * @return $this
      */
-    public function setExtraMsg($var)
+    public function setExtraMsg(\CrazyGoat\Proto\RaftServerpb\ExtraMessage|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\ExtraMessage::class);
         $this->extra_msg = $var;
 
         return $this;
@@ -403,9 +396,9 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setExtraCtx($var)
+    public function setExtraCtx(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->extra_ctx = $var;
 
         return $this;
@@ -413,7 +406,7 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.disk_usage.DiskUsage disk_usage = 12;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\DiskUsage\DiskUsage}
      */
     public function getDiskUsage()
     {
@@ -422,10 +415,10 @@ class RaftMessage extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.disk_usage.DiskUsage disk_usage = 12;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\DiskUsage\DiskUsage}
      * @return $this
      */
-    public function setDiskUsage($var)
+    public function setDiskUsage(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\DiskUsage\DiskUsage::class);
         $this->disk_usage = $var;

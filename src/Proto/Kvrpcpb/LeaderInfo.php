@@ -67,7 +67,7 @@ class LeaderInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -89,7 +89,7 @@ class LeaderInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPeerId($var)
+    public function setPeerId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->peer_id = $var;
@@ -111,7 +111,7 @@ class LeaderInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTerm($var)
+    public function setTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->term = $var;
@@ -143,9 +143,8 @@ class LeaderInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setRegionEpoch($var)
+    public function setRegionEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->region_epoch = $var;
 
         return $this;
@@ -175,9 +174,8 @@ class LeaderInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ReadState $var
      * @return $this
      */
-    public function setReadState($var)
+    public function setReadState(\CrazyGoat\Proto\Kvrpcpb\ReadState|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ReadState::class);
         $this->read_state = $var;
 
         return $this;

@@ -62,7 +62,7 @@ class RegionEpoch extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setConfVer($var)
+    public function setConfVer(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->conf_ver = $var;
@@ -88,7 +88,7 @@ class RegionEpoch extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setVersion($var)
+    public function setVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->version = $var;

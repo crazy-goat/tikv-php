@@ -116,7 +116,7 @@ class Message extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.eraftpb.MessageType msg_type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Eraftpb\MessageType}
      */
     public function getMsgType()
     {
@@ -125,10 +125,10 @@ class Message extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.eraftpb.MessageType msg_type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Eraftpb\MessageType}
      * @return $this
      */
-    public function setMsgType($var)
+    public function setMsgType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Eraftpb\MessageType::class);
         $this->msg_type = $var;
@@ -150,7 +150,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTo($var)
+    public function setTo(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->to = $var;
@@ -172,7 +172,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFrom($var)
+    public function setFrom(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->from = $var;
@@ -194,7 +194,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTerm($var)
+    public function setTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->term = $var;
@@ -216,7 +216,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLogTerm($var)
+    public function setLogTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->log_term = $var;
@@ -238,7 +238,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setIndex($var)
+    public function setIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->index = $var;
@@ -260,7 +260,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Eraftpb\Entry[] $var
      * @return $this
      */
-    public function setEntries($var)
+    public function setEntries(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Eraftpb\Entry::class);
         $this->entries = $arr;
@@ -282,7 +282,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommit($var)
+    public function setCommit(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit = $var;
@@ -314,9 +314,8 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Eraftpb\Snapshot $var
      * @return $this
      */
-    public function setSnapshot($var)
+    public function setSnapshot(\CrazyGoat\Proto\Eraftpb\Snapshot|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Eraftpb\Snapshot::class);
         $this->snapshot = $var;
 
         return $this;
@@ -336,7 +335,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRequestSnapshot($var)
+    public function setRequestSnapshot(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->request_snapshot = $var;
@@ -358,9 +357,8 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setReject($var)
+    public function setReject(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->reject = $var;
 
         return $this;
@@ -380,7 +378,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRejectHint($var)
+    public function setRejectHint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->reject_hint = $var;
@@ -402,9 +400,9 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->context = $var;
 
         return $this;
@@ -424,7 +422,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setDeprecatedPriority($var)
+    public function setDeprecatedPriority(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->deprecated_priority = $var;
@@ -458,7 +456,7 @@ class Message extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPriority($var)
+    public function setPriority(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->priority = $var;

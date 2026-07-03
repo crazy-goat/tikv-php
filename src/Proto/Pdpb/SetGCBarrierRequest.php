@@ -77,9 +77,8 @@ class SetGCBarrierRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -109,9 +108,8 @@ class SetGCBarrierRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\KeyspaceScope $var
      * @return $this
      */
-    public function setKeyspaceScope($var)
+    public function setKeyspaceScope(\CrazyGoat\Proto\Pdpb\KeyspaceScope|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\KeyspaceScope::class);
         $this->keyspace_scope = $var;
 
         return $this;
@@ -131,9 +129,9 @@ class SetGCBarrierRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setBarrierId($var)
+    public function setBarrierId(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->barrier_id = $var;
 
         return $this;
@@ -153,7 +151,7 @@ class SetGCBarrierRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBarrierTs($var)
+    public function setBarrierTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->barrier_ts = $var;
@@ -175,7 +173,7 @@ class SetGCBarrierRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTtlSeconds($var)
+    public function setTtlSeconds(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->ttl_seconds = $var;

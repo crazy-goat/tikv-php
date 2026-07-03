@@ -98,9 +98,8 @@ class DispatchTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Mpp\TaskMeta $var
      * @return $this
      */
-    public function setMeta($var)
+    public function setMeta(\CrazyGoat\Proto\Mpp\TaskMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Mpp\TaskMeta::class);
         $this->meta = $var;
 
         return $this;
@@ -120,9 +119,9 @@ class DispatchTaskRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEncodedPlan($var)
+    public function setEncodedPlan(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->encoded_plan = $var;
 
         return $this;
@@ -142,7 +141,7 @@ class DispatchTaskRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTimeout($var)
+    public function setTimeout(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->timeout = $var;
@@ -164,7 +163,7 @@ class DispatchTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\RegionInfo[] $var
      * @return $this
      */
-    public function setRegions($var)
+    public function setRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\RegionInfo::class);
         $this->regions = $arr;
@@ -190,7 +189,7 @@ class DispatchTaskRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSchemaVer($var)
+    public function setSchemaVer(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->schema_ver = $var;
@@ -216,7 +215,7 @@ class DispatchTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\TableRegions[] $var
      * @return $this
      */
-    public function setTableRegions($var)
+    public function setTableRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\TableRegions::class);
         $this->table_regions = $arr;
@@ -242,7 +241,7 @@ class DispatchTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\TableShardInfos[] $var
      * @return $this
      */
-    public function setTableShardInfos($var)
+    public function setTableShardInfos(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\TableShardInfos::class);
         $this->table_shard_infos = $arr;

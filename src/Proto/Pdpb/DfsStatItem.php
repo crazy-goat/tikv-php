@@ -73,9 +73,8 @@ class DfsStatItem extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\DfsStatScope $var
      * @return $this
      */
-    public function setScope($var)
+    public function setScope(\CrazyGoat\Proto\Pdpb\DfsStatScope|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\DfsStatScope::class);
         $this->scope = $var;
 
         return $this;
@@ -99,7 +98,7 @@ class DfsStatItem extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWrittenBytes($var)
+    public function setWrittenBytes(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->written_bytes = $var;
@@ -125,7 +124,7 @@ class DfsStatItem extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWriteRequests($var)
+    public function setWriteRequests(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->write_requests = $var;

@@ -62,7 +62,7 @@ class RegionSequenceNumberRelation extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -84,7 +84,7 @@ class RegionSequenceNumberRelation extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSequenceNumber($var)
+    public function setSequenceNumber(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->sequence_number = $var;
@@ -116,9 +116,8 @@ class RegionSequenceNumberRelation extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\RaftApplyState $var
      * @return $this
      */
-    public function setApplyState($var)
+    public function setApplyState(\CrazyGoat\Proto\RaftServerpb\RaftApplyState|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\RaftApplyState::class);
         $this->apply_state = $var;
 
         return $this;
@@ -148,9 +147,8 @@ class RegionSequenceNumberRelation extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\RegionLocalState $var
      * @return $this
      */
-    public function setRegionState($var)
+    public function setRegionState(\CrazyGoat\Proto\RaftServerpb\RegionLocalState|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\RegionLocalState::class);
         $this->region_state = $var;
 
         return $this;

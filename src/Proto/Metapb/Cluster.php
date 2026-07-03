@@ -57,7 +57,7 @@ class Cluster extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setId($var)
+    public function setId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->id = $var;
@@ -85,7 +85,7 @@ class Cluster extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setMaxPeerCount($var)
+    public function setMaxPeerCount(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->max_peer_count = $var;

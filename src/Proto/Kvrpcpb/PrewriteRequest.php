@@ -199,9 +199,8 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -225,7 +224,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Mutation[] $var
      * @return $this
      */
-    public function setMutations($var)
+    public function setMutations(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\Mutation::class);
         $this->mutations = $arr;
@@ -255,9 +254,9 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimaryLock($var)
+    public function setPrimaryLock(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary_lock = $var;
 
         return $this;
@@ -281,7 +280,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartVersion($var)
+    public function setStartVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_version = $var;
@@ -303,7 +302,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockTtl($var)
+    public function setLockTtl(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_ttl = $var;
@@ -329,9 +328,8 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setSkipConstraintCheck($var)
+    public function setSkipConstraintCheck(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->skip_constraint_check = $var;
 
         return $this;
@@ -342,7 +340,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * Keys with deferred constraint checks are not locked.
      *
      * Generated from protobuf field <code>repeated .kvrpcpb.PrewriteRequest.PessimisticAction pessimistic_actions = 7;</code>
-     * @return RepeatedField<int>
+     * @return RepeatedField<int> one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\PessimisticAction}
      */
     public function getPessimisticActions()
     {
@@ -354,10 +352,10 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * Keys with deferred constraint checks are not locked.
      *
      * Generated from protobuf field <code>repeated .kvrpcpb.PrewriteRequest.PessimisticAction pessimistic_actions = 7;</code>
-     * @param int[] $var
+     * @param int[] $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\PessimisticAction}
      * @return $this
      */
-    public function setPessimisticActions($var)
+    public function setPessimisticActions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::ENUM, \CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\PessimisticAction::class);
         $this->pessimistic_actions = $arr;
@@ -383,7 +381,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTxnSize($var)
+    public function setTxnSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->txn_size = $var;
@@ -409,7 +407,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setForUpdateTs($var)
+    public function setForUpdateTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->for_update_ts = $var;
@@ -437,7 +435,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinCommitTs($var)
+    public function setMinCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_commit_ts = $var;
@@ -465,9 +463,8 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setUseAsyncCommit($var)
+    public function setUseAsyncCommit(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->use_async_commit = $var;
 
         return $this;
@@ -487,7 +484,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setSecondaries($var)
+    public function setSecondaries(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->secondaries = $arr;
@@ -515,9 +512,8 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setTryOnePc($var)
+    public function setTryOnePc(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->try_one_pc = $var;
 
         return $this;
@@ -543,7 +539,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMaxCommitTs($var)
+    public function setMaxCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->max_commit_ts = $var;
@@ -555,7 +551,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * The level of assertion to use on this prewrte request.
      *
      * Generated from protobuf field <code>.kvrpcpb.AssertionLevel assertion_level = 15;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\AssertionLevel}
      */
     public function getAssertionLevel()
     {
@@ -566,10 +562,10 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * The level of assertion to use on this prewrte request.
      *
      * Generated from protobuf field <code>.kvrpcpb.AssertionLevel assertion_level = 15;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\AssertionLevel}
      * @return $this
      */
-    public function setAssertionLevel($var)
+    public function setAssertionLevel(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\AssertionLevel::class);
         $this->assertion_level = $var;
@@ -597,7 +593,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\ForUpdateTSConstraint[] $var
      * @return $this
      */
-    public function setForUpdateTsConstraints($var)
+    public function setForUpdateTsConstraints(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\ForUpdateTSConstraint::class);
         $this->for_update_ts_constraints = $arr;
@@ -623,7 +619,7 @@ class PrewriteRequest extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setTxnFileChunks($var)
+    public function setTxnFileChunks(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->txn_file_chunks = $arr;

@@ -155,9 +155,8 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -181,9 +180,9 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimaryKey($var)
+    public function setPrimaryKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary_key = $var;
 
         return $this;
@@ -207,7 +206,7 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockTs($var)
+    public function setLockTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_ts = $var;
@@ -233,7 +232,7 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCallerStartTs($var)
+    public function setCallerStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->caller_start_ts = $var;
@@ -261,7 +260,7 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCurrentTs($var)
+    public function setCurrentTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->current_ts = $var;
@@ -289,9 +288,8 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setRollbackIfNotExist($var)
+    public function setRollbackIfNotExist(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->rollback_if_not_exist = $var;
 
         return $this;
@@ -319,9 +317,8 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setForceSyncCommit($var)
+    public function setForceSyncCommit(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->force_sync_commit = $var;
 
         return $this;
@@ -349,9 +346,8 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setResolvingPessimisticLock($var)
+    public function setResolvingPessimisticLock(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->resolving_pessimistic_lock = $var;
 
         return $this;
@@ -383,9 +379,8 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setVerifyIsPrimary($var)
+    public function setVerifyIsPrimary(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->verify_is_primary = $var;
 
         return $this;
@@ -409,9 +404,8 @@ class CheckTxnStatusRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTxnFile($var)
+    public function setIsTxnFile(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_txn_file = $var;
 
         return $this;

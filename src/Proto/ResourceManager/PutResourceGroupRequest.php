@@ -57,9 +57,8 @@ class PutResourceGroupRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\ResourceGroup $var
      * @return $this
      */
-    public function setGroup($var)
+    public function setGroup(\CrazyGoat\Proto\ResourceManager\ResourceGroup|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\ResourceGroup::class);
         $this->group = $var;
 
         return $this;

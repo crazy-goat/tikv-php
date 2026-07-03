@@ -57,7 +57,7 @@ class TokenBucketsRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucketRequest[] $var
      * @return $this
      */
-    public function setRequests($var)
+    public function setRequests(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\ResourceManager\TokenBucketRequest::class);
         $this->requests = $arr;
@@ -79,7 +79,7 @@ class TokenBucketsRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTargetRequestPeriodMs($var)
+    public function setTargetRequestPeriodMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->target_request_period_ms = $var;
@@ -101,7 +101,7 @@ class TokenBucketsRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setClientUniqueId($var)
+    public function setClientUniqueId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->client_unique_id = $var;

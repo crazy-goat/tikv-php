@@ -75,9 +75,8 @@ class GetDCLocationInfoResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -101,7 +100,7 @@ class GetDCLocationInfoResponse extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setSuffix($var)
+    public function setSuffix(int $var)
     {
         GPBUtil::checkInt32($var);
         $this->suffix = $var;
@@ -139,9 +138,8 @@ class GetDCLocationInfoResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Timestamp $var
      * @return $this
      */
-    public function setMaxTs($var)
+    public function setMaxTs(\CrazyGoat\Proto\Pdpb\Timestamp|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Timestamp::class);
         $this->max_ts = $var;
 
         return $this;

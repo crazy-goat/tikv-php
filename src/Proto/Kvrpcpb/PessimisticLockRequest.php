@@ -65,8 +65,7 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * If it is true, TiKV will acquire the pessimistic lock regardless of write conflict
      * and return the latest value. It's only supported for single mutation.
      *
-     * Generated from protobuf field <code>bool force = 9 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>bool force = 9;</code>
      */
     protected $force = false;
     /**
@@ -179,9 +178,8 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -205,7 +203,7 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Mutation[] $var
      * @return $this
      */
-    public function setMutations($var)
+    public function setMutations(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\Mutation::class);
         $this->mutations = $arr;
@@ -227,9 +225,9 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimaryLock($var)
+    public function setPrimaryLock(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary_lock = $var;
 
         return $this;
@@ -249,7 +247,7 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartVersion($var)
+    public function setStartVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_version = $var;
@@ -271,7 +269,7 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockTtl($var)
+    public function setLockTtl(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_ttl = $var;
@@ -305,7 +303,7 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setForUpdateTs($var)
+    public function setForUpdateTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->for_update_ts = $var;
@@ -331,9 +329,8 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsFirstLock($var)
+    public function setIsFirstLock(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_first_lock = $var;
 
         return $this;
@@ -359,7 +356,7 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWaitTimeout($var)
+    public function setWaitTimeout(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->wait_timeout = $var;
@@ -371,15 +368,11 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * If it is true, TiKV will acquire the pessimistic lock regardless of write conflict
      * and return the latest value. It's only supported for single mutation.
      *
-     * Generated from protobuf field <code>bool force = 9 [deprecated = true];</code>
+     * Generated from protobuf field <code>bool force = 9;</code>
      * @return bool
-     * @deprecated
      */
     public function getForce()
     {
-        if ($this->force !== false) {
-            @trigger_error('force is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->force;
     }
 
@@ -387,15 +380,12 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * If it is true, TiKV will acquire the pessimistic lock regardless of write conflict
      * and return the latest value. It's only supported for single mutation.
      *
-     * Generated from protobuf field <code>bool force = 9 [deprecated = true];</code>
+     * Generated from protobuf field <code>bool force = 9;</code>
      * @param bool $var
      * @return $this
-     * @deprecated
      */
-    public function setForce($var)
+    public function setForce(bool $var)
     {
-        @trigger_error('force is deprecated.', E_USER_DEPRECATED);
-        GPBUtil::checkBool($var);
         $this->force = $var;
 
         return $this;
@@ -423,9 +413,8 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setReturnValues($var)
+    public function setReturnValues(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->return_values = $var;
 
         return $this;
@@ -451,7 +440,7 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinCommitTs($var)
+    public function setMinCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_commit_ts = $var;
@@ -483,9 +472,8 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setCheckExistence($var)
+    public function setCheckExistence(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->check_existence = $var;
 
         return $this;
@@ -509,9 +497,8 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setLockOnlyIfExists($var)
+    public function setLockOnlyIfExists(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->lock_only_if_exists = $var;
 
         return $this;
@@ -521,7 +508,7 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * Specifies the behavior when the request is woken up after wating for lock of another transaction.
      *
      * Generated from protobuf field <code>.kvrpcpb.PessimisticLockWakeUpMode wake_up_mode = 14;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\PessimisticLockWakeUpMode}
      */
     public function getWakeUpMode()
     {
@@ -532,10 +519,10 @@ class PessimisticLockRequest extends \Google\Protobuf\Internal\Message
      * Specifies the behavior when the request is woken up after wating for lock of another transaction.
      *
      * Generated from protobuf field <code>.kvrpcpb.PessimisticLockWakeUpMode wake_up_mode = 14;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\PessimisticLockWakeUpMode}
      * @return $this
      */
-    public function setWakeUpMode($var)
+    public function setWakeUpMode(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\PessimisticLockWakeUpMode::class);
         $this->wake_up_mode = $var;

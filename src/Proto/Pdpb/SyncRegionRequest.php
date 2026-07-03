@@ -72,9 +72,8 @@ class SyncRegionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -104,9 +103,8 @@ class SyncRegionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Member $var
      * @return $this
      */
-    public function setMember($var)
+    public function setMember(\CrazyGoat\Proto\Pdpb\Member|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Member::class);
         $this->member = $var;
 
         return $this;
@@ -132,7 +130,7 @@ class SyncRegionRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartIndex($var)
+    public function setStartIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_index = $var;

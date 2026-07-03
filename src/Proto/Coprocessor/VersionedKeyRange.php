@@ -65,9 +65,8 @@ class VersionedKeyRange extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\KeyRange $var
      * @return $this
      */
-    public function setRange($var)
+    public function setRange(\CrazyGoat\Proto\Coprocessor\KeyRange|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Coprocessor\KeyRange::class);
         $this->range = $var;
 
         return $this;
@@ -87,7 +86,7 @@ class VersionedKeyRange extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadTs($var)
+    public function setReadTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->read_ts = $var;

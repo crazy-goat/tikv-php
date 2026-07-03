@@ -1908,4 +1908,44 @@ class RawKvClientTest extends TestCase
         $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawCASRequest::class, $capturedRequest);
         $this->assertSame('default', $capturedRequest->getCf());
     }
+
+    // ========================================================================
+    // Ingest (SST bulk import)
+    // ========================================================================
+
+    public function testIngestThrowsClientClosedException(): void
+    {
+        $this->client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $this->client->ingest(['key' => 'value']);
+    }
+
+    public function testIngestWithEmptyArrayDoesNothing(): void
+    {
+        $this->grpc->expects($this->never())->method('call');
+
+        $this->client->ingest([]);
+    }
+
+    public function testIngestValidatesEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key must not be empty in ingest');
+        $this->client->ingest(['' => 'value']);
+    }
+
+    public function testIngestValidatesKeySize(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('exceeds maximum allowed size');
+        $this->client->ingest([str_repeat('a', RawKvClient::MAX_KEY_SIZE + 1) => 'value']);
+    }
+
+    public function testIngestValidatesValueSize(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('exceeds maximum allowed size');
+        $this->client->ingest(['key' => str_repeat('a', RawKvClient::MAX_VALUE_SIZE + 1)]);
+    }
 }

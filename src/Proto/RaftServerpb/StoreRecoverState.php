@@ -70,7 +70,7 @@ class StoreRecoverState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSeqno($var)
+    public function setSeqno(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->seqno = $var;

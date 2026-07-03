@@ -70,9 +70,8 @@ class DfsStatScope extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsGlobal($var)
+    public function setIsGlobal(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_global = $var;
 
         return $this;
@@ -96,7 +95,7 @@ class DfsStatScope extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;
@@ -122,9 +121,9 @@ class DfsStatScope extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setComponent($var)
+    public function setComponent(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->component = $var;
 
         return $this;

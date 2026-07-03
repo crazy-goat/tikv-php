@@ -99,7 +99,7 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSourceRegionId($var)
+    public function setSourceRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->source_region_id = $var;
@@ -131,9 +131,8 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setSourceEpoch($var)
+    public function setSourceEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->source_epoch = $var;
 
         return $this;
@@ -157,7 +156,7 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setSourcePeers($var)
+    public function setSourcePeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->source_peers = $arr;
@@ -183,7 +182,7 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setSourceRemovedRecords($var)
+    public function setSourceRemovedRecords(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->source_removed_records = $arr;
@@ -205,7 +204,7 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTargetRegionId($var)
+    public function setTargetRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->target_region_id = $var;
@@ -237,9 +236,8 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setTargetEpoch($var)
+    public function setTargetEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->target_epoch = $var;
 
         return $this;
@@ -259,7 +257,7 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setTargetPeers($var)
+    public function setTargetPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->target_peers = $arr;
@@ -285,7 +283,7 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setIndex($var)
+    public function setIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->index = $var;
@@ -311,7 +309,7 @@ class MergedRecord extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSourceIndex($var)
+    public function setSourceIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->source_index = $var;

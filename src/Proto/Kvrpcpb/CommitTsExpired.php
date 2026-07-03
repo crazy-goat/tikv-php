@@ -62,7 +62,7 @@ class CommitTsExpired extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -84,7 +84,7 @@ class CommitTsExpired extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAttemptedCommitTs($var)
+    public function setAttemptedCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->attempted_commit_ts = $var;
@@ -106,9 +106,9 @@ class CommitTsExpired extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -128,7 +128,7 @@ class CommitTsExpired extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinCommitTs($var)
+    public function setMinCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_commit_ts = $var;

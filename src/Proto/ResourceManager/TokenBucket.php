@@ -65,9 +65,8 @@ class TokenBucket extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenLimitSettings $var
      * @return $this
      */
-    public function setSettings($var)
+    public function setSettings(\CrazyGoat\Proto\ResourceManager\TokenLimitSettings|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\TokenLimitSettings::class);
         $this->settings = $var;
 
         return $this;
@@ -91,9 +90,8 @@ class TokenBucket extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setTokens($var)
+    public function setTokens(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->tokens = $var;
 
         return $this;

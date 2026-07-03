@@ -5,28 +5,65 @@
 
 namespace CrazyGoat\Proto\Encryptionpb;
 
-use Google\Protobuf\Internal\GPBType;
-use Google\Protobuf\Internal\GPBUtil;
-use Google\Protobuf\RepeatedField;
+use UnexpectedValueException;
 
 /**
- * Generated from protobuf message <code>encryptionpb.EncryptionMethod</code>
+ * Protobuf type <code>encryptionpb.EncryptionMethod</code>
  */
-class EncryptionMethod extends \Google\Protobuf\Internal\Message
+class EncryptionMethod
 {
-
     /**
-     * Constructor.
-     *
-     * @param array $data {
-     *     Optional. Data for populating the Message object.
-     *
-     * }
+     * Generated from protobuf enum <code>UNKNOWN = 0;</code>
      */
-    public function __construct($data = NULL) {
-        \CrazyGoat\Proto\GPBMetadata\Encryptionpb::initOnce();
-        parent::__construct($data);
+    const UNKNOWN = 0;
+    /**
+     * Generated from protobuf enum <code>PLAINTEXT = 1;</code>
+     */
+    const PLAINTEXT = 1;
+    /**
+     * Generated from protobuf enum <code>AES128_CTR = 2;</code>
+     */
+    const AES128_CTR = 2;
+    /**
+     * Generated from protobuf enum <code>AES192_CTR = 3;</code>
+     */
+    const AES192_CTR = 3;
+    /**
+     * Generated from protobuf enum <code>AES256_CTR = 4;</code>
+     */
+    const AES256_CTR = 4;
+    /**
+     * Generated from protobuf enum <code>SM4_CTR = 5;</code>
+     */
+    const SM4_CTR = 5;
+
+    private static $valueToName = [
+        self::UNKNOWN => 'UNKNOWN',
+        self::PLAINTEXT => 'PLAINTEXT',
+        self::AES128_CTR => 'AES128_CTR',
+        self::AES192_CTR => 'AES192_CTR',
+        self::AES256_CTR => 'AES256_CTR',
+        self::SM4_CTR => 'SM4_CTR',
+    ];
+
+    public static function name($value)
+    {
+        if (!isset(self::$valueToName[$value])) {
+            throw new UnexpectedValueException(sprintf(
+                    'Enum %s has no name defined for value %s', __CLASS__, $value));
+        }
+        return self::$valueToName[$value];
     }
 
+
+    public static function value($name)
+    {
+        $const = __CLASS__ . '::' . strtoupper($name);
+        if (!defined($const)) {
+            throw new UnexpectedValueException(sprintf(
+                    'Enum %s has no value defined for name %s', __CLASS__, $name));
+        }
+        return constant($const);
+    }
 }
 

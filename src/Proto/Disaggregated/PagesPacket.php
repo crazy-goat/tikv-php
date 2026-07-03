@@ -85,9 +85,8 @@ class PagesPacket extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\DisaggReadError $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Disaggregated\DisaggReadError|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\DisaggReadError::class);
         $this->error = $var;
 
         return $this;
@@ -113,7 +112,7 @@ class PagesPacket extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setPages($var)
+    public function setPages(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->pages = $arr;
@@ -139,7 +138,7 @@ class PagesPacket extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setChunks($var)
+    public function setChunks(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->chunks = $arr;
@@ -167,7 +166,7 @@ class PagesPacket extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setSummaries($var)
+    public function setSummaries(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->summaries = $arr;

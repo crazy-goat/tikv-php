@@ -57,7 +57,7 @@ class MergeState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinIndex($var)
+    public function setMinIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_index = $var;
@@ -89,9 +89,8 @@ class MergeState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setTarget($var)
+    public function setTarget(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->target = $var;
 
         return $this;
@@ -111,7 +110,7 @@ class MergeState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommit($var)
+    public function setCommit(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit = $var;

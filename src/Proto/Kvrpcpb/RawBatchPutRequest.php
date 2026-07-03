@@ -27,8 +27,7 @@ class RawBatchPutRequest extends \Google\Protobuf\Internal\Message
      */
     protected $cf = '';
     /**
-     * Generated from protobuf field <code>uint64 ttl = 4 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>uint64 ttl = 4;</code>
      */
     protected $ttl = 0;
     /**
@@ -90,9 +89,8 @@ class RawBatchPutRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -112,7 +110,7 @@ class RawBatchPutRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KvPair[] $var
      * @return $this
      */
-    public function setPairs($var)
+    public function setPairs(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\KvPair::class);
         $this->pairs = $arr;
@@ -134,36 +132,30 @@ class RawBatchPutRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCf($var)
+    public function setCf(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->cf = $var;
 
         return $this;
     }
 
     /**
-     * Generated from protobuf field <code>uint64 ttl = 4 [deprecated = true];</code>
+     * Generated from protobuf field <code>uint64 ttl = 4;</code>
      * @return int|string
-     * @deprecated
      */
     public function getTtl()
     {
-        if ($this->ttl !== 0) {
-            @trigger_error('ttl is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->ttl;
     }
 
     /**
-     * Generated from protobuf field <code>uint64 ttl = 4 [deprecated = true];</code>
+     * Generated from protobuf field <code>uint64 ttl = 4;</code>
      * @param int|string $var
      * @return $this
-     * @deprecated
      */
-    public function setTtl($var)
+    public function setTtl(int|string $var)
     {
-        @trigger_error('ttl is deprecated.', E_USER_DEPRECATED);
         GPBUtil::checkUint64($var);
         $this->ttl = $var;
 
@@ -184,9 +176,8 @@ class RawBatchPutRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setForCas($var)
+    public function setForCas(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->for_cas = $var;
 
         return $this;
@@ -214,7 +205,7 @@ class RawBatchPutRequest extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setTtls($var)
+    public function setTtls(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->ttls = $arr;

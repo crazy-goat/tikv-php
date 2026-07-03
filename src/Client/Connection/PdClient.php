@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Connection;
 
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\Proto\Pdpb\GetAllStoresRequest;
+use CrazyGoat\Proto\Pdpb\GetAllStoresResponse;
 use CrazyGoat\Proto\Pdpb\GetMembersRequest;
 use CrazyGoat\Proto\Pdpb\GetMembersResponse;
 use CrazyGoat\Proto\Pdpb\GetRegionRequest;
@@ -103,6 +105,29 @@ final class PdClient implements PdClientInterface
         }
 
         return $store;
+    }
+
+    /**
+     * @return Store[]
+     */
+    /**
+     * @return Store[]
+     */
+    public function getAllStores(): array
+    {
+        $request = new GetAllStoresRequest();
+        $request->setHeader($this->createHeader());
+        $request->setExcludeTombstoneStores(true);
+
+        /** @var GetAllStoresResponse $response */
+        $response = $this->callWithClusterIdRetry(
+            'GetAllStores',
+            $request,
+            GetAllStoresResponse::class,
+        );
+
+        /** @var Store[] */
+        return iterator_to_array($response->getStores());
     }
 
     /**

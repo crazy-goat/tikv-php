@@ -52,7 +52,7 @@ class StoreReport extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\PeerReport[] $var
      * @return $this
      */
-    public function setPeerReports($var)
+    public function setPeerReports(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\PeerReport::class);
         $this->peer_reports = $arr;
@@ -74,7 +74,7 @@ class StoreReport extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStep($var)
+    public function setStep(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->step = $var;

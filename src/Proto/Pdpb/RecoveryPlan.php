@@ -23,8 +23,7 @@ class RecoveryPlan extends \Google\Protobuf\Internal\Message
     /**
      * Update the meta of the regions, including peer lists, epoch and key range.
      *
-     * Generated from protobuf field <code>repeated .metapb.Region updates = 2 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>repeated .metapb.Region updates = 2;</code>
      */
     private $updates;
     /**
@@ -97,7 +96,7 @@ class RecoveryPlan extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region[] $var
      * @return $this
      */
-    public function setCreates($var)
+    public function setCreates(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Region::class);
         $this->creates = $arr;
@@ -108,32 +107,24 @@ class RecoveryPlan extends \Google\Protobuf\Internal\Message
     /**
      * Update the meta of the regions, including peer lists, epoch and key range.
      *
-     * Generated from protobuf field <code>repeated .metapb.Region updates = 2 [deprecated = true];</code>
+     * Generated from protobuf field <code>repeated .metapb.Region updates = 2;</code>
      * @return RepeatedField<\CrazyGoat\Proto\Metapb\Region>
-     * @deprecated
      */
     public function getUpdates()
     {
-        if ($this->updates->count() !== 0) {
-            @trigger_error('updates is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->updates;
     }
 
     /**
      * Update the meta of the regions, including peer lists, epoch and key range.
      *
-     * Generated from protobuf field <code>repeated .metapb.Region updates = 2 [deprecated = true];</code>
+     * Generated from protobuf field <code>repeated .metapb.Region updates = 2;</code>
      * @param \CrazyGoat\Proto\Metapb\Region[] $var
      * @return $this
-     * @deprecated
      */
-    public function setUpdates($var)
+    public function setUpdates(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Region::class);
-        if ($arr->count() !== 0) {
-            @trigger_error('updates is deprecated.', E_USER_DEPRECATED);
-        }
         $this->updates = $arr;
 
         return $this;
@@ -157,7 +148,7 @@ class RecoveryPlan extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setTombstones($var)
+    public function setTombstones(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->tombstones = $arr;
@@ -183,7 +174,7 @@ class RecoveryPlan extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\DemoteFailedVoters[] $var
      * @return $this
      */
-    public function setDemotes($var)
+    public function setDemotes(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\DemoteFailedVoters::class);
         $this->demotes = $arr;
@@ -219,9 +210,8 @@ class RecoveryPlan extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ForceLeader $var
      * @return $this
      */
-    public function setForceLeader($var)
+    public function setForceLeader(\CrazyGoat\Proto\Pdpb\ForceLeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ForceLeader::class);
         $this->force_leader = $var;
 
         return $this;
@@ -247,7 +237,7 @@ class RecoveryPlan extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStep($var)
+    public function setStep(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->step = $var;

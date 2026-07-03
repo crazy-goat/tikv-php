@@ -10,10 +10,20 @@ use Google\Protobuf\Internal\GPBUtil;
 use Google\Protobuf\RepeatedField;
 
 /**
+ * The replication status sync from PD to TiKV.
+ *
  * Generated from protobuf message <code>replication_modepb.ReplicationStatus</code>
  */
 class ReplicationStatus extends \Google\Protobuf\Internal\Message
 {
+    /**
+     * Generated from protobuf field <code>.replication_modepb.ReplicationMode mode = 1;</code>
+     */
+    protected $mode = 0;
+    /**
+     * Generated from protobuf field <code>.replication_modepb.DRAutoSync dr_auto_sync = 2;</code>
+     */
+    protected $dr_auto_sync = null;
 
     /**
      * Constructor.
@@ -21,11 +31,66 @@ class ReplicationStatus extends \Google\Protobuf\Internal\Message
      * @param array $data {
      *     Optional. Data for populating the Message object.
      *
+     *     @type int $mode
+     *     @type \CrazyGoat\Proto\ReplicationModepb\DRAutoSync $dr_auto_sync
      * }
      */
     public function __construct($data = NULL) {
         \CrazyGoat\Proto\GPBMetadata\ReplicationModepb::initOnce();
         parent::__construct($data);
+    }
+
+    /**
+     * Generated from protobuf field <code>.replication_modepb.ReplicationMode mode = 1;</code>
+     * @return int one of the values in {@see \CrazyGoat\Proto\ReplicationModepb\ReplicationMode}
+     */
+    public function getMode()
+    {
+        return $this->mode;
+    }
+
+    /**
+     * Generated from protobuf field <code>.replication_modepb.ReplicationMode mode = 1;</code>
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\ReplicationModepb\ReplicationMode}
+     * @return $this
+     */
+    public function setMode(int $var)
+    {
+        GPBUtil::checkEnum($var, \CrazyGoat\Proto\ReplicationModepb\ReplicationMode::class);
+        $this->mode = $var;
+
+        return $this;
+    }
+
+    /**
+     * Generated from protobuf field <code>.replication_modepb.DRAutoSync dr_auto_sync = 2;</code>
+     * @return \CrazyGoat\Proto\ReplicationModepb\DRAutoSync|null
+     */
+    public function getDrAutoSync()
+    {
+        return $this->dr_auto_sync;
+    }
+
+    public function hasDrAutoSync()
+    {
+        return isset($this->dr_auto_sync);
+    }
+
+    public function clearDrAutoSync()
+    {
+        unset($this->dr_auto_sync);
+    }
+
+    /**
+     * Generated from protobuf field <code>.replication_modepb.DRAutoSync dr_auto_sync = 2;</code>
+     * @param \CrazyGoat\Proto\ReplicationModepb\DRAutoSync $var
+     * @return $this
+     */
+    public function setDrAutoSync(\CrazyGoat\Proto\ReplicationModepb\DRAutoSync|null $var)
+    {
+        $this->dr_auto_sync = $var;
+
+        return $this;
     }
 
 }

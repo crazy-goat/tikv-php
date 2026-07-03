@@ -14,6 +14,25 @@ use Google\Protobuf\RepeatedField;
  */
 class FileEncryptionInfo extends \Google\Protobuf\Internal\Message
 {
+    /**
+     * file encryption method
+     *
+     * Generated from protobuf field <code>.encryptionpb.EncryptionMethod encryption_method = 3;</code>
+     */
+    protected $encryption_method = 0;
+    /**
+     * iv to encrypt the file by data key
+     *
+     * Generated from protobuf field <code>bytes file_iv = 4;</code>
+     */
+    protected $file_iv = '';
+    /**
+     * file checksum after encryption, optional if using GCM
+     *
+     * Generated from protobuf field <code>bytes checksum = 5;</code>
+     */
+    protected $checksum = '';
+    protected $mode;
 
     /**
      * Constructor.
@@ -21,11 +40,157 @@ class FileEncryptionInfo extends \Google\Protobuf\Internal\Message
      * @param array $data {
      *     Optional. Data for populating the Message object.
      *
+     *     @type \CrazyGoat\Proto\Encryptionpb\PlainTextDataKey $plain_text_data_key
+     *     @type \CrazyGoat\Proto\Encryptionpb\MasterKeyBased $master_key_based
+     *     @type int $encryption_method
+     *           file encryption method
+     *     @type string $file_iv
+     *           iv to encrypt the file by data key
+     *     @type string $checksum
+     *           file checksum after encryption, optional if using GCM
      * }
      */
     public function __construct($data = NULL) {
         \CrazyGoat\Proto\GPBMetadata\Encryptionpb::initOnce();
         parent::__construct($data);
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.PlainTextDataKey plain_text_data_key = 1;</code>
+     * @return \CrazyGoat\Proto\Encryptionpb\PlainTextDataKey|null
+     */
+    public function getPlainTextDataKey()
+    {
+        return $this->readOneof(1);
+    }
+
+    public function hasPlainTextDataKey()
+    {
+        return $this->hasOneof(1);
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.PlainTextDataKey plain_text_data_key = 1;</code>
+     * @param \CrazyGoat\Proto\Encryptionpb\PlainTextDataKey $var
+     * @return $this
+     */
+    public function setPlainTextDataKey(\CrazyGoat\Proto\Encryptionpb\PlainTextDataKey|null $var)
+    {
+        $this->writeOneof(1, $var);
+
+        return $this;
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.MasterKeyBased master_key_based = 2;</code>
+     * @return \CrazyGoat\Proto\Encryptionpb\MasterKeyBased|null
+     */
+    public function getMasterKeyBased()
+    {
+        return $this->readOneof(2);
+    }
+
+    public function hasMasterKeyBased()
+    {
+        return $this->hasOneof(2);
+    }
+
+    /**
+     * Generated from protobuf field <code>.encryptionpb.MasterKeyBased master_key_based = 2;</code>
+     * @param \CrazyGoat\Proto\Encryptionpb\MasterKeyBased $var
+     * @return $this
+     */
+    public function setMasterKeyBased(\CrazyGoat\Proto\Encryptionpb\MasterKeyBased|null $var)
+    {
+        $this->writeOneof(2, $var);
+
+        return $this;
+    }
+
+    /**
+     * file encryption method
+     *
+     * Generated from protobuf field <code>.encryptionpb.EncryptionMethod encryption_method = 3;</code>
+     * @return int one of the values in {@see \CrazyGoat\Proto\Encryptionpb\EncryptionMethod}
+     */
+    public function getEncryptionMethod()
+    {
+        return $this->encryption_method;
+    }
+
+    /**
+     * file encryption method
+     *
+     * Generated from protobuf field <code>.encryptionpb.EncryptionMethod encryption_method = 3;</code>
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Encryptionpb\EncryptionMethod}
+     * @return $this
+     */
+    public function setEncryptionMethod(int $var)
+    {
+        GPBUtil::checkEnum($var, \CrazyGoat\Proto\Encryptionpb\EncryptionMethod::class);
+        $this->encryption_method = $var;
+
+        return $this;
+    }
+
+    /**
+     * iv to encrypt the file by data key
+     *
+     * Generated from protobuf field <code>bytes file_iv = 4;</code>
+     * @return string
+     */
+    public function getFileIv()
+    {
+        return $this->file_iv;
+    }
+
+    /**
+     * iv to encrypt the file by data key
+     *
+     * Generated from protobuf field <code>bytes file_iv = 4;</code>
+     * @param string $var
+     * @return $this
+     */
+    public function setFileIv(string $var)
+    {
+        GPBUtil::checkString($var, false);
+        $this->file_iv = $var;
+
+        return $this;
+    }
+
+    /**
+     * file checksum after encryption, optional if using GCM
+     *
+     * Generated from protobuf field <code>bytes checksum = 5;</code>
+     * @return string
+     */
+    public function getChecksum()
+    {
+        return $this->checksum;
+    }
+
+    /**
+     * file checksum after encryption, optional if using GCM
+     *
+     * Generated from protobuf field <code>bytes checksum = 5;</code>
+     * @param string $var
+     * @return $this
+     */
+    public function setChecksum(string $var)
+    {
+        GPBUtil::checkString($var, false);
+        $this->checksum = $var;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getMode()
+    {
+        return $this->whichOneof("mode");
     }
 
 }

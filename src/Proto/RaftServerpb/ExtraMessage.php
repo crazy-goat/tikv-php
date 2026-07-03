@@ -104,7 +104,7 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.raft_serverpb.ExtraMessageType type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\RaftServerpb\ExtraMessageType}
      */
     public function getType()
     {
@@ -113,10 +113,10 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.raft_serverpb.ExtraMessageType type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\RaftServerpb\ExtraMessageType}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\RaftServerpb\ExtraMessageType::class);
         $this->type = $var;
@@ -146,7 +146,7 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setIndex($var)
+    public function setIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->index = $var;
@@ -172,7 +172,7 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setCheckPeers($var)
+    public function setCheckPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->check_peers = $arr;
@@ -194,9 +194,8 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setWaitData($var)
+    public function setWaitData(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->wait_data = $var;
 
         return $this;
@@ -220,9 +219,8 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setForcelyAwaken($var)
+    public function setForcelyAwaken(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->forcely_awaken = $var;
 
         return $this;
@@ -252,9 +250,8 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\CheckGcPeer $var
      * @return $this
      */
-    public function setCheckGcPeer($var)
+    public function setCheckGcPeer(\CrazyGoat\Proto\RaftServerpb\CheckGcPeer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\CheckGcPeer::class);
         $this->check_gc_peer = $var;
 
         return $this;
@@ -284,9 +281,8 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\FlushMemtable $var
      * @return $this
      */
-    public function setFlushMemtable($var)
+    public function setFlushMemtable(\CrazyGoat\Proto\RaftServerpb\FlushMemtable|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\FlushMemtable::class);
         $this->flush_memtable = $var;
 
         return $this;
@@ -320,9 +316,8 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\AvailabilityContext $var
      * @return $this
      */
-    public function setAvailabilityContext($var)
+    public function setAvailabilityContext(\CrazyGoat\Proto\RaftServerpb\AvailabilityContext|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\AvailabilityContext::class);
         $this->availability_context = $var;
 
         return $this;
@@ -356,9 +351,8 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\RefreshBuckets $var
      * @return $this
      */
-    public function setRefreshBuckets($var)
+    public function setRefreshBuckets(\CrazyGoat\Proto\RaftServerpb\RefreshBuckets|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\RefreshBuckets::class);
         $this->refresh_buckets = $var;
 
         return $this;
@@ -384,9 +378,8 @@ class ExtraMessage extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setSnapGenPrecheckPassed($var)
+    public function setSnapGenPrecheckPassed(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->snap_gen_precheck_passed = $var;
 
         return $this;

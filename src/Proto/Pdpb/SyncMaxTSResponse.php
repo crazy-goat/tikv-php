@@ -67,9 +67,8 @@ class SyncMaxTSResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -99,9 +98,8 @@ class SyncMaxTSResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Timestamp $var
      * @return $this
      */
-    public function setMaxLocalTs($var)
+    public function setMaxLocalTs(\CrazyGoat\Proto\Pdpb\Timestamp|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Timestamp::class);
         $this->max_local_ts = $var;
 
         return $this;
@@ -121,7 +119,7 @@ class SyncMaxTSResponse extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setSyncedDcs($var)
+    public function setSyncedDcs(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::STRING);
         $this->synced_dcs = $arr;

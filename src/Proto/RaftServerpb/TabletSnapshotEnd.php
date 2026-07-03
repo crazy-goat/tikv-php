@@ -58,7 +58,7 @@ class TabletSnapshotEnd extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setChecksum($var)
+    public function setChecksum(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->checksum = $var;

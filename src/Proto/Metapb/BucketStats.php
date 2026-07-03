@@ -94,7 +94,7 @@ class BucketStats extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setReadBytes($var)
+    public function setReadBytes(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->read_bytes = $arr;
@@ -120,7 +120,7 @@ class BucketStats extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setWriteBytes($var)
+    public function setWriteBytes(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->write_bytes = $arr;
@@ -146,7 +146,7 @@ class BucketStats extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setReadQps($var)
+    public function setReadQps(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->read_qps = $arr;
@@ -172,7 +172,7 @@ class BucketStats extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setWriteQps($var)
+    public function setWriteQps(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->write_qps = $arr;
@@ -198,7 +198,7 @@ class BucketStats extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setReadKeys($var)
+    public function setReadKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->read_keys = $arr;
@@ -224,7 +224,7 @@ class BucketStats extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setWriteKeys($var)
+    public function setWriteKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->write_keys = $arr;

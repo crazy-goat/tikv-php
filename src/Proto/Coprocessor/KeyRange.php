@@ -54,9 +54,9 @@ class KeyRange extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setStart($var)
+    public function setStart(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->start = $var;
 
         return $this;
@@ -76,9 +76,9 @@ class KeyRange extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEnd($var)
+    public function setEnd(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->end = $var;
 
         return $this;

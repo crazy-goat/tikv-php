@@ -75,9 +75,8 @@ class StoreHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -107,9 +106,8 @@ class StoreHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\StoreStats $var
      * @return $this
      */
-    public function setStats($var)
+    public function setStats(\CrazyGoat\Proto\Pdpb\StoreStats|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\StoreStats::class);
         $this->stats = $var;
 
         return $this;
@@ -143,9 +141,8 @@ class StoreHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\StoreReport $var
      * @return $this
      */
-    public function setStoreReport($var)
+    public function setStoreReport(\CrazyGoat\Proto\Pdpb\StoreReport|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\StoreReport::class);
         $this->store_report = $var;
 
         return $this;
@@ -175,9 +172,8 @@ class StoreHeartbeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ReplicationModepb\StoreDRAutoSyncStatus $var
      * @return $this
      */
-    public function setDrAutosyncStatus($var)
+    public function setDrAutosyncStatus(\CrazyGoat\Proto\ReplicationModepb\StoreDRAutoSyncStatus|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ReplicationModepb\StoreDRAutoSyncStatus::class);
         $this->dr_autosync_status = $var;
 
         return $this;

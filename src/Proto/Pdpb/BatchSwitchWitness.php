@@ -47,7 +47,7 @@ class BatchSwitchWitness extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\SwitchWitness[] $var
      * @return $this
      */
-    public function setSwitchWitnesses($var)
+    public function setSwitchWitnesses(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\SwitchWitness::class);
         $this->switch_witnesses = $arr;

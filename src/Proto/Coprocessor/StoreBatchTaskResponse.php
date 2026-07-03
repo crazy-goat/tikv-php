@@ -72,9 +72,9 @@ class StoreBatchTaskResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;
@@ -104,9 +104,8 @@ class StoreBatchTaskResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -136,9 +135,8 @@ class StoreBatchTaskResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\LockInfo $var
      * @return $this
      */
-    public function setLocked($var)
+    public function setLocked(\CrazyGoat\Proto\Kvrpcpb\LockInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\LockInfo::class);
         $this->locked = $var;
 
         return $this;
@@ -158,9 +156,9 @@ class StoreBatchTaskResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setOtherError($var)
+    public function setOtherError(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->other_error = $var;
 
         return $this;
@@ -180,7 +178,7 @@ class StoreBatchTaskResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTaskId($var)
+    public function setTaskId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->task_id = $var;
@@ -212,9 +210,8 @@ class StoreBatchTaskResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2 $var
      * @return $this
      */
-    public function setExecDetailsV2($var)
+    public function setExecDetailsV2(\CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2::class);
         $this->exec_details_v2 = $var;
 
         return $this;

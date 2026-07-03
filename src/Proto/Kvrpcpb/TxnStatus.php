@@ -76,7 +76,7 @@ class TxnStatus extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -102,7 +102,7 @@ class TxnStatus extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinCommitTs($var)
+    public function setMinCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_commit_ts = $var;
@@ -128,7 +128,7 @@ class TxnStatus extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitTs($var)
+    public function setCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_ts = $var;
@@ -150,9 +150,8 @@ class TxnStatus extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setRolledBack($var)
+    public function setRolledBack(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->rolled_back = $var;
 
         return $this;
@@ -176,9 +175,8 @@ class TxnStatus extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsCompleted($var)
+    public function setIsCompleted(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_completed = $var;
 
         return $this;

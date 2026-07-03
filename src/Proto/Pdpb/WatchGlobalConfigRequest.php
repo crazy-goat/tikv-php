@@ -52,9 +52,9 @@ class WatchGlobalConfigRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setConfigPath($var)
+    public function setConfigPath(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->config_path = $var;
 
         return $this;
@@ -74,7 +74,7 @@ class WatchGlobalConfigRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRevision($var)
+    public function setRevision(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->revision = $var;

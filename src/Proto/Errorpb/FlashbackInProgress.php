@@ -59,7 +59,7 @@ class FlashbackInProgress extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -81,7 +81,7 @@ class FlashbackInProgress extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFlashbackStartTs($var)
+    public function setFlashbackStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->flashback_start_ts = $var;

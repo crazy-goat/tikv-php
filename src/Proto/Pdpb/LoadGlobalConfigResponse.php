@@ -52,7 +52,7 @@ class LoadGlobalConfigResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\GlobalConfigItem[] $var
      * @return $this
      */
-    public function setItems($var)
+    public function setItems(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\GlobalConfigItem::class);
         $this->items = $arr;
@@ -74,7 +74,7 @@ class LoadGlobalConfigResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRevision($var)
+    public function setRevision(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->revision = $var;

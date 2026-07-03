@@ -72,9 +72,8 @@ class UpdateServiceGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -94,9 +93,9 @@ class UpdateServiceGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setServiceId($var)
+    public function setServiceId(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->service_id = $var;
 
         return $this;
@@ -116,7 +115,7 @@ class UpdateServiceGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTTL($var)
+    public function setTTL(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->TTL = $var;
@@ -138,7 +137,7 @@ class UpdateServiceGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSafePoint($var)
+    public function setSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->safe_point = $var;

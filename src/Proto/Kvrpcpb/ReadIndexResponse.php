@@ -72,9 +72,8 @@ class ReadIndexResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -94,7 +93,7 @@ class ReadIndexResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadIndex($var)
+    public function setReadIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->read_index = $var;
@@ -132,9 +131,8 @@ class ReadIndexResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\LockInfo $var
      * @return $this
      */
-    public function setLocked($var)
+    public function setLocked(\CrazyGoat\Proto\Kvrpcpb\LockInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\LockInfo::class);
         $this->locked = $var;
 
         return $this;

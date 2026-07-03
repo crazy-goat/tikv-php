@@ -73,7 +73,7 @@ class TabletSnapshotFileChunk extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFileSize($var)
+    public function setFileSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->file_size = $var;
@@ -95,9 +95,9 @@ class TabletSnapshotFileChunk extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setFileName($var)
+    public function setFileName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->file_name = $var;
 
         return $this;
@@ -121,9 +121,9 @@ class TabletSnapshotFileChunk extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;
@@ -147,9 +147,9 @@ class TabletSnapshotFileChunk extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setIv($var)
+    public function setIv(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->iv = $var;
 
         return $this;
@@ -179,9 +179,8 @@ class TabletSnapshotFileChunk extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Encryptionpb\DataKey $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(\CrazyGoat\Proto\Encryptionpb\DataKey|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Encryptionpb\DataKey::class);
         $this->key = $var;
 
         return $this;

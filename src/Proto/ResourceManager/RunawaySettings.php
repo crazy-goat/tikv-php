@@ -77,9 +77,8 @@ class RunawaySettings extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\RunawayRule $var
      * @return $this
      */
-    public function setRule($var)
+    public function setRule(\CrazyGoat\Proto\ResourceManager\RunawayRule|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\RunawayRule::class);
         $this->rule = $var;
 
         return $this;
@@ -87,7 +86,7 @@ class RunawaySettings extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.RunawayAction action = 2;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\ResourceManager\RunawayAction}
      */
     public function getAction()
     {
@@ -96,10 +95,10 @@ class RunawaySettings extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.RunawayAction action = 2;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\ResourceManager\RunawayAction}
      * @return $this
      */
-    public function setAction($var)
+    public function setAction(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\ResourceManager\RunawayAction::class);
         $this->action = $var;
@@ -131,9 +130,8 @@ class RunawaySettings extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\RunawayWatch $var
      * @return $this
      */
-    public function setWatch($var)
+    public function setWatch(\CrazyGoat\Proto\ResourceManager\RunawayWatch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\RunawayWatch::class);
         $this->watch = $var;
 
         return $this;
@@ -159,9 +157,9 @@ class RunawaySettings extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setSwitchGroupName($var)
+    public function setSwitchGroupName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->switch_group_name = $var;
 
         return $this;

@@ -294,7 +294,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStoreId($var)
+    public function setStoreId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->store_id = $var;
@@ -320,7 +320,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCapacity($var)
+    public function setCapacity(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->capacity = $var;
@@ -346,7 +346,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAvailable($var)
+    public function setAvailable(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->available = $var;
@@ -372,7 +372,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setRegionCount($var)
+    public function setRegionCount(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->region_count = $var;
@@ -398,7 +398,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setSendingSnapCount($var)
+    public function setSendingSnapCount(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->sending_snap_count = $var;
@@ -424,7 +424,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setReceivingSnapCount($var)
+    public function setReceivingSnapCount(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->receiving_snap_count = $var;
@@ -450,7 +450,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setStartTime($var)
+    public function setStartTime(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->start_time = $var;
@@ -476,7 +476,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setApplyingSnapCount($var)
+    public function setApplyingSnapCount(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->applying_snap_count = $var;
@@ -502,9 +502,8 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsBusy($var)
+    public function setIsBusy(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_busy = $var;
 
         return $this;
@@ -528,7 +527,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setUsedSize($var)
+    public function setUsedSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->used_size = $var;
@@ -554,7 +553,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBytesWritten($var)
+    public function setBytesWritten(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->bytes_written = $var;
@@ -580,7 +579,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKeysWritten($var)
+    public function setKeysWritten(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->keys_written = $var;
@@ -606,7 +605,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBytesRead($var)
+    public function setBytesRead(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->bytes_read = $var;
@@ -632,7 +631,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKeysRead($var)
+    public function setKeysRead(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->keys_read = $var;
@@ -668,9 +667,8 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\TimeInterval $var
      * @return $this
      */
-    public function setInterval($var)
+    public function setInterval(\CrazyGoat\Proto\Pdpb\TimeInterval|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\TimeInterval::class);
         $this->interval = $var;
 
         return $this;
@@ -694,7 +692,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RecordPair[] $var
      * @return $this
      */
-    public function setCpuUsages($var)
+    public function setCpuUsages(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\RecordPair::class);
         $this->cpu_usages = $arr;
@@ -720,7 +718,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RecordPair[] $var
      * @return $this
      */
-    public function setReadIoRates($var)
+    public function setReadIoRates(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\RecordPair::class);
         $this->read_io_rates = $arr;
@@ -746,7 +744,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RecordPair[] $var
      * @return $this
      */
-    public function setWriteIoRates($var)
+    public function setWriteIoRates(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\RecordPair::class);
         $this->write_io_rates = $arr;
@@ -772,7 +770,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RecordPair[] $var
      * @return $this
      */
-    public function setOpLatencies($var)
+    public function setOpLatencies(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\RecordPair::class);
         $this->op_latencies = $arr;
@@ -798,7 +796,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\PeerStat[] $var
      * @return $this
      */
-    public function setPeerStats($var)
+    public function setPeerStats(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\PeerStat::class);
         $this->peer_stats = $arr;
@@ -834,9 +832,8 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\QueryStats $var
      * @return $this
      */
-    public function setQueryStats($var)
+    public function setQueryStats(\CrazyGoat\Proto\Pdpb\QueryStats|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\QueryStats::class);
         $this->query_stats = $var;
 
         return $this;
@@ -860,7 +857,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSlowScore($var)
+    public function setSlowScore(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->slow_score = $var;
@@ -886,7 +883,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setDamagedRegionsId($var)
+    public function setDamagedRegionsId(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->damaged_regions_id = $arr;
@@ -912,9 +909,8 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsApplyBusy($var)
+    public function setIsApplyBusy(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_apply_busy = $var;
 
         return $this;
@@ -938,7 +934,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\SnapshotStat[] $var
      * @return $this
      */
-    public function setSnapshotStats($var)
+    public function setSnapshotStats(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\SnapshotStat::class);
         $this->snapshot_stats = $arr;
@@ -970,9 +966,8 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\SlowTrend $var
      * @return $this
      */
-    public function setSlowTrend($var)
+    public function setSlowTrend(\CrazyGoat\Proto\Pdpb\SlowTrend|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\SlowTrend::class);
         $this->slow_trend = $var;
 
         return $this;
@@ -996,9 +991,8 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsGrpcPaused($var)
+    public function setIsGrpcPaused(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_grpc_paused = $var;
 
         return $this;
@@ -1022,7 +1016,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTotalMemory($var)
+    public function setTotalMemory(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->total_memory = $var;
@@ -1048,7 +1042,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setUsedMemory($var)
+    public function setUsedMemory(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->used_memory = $var;
@@ -1076,7 +1070,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param array|\Google\Protobuf\Internal\MapField $var
      * @return $this
      */
-    public function setNetworkSlowScores($var)
+    public function setNetworkSlowScores(array|\Google\Protobuf\Internal\MapField $var)
     {
         $arr = GPBUtil::checkMapField($var, \Google\Protobuf\Internal\GPBType::UINT64, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->network_slow_scores = $arr;
@@ -1102,7 +1096,7 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\DfsStatItem[] $var
      * @return $this
      */
-    public function setDfs($var)
+    public function setDfs(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\DfsStatItem::class);
         $this->dfs = $arr;
@@ -1128,9 +1122,8 @@ class StoreStats extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsStopping($var)
+    public function setIsStopping(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_stopping = $var;
 
         return $this;

@@ -67,9 +67,8 @@ class ScatterRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -89,7 +88,7 @@ class ScatterRegionResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFinishedPercentage($var)
+    public function setFinishedPercentage(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->finished_percentage = $var;
@@ -111,7 +110,7 @@ class ScatterRegionResponse extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setFailedRegionsId($var)
+    public function setFailedRegionsId(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->failed_regions_id = $arr;

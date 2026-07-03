@@ -82,7 +82,7 @@ class ConfState extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setVoters($var)
+    public function setVoters(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->voters = $arr;
@@ -104,7 +104,7 @@ class ConfState extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setLearners($var)
+    public function setLearners(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->learners = $arr;
@@ -130,7 +130,7 @@ class ConfState extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setVotersOutgoing($var)
+    public function setVotersOutgoing(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->voters_outgoing = $arr;
@@ -160,7 +160,7 @@ class ConfState extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setLearnersNext($var)
+    public function setLearnersNext(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->learners_next = $arr;
@@ -188,9 +188,8 @@ class ConfState extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setAutoLeave($var)
+    public function setAutoLeave(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->auto_leave = $var;
 
         return $this;

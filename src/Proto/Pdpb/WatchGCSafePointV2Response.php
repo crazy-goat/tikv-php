@@ -67,9 +67,8 @@ class WatchGCSafePointV2Response extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -89,7 +88,7 @@ class WatchGCSafePointV2Response extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\SafePointEvent[] $var
      * @return $this
      */
-    public function setEvents($var)
+    public function setEvents(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\SafePointEvent::class);
         $this->events = $arr;
@@ -111,7 +110,7 @@ class WatchGCSafePointV2Response extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRevision($var)
+    public function setRevision(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->revision = $var;

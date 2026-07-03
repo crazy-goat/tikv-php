@@ -25,13 +25,11 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
     /**
      * It carries the latest value and its commit ts if force in PessimisticLockRequest is true.
      *
-     * Generated from protobuf field <code>uint64 commit_ts = 3 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>uint64 commit_ts = 3;</code>
      */
     protected $commit_ts = 0;
     /**
-     * Generated from protobuf field <code>bytes value = 4 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>bytes value = 4;</code>
      */
     protected $value = '';
     /**
@@ -119,9 +117,8 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -141,7 +138,7 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyError[] $var
      * @return $this
      */
-    public function setErrors($var)
+    public function setErrors(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\KeyError::class);
         $this->errors = $arr;
@@ -152,29 +149,23 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
     /**
      * It carries the latest value and its commit ts if force in PessimisticLockRequest is true.
      *
-     * Generated from protobuf field <code>uint64 commit_ts = 3 [deprecated = true];</code>
+     * Generated from protobuf field <code>uint64 commit_ts = 3;</code>
      * @return int|string
-     * @deprecated
      */
     public function getCommitTs()
     {
-        if ($this->commit_ts !== 0) {
-            @trigger_error('commit_ts is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->commit_ts;
     }
 
     /**
      * It carries the latest value and its commit ts if force in PessimisticLockRequest is true.
      *
-     * Generated from protobuf field <code>uint64 commit_ts = 3 [deprecated = true];</code>
+     * Generated from protobuf field <code>uint64 commit_ts = 3;</code>
      * @param int|string $var
      * @return $this
-     * @deprecated
      */
-    public function setCommitTs($var)
+    public function setCommitTs(int|string $var)
     {
-        @trigger_error('commit_ts is deprecated.', E_USER_DEPRECATED);
         GPBUtil::checkUint64($var);
         $this->commit_ts = $var;
 
@@ -182,28 +173,22 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
     }
 
     /**
-     * Generated from protobuf field <code>bytes value = 4 [deprecated = true];</code>
+     * Generated from protobuf field <code>bytes value = 4;</code>
      * @return string
-     * @deprecated
      */
     public function getValue()
     {
-        if ($this->value !== '') {
-            @trigger_error('value is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->value;
     }
 
     /**
-     * Generated from protobuf field <code>bytes value = 4 [deprecated = true];</code>
+     * Generated from protobuf field <code>bytes value = 4;</code>
      * @param string $var
      * @return $this
-     * @deprecated
      */
-    public function setValue($var)
+    public function setValue(string $var)
     {
-        @trigger_error('value is deprecated.', E_USER_DEPRECATED);
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->value = $var;
 
         return $this;
@@ -231,7 +216,7 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setValues($var)
+    public function setValues(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->values = $arr;
@@ -263,7 +248,7 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
      * @param bool[] $var
      * @return $this
      */
-    public function setNotFounds($var)
+    public function setNotFounds(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BOOL);
         $this->not_founds = $arr;
@@ -299,9 +284,8 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2 $var
      * @return $this
      */
-    public function setExecDetailsV2($var)
+    public function setExecDetailsV2(\CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ExecDetailsV2::class);
         $this->exec_details_v2 = $var;
 
         return $this;
@@ -325,7 +309,7 @@ class PessimisticLockResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\PessimisticLockKeyResult[] $var
      * @return $this
      */
-    public function setResults($var)
+    public function setResults(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\PessimisticLockKeyResult::class);
         $this->results = $arr;

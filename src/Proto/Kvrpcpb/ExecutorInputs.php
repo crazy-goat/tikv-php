@@ -77,7 +77,7 @@ class ExecutorInputs extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTikvCoprocessorExecutorWorkTotalBatchIndexScan($var)
+    public function setTikvCoprocessorExecutorWorkTotalBatchIndexScan(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->tikv_coprocessor_executor_work_total_batch_index_scan = $var;
@@ -99,7 +99,7 @@ class ExecutorInputs extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTikvCoprocessorExecutorWorkTotalBatchTableScan($var)
+    public function setTikvCoprocessorExecutorWorkTotalBatchTableScan(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->tikv_coprocessor_executor_work_total_batch_table_scan = $var;
@@ -121,7 +121,7 @@ class ExecutorInputs extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTikvCoprocessorExecutorWorkTotalBatchSelection($var)
+    public function setTikvCoprocessorExecutorWorkTotalBatchSelection(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->tikv_coprocessor_executor_work_total_batch_selection = $var;
@@ -143,7 +143,7 @@ class ExecutorInputs extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTikvCoprocessorExecutorWorkTotalBatchTopN($var)
+    public function setTikvCoprocessorExecutorWorkTotalBatchTopN(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->tikv_coprocessor_executor_work_total_batch_top_n = $var;
@@ -165,7 +165,7 @@ class ExecutorInputs extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTikvCoprocessorExecutorWorkTotalBatchLimit($var)
+    public function setTikvCoprocessorExecutorWorkTotalBatchLimit(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->tikv_coprocessor_executor_work_total_batch_limit = $var;
@@ -187,7 +187,7 @@ class ExecutorInputs extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTikvCoprocessorExecutorWorkTotalBatchSimpleAggr($var)
+    public function setTikvCoprocessorExecutorWorkTotalBatchSimpleAggr(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->tikv_coprocessor_executor_work_total_batch_simple_aggr = $var;
@@ -209,7 +209,7 @@ class ExecutorInputs extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTikvCoprocessorExecutorWorkTotalBatchFastHashAggr($var)
+    public function setTikvCoprocessorExecutorWorkTotalBatchFastHashAggr(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->tikv_coprocessor_executor_work_total_batch_fast_hash_aggr = $var;

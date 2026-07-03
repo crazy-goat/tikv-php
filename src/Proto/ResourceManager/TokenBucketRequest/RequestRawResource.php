@@ -47,7 +47,7 @@ class RequestRawResource extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\RawResourceItem[] $var
      * @return $this
      */
-    public function setRequestRawResource($var)
+    public function setRequestRawResource(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\ResourceManager\RawResourceItem::class);
         $this->request_raw_resource = $arr;

@@ -62,9 +62,8 @@ class DeleteGlobalGCBarrierResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -94,9 +93,8 @@ class DeleteGlobalGCBarrierResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\GlobalGCBarrierInfo $var
      * @return $this
      */
-    public function setDeletedBarrierInfo($var)
+    public function setDeletedBarrierInfo(\CrazyGoat\Proto\Pdpb\GlobalGCBarrierInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\GlobalGCBarrierInfo::class);
         $this->deleted_barrier_info = $var;
 
         return $this;

@@ -57,7 +57,7 @@ class TraceContext extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tracepb\RemoteParentSpan[] $var
      * @return $this
      */
-    public function setRemoteParentSpans($var)
+    public function setRemoteParentSpans(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Tracepb\RemoteParentSpan::class);
         $this->remote_parent_spans = $arr;
@@ -83,7 +83,7 @@ class TraceContext extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setDurationThresholdMs($var)
+    public function setDurationThresholdMs(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->duration_threshold_ms = $var;

@@ -52,7 +52,7 @@ class GCSafePointV2 extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;
@@ -74,7 +74,7 @@ class GCSafePointV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGcSafePoint($var)
+    public function setGcSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->gc_safe_point = $var;

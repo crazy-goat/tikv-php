@@ -160,9 +160,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\LockInfo $var
      * @return $this
      */
-    public function setLocked($var)
+    public function setLocked(\CrazyGoat\Proto\Kvrpcpb\LockInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\LockInfo::class);
         $this->locked = $var;
 
         return $this;
@@ -186,9 +185,9 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setRetryable($var)
+    public function setRetryable(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->retryable = $var;
 
         return $this;
@@ -212,9 +211,9 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setAbort($var)
+    public function setAbort(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->abort = $var;
 
         return $this;
@@ -248,9 +247,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\WriteConflict $var
      * @return $this
      */
-    public function setConflict($var)
+    public function setConflict(\CrazyGoat\Proto\Kvrpcpb\WriteConflict|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\WriteConflict::class);
         $this->conflict = $var;
 
         return $this;
@@ -284,9 +282,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\AlreadyExist $var
      * @return $this
      */
-    public function setAlreadyExist($var)
+    public function setAlreadyExist(\CrazyGoat\Proto\Kvrpcpb\AlreadyExist|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\AlreadyExist::class);
         $this->already_exist = $var;
 
         return $this;
@@ -320,9 +317,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Deadlock $var
      * @return $this
      */
-    public function setDeadlock($var)
+    public function setDeadlock(\CrazyGoat\Proto\Kvrpcpb\Deadlock|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Deadlock::class);
         $this->deadlock = $var;
 
         return $this;
@@ -356,9 +352,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CommitTsExpired $var
      * @return $this
      */
-    public function setCommitTsExpired($var)
+    public function setCommitTsExpired(\CrazyGoat\Proto\Kvrpcpb\CommitTsExpired|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CommitTsExpired::class);
         $this->commit_ts_expired = $var;
 
         return $this;
@@ -392,9 +387,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\TxnNotFound $var
      * @return $this
      */
-    public function setTxnNotFound($var)
+    public function setTxnNotFound(\CrazyGoat\Proto\Kvrpcpb\TxnNotFound|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\TxnNotFound::class);
         $this->txn_not_found = $var;
 
         return $this;
@@ -428,9 +422,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CommitTsTooLarge $var
      * @return $this
      */
-    public function setCommitTsTooLarge($var)
+    public function setCommitTsTooLarge(\CrazyGoat\Proto\Kvrpcpb\CommitTsTooLarge|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CommitTsTooLarge::class);
         $this->commit_ts_too_large = $var;
 
         return $this;
@@ -464,9 +457,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\AssertionFailed $var
      * @return $this
      */
-    public function setAssertionFailed($var)
+    public function setAssertionFailed(\CrazyGoat\Proto\Kvrpcpb\AssertionFailed|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\AssertionFailed::class);
         $this->assertion_failed = $var;
 
         return $this;
@@ -500,9 +492,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\PrimaryMismatch $var
      * @return $this
      */
-    public function setPrimaryMismatch($var)
+    public function setPrimaryMismatch(\CrazyGoat\Proto\Kvrpcpb\PrimaryMismatch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\PrimaryMismatch::class);
         $this->primary_mismatch = $var;
 
         return $this;
@@ -536,9 +527,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\TxnLockNotFound $var
      * @return $this
      */
-    public function setTxnLockNotFound($var)
+    public function setTxnLockNotFound(\CrazyGoat\Proto\Kvrpcpb\TxnLockNotFound|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\TxnLockNotFound::class);
         $this->txn_lock_not_found = $var;
 
         return $this;
@@ -572,9 +562,8 @@ class KeyError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\DebugInfo $var
      * @return $this
      */
-    public function setDebugInfo($var)
+    public function setDebugInfo(\CrazyGoat\Proto\Kvrpcpb\DebugInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\DebugInfo::class);
         $this->debug_info = $var;
 
         return $this;

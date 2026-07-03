@@ -57,7 +57,7 @@ class StoreIdent extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setClusterId($var)
+    public function setClusterId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->cluster_id = $var;
@@ -79,7 +79,7 @@ class StoreIdent extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStoreId($var)
+    public function setStoreId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->store_id = $var;
@@ -89,7 +89,7 @@ class StoreIdent extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 3;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      */
     public function getApiVersion()
     {
@@ -98,10 +98,10 @@ class StoreIdent extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 3;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      * @return $this
      */
-    public function setApiVersion($var)
+    public function setApiVersion(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\APIVersion::class);
         $this->api_version = $var;

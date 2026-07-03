@@ -62,9 +62,8 @@ class SlowTrend extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setCauseValue($var)
+    public function setCauseValue(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->cause_value = $var;
 
         return $this;
@@ -84,9 +83,8 @@ class SlowTrend extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setCauseRate($var)
+    public function setCauseRate(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->cause_rate = $var;
 
         return $this;
@@ -106,9 +104,8 @@ class SlowTrend extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setResultValue($var)
+    public function setResultValue(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->result_value = $var;
 
         return $this;
@@ -128,9 +125,8 @@ class SlowTrend extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setResultRate($var)
+    public function setResultRate(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->result_rate = $var;
 
         return $this;

@@ -155,9 +155,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -177,7 +176,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTp($var)
+    public function setTp(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->tp = $var;
@@ -199,9 +198,9 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;
@@ -221,7 +220,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -243,7 +242,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\KeyRange[] $var
      * @return $this
      */
-    public function setRanges($var)
+    public function setRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\KeyRange::class);
         $this->ranges = $arr;
@@ -271,9 +270,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsCacheEnabled($var)
+    public function setIsCacheEnabled(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_cache_enabled = $var;
 
         return $this;
@@ -293,7 +291,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCacheIfMatchVersion($var)
+    public function setCacheIfMatchVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->cache_if_match_version = $var;
@@ -319,7 +317,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSchemaVer($var)
+    public function setSchemaVer(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->schema_ver = $var;
@@ -341,9 +339,8 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTraceEnabled($var)
+    public function setIsTraceEnabled(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_trace_enabled = $var;
 
         return $this;
@@ -367,7 +364,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPagingSize($var)
+    public function setPagingSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->paging_size = $var;
@@ -393,7 +390,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\StoreBatchTask[] $var
      * @return $this
      */
-    public function setTasks($var)
+    public function setTasks(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\StoreBatchTask::class);
         $this->tasks = $arr;
@@ -419,7 +416,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setConnectionId($var)
+    public function setConnectionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->connection_id = $var;
@@ -445,9 +442,9 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setConnectionAlias($var)
+    public function setConnectionAlias(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->connection_alias = $var;
 
         return $this;
@@ -471,7 +468,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\TableShardInfos[] $var
      * @return $this
      */
-    public function setTableShardInfos($var)
+    public function setTableShardInfos(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\TableShardInfos::class);
         $this->table_shard_infos = $arr;
@@ -499,7 +496,7 @@ class Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\VersionedKeyRange[] $var
      * @return $this
      */
-    public function setVersionedRanges($var)
+    public function setVersionedRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\VersionedKeyRange::class);
         $this->versioned_ranges = $arr;

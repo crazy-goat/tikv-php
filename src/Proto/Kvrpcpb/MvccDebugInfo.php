@@ -52,9 +52,9 @@ class MvccDebugInfo extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -84,9 +84,8 @@ class MvccDebugInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\MvccInfo $var
      * @return $this
      */
-    public function setMvcc($var)
+    public function setMvcc(\CrazyGoat\Proto\Kvrpcpb\MvccInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\MvccInfo::class);
         $this->mvcc = $var;
 
         return $this;

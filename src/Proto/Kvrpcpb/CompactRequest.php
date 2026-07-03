@@ -112,9 +112,9 @@ class CompactRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setStartKey($var)
+    public function setStartKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->start_key = $var;
 
         return $this;
@@ -142,7 +142,7 @@ class CompactRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPhysicalTableId($var)
+    public function setPhysicalTableId(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->physical_table_id = $var;
@@ -174,7 +174,7 @@ class CompactRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLogicalTableId($var)
+    public function setLogicalTableId(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->logical_table_id = $var;
@@ -186,7 +186,7 @@ class CompactRequest extends \Google\Protobuf\Internal\Message
      * API version of the request
      *
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 7;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      */
     public function getApiVersion()
     {
@@ -197,10 +197,10 @@ class CompactRequest extends \Google\Protobuf\Internal\Message
      * API version of the request
      *
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 7;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      * @return $this
      */
-    public function setApiVersion($var)
+    public function setApiVersion(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\APIVersion::class);
         $this->api_version = $var;
@@ -226,7 +226,7 @@ class CompactRequest extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;

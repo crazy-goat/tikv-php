@@ -134,7 +134,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -160,7 +160,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGatherId($var)
+    public function setGatherId(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->gather_id = $var;
@@ -186,7 +186,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setQueryTs($var)
+    public function setQueryTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->query_ts = $var;
@@ -212,7 +212,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setServerId($var)
+    public function setServerId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->server_id = $var;
@@ -238,7 +238,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLocalQueryId($var)
+    public function setLocalQueryId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->local_query_id = $var;
@@ -264,7 +264,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTaskId($var)
+    public function setTaskId(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->task_id = $var;
@@ -290,9 +290,9 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setExecutorId($var)
+    public function setExecutorId(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->executor_id = $var;
 
         return $this;
@@ -316,7 +316,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;
@@ -328,7 +328,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * API version of the request
      *
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 8;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      */
     public function getApiVersion()
     {
@@ -339,10 +339,10 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * API version of the request
      *
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 8;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      * @return $this
      */
-    public function setApiVersion($var)
+    public function setApiVersion(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\APIVersion::class);
         $this->api_version = $var;
@@ -368,7 +368,7 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setConnectionId($var)
+    public function setConnectionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->connection_id = $var;
@@ -394,9 +394,9 @@ class DisaggTaskMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setConnectionAlias($var)
+    public function setConnectionAlias(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->connection_alias = $var;
 
         return $this;

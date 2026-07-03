@@ -62,7 +62,7 @@ class TabletSnapshotPreview extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\TabletSnapshotFileMeta[] $var
      * @return $this
      */
-    public function setMetas($var)
+    public function setMetas(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\RaftServerpb\TabletSnapshotFileMeta::class);
         $this->metas = $arr;
@@ -90,9 +90,8 @@ class TabletSnapshotPreview extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setEnd($var)
+    public function setEnd(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->end = $var;
 
         return $this;

@@ -57,9 +57,9 @@ class DisaggS3Config extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setBucket($var)
+    public function setBucket(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->bucket = $var;
 
         return $this;
@@ -79,9 +79,9 @@ class DisaggS3Config extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setRoot($var)
+    public function setRoot(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->root = $var;
 
         return $this;
@@ -101,9 +101,9 @@ class DisaggS3Config extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEndpoint($var)
+    public function setEndpoint(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->endpoint = $var;
 
         return $this;
