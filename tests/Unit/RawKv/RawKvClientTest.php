@@ -21,6 +21,7 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
@@ -1509,7 +1510,7 @@ class RawKvClientTest extends TestCase
 
     public function testCompareAndSwapRequiresAtomicMode(): void
     {
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('CompareAndSwap requires atomic mode');
 
         $this->client->compareAndSwap('key', 'old', 'new');
@@ -1537,7 +1538,7 @@ class RawKvClientTest extends TestCase
 
     public function testPutIfAbsentRequiresAtomicMode(): void
     {
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('CompareAndSwap requires atomic mode');
 
         $this->client->putIfAbsent('key', 'value');
