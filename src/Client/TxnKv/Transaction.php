@@ -29,6 +29,7 @@ use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
@@ -63,8 +64,9 @@ final class Transaction
 
     private const OPTIMISTIC_LOCK_TTL_MS = 3000;
     private const PESSIMISTIC_LOCK_TTL_MS = 30000;
-    /** TiKV KvScan treats limit=0 as "return 0 results"; use uint32 max for "unlimited" */
-    private const DEFAULT_SCAN_LIMIT = 4294967295;
+    /** Maximum scan limit to prevent unbounded memory usage */
+    private const MAX_SCAN_LIMIT = 10240;
+    /** TiKV KvScan treats limit=0 as "return 0 results" */
 
     public function __construct(
         private readonly string $txnId,
@@ -244,6 +246,7 @@ final class Transaction
     /**
      * @return array<array{key: string, value: ?string}>
      *
+     * @throws InvalidArgumentException
      * @throws InvalidStateException
      * @throws TiKvException
      * @throws TransactionConflictException
@@ -254,13 +257,15 @@ final class Transaction
     {
         $this->ensureActive();
 
+        $limit = $this->normalizeScanLimit($limit);
+
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         $results = [];
         $remaining = $limit;
 
         $clipper = new RegionRangeClipper();
         foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
-            $regionLimit = $remaining === 0 ? self::DEFAULT_SCAN_LIMIT : $remaining;
+            $regionLimit = $remaining > 0 ? $remaining : $limit;
             $regionResults = $this->executeScanForRegion(
                 $region,
                 $scanStart,
@@ -277,19 +282,7 @@ final class Transaction
             }
         }
 
-        $merged = [];
-        foreach ($results as $entry) {
-            $key = $entry['key'];
-            if (array_key_exists($key, $this->writeSet)) {
-                if ($this->writeSet[$key] !== null) {
-                    $merged[] = ['key' => $key, 'value' => $this->writeSet[$key]];
-                }
-            } else {
-                $merged[] = $entry;
-            }
-        }
-
-        return $merged;
+        return $this->finalizeScanResults($results, $startKey, $endKey, $limit);
     }
 
     /**
@@ -816,7 +809,7 @@ final class Transaction
             if ($endKey !== '') {
                 $request->setEndKey($endKey);
             }
-            $request->setLimit($limit > 0 ? $limit : self::DEFAULT_SCAN_LIMIT);
+            $request->setLimit($limit > 0 ? $limit : self::MAX_SCAN_LIMIT);
             $request->setVersion($this->startTs);
 
             /** @var ScanResponse $response */
@@ -856,6 +849,78 @@ final class Transaction
 
             return $results;
         });
+    }
+
+    /**
+     * @throws InvalidArgumentException
+     */
+    private function normalizeScanLimit(int $limit): int
+    {
+        if ($limit < 0) {
+            throw new InvalidArgumentException('Scan limit must be 0 or greater');
+        }
+
+        if ($limit === 0) {
+            return self::MAX_SCAN_LIMIT;
+        }
+
+        if ($limit > self::MAX_SCAN_LIMIT) {
+            throw new InvalidArgumentException(sprintf(
+                'Scan limit (%d) exceeds maximum allowed scan limit of %d',
+                $limit,
+                self::MAX_SCAN_LIMIT,
+            ));
+        }
+
+        return $limit;
+    }
+
+    /**
+     * Merge TiKV scan results with the local write set to enforce read-your-writes
+     * semantics, then apply the limit.
+     *
+     * @param array<array{key: string, value: ?string}> $results
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function finalizeScanResults(array $results, string $startKey, string $endKey, int $limit): array
+    {
+        // Build a map of TiKV results (key => value)
+        $tikvMap = [];
+        foreach ($results as $entry) {
+            $tikvMap[$entry['key']] = $entry['value'];
+        }
+
+        // Collect all unique keys: from TiKV results + write-set keys in range
+        $allKeys = array_keys($tikvMap);
+        foreach (array_keys($this->writeSet) as $key) {
+            // Check if key is in range [startKey, endKey)
+            if ($key >= $startKey && ($endKey === '' || $key < $endKey)) {
+                $allKeys[] = $key;
+            }
+        }
+        $allKeys = array_unique($allKeys);
+        sort($allKeys);
+
+        // Build merged result set in key order
+        $merged = [];
+        foreach ($allKeys as $key) {
+            if (count($merged) >= $limit) {
+                break;
+            }
+
+            if (array_key_exists($key, $this->writeSet)) {
+                // Write set value takes precedence
+                if ($this->writeSet[$key] !== null) {
+                    $merged[] = ['key' => $key, 'value' => $this->writeSet[$key]];
+                }
+                // else: deleted in write set, omit from results
+            } elseif (array_key_exists($key, $tikvMap)) {
+                // Key came from TiKV and not in write set
+                $merged[] = ['key' => $key, 'value' => $tikvMap[$key]];
+            }
+        }
+
+        return $merged;
     }
 
     private function timeoutMs(string $operationType): ?int

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Transaction::scan() now enforces a `MAX_SCAN_LIMIT` (10240), applies the limit after write-set merge, and inserts in-range write-set keys not returned by TiKV** — previously, limit=0 sent uint32 max (memory exhaustion risk), and the limit was not re-applied after merging results with the write set. Additionally, newly-written keys inside the scan range that TiKV had not yet committed were silently missing from the result, violating read-your-writes semantics for scans. (#86)
 - **RawKvBatch retry now re-groups keys after region split/merge** — `resolveRegion()` no longer returns a stale `RegionInfo` when the region ID changes; the retry wrappers (`batchGetWithRetry`, `batchPutWithRetry`, `batchDeleteWithRetry`) now verify every key still falls within the resolved region's range and, when a split/merge scatters keys across multiple regions, re-resolve and re-dispatch each sub-group to its own region. `RegionErrorHandler::check()` now surfaces per-pair `KeyError`s from `RawBatchGetResponse` and top-level error strings from `RawBatchPutResponse`/`RawBatchDeleteResponse`, eliminating silent partial writes/deletes/reads. (#140)
 
 ### Added
