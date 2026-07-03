@@ -525,6 +525,37 @@ final class Transaction
         }
     }
 
+    private function handleRollbackError(KeyError $error): void
+    {
+        $locked = $error->getLocked();
+        if ($locked !== null) {
+            $this->lockResolver->resolveLock(
+                $locked->getKey(),
+                (int) $locked->getLockVersion(),
+                $this->startTs,
+            );
+            throw new TxnRetryableException(
+                'Lock encountered during rollback, resolved - retry',
+                BackoffType::TxnLock,
+            );
+        }
+
+        $retryable = $error->getRetryable();
+        if ($retryable !== '') {
+            throw new TxnRetryableException(
+                'Retryable error during rollback: ' . $retryable,
+                BackoffType::TxnLock,
+            );
+        }
+
+        $abort = $error->getAbort();
+        if ($abort !== '') {
+            throw new TransactionConflictException(
+                'Abort during rollback: ' . $abort,
+            );
+        }
+    }
+
     /**
      * @param string[] $keys
      */
@@ -590,27 +621,40 @@ final class Transaction
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+            $firstKey = $regionKeys[0] ?? '';
 
-            $request = new BatchRollbackRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setStartVersion($this->startTs);
-            $request->setKeys($regionKeys);
+            $this->executeWithRetry($firstKey, function () use ($region, $regionKeys): null {
+                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-            $this->logger->debug('BatchRollback', [
-                'txnId' => $this->txnId,
-                'regionId' => $region->regionId,
-                'keyCount' => count($regionKeys),
-            ]);
+                $request = new BatchRollbackRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                $request->setStartVersion($this->startTs);
+                $request->setKeys($regionKeys);
 
-            $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvBatchRollback',
-                $request,
-                BatchRollbackResponse::class,
-                $this->timeoutMs('write'),
-            );
+                $this->logger->debug('BatchRollback', [
+                    'txnId' => $this->txnId,
+                    'regionId' => $region->regionId,
+                    'keyCount' => count($regionKeys),
+                ]);
+
+                /** @var BatchRollbackResponse $response */
+                $response = $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'KvBatchRollback',
+                    $request,
+                    BatchRollbackResponse::class,
+                    $this->timeoutMs('write'),
+                );
+                $this->handleRegionError($response, $region);
+
+                $error = $response->getError();
+                if ($error !== null) {
+                    $this->handleRollbackError($error);
+                }
+
+                return null;
+            });
         }
     }
 
@@ -722,27 +766,40 @@ final class Transaction
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+            $firstKey = $regionKeys[0] ?? '';
 
-            $request = new PessimisticRollbackRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setStartVersion($this->startTs);
-            $request->setForUpdateTs($this->startTs);
-            $request->setKeys($regionKeys);
+            $this->executeWithRetry($firstKey, function () use ($region, $regionKeys): null {
+                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-            $this->logger->debug('PessimisticRollback', [
-                'txnId' => $this->txnId,
-                'regionId' => $region->regionId,
-            ]);
+                $request = new PessimisticRollbackRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                $request->setStartVersion($this->startTs);
+                $request->setForUpdateTs($this->startTs);
+                $request->setKeys($regionKeys);
 
-            $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KVPessimisticRollback',
-                $request,
-                PessimisticRollbackResponse::class,
-                $this->timeoutMs('write'),
-            );
+                $this->logger->debug('PessimisticRollback', [
+                    'txnId' => $this->txnId,
+                    'regionId' => $region->regionId,
+                ]);
+
+                /** @var PessimisticRollbackResponse $response */
+                $response = $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'KVPessimisticRollback',
+                    $request,
+                    PessimisticRollbackResponse::class,
+                    $this->timeoutMs('write'),
+                );
+                $this->handleRegionError($response, $region);
+
+                $errors = $response->getErrors();
+                foreach ($errors as $keyError) {
+                    $this->handleRollbackError($keyError);
+                }
+
+                return null;
+            });
         }
     }
 
