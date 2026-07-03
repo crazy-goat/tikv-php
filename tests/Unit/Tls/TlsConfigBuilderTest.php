@@ -80,4 +80,71 @@ class TlsConfigBuilderTest extends TestCase
         $this->assertNull($config->clientKey);
         $this->assertFalse($config->isEnabled());
     }
+
+    // ========================================================================
+    // Validation: disallowed file extension
+    // ========================================================================
+
+    public function testDisallowedExtensionThrowsInvalidArgumentException(): void
+    {
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('disallowed extension');
+
+        $path = $this->tempDir . '/ca.txt';
+        file_put_contents($path, 'content');
+
+        (new TlsConfigBuilder())->withCaCert($path);
+    }
+
+    public function testDisallowedExtensionForClientCertThrows(): void
+    {
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('disallowed extension');
+
+        $certPath = $this->tempDir . '/client.xml';
+        $keyPath = $this->tempDir . '/client.key';
+        file_put_contents($certPath, 'cert');
+        file_put_contents($keyPath, 'key');
+
+        (new TlsConfigBuilder())->withClientCert($certPath, $keyPath);
+    }
+
+    public function testDisallowedExtensionForClientKeyThrows(): void
+    {
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('disallowed extension');
+
+        $certPath = $this->tempDir . '/client.crt';
+        $keyPath = $this->tempDir . '/client.json';
+        file_put_contents($certPath, 'cert');
+        file_put_contents($keyPath, 'key');
+
+        (new TlsConfigBuilder())->withClientCert($certPath, $keyPath);
+    }
+
+    // ========================================================================
+    // Allowed extensions (positive tests)
+    // ========================================================================
+
+    public function testWithCaCertFromPemFile(): void
+    {
+        $content = 'pem-content';
+        $path = $this->tempDir . '/ca.pem';
+        file_put_contents($path, $content);
+
+        $config = (new TlsConfigBuilder())->withCaCert($path)->build();
+
+        $this->assertSame($content, $config->caCert);
+    }
+
+    public function testWithCaCertFromKeyFile(): void
+    {
+        $content = 'key-content';
+        $path = $this->tempDir . '/ca.key';
+        file_put_contents($path, $content);
+
+        $config = (new TlsConfigBuilder())->withCaCert($path)->build();
+
+        $this->assertSame($content, $config->caCert);
+    }
 }
