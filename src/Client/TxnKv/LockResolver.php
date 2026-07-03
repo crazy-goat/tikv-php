@@ -9,10 +9,10 @@ use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
-use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
@@ -102,11 +102,7 @@ final readonly class LockResolver
             CheckTxnStatusResponse::class,
         );
 
-        $regionError = $response->getRegionError();
-        if ($regionError instanceof \CrazyGoat\Proto\Errorpb\Error) {
-            $this->regionCache->invalidate($region->regionId);
-            throw RegionException::fromRegionError($regionError);
-        }
+        RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
 
         $error = $response->getError();
         if ($error !== null) {

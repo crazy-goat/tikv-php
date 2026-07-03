@@ -5,24 +5,35 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Region;
 
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
+use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 
 final class RegionErrorHandler
 {
     /**
-     * Check a response for errors and throw if any are found.
+     * Check a response for region errors and throw if any are found.
      *
      * Inspects:
      * 1. Top-level region_error (all batch responses)
      * 2. Top-level error string (RawBatchPutResponse, RawBatchDeleteResponse)
      * 3. Per-pair KeyError in pairs (RawBatchGetResponse)
+     *
+     * When a $cache and $regionId are provided, the region is invalidated
+     * from the cache before the exception is thrown. This is the consistent
+     * behaviour expected by Transaction and LockResolver callers.
      */
-    public static function check(object $response): void
-    {
+    public static function check(
+        object $response,
+        ?RegionCacheInterface $cache = null,
+        ?int $regionId = null,
+    ): void {
         // 1. Top-level region error (all response types)
         if (method_exists($response, 'getRegionError')) {
             $regionError = $response->getRegionError();
             if ($regionError !== null) {
+                if ($cache instanceof \CrazyGoat\TiKV\Client\Cache\RegionCacheInterface && $regionId !== null) {
+                    $cache->invalidate($regionId);
+                }
                 throw RegionException::fromRegionError($regionError);
             }
         }
@@ -30,7 +41,7 @@ final class RegionErrorHandler
         // 2. Top-level error string (RawBatchPutResponse, RawBatchDeleteResponse)
         if (method_exists($response, 'getError')) {
             $error = $response->getError();
-            if ($error !== '' && $error !== null) {
+            if (is_string($error) && $error !== '') {
                 throw new RegionException(
                     operation: 'BatchRequest',
                     message: $error,

@@ -39,6 +39,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
@@ -1101,32 +1102,22 @@ final class Transaction
      */
     private function groupMutationsByRegion(array $mutations): array
     {
-        if ($mutations === []) {
-            return [];
+        $grouped = RegionGrouper::groupItemsByRegion(
+            $mutations,
+            fn(Mutation $m) => $m->getKey(),
+            $this->regionResolver,
+        );
+
+        // Remap 'items' → 'mutations' for backward compatibility
+        $result = [];
+        foreach ($grouped as $regionId => $data) {
+            $result[$regionId] = [
+                'region' => $data['region'],
+                'mutations' => $data['items'],
+            ];
         }
 
-        $keys = array_map(fn(Mutation $m) => $m->getKey(), $mutations);
-        $resolved = $this->regionResolver->batchResolveRegions($keys);
-
-        $keyToMutation = [];
-        foreach ($mutations as $mutation) {
-            $keyToMutation[$mutation->getKey()] = $mutation;
-        }
-
-        $grouped = [];
-        foreach ($keys as $key) {
-            $region = $resolved[$key] ?? null;
-            if ($region === null) {
-                continue;
-            }
-            $mutation = $keyToMutation[$key];
-            $regionId = $region->regionId;
-            if (!isset($grouped[$regionId])) {
-                $grouped[$regionId] = ['region' => $region, 'mutations' => []];
-            }
-            $grouped[$regionId]['mutations'][] = $mutation;
-        }
-        return $grouped;
+        return $result;
     }
 
     /**
@@ -1142,15 +1133,7 @@ final class Transaction
         \Google\Protobuf\Internal\Message $response,
         RegionInfo $region,
     ): void {
-        if (!method_exists($response, 'getRegionError')) {
-            return;
-        }
-
-        $regionError = $response->getRegionError();
-        if ($regionError instanceof \CrazyGoat\Proto\Errorpb\Error) {
-            $this->regionCache->invalidate($region->regionId);
-            throw RegionException::fromRegionError($regionError);
-        }
+        RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
     }
 
     private function ensureActive(): void

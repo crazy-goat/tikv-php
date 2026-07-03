@@ -6,19 +6,15 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
-use CrazyGoat\TiKV\Client\Cache\StoreCache;
-use CrazyGoat\TiKV\Client\Connection\PdClient;
+use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
-use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
-use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
-use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -39,91 +35,14 @@ final class TxnKvClient
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
-        if ($pdEndpoints === []) {
-            throw new InvalidArgumentException('PD endpoints array must not be empty');
-        }
+        $bundle = ConnectionFactory::create($pdEndpoints, $logger, $options);
 
-        $resolvedLogger = $logger ?? new NullLogger();
-
-        $metrics = $options[self::OPT_METRICS] ?? new NoOpMetrics();
-        if (!$metrics instanceof MetricsInterface) {
-            throw new InvalidArgumentException(
-                "options['" . self::OPT_METRICS . "'] must be an instance of MetricsInterface, "
-                . 'got ' . (get_debug_type($metrics))
-            );
-        }
-
-        $tlsConfig = null;
-        if (isset($options['tls']) && is_array($options['tls'])) {
-            $tlsOptions = $options['tls'];
-            $builder = new TlsConfigBuilder();
-
-            // Explicit file-path options take priority
-            if (isset($tlsOptions['caCertFile']) && is_string($tlsOptions['caCertFile'])) {
-                $baseDir = isset($tlsOptions['caCertBaseDir']) && is_string($tlsOptions['caCertBaseDir'])
-                    ? $tlsOptions['caCertBaseDir']
-                    : null;
-                $builder->withCaCertFile($tlsOptions['caCertFile'], $baseDir);
-            } elseif (isset($tlsOptions['caCertPem']) && is_string($tlsOptions['caCertPem'])) {
-                $builder->withCaCertPem($tlsOptions['caCertPem']);
-            } elseif (isset($tlsOptions['caCert']) && is_string($tlsOptions['caCert'])) {
-                // Backward compatibility: guess file path vs inline content
-                $builder->withCaCert($tlsOptions['caCert']);
-            }
-
-            $hasClientCertFile = isset($tlsOptions['clientCertFile']) && is_string($tlsOptions['clientCertFile']);
-            $hasClientKeyFile = isset($tlsOptions['clientKeyFile']) && is_string($tlsOptions['clientKeyFile']);
-            $hasClientCertPem = isset($tlsOptions['clientCertPem']) && is_string($tlsOptions['clientCertPem']);
-            $hasClientKeyPem = isset($tlsOptions['clientKeyPem']) && is_string($tlsOptions['clientKeyPem']);
-
-            if ($hasClientCertFile && $hasClientKeyFile) {
-                $baseDir = isset($tlsOptions['clientCertBaseDir']) && is_string($tlsOptions['clientCertBaseDir'])
-                    ? $tlsOptions['clientCertBaseDir']
-                    : null;
-                $builder->withClientCertFile(
-                    $tlsOptions['clientCertFile'],
-                    $tlsOptions['clientKeyFile'],
-                    $baseDir,
-                );
-            } elseif ($hasClientCertPem && $hasClientKeyPem) {
-                $builder->withClientCertPem($tlsOptions['clientCertPem'], $tlsOptions['clientKeyPem']);
-            } elseif (
-                isset($tlsOptions['clientCert']) && is_string($tlsOptions['clientCert']) &&
-                isset($tlsOptions['clientKey']) && is_string($tlsOptions['clientKey'])
-            ) {
-                // Backward compatibility: guess file path vs inline content
-                $builder->withClientCert($tlsOptions['clientCert'], $tlsOptions['clientKey']);
-            }
-
-            $tlsConfig = $builder->build();
-        }
-
-        $grpc = new GrpcClient($resolvedLogger, $tlsConfig, metrics: $metrics);
-        $pdAddress = $pdEndpoints[0];
-        $storeCache = new StoreCache(logger: $resolvedLogger);
-        $pdClient = new PdClient($grpc, $pdAddress, $resolvedLogger, $storeCache);
-
-        $timeoutConfig = new TimeoutConfig();
-
-        if (isset($options[self::OPT_TIMEOUT]) && is_array($options[self::OPT_TIMEOUT])) {
-            $t = $options[self::OPT_TIMEOUT];
-            $timeoutConfig = new TimeoutConfig(
-                readTimeoutMs: isset($t['readTimeoutMs']) && is_int($t['readTimeoutMs'])
-                    ? $t['readTimeoutMs'] : $timeoutConfig->readTimeoutMs,
-                writeTimeoutMs: isset($t['writeTimeoutMs']) && is_int($t['writeTimeoutMs'])
-                    ? $t['writeTimeoutMs'] : $timeoutConfig->writeTimeoutMs,
-                batchReadTimeoutMs: isset($t['batchReadTimeoutMs']) && is_int($t['batchReadTimeoutMs'])
-                    ? $t['batchReadTimeoutMs'] : $timeoutConfig->batchReadTimeoutMs,
-                batchWriteTimeoutMs: isset($t['batchWriteTimeoutMs']) && is_int($t['batchWriteTimeoutMs'])
-                    ? $t['batchWriteTimeoutMs'] : $timeoutConfig->batchWriteTimeoutMs,
-                scanTimeoutMs: isset($t['scanTimeoutMs']) && is_int($t['scanTimeoutMs'])
-                    ? $t['scanTimeoutMs'] : $timeoutConfig->scanTimeoutMs,
-                deleteRangeTimeoutMs: isset($t['deleteRangeTimeoutMs']) && is_int($t['deleteRangeTimeoutMs'])
-                    ? $t['deleteRangeTimeoutMs'] : $timeoutConfig->deleteRangeTimeoutMs,
-            );
-        }
-
-        return new self($pdClient, $grpc, logger: $resolvedLogger, timeoutConfig: $timeoutConfig);
+        return new self(
+            $bundle->pdClient,
+            $bundle->grpc,
+            logger: $bundle->logger,
+            timeoutConfig: $bundle->timeoutConfig,
+        );
     }
 
     public function __construct(
