@@ -48,8 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TxnKV client with full ACID transaction support (begin/commit/rollback, snapshot reads, pessimistic locking)
 - Lazy auto-paginating `ScanIterator` for RawKV scans — fetches next pages transparently on iteration
 - Auto-split large batches by key count and total byte size — prevents oversized gRPC requests
-- Configurable per-operation gRPC timeouts via `GrpcClient::setTimeout()`
-- Scan limit guard (`MAX_RAW_SCAN_LIMIT = 10240`) — prevents accidental unbounded scans
+- Configurable per-operation gRPC timeouts via `TimeoutConfig` / `options['timeout']`
+- Scan limit guard (`MAX_SCAN_LIMIT = 10240`) — prevents accidental unbounded scans
 - Per-key TTL support in `batchPut()` — accepts `int|array $ttl` for individual key expiration times
 - E2E tests running against a real TiKV cluster in CI via GitHub Actions
 
