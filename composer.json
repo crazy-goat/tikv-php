@@ -6,7 +6,7 @@
     "require": {
         "php": ">=8.2",
         "grpc/grpc": "^1.57",
-        "google/protobuf": "^3.25",
+        "google/protobuf": "^4.33.6",
         "psr/log": "^3.0"
     },
     "require-dev": {
@@ -19,7 +19,7 @@
     },
     "config": {
         "audit": {
-            "block-insecure": false
+            "block-insecure": true
         },
         "allow-plugins": {
             "dealerdirect/phpcodesniffer-composer-installer": true
