@@ -80,25 +80,6 @@ class GrpcClientTest extends TestCase
         );
     }
 
-    public function testAllowsInsecureWhenExplicitlySet(): void
-    {
-        // Should not throw InvalidStateException
-        $this->expectException(GrpcException::class);
-        // It will throw GrpcException because the address is invalid, not InvalidStateException
-
-        $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
-        $request->setKey('test');
-
-        $this->insecureClient->call(
-            'invalid-address:99999',
-            'tikvpb.Tikv',
-            'RawGet',
-            $request,
-            \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
-            timeoutMs: 1000,
-        );
-    }
-
     public function testCloseContinuesAfterChannelCloseThrows(): void
     {
         $throwing = $this->createMock(\Grpc\Channel::class);

@@ -32,6 +32,15 @@ echo "\nCode:\n";
 echo "  \$options = ['tls' => ['caCert' => '/path/to/ca.crt']];\n";
 echo "  \$client = RawKvClient::create(['tikv.example.com:2379'], options: \$options);\n\n";
 
+// Example: Insecure (plaintext) connection - must opt in explicitly
+echo "Example: Insecure (Plaintext) Connection\n";
+echo "-----------------------------------------\n";
+echo "Since v0.11.0, plaintext/insecure gRPC requires explicit opt-in:\n\n";
+echo "  \$options = ['insecure' => true];\n";
+echo "  \$client = RawKvClient::create(['127.0.0.1:2379'], options: \$options);\n\n";
+echo "Without 'insecure => true' and without TLS configuration, the client\n";
+echo "throws an exception (fail-closed).\n\n";
+
 // Example 2: Mutual TLS (mTLS) with client certificate
 echo "Example 2: Mutual TLS (Client Certificate Authentication)\n";
 echo "----------------------------------------------------------\n";
