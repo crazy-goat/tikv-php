@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **RawKvBatch retry now re-groups keys after region split/merge** — `resolveRegion()` no longer returns a stale `RegionInfo` when the region ID changes; the retry wrappers (`batchGetWithRetry`, `batchPutWithRetry`, `batchDeleteWithRetry`) now verify every key still falls within the resolved region's range and, when a split/merge scatters keys across multiple regions, re-resolve and re-dispatch each sub-group to its own region. `RegionErrorHandler::check()` now surfaces per-pair `KeyError`s from `RawBatchGetResponse` and top-level error strings from `RawBatchPutResponse`/`RawBatchDeleteResponse`, eliminating silent partial writes/deletes/reads. (#140)
+
 ### Added
 - `StoreCache` now has a `maxEntries` cap (default 128) with LRU eviction — when at capacity, the least recently used entry is evicted before inserting a new one, preventing unbounded memory growth over time. (#108)
 - `GrpcClient` `closed` guard — `close()` sets an internal flag and `call()` throws `InvalidStateException` if invoked after close, making the closed state explicit and preventing latent use-after-close bugs. (#108)
