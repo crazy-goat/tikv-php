@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `CodecInterface` in `src/Client/Codec/` — defines the contract for key encoding/decoding across TiKV API versions (V1 passthrough, V2 prefix-based). Includes `encodeKey()`/`decodeKey()` for user keys, `encodeRegionKey()`/`decodeRegionKey()` for PD region lookups, `encodeRange()`/`decodeRange()` for key ranges, and `getApiVersion()`/`getKeyspaceId()`/`getKeyspaceName()` metadata accessors. (#28)
+- `Mode` enum in `src/Client/Codec/` — Raw/Txn key-space mode used by API V2 key prefix encoding. Provides `prefixByte()` (0x72 for Raw, 0x78 for Txn) and `fromPrefixByte()` factory. (#28)
+- `MemComparableCodec` in `src/Client/Codec/` — Memory Comparable Encoding (MCE) for region boundary keys, implementing TiDB's `codec.EncodeBytes`/`DecodeBytes` convention. Escapes 0x00/0xFF bytes with padding and appends a terminator so that encoded keys sort in the same byte-wise order as the original keys. (#28)
+- `CodecV1` in `src/Client/Codec/` — V1 codec implementation: keys pass through unchanged, region keys are MCE-encoded only for TxnKV mode (RawKV uses passthrough). Returns `APIVersion::V1`, keyspace ID 0, and empty keyspace name. (#28)
+- Unit tests for `MemComparableCodec` (encode/decode round-trips, sort-order preservation, edge cases with null/FF bytes, missing terminator errors) and `CodecV1` (RawKV passthrough, TxnKV MCE region encoding, range encode/decode, empty keys, binary keys, custom MCE injection). (#28)
+
 ### Changed
 - **Transaction SRP decomposition** — broke up the 944-line `Transaction` god object into three focused collaborators: `TransactionState` (mutable state), `TxnReader` (get/batchGet/scan), and `TwoPhaseCommitter` (commit/rollback/pessimistic lock/heartbeat). The public `Transaction` API is preserved as a thin façade delegating to these classes, following the same decomposition pattern already established in the RawKv module (`RawKvCrud`, `RawKvBatch`, etc.). (#83)
 
