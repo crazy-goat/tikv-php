@@ -42,6 +42,7 @@ use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -154,7 +155,7 @@ final class Transaction
                         (int) $locked->getLockVersion(),
                         $this->startTs,
                     );
-                    throw new TiKvException('Lock encountered, resolved - retry');
+                    throw new TxnRetryableException('Lock encountered, resolved - retry', BackoffType::TxnLock);
                 }
 
                 $retryable = $error->getRetryable();
@@ -502,7 +503,10 @@ final class Transaction
                     (int) $locked->getLockVersion(),
                     $this->startTs,
                 );
-                throw new TiKvException('Lock conflict during prewrite, resolved - retry');
+                throw new TxnRetryableException(
+                    'Lock conflict during prewrite, resolved - retry',
+                    BackoffType::TxnLock,
+                );
             }
 
             $conflict = $keyError->getConflict();
@@ -841,7 +845,10 @@ final class Transaction
                         (int) $locked->getLockVersion(),
                         $this->startTs,
                     );
-                    throw new TiKvException('Lock encountered during scan, resolved - retry');
+                    throw new TxnRetryableException(
+                        'Lock encountered during scan, resolved - retry',
+                        BackoffType::TxnLock,
+                    );
                 }
             }
 
@@ -1000,15 +1007,15 @@ final class Transaction
 
     private function classifyError(TiKvException $e): ?BackoffType
     {
-        $message = $e->getMessage();
-
-        if (str_contains($message, 'KeyExists') || str_contains($message, 'WriteConflict')) {
-            return null;
-        }
-        if (str_contains($message, 'locked') || str_contains($message, 'Lock')) {
-            return BackoffType::TxnLock;
+        // Typed path: exceptions that carry their own BackoffType.
+        if ($e instanceof TxnRetryableException) {
+            return $e->backoffType;
         }
 
+        // RegionException instances with a typed error kind are handled
+        // by ErrorClassifier (fallback in RetryExecutor).  For
+        // TransactionConflictException and other non-retryable tx errors
+        // the response is fatal (no retry).
         return null;
     }
 }
