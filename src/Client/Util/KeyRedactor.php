@@ -25,7 +25,7 @@ final class KeyRedactor
     private const MAX_PREFIX_BYTES = 8;
 
     /** @var (callable(string): string)|null */
-    private static $customRedactor = null;
+    private static $customRedactor;
 
     /**
      * Set a custom redaction callable.

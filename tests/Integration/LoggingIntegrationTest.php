@@ -248,8 +248,10 @@ class LoggingIntegrationTest extends TestCase
         $this->assertInstanceOf(\Monolog\LogRecord::class, $record);
         // Key context should be redacted, not contain the raw key
         $this->assertArrayHasKey('key', $record->context);
-        $this->assertStringContainsString('bytes', $record->context['key']);
-        $this->assertStringNotContainsString('contextkey', $record->context['key']);
+        $key = $record->context['key'];
+        $this->assertIsString($key);
+        $this->assertStringContainsString('bytes', $key);
+        $this->assertStringNotContainsString('contextkey', $key);
         $this->assertSame(0, $record->context['attempt']);
         $this->assertSame('None', $record->context['backoffType']);
         $this->assertArrayHasKey('sleepMs', $record->context);
