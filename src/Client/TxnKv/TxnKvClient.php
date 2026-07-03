@@ -185,6 +185,12 @@ final class TxnKvClient
         $this->closed = true;
 
         try {
+            $this->regionCache->clear();
+        } catch (\Throwable $e) {
+            $this->logger->error('Failed to clear region cache', ['exception' => $e]);
+        }
+
+        try {
             $this->grpc->close();
         } catch (\Throwable $e) {
             $this->logger->error('Failed to close gRPC client', ['exception' => $e]);
