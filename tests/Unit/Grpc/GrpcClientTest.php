@@ -162,6 +162,35 @@ class GrpcClientTest extends TestCase
         $client->close();
     }
 
+    // ========================================================================
+    // allowInsecure
+    // ========================================================================
+
+    public function testAllowInsecureDefaultsToTrue(): void
+    {
+        $ref = new \ReflectionProperty(GrpcClient::class, 'allowInsecure');
+        $val = $ref->getValue($this->client);
+        $this->assertTrue($val);
+    }
+
+    public function testAllowInsecureCanBeSetToFalse(): void
+    {
+        $client = new GrpcClient(allowInsecure: false);
+        $ref = new \ReflectionProperty(GrpcClient::class, 'allowInsecure');
+        $val = $ref->getValue($client);
+        $this->assertFalse($val);
+        $client->close();
+    }
+
+    public function testGetChannelWithAllowInsecureFalseThrowsWithoutTls(): void
+    {
+        $client = new GrpcClient(allowInsecure: false);
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('TLS is not configured');
+        $client->getChannel('127.0.0.1:20160');
+        $client->close();
+    }
+
     public function testChannelCountStartsAtZero(): void
     {
         $this->assertSame(0, $this->client->getChannelCount());
