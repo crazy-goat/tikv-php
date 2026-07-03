@@ -217,7 +217,7 @@ class LoggingIntegrationTest extends TestCase
         $this->assertTrue($this->testHandler->hasErrorThatContains('budget exhausted'));
     }
 
-    public function testLogContextContainsExpectedFields(): void
+    public function testLogContextContainsRedactedKey(): void
     {
         $cache = new RegionCache(logger: $this->logger);
         $client = new RawKvClient($this->pdClient, $this->grpc, $cache, 20000, $this->logger);
@@ -246,7 +246,10 @@ class LoggingIntegrationTest extends TestCase
         $this->assertNotEmpty($warningRecords);
         $record = reset($warningRecords);
         $this->assertInstanceOf(\Monolog\LogRecord::class, $record);
-        $this->assertSame('contextkey', $record->context['key']);
+        // Key context should be redacted, not contain the raw key
+        $this->assertArrayHasKey('key', $record->context);
+        $this->assertStringContainsString('bytes', $record->context['key']);
+        $this->assertStringNotContainsString('contextkey', $record->context['key']);
         $this->assertSame(0, $record->context['attempt']);
         $this->assertSame('None', $record->context['backoffType']);
         $this->assertArrayHasKey('sleepMs', $record->context);

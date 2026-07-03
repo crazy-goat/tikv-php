@@ -43,6 +43,7 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -372,7 +373,7 @@ final class Transaction
 
             $this->logger->debug('TxnHeartBeat', [
                 'txnId' => $this->txnId,
-                'primary' => $primary,
+                'primary' => KeyRedactor::redact($primary),
                 'adviseLockTtlMs' => $adviseLockTtlMs,
             ]);
 

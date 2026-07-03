@@ -100,6 +100,14 @@ echo "3. Structured logging with JSON format:\n";
 echo "   use Monolog\\Formatter\\JsonFormatter;\n";
 echo "   \$handler->setFormatter(new JsonFormatter());\n\n";
 
-echo "4. Integration with log aggregation (ELK, Datadog, etc.)\n\n";
+echo "4. Key redaction:\n";
+echo "   - Raw keys are automatically redacted in log context using the\n";
+echo "     KeyRedactor utility (first 8 bytes as hex + length).\n";
+echo "   - Use KeyRedactor::setRedactor() to provide a custom redaction\n";
+echo "     callable for your environment.\n";
+echo "   - Avoid DEBUG level in production; keys contain tenant IDs,\n";
+echo "     user IDs, session tokens, etc. and can leak via logs.\n\n";
+
+echo "5. Integration with log aggregation (ELK, Datadog, etc.)\n\n";
 
 echo "PSR-3 logging example completed!\n";
