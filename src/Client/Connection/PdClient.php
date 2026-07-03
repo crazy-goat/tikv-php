@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Connection;
 
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\Proto\Pdpb\GetMembersRequest;
+use CrazyGoat\Proto\Pdpb\GetMembersResponse;
 use CrazyGoat\Proto\Pdpb\GetRegionRequest;
 use CrazyGoat\Proto\Pdpb\GetRegionResponse;
 use CrazyGoat\Proto\Pdpb\GetStoreRequest;
@@ -136,6 +138,36 @@ final class PdClient implements PdClientInterface
 
     public function getClusterId(): ?int
     {
+        return $this->clusterId;
+    }
+
+    /**
+     * Probe the PD member list to verify connectivity & discover cluster ID.
+     *
+     * Issues a `GetMembers` RPC against the configured PD address and learns
+     * the cluster ID from the response header (if present). Returns the
+     * cluster ID on success; returns null if the response carried no cluster
+     * ID header. Unlike getRegion(), this call does NOT look up any user
+     * data and never fails with "no region" — making it suitable as a
+     * health check.
+     *
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD-level error
+     */
+    public function ping(): ?int
+    {
+        $request = new GetMembersRequest();
+        $request->setHeader($this->createHeader());
+
+        /** @var GetMembersResponse $response */
+        $response = $this->callWithClusterIdRetry(
+            'GetMembers',
+            $request,
+            GetMembersResponse::class,
+        );
+
+        $this->learnClusterId($response);
+
         return $this->clusterId;
     }
 

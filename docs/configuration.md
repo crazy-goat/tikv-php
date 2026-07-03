@@ -474,18 +474,68 @@ return [
 
 ### Health Checks
 
-Monitor client health:
+The client ships a first-class health check that probes PD without
+touching any user data. Use it in load-balancer probes, Kubernetes
+readiness/liveness checks, etc.:
 
 ```php
-// Simple health check
+// Caller pattern: probe PD reachable + return the learned cluster ID.
 try {
-    $client->put('health:check', 'ok');
-    $value = $client->get('health:check');
-    $client->delete('health:check');
-    echo "Healthy\n";
-} catch (Exception $e) {
-    echo "Unhealthy: " . $e->getMessage() . "\n";
+    $clusterId = $client->healthCheck();   // int|null
+    // $clusterId is non-null when PD responded with a cluster-id header.
+} catch (\CrazyGoat\TiKV\Client\Exception\HealthCheckException $e) {
+    // PD was unreachable or returned a non-OK status.
 }
+
+// Throws ClientClosedException when called after $client->close().
+```
+
+Internally, `healthCheck()` issues the lightweight `GetMembers` RPC over
+the same gRPC channel used for region lookups, so it exercises the full
+network path without writing or reading user keys.
+
+### Metrics and Observability
+
+The library exposes an opt-in `MetricsInterface` for capturing operational
+counters (RPC counts and latency, retry counts, region-cache hit/miss,
+region-cache invalidations). The default is a zero-cost no-op, so callers
+that do not opt in pay a single empty-method dispatch per call site.
+
+```php
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
+
+class PrometheusMetrics implements MetricsInterface
+{
+    // ... your Prometheus / StatsD / OpenTelemetry adapter here ...
+}
+
+$metrics = new PrometheusMetrics();   // or new InMemoryMetrics() for tests
+$client = RawKvClient::create(
+    ['tikv.example.com:2379'],
+    options: ['metrics' => $metrics],
+);
+```
+
+The library emits the following counter tags:
+
+| Method                         | Tag example                | Meaning                                           |
+|--------------------------------|----------------------------|---------------------------------------------------|
+| `rpcStarted()`                 | `'tikvpb.Tikv/KvGet'`      | One outbound gRPC call was dispatched             |
+| `rpcCompleted()`               | `'tikvpb.Tikv/KvGet'`      | gRPC call returned (success or error); carries duration (ms) |
+| `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
+| `regionCacheHit()`             | `'region_resolution'`      | Region was found in the cache                     |
+| `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
+| `regionInvalidated()`          | `'not_leader'`, `'retry_region_error'` | A region was dropped from the cache |
+
+`InMemoryMetrics` ships the same counters in-process, suitable for tests
+and benchmarks — see `getRpcStarted()`, `getRpcSucceeded()`, `getRetries()`,
+`getCacheHits()`, `getInvalidations()`, `getMeanLatencyMs()`, and `reset()`.
+
+Inspect live counters at any time:
+
+```php
+$metrics = $client->getMetrics();     // returns whatever was injected
 ```
 
 ### Connection Pooling

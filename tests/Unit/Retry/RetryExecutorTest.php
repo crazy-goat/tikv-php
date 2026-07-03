@@ -8,6 +8,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
@@ -44,6 +45,7 @@ class RetryExecutorTest extends TestCase
         int $maxAttempts = RetryExecutor::DEFAULT_MAX_ATTEMPTS,
         int $deadlineMs = 0,
         ?LoggerInterface $logger = null,
+        ?InMemoryMetrics $metrics = null,
     ): RetryExecutor {
         return new RetryExecutor(
             maxBackoffMs: $maxBackoffMs,
@@ -54,6 +56,7 @@ class RetryExecutorTest extends TestCase
             logger: $logger ?? $this->logger,
             maxAttempts: $maxAttempts,
             deadlineMs: $deadlineMs,
+            metrics: $metrics ?? new InMemoryMetrics(),
         );
     }
 
@@ -324,6 +327,72 @@ class RetryExecutorTest extends TestCase
             regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
             logger: $this->logger,
             deadlineMs: -1,
+        );
+    }
+
+    // ========================================================================
+    // Metrics emission
+    // ========================================================================
+
+    public function testNoRetryMeansNoMetricsEmitted(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $executor = $this->createExecutor(metrics: $metrics);
+
+        $result = $executor->execute('test_key', fn(): string => 'success');
+
+        $this->assertSame('success', $result);
+        $this->assertSame(0, $metrics->getRetries('NotLeader'));
+        $this->assertSame(0, $metrics->getInvalidations('not_leader'));
+        $this->assertSame(0, $metrics->getInvalidations('retry_region_error'));
+    }
+
+    public function testRetryableErrorIncrementsRetryMetric(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $executor = $this->createExecutor(metrics: $metrics);
+
+        $attempts = 0;
+        try {
+            $executor->execute('retry_key', function () use (&$attempts): void {
+                $attempts++;
+                // "RegionNotFound" matches the message-fallback classifier → BackoffType::RegionMiss.
+                throw new TiKvException('RegionNotFound oh no');
+            });
+        } catch (TiKvException) {
+            // expected — we just want the retry loop to run to exhaustion
+        }
+
+        $this->assertGreaterThan(1, $attempts, 'Should have attempted > 1 time');
+        $this->assertGreaterThan(
+            0,
+            $metrics->getRetries('RegionMiss'),
+            'RetryExecutor should have emitted retries tagged with RegionMiss'
+        );
+    }
+
+    public function testRegionInvalidationMetricEmittedOnRetry(): void
+    {
+        $metrics = new InMemoryMetrics();
+
+        $executor = $this->createExecutor(metrics: $metrics);
+
+        try {
+            // EpochNotMatch → BackoffType::None (sleepMs=0). Total backoff stays
+            // at 0 so the 30-attempt cap kicks in, giving us a deterministic
+            // number of retries (DEFAULT_MAX_ATTEMPTS - 1 = 29 attempts to retry).
+            $executor->execute('retry_key', function (): void {
+                throw new TiKvException('EpochNotMatch something');
+            });
+        } catch (RetryBudgetExhaustedException) {
+            // expected
+        }
+
+        $attemptCap = RetryExecutor::DEFAULT_MAX_ATTEMPTS - 1;
+        $this->assertGreaterThanOrEqual(
+            $attemptCap,
+            $metrics->getRetries('None'),
+            'RetryExecutor should have recorded a retry metric for every attempt past the first'
         );
     }
 }

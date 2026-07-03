@@ -8,6 +8,8 @@ use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 
 final readonly class RegionResolver
@@ -15,6 +17,7 @@ final readonly class RegionResolver
     public function __construct(
         private PdClientInterface $pdClient,
         private RegionCacheInterface $regionCache,
+        private MetricsInterface $metrics = new NoOpMetrics(),
     ) {
     }
 
@@ -22,9 +25,12 @@ final readonly class RegionResolver
     {
         $region = $this->regionCache->getByKey($key);
         if ($region instanceof RegionInfo) {
+            $this->metrics->regionCacheHit('region_resolution');
+
             return $region;
         }
 
+        $this->metrics->regionCacheMiss('region_resolution');
         $region = $this->pdClient->getRegion($key);
         $this->regionCache->put($region);
 

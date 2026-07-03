@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\E2E;
 
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
@@ -2747,6 +2748,74 @@ class RawKvE2ETest extends TestCase
     {
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
         return RawKvClient::create($pdEndpoints);
+    }
+
+    // ========================================================================
+    // Health check, metrics
+    // ========================================================================
+
+    public function testHealthCheckReturnsLearnedClusterId(): void
+    {
+        $client = $this->createFreshClient();
+
+        $clusterId = $client->healthCheck();
+
+        // Either a non-null cluster ID (PD responded with a cluster-id header)
+        // or null (PD responded but no header). Either is reachable.
+        $this->assertTrue($clusterId === null || $clusterId > 0);
+    }
+
+    public function testHealthCheckAfterClientCloseThrows(): void
+    {
+        $client = $this->createFreshClient();
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->healthCheck();
+    }
+
+    public function testMetricsBackendReceivesRpcCountersOnRealOperation(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        $client = RawKvClient::create($pdEndpoints, options: ['metrics' => $metrics]);
+        $this->keysToCleanup[] = 'metrics:test:key';
+
+        $caught = null;
+        try {
+            $client->put('metrics:test:key', 'value');
+            $client->get('metrics:test:key');
+            $client->healthCheck();
+        } catch (\Throwable $e) {
+            $caught = $e;
+        }
+
+        // At least one PD or TiKV RPC must have been recorded.
+        $tags = [
+            'pdpb.PD/GetRegion' => $metrics->getRpcStarted('pdpb.PD/GetRegion'),
+            'pdpb.PD/GetMembers' => $metrics->getRpcStarted('pdpb.PD/GetMembers'),
+            'tikvpb.Tikv/KvPut' => $metrics->getRpcStarted('tikvpb.Tikv/KvPut'),
+            'tikvpb.Tikv/KvGet' => $metrics->getRpcStarted('tikvpb.Tikv/KvGet'),
+            'pdpb.PD/GetStore' => $metrics->getRpcStarted('pdpb.PD/GetStore'),
+        ];
+        $totalRpc = array_sum($tags);
+
+        if ($caught instanceof \Throwable) {
+            $this->fail(sprintf(
+                'Caught exception before metric check: %s :: %s. Tags: %s',
+                $caught::class,
+                $caught->getMessage(),
+                json_encode($tags, JSON_THROW_ON_ERROR),
+            ));
+        }
+
+        $this->assertGreaterThanOrEqual(
+            1,
+            $totalRpc,
+            'Expected >= 1 RPC counter across all known tags; got: ' . json_encode($tags, JSON_THROW_ON_ERROR),
+        );
+
+        $client->close();
     }
 
     public function testCloseThenGetThrowsClientClosedException(): void

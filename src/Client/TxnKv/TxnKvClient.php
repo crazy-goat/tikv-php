@@ -10,10 +10,13 @@ use CrazyGoat\TiKV\Client\Cache\StoreCache;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 use Psr\Log\LoggerInterface;
@@ -22,14 +25,17 @@ use Psr\Log\NullLogger;
 final class TxnKvClient
 {
     public const OPT_TIMEOUT = 'timeout';
+    public const OPT_METRICS = 'metrics';
 
     private bool $closed = false;
     private readonly RegionResolver $regionResolver;
+    private readonly MetricsInterface $metrics;
 
     /**
      * @param string[] $pdEndpoints PD addresses (currently only the first is used)
      * @param array<string, mixed> $options Client options, including 'tls' for TLS
-     *                                      configuration and 'timeout' for timeout config
+     *                                      configuration, 'timeout' for timeout config,
+     *                                      and 'metrics' for the metrics backend
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
@@ -38,6 +44,14 @@ final class TxnKvClient
         }
 
         $resolvedLogger = $logger ?? new NullLogger();
+
+        $metrics = $options[self::OPT_METRICS] ?? new NoOpMetrics();
+        if (!$metrics instanceof MetricsInterface) {
+            throw new InvalidArgumentException(
+                "options['" . self::OPT_METRICS . "'] must be an instance of MetricsInterface, "
+                . 'got ' . (get_debug_type($metrics))
+            );
+        }
 
         $tlsConfig = null;
         if (isset($options['tls']) && is_array($options['tls'])) {
@@ -84,7 +98,7 @@ final class TxnKvClient
             $tlsConfig = $builder->build();
         }
 
-        $grpc = new GrpcClient($resolvedLogger, $tlsConfig);
+        $grpc = new GrpcClient($resolvedLogger, $tlsConfig, metrics: $metrics);
         $pdAddress = $pdEndpoints[0];
         $storeCache = new StoreCache(logger: $resolvedLogger);
         $pdClient = new PdClient($grpc, $pdAddress, $resolvedLogger, $storeCache);
@@ -121,7 +135,9 @@ final class TxnKvClient
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
     ) {
-        $this->regionResolver = $regionResolver ?? new RegionResolver($this->pdClient, $this->regionCache);
+        $this->metrics = new NoOpMetrics();
+        $this->regionResolver = $regionResolver
+            ?? new RegionResolver($this->pdClient, $this->regionCache, $this->metrics);
     }
 
     /**
@@ -165,6 +181,7 @@ final class TxnKvClient
             maxBackoffMs: $this->maxBackoffMs,
             logger: $this->logger,
             timeoutConfig: $this->timeoutConfig,
+            metrics: $this->metrics,
         );
     }
 
@@ -174,6 +191,40 @@ final class TxnKvClient
     public function getClusterId(): ?int
     {
         return $this->pdClient->getClusterId();
+    }
+
+    /**
+     * Probe the PD cluster by issuing a {@see GetMembers} RPC and return
+     * the learned cluster ID.
+     *
+     * Use as a lightweight health check. Does not touch any user data.
+     *
+     * @throws ClientClosedException When the client has been closed
+     * @throws HealthCheckException When the PD probe fails
+     */
+    public function healthCheck(): ?int
+    {
+        $this->ensureOpen();
+
+        try {
+            return $this->pdClient->ping();
+        } catch (ClientClosedException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw new HealthCheckException(
+                sprintf('PD health check failed: %s', $e->getMessage()),
+                $e,
+            );
+        }
+    }
+
+    /**
+     * Return the metrics implementation in use. Same semantics as
+     * {@see RawKvClient::getMetrics()}.
+     */
+    public function getMetrics(): MetricsInterface
+    {
+        return $this->metrics;
     }
 
     public function close(): void

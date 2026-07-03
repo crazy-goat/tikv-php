@@ -35,6 +35,8 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
@@ -81,6 +83,7 @@ final class Transaction
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
+        private readonly MetricsInterface $metrics = new NoOpMetrics(),
     ) {
     }
 
@@ -1188,6 +1191,7 @@ final class Transaction
             $this->grpc,
             $this->regionResolver,
             $this->logger,
+            metrics: $this->metrics,
         );
 
         return $this->retryExecutor;

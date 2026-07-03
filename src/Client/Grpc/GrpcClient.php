@@ -6,6 +6,8 @@ namespace CrazyGoat\TiKV\Client\Grpc;
 
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Tls\TlsConfig;
 use Google\Protobuf\Internal\Message;
 use Grpc\Call;
@@ -39,6 +41,7 @@ final class GrpcClient implements GrpcClientInterface
         private readonly int $maxChannels = self::DEFAULT_MAX_CHANNELS,
         private readonly int $idleTtlMs = self::DEFAULT_IDLE_TTL_MS,
         private readonly bool $allowInsecure = true,
+        private readonly MetricsInterface $metrics = new NoOpMetrics(),
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -58,6 +61,9 @@ final class GrpcClient implements GrpcClientInterface
         if ($this->closed) {
             throw new InvalidStateException('gRPC client is closed');
         }
+
+        $operation = $service . '/' . $method;
+        $this->metrics->rpcStarted($operation);
 
         $channel = $this->getChannel($address);
 
@@ -83,16 +89,25 @@ final class GrpcClient implements GrpcClientInterface
             \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
         ]);
 
-        $status = GrpcResponseParser::extractStatus($event);
+        $startMs = microtime(true);
+        $success = false;
+        try {
+            $status = GrpcResponseParser::extractStatus($event);
 
-        if ($status['code'] !== \Grpc\STATUS_OK) {
-            throw new GrpcException(
-                details: $status['details'],
-                grpcStatusCode: $status['code'],
-            );
+            if ($status['code'] !== \Grpc\STATUS_OK) {
+                throw new GrpcException(
+                    details: $status['details'],
+                    grpcStatusCode: $status['code'],
+                );
+            }
+
+            $success = true;
+
+            return GrpcResponseParser::deserialize($event, $responseClass);
+        } finally {
+            $durationMs = (microtime(true) - $startMs) * 1000.0;
+            $this->metrics->rpcCompleted($operation, $durationMs, $success);
         }
-
-        return GrpcResponseParser::deserialize($event, $responseClass);
     }
 
     public function __destruct()

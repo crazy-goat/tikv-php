@@ -56,6 +56,18 @@ interface PdClientInterface
     public function getClusterId(): ?int;
 
     /**
+     * Probe PD connectivity and learn the cluster ID.
+     *
+     * Issues a `GetMembers` RPC and returns the learned cluster ID, or null
+     * if the response carried no cluster ID header. Suitable as a health
+     * check: no user data is looked up and no "no region" failure can occur.
+     *
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD-level error
+     */
+    public function ping(): ?int;
+
+    /**
      * Set the cluster ID (learned from PD response headers).
      *
      * Called by TimestampOracle and PdClient itself when the cluster ID
