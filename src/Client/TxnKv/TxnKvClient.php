@@ -116,6 +116,14 @@ final class TxnKvClient
         );
     }
 
+    /**
+     * Get the learned cluster ID, or null if not yet discovered.
+     */
+    public function getClusterId(): ?int
+    {
+        return $this->pdClient->getClusterId();
+    }
+
     public function close(): void
     {
         if ($this->closed) {
