@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - E2E tests for client lifecycle: Close then get/put/delete/scan/... throws ClientClosedException, double close is idempotent, transaction before close remains usable (#55)
 - Removed `__construct()` from `GrpcClientInterface` — interfaces should not enforce constructor signatures; all consumers use DI or concrete class instantiation (#46)
 - `RegionInfoMapper`, a shared proto→DTO mapper used by `PdClient::getRegion()` and `scanRegions()` so both RPCs share identical, explicit null-handling for a missing leader (#104)
+- Unit tests for `RetryExecutor` budget exhaustion (total backoff, ServerBusy, max-attempts cap, wall-clock deadline), `BatchAsyncExecutor` dispatch-phase vs wait-phase failure aggregation, `TlsConfigBuilder` disallowed-extension rejection, and `TlsConfig::close()` key-zeroing (#100)
 
 ### Changed
 - Merged `commitOptimistic()` and `commitPessimistic()` into a single `doCommit()` method; removed dead `$firstRegionKeys`/`$isPrimaryRegion` that were never used (#113)
