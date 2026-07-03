@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests for `RetryExecutor` budget exhaustion (total backoff, ServerBusy, max-attempts cap, wall-clock deadline), `BatchAsyncExecutor` dispatch-phase vs wait-phase failure aggregation, `TlsConfigBuilder` disallowed-extension rejection, and `TlsConfig::close()` key-zeroing (#100)
 
 ### Changed
+- **Moved shared region DTOs and helpers from `RawKv` to `Region` namespace**: `RegionInfo` and `PeerInfo` DTOs moved to `CrazyGoat\TiKV\Client\Region\Dto`, `RegionGrouper` and `RegionErrorHandler` moved to `CrazyGoat\TiKV\Client\Region`. All imports updated across the codebase. The old `RawKv\Dto\RegionInfo`, `RawKv\Dto\PeerInfo`, `RawKv\RegionGrouper`, and `RawKv\RegionErrorHandler` aliases are removed. (#111)
 - Merged `commitOptimistic()` and `commitPessimistic()` into a single `doCommit()` method; removed dead `$firstRegionKeys`/`$isPrimaryRegion` that were never used (#113)
 - **Error classification now uses typed `ErrorKind` enum instead of message-string matching.** Added `ErrorKind` enum covering all 21 `Errorpb\Error` oneof variants; `RegionException` auto-detects the kind from the proto `Error` message; `ErrorClassifier::classifyByKind()` is the single source of truth for the error→backoff mapping; `Transaction::classifyError()` uses `TxnRetryableException` carrying `BackoffType` directly; `PdClient::extractClusterIdFromError()` uses pure regex without `str_contains()` (#93)
 

@@ -7,7 +7,7 @@ namespace CrazyGoat\TiKV\Client\Connection;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
-use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 
 interface PdClientInterface
 {

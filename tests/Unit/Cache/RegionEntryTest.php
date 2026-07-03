@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\Cache;
 
 use CrazyGoat\TiKV\Client\Cache\RegionEntry;
-use CrazyGoat\TiKV\Client\RawKv\Dto\PeerInfo;
-use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use PHPUnit\Framework\TestCase;
 
 class RegionEntryTest extends TestCase

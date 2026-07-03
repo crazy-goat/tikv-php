@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace CrazyGoat\TiKV\Client\RawKv\Dto;
+namespace CrazyGoat\TiKV\Client\Region\Dto;
 
 final readonly class PeerInfo
 {
