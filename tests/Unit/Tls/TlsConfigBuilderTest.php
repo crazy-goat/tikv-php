@@ -61,17 +61,22 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithClientCertFromFiles(): void
     {
+        $caContent = 'test-ca-cert-content';
         $certContent = 'test-client-cert';
         $keyContent = 'test-client-key';
+        $caPath = $this->tempDir . '/ca.crt';
         $certPath = $this->tempDir . '/client.crt';
         $keyPath = $this->tempDir . '/client.key';
+        file_put_contents($caPath, $caContent);
         file_put_contents($certPath, $certContent);
         file_put_contents($keyPath, $keyContent);
 
         $config = (new TlsConfigBuilder())
+            ->withCaCert($caPath)
             ->withClientCert($certPath, $keyPath)
             ->build();
 
+        $this->assertSame($caContent, $config->caCert);
         $this->assertSame($certContent, $config->clientCert);
         $this->assertSame($keyContent, $config->clientKey);
     }
@@ -125,30 +130,38 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithClientCertFileReadsFromPaths(): void
     {
+        $caContent = 'ca-content';
         $certContent = 'cert-content';
         $keyContent = 'key-content';
+        $caPath = $this->tempDir . '/ca.crt';
         $certPath = $this->tempDir . '/client.crt';
         $keyPath = $this->tempDir . '/client.key';
+        file_put_contents($caPath, $caContent);
         file_put_contents($certPath, $certContent);
         file_put_contents($keyPath, $keyContent);
 
         $config = (new TlsConfigBuilder())
+            ->withCaCertFile($caPath)
             ->withClientCertFile($certPath, $keyPath)
             ->build();
 
+        $this->assertSame($caContent, $config->caCert);
         $this->assertSame($certContent, $config->clientCert);
         $this->assertSame($keyContent, $config->clientKey);
     }
 
     public function testWithClientCertPemStoresInlineContent(): void
     {
+        $caPem = 'inline-ca-cert';
         $certPem = 'inline-client-cert';
         $keyPem = 'inline-client-key';
 
         $config = (new TlsConfigBuilder())
+            ->withCaCertPem($caPem)
             ->withClientCertPem($certPem, $keyPem)
             ->build();
 
+        $this->assertSame($caPem, $config->caCert);
         $this->assertSame($certPem, $config->clientCert);
         $this->assertSame($keyPem, $config->clientKey);
     }
@@ -377,5 +390,68 @@ class TlsConfigBuilderTest extends TestCase
             ->build();
 
         $this->assertSame($content, $config->caCert);
+    }
+
+    // ========================================================================
+    // Partial TLS validation: client cert/key without CA cert
+    // ========================================================================
+
+    public function testClientCertWithoutCaCertThrowsInvalidArgumentException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Partial TLS configuration');
+
+        (new TlsConfigBuilder())
+            ->withClientCertPem('client-cert', 'client-key')
+            ->build();
+    }
+
+    public function testClientKeyOnlyThrowsInvalidArgumentException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Partial TLS configuration');
+
+        $builder = new TlsConfigBuilder();
+        // Use reflection to set clientKey directly (simulating partial config)
+        $prop = new \ReflectionProperty(TlsConfigBuilder::class, 'clientKey');
+        $prop->setValue($builder, 'some-key');
+        $builder->build();
+    }
+
+    public function testClientCertAndKeyWithCaPassesValidation(): void
+    {
+        $caContent = 'ca-content';
+        $certContent = 'cert-content';
+        $keyContent = 'key-content';
+        $caPath = $this->tempDir . '/ca.crt';
+        $certPath = $this->tempDir . '/client.crt';
+        $keyPath = $this->tempDir . '/client.key';
+        file_put_contents($caPath, $caContent);
+        file_put_contents($certPath, $certContent);
+        file_put_contents($keyPath, $keyContent);
+
+        $config = (new TlsConfigBuilder())
+            ->withCaCertFile($caPath)
+            ->withClientCertFile($certPath, $keyPath)
+            ->build();
+
+        $this->assertSame($caContent, $config->caCert);
+        $this->assertSame($certContent, $config->clientCert);
+        $this->assertSame($keyContent, $config->clientKey);
+    }
+
+    public function testCaCertOnlyPassesValidation(): void
+    {
+        $content = 'ca-content';
+        $path = $this->tempDir . '/ca.crt';
+        file_put_contents($path, $content);
+
+        $config = (new TlsConfigBuilder())
+            ->withCaCertFile($path)
+            ->build();
+
+        $this->assertSame($content, $config->caCert);
+        $this->assertNull($config->clientCert);
+        $this->assertNull($config->clientKey);
     }
 }

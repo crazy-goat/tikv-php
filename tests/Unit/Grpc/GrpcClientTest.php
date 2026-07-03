@@ -14,17 +14,22 @@ class GrpcClientTest extends TestCase
     use GrpcExtensionGate;
 
     private GrpcClient $client;
+    private GrpcClient $insecureClient;
 
     protected function setUp(): void
     {
         $this->requireGrpcExtension();
         $this->client = new GrpcClient();
+        $this->insecureClient = new GrpcClient(allowInsecure: true);
     }
 
     protected function tearDown(): void
     {
         if (isset($this->client)) {
             $this->client->close();
+        }
+        if (isset($this->insecureClient)) {
+            $this->insecureClient->close();
         }
     }
 
@@ -35,8 +40,8 @@ class GrpcClientTest extends TestCase
 
     public function testCloseIsIdempotent(): void
     {
-        $this->client->close();
-        $this->client->close();
+        $this->insecureClient->close();
+        $this->insecureClient->close();
         $this->expectNotToPerformAssertions();
     }
 
@@ -47,8 +52,26 @@ class GrpcClientTest extends TestCase
         $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
         $request->setKey('test');
 
-        $this->client->call(
+        $this->insecureClient->call(
             'invalid-address:99999',
+            'tikvpb.Tikv',
+            'RawGet',
+            $request,
+            \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
+            timeoutMs: 1000,
+        );
+    }
+
+    public function testRejectsInsecureConnectionByDefault(): void
+    {
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidStateException::class);
+        $this->expectExceptionMessage('TLS is not configured');
+
+        $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
+        $request->setKey('test');
+
+        $this->client->call(
+            'some-address:20160',
             'tikvpb.Tikv',
             'RawGet',
             $request,
@@ -67,14 +90,14 @@ class GrpcClientTest extends TestCase
         $ok = $this->createMock(\Grpc\Channel::class);
         $ok->expects($this->once())->method('close');
 
-        $this->injectChannels([
+        $this->injectChannels($this->insecureClient, [
             'addr-throws:1' => $throwing,
             'addr-ok:1' => $ok,
         ]);
 
-        $this->client->close();
+        $this->insecureClient->close();
 
-        $this->assertSame([], $this->readChannels());
+        $this->assertSame([], $this->readChannels($this->insecureClient));
     }
 
     public function testCloseResetsChannelsEvenWhenAllThrow(): void
@@ -84,11 +107,11 @@ class GrpcClientTest extends TestCase
             ->method('close')
             ->willThrowException(new \RuntimeException('boom'));
 
-        $this->injectChannels(['addr:1' => $throwing]);
+        $this->injectChannels($this->insecureClient, ['addr:1' => $throwing]);
 
-        $this->client->close();
+        $this->insecureClient->close();
 
-        $this->assertSame([], $this->readChannels());
+        $this->assertSame([], $this->readChannels($this->insecureClient));
     }
 
     public function testCloseIsIdempotentAfterPartialFailure(): void
@@ -98,29 +121,29 @@ class GrpcClientTest extends TestCase
             ->method('close')
             ->willThrowException(new \RuntimeException('boom'));
 
-        $this->injectChannels(['addr:1' => $throwing]);
+        $this->injectChannels($this->insecureClient, ['addr:1' => $throwing]);
 
-        $this->client->close();
-        $this->client->close();
+        $this->insecureClient->close();
+        $this->insecureClient->close();
     }
 
     /**
      * @param array<string, \Grpc\Channel> $channels
      */
-    private function injectChannels(array $channels): void
+    private function injectChannels(GrpcClient $client, array $channels): void
     {
         $prop = new \ReflectionProperty(GrpcClient::class, 'channels');
-        $prop->setValue($this->client, $channels);
+        $prop->setValue($client, $channels);
     }
 
     /**
      * @return array<string, \Grpc\Channel>
      */
-    private function readChannels(): array
+    private function readChannels(GrpcClient $client): array
     {
         $prop = new \ReflectionProperty(GrpcClient::class, 'channels');
         /** @var array<string, \Grpc\Channel> $value */
-        $value = $prop->getValue($this->client);
+        $value = $prop->getValue($client);
         return $value;
     }
 }

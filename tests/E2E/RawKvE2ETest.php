@@ -32,7 +32,7 @@ class RawKvE2ETest extends TestCase
     public static function setUpBeforeClass(): void
     {
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
-        self::$client = RawKvClient::create($pdEndpoints);
+        self::$client = RawKvClient::create($pdEndpoints, options: ['insecure' => true]);
     }
 
     public static function tearDownAfterClass(): void
@@ -2378,6 +2378,7 @@ class RawKvE2ETest extends TestCase
         $client = RawKvClient::create(
             getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
             options: [
+                'insecure' => true,
                 'timeout' => [
                     'readTimeoutMs' => 15000,
                     'writeTimeoutMs' => 15000,
@@ -2398,6 +2399,7 @@ class RawKvE2ETest extends TestCase
         $client = RawKvClient::create(
             getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
             options: [
+                'insecure' => true,
                 'timeout' => [
                     'scanTimeoutMs' => 30000,
                     'writeTimeoutMs' => 15000,
@@ -2427,6 +2429,7 @@ class RawKvE2ETest extends TestCase
         $client = RawKvClient::create(
             getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
             options: [
+                'insecure' => true,
                 'timeout' => [
                     'batchReadTimeoutMs' => 30000,
                     'batchWriteTimeoutMs' => 30000,
@@ -2454,6 +2457,7 @@ class RawKvE2ETest extends TestCase
         $client = RawKvClient::create(
             getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
             options: [
+                'insecure' => true,
                 'timeout' => [
                     'deleteRangeTimeoutMs' => 60000,
                     'writeTimeoutMs' => 15000,
@@ -2477,6 +2481,7 @@ class RawKvE2ETest extends TestCase
         $client = RawKvClient::create(
             getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
             options: [
+                'insecure' => true,
                 'timeout' => [
                     'readTimeoutMs' => 5000,
                     'writeTimeoutMs' => 5000,
@@ -2717,7 +2722,7 @@ class RawKvE2ETest extends TestCase
     private function createFreshClient(): RawKvClient
     {
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
-        return RawKvClient::create($pdEndpoints);
+        return RawKvClient::create($pdEndpoints, options: ['insecure' => true]);
     }
 
     public function testCloseThenGetThrowsClientClosedException(): void

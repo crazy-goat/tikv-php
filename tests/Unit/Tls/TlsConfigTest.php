@@ -37,10 +37,32 @@ class TlsConfigTest extends TestCase
         $this->assertTrue($config->isEnabled());
     }
 
-    public function testIsEnabledReturnsFalseWhenCaCertNull(): void
+    public function testIsEnabledReturnsTrueWhenClientCertPresentWithoutCaCert(): void
+    {
+        $config = new TlsConfig(clientCert: 'client-cert');
+        $this->assertTrue($config->isEnabled());
+    }
+
+    public function testIsEnabledReturnsTrueWhenClientKeyPresentWithoutCaCert(): void
+    {
+        $config = new TlsConfig(clientKey: 'client-key');
+        $this->assertTrue($config->isEnabled());
+    }
+
+    public function testIsEnabledReturnsFalseWhenAllNull(): void
     {
         $config = new TlsConfig();
         $this->assertFalse($config->isEnabled());
+    }
+
+    public function testIsEnabledReturnsTrueForFullTlsConfig(): void
+    {
+        $config = new TlsConfig(
+            caCert: 'ca-content',
+            clientCert: 'client-cert',
+            clientKey: 'client-key',
+        );
+        $this->assertTrue($config->isEnabled());
     }
 
     // ========================================================================
