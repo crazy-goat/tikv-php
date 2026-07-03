@@ -401,7 +401,7 @@ class TransactionTest extends TestCase
             'k2' => 'scanned-v2',
         ]);
 
-        $this->grpc->expects($this->once())->method('call')->willReturn($response);
+        $this->grpc->expects($this->exactly(2))->method('call')->willReturn($response);
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'local-v1');
@@ -410,6 +410,8 @@ class TransactionTest extends TestCase
         $this->assertCount(2, $result);
         $this->assertSame('local-v1', $result[0]['value']);
         $this->assertSame('scanned-v2', $result[1]['value']);
+
+        $txn->rollback(); // explicit cleanup to avoid extra call from __destruct
     }
 
     public function testScanWithLimitZeroAndNoResultsReturnsEmpty(): void
@@ -1378,13 +1380,15 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
 
-        $this->grpc->method('call')
+        $this->grpc->expects($this->atLeastOnce())
+            ->method('call')
             ->willReturn(new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse());
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('key', 'value');
         // Destructor triggers rollback when object goes out of scope
         // (at the end of this test method).
+        unset($txn);
     }
 
     public function testDestructDoesNotThrowWhenAlreadyCommitted(): void

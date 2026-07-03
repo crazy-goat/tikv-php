@@ -17,7 +17,8 @@ final class ClusterIdHolder
 {
     public function __construct(
         private ?int $clusterId = null,
-    ) {}
+    ) {
+    }
 
     public function get(): ?int
     {

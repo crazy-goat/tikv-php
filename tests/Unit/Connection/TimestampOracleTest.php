@@ -159,8 +159,6 @@ class TimestampOracleTest extends TestCase
         $grpc = $this->createMock(GrpcClientInterface::class);
         $grpc->method('call')->willReturn($response);
 
-        $client = new PdClient($grpc, '127.0.0.1:2379');
-
         $oracle = new TimestampOracle(
             $grpc,
             '127.0.0.1:2379',
@@ -212,7 +210,6 @@ class TimestampOracleTest extends TestCase
             );
 
         $holder = new ClusterIdHolder();
-        $client = new PdClient($grpc, '127.0.0.1:2379', new NullLogger(), null, $holder);
 
         $oracle = new TimestampOracle($grpc, '127.0.0.1:2379', $holder, new NullLogger());
 
