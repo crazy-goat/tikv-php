@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\TxnKv;
 
+use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -29,42 +31,53 @@ final readonly class LockResolver
     ) {
     }
 
-    public function resolveLock(string $key, int $lockTs, int $callerStartTs): void
+    /**
+     * Resolve a lock by checking the transaction's status and either
+     * committing it (if committed elsewhere) or rolling it back.
+     *
+     * @param string $primaryLock The primary key of the transaction (from LockInfo::getPrimaryLock()).
+     *                            If the lock has no primary info (e.g. pessimistic), pass the locked key itself.
+     * @param LockInfo $lock The lock information from the error response.
+     */
+    public function resolveLock(string $primaryLock, LockInfo $lock): void
     {
-        $this->logger->debug('Resolving lock', ['key' => KeyRedactor::redact($key), 'lockTs' => $lockTs]);
+        $lockTs = (int) $lock->getLockVersion();
+        $this->logger->debug('Resolving lock', [
+            'key' => KeyRedactor::redact((string) $lock->getKey()),
+            'lockTs' => $lockTs,
+        ]);
 
-        $status = $this->checkTxnStatus($key, $lockTs, $callerStartTs);
+        $status = $this->checkTxnStatus($primaryLock, $lockTs);
 
         $commitTs = $status['commitTs'] ?? null;
-        $action = $status['action'] ?? null;
 
         if ($commitTs !== null && $commitTs > 0) {
-            $this->resolveLockCommitted($key, $lockTs, $commitTs);
-        } elseif ($action === 'Lock' || $commitTs === 0) {
+            $this->resolveLockCommitted($lock, $lockTs, $commitTs);
+        } elseif ($commitTs === 0) {
             $ttl = $status['lockTtl'] ?? 0;
             if ($ttl > 0) {
                 $sleepMs = min($ttl, $this->maxBackoffMs);
                 $this->logger->debug('Lock still active, waiting', [
-                    'key' => KeyRedactor::redact($key),
+                    'key' => KeyRedactor::redact((string) $lock->getKey()),
                     'ttl' => $ttl,
                     'sleepMs' => $sleepMs,
                 ]);
                 usleep($sleepMs * 1000);
             }
 
-            $status = $this->checkTxnStatus($key, $lockTs, $callerStartTs);
+            $status = $this->checkTxnStatus($primaryLock, $lockTs);
             $commitTs = $status['commitTs'] ?? null;
 
             if ($commitTs !== null && $commitTs > 0) {
-                $this->resolveLockCommitted($key, $lockTs, $commitTs);
+                $this->resolveLockCommitted($lock, $lockTs, $commitTs);
             } else {
-                $this->resolveLockRolledBack($key, $lockTs);
+                $this->resolveLockRolledBack($lock, $lockTs);
             }
         } else {
-            $this->resolveLockRolledBack($key, $lockTs);
+            $this->resolveLockRolledBack($lock, $lockTs);
         }
 
-        $this->invalidateRegionFor($key);
+        $this->invalidateRegionFor((string) $lock->getKey());
     }
 
     public function getGrpc(): GrpcClientInterface
@@ -73,23 +86,23 @@ final readonly class LockResolver
     }
 
     /**
-     * @return array{commitTs: ?int, action: ?string, lockTtl: ?int}
+     * @return array{commitTs: ?int, lockTtl: ?int}
      */
-    private function checkTxnStatus(string $primaryLock, int $lockTs, int $callerStartTs): array
+    private function checkTxnStatus(string $primaryKey, int $lockTs): array
     {
-        $region = $this->regionResolver->getRegionInfo($primaryLock);
+        $region = $this->regionResolver->getRegionInfo($primaryKey);
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new CheckTxnStatusRequest();
         $request->setContext(RegionContextFactory::fromRegionInfo($region));
-        $request->setPrimaryKey($primaryLock);
+        $request->setPrimaryKey($primaryKey);
         $request->setLockTs($lockTs);
-        $request->setCallerStartTs($callerStartTs);
+        $request->setCallerStartTs((int) (hrtime(true) / 1_000_000));
         $request->setCurrentTs((int) (hrtime(true) / 1_000_000));
         $request->setRollbackIfNotExist(true);
 
         $this->logger->debug('CheckTxnStatus', [
-            'primaryLock' => KeyRedactor::redact($primaryLock),
+            'primaryKey' => KeyRedactor::redact($primaryKey),
             'lockTs' => $lockTs,
         ]);
 
@@ -107,26 +120,30 @@ final readonly class LockResolver
         $error = $response->getError();
         if ($error !== null) {
             $this->logger->warning('CheckTxnStatus returned error', [
-                'primaryLock' => KeyRedactor::redact($primaryLock),
+                'primaryKey' => KeyRedactor::redact($primaryKey),
                 'lockTs' => $lockTs,
             ]);
         }
 
         $action = $response->getAction();
-        $actionName = null;
-        if ($action !== 0) {
-            $actionName = (string) $action;
+        $lockTtl = 0;
+
+        // Use Action enum constants instead of string comparison.
+        // When action is NoAction or MinCommitTSPushed, the lock is still
+        // active (caller should wait/retry).
+        if ($action === Action::NoAction || $action === Action::MinCommitTSPushed) {
+            $lockTtl = (int) $response->getLockTtl();
         }
 
         return [
             'commitTs' => (int) $response->getCommitVersion(),
-            'action' => $actionName,
-            'lockTtl' => (int) $response->getLockTtl(),
+            'lockTtl' => $lockTtl,
         ];
     }
 
-    private function resolveLockCommitted(string $key, int $lockTs, int $commitTs): void
+    private function resolveLockCommitted(LockInfo $lock, int $lockTs, int $commitTs): void
     {
+        $key = (string) $lock->getKey();
         $this->logger->debug('Resolving lock as committed', [
             'key' => KeyRedactor::redact($key),
             'lockTs' => $lockTs,
@@ -144,8 +161,9 @@ final readonly class LockResolver
         $this->grpc->call($address, 'tikvpb.Tikv', 'KvResolveLock', $request, ResolveLockResponse::class);
     }
 
-    private function resolveLockRolledBack(string $key, int $lockTs): void
+    private function resolveLockRolledBack(LockInfo $lock, int $lockTs): void
     {
+        $key = (string) $lock->getKey();
         $this->logger->debug('Resolving lock as rolled back', [
             'key' => KeyRedactor::redact($key),
             'lockTs' => $lockTs,

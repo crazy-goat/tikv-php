@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -24,7 +25,6 @@ class LockResolverTest extends TestCase
 {
     private const TEST_KEY = 'test-key';
     private const LOCK_TS = 100;
-    private const CALLER_START_TS = 200;
 
     private const REGION_ID = 1;
     private const LEADER_STORE_ID = 1;
@@ -90,6 +90,20 @@ class LockResolverTest extends TestCase
         $response->setLockTtl($lockTtl);
         $response->setAction($action);
         return $response;
+    }
+
+    private function makeLockInfo(
+        string $key = self::TEST_KEY,
+        int $lockVersion = self::LOCK_TS,
+        string $primaryLock = '',
+    ): LockInfo {
+        $lock = new LockInfo();
+        $lock->setKey($key);
+        $lock->setLockVersion($lockVersion);
+        if ($primaryLock !== '') {
+            $lock->setPrimaryLock($primaryLock);
+        }
+        return $lock;
     }
 
     /**
@@ -162,7 +176,7 @@ class LockResolverTest extends TestCase
         $this->mockGrpcCalls($this->makeCheckTxnStatusResponse(commitVersion: 1));
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     public function testGetRegionInfoReturnsCachedRegionWithoutPdcall(): void
@@ -179,7 +193,7 @@ class LockResolverTest extends TestCase
         $this->mockGrpcCalls($this->makeCheckTxnStatusResponse(commitVersion: 1));
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     public function testGetRegionInfoFetchesFromPdOnCacheMiss(): void
@@ -209,7 +223,7 @@ class LockResolverTest extends TestCase
         $this->mockGrpcCalls($this->makeCheckTxnStatusResponse(commitVersion: 1));
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     // ========================================================================
@@ -229,7 +243,7 @@ class LockResolverTest extends TestCase
             );
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     public function testResolveLockWithZeroCommitTsRollsBack(): void
@@ -246,7 +260,7 @@ class LockResolverTest extends TestCase
             );
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     public function testResolveLockWithActiveLockWaitsThenRollsBack(): void
@@ -263,7 +277,7 @@ class LockResolverTest extends TestCase
             );
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     public function testResolveLockWithLockActionImmediatelyRollsBack(): void
@@ -280,7 +294,7 @@ class LockResolverTest extends TestCase
             );
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     public function testResolveLockWithRegionErrorThrows(): void
@@ -298,7 +312,7 @@ class LockResolverTest extends TestCase
         $this->expectException(RegionException::class);
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     // ========================================================================
@@ -366,8 +380,8 @@ class LockResolverTest extends TestCase
             });
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock('key-a', self::LOCK_TS, self::CALLER_START_TS);
-        $resolver->resolveLock('key-b', self::LOCK_TS, self::CALLER_START_TS);
+        $resolver->resolveLock('key-a', $this->makeLockInfo(key: 'key-a'));
+        $resolver->resolveLock('key-b', $this->makeLockInfo(key: 'key-b'));
 
         $this->assertSame(2, $pdRegionCallCount, 'PD should be queried once per unique key');
     }
