@@ -13,6 +13,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 
 final class RetryExecutor
@@ -67,7 +68,7 @@ final class RetryExecutor
             // BackoffType::None) that would otherwise drive an infinite loop.
             if ($this->attempt >= $this->maxAttempts) {
                 $this->logger->error('Retry attempt cap exhausted', [
-                    'key' => $key,
+                    'key' => KeyRedactor::redact($key),
                     'attempt' => $this->attempt,
                     'maxAttempts' => $this->maxAttempts,
                     'totalBackoffMs' => $this->totalBackoffMs,
@@ -85,7 +86,7 @@ final class RetryExecutor
                 $elapsedMs = (int) (microtime(true) * 1000) - $startTimeMs;
                 if ($elapsedMs >= $this->deadlineMs) {
                     $this->logger->error('Retry deadline exhausted', [
-                        'key' => $key,
+                        'key' => KeyRedactor::redact($key),
                         'attempt' => $this->attempt,
                         'elapsedMs' => $elapsedMs,
                         'deadlineMs' => $this->deadlineMs,
@@ -117,7 +118,10 @@ final class RetryExecutor
                     }
 
                     if (!$backoffType instanceof BackoffType) {
-                        $this->logger->error('Fatal error, not retrying', ['key' => $key, 'error' => $e->getMessage()]);
+                        $this->logger->error('Fatal error, not retrying', [
+                            'key' => KeyRedactor::redact($key),
+                            'error' => $e->getMessage(),
+                        ]);
                         throw $e;
                     }
 
@@ -125,7 +129,7 @@ final class RetryExecutor
                     if ($cached instanceof RegionInfo) {
                         $this->regionCache->invalidate($cached->regionId);
                         $this->logger->info('Invalidated region on retry', [
-                            'key' => $key,
+                            'key' => KeyRedactor::redact($key),
                             'regionId' => $cached->regionId,
                         ]);
 
@@ -145,7 +149,7 @@ final class RetryExecutor
                     $this->serverBusyBackoffMs += $sleepMs;
                     if ($this->serverBusyBackoffMs > $this->serverBusyBudgetMs) {
                         $this->logger->error('ServerBusy budget exhausted', [
-                            'key' => $key,
+                            'key' => KeyRedactor::redact($key),
                             'attempt' => $attemptBeforeInspection,
                             'serverBusyBackoffMs' => $this->serverBusyBackoffMs,
                             'serverBusyBudgetMs' => $this->serverBusyBudgetMs,
@@ -156,7 +160,7 @@ final class RetryExecutor
                     $this->totalBackoffMs += $sleepMs;
                     if ($this->totalBackoffMs > $this->maxBackoffMs) {
                         $this->logger->error('Retry budget exhausted', [
-                            'key' => $key,
+                            'key' => KeyRedactor::redact($key),
                             'attempt' => $attemptBeforeInspection,
                             'totalBackoffMs' => $this->totalBackoffMs,
                             'maxBackoffMs' => $this->maxBackoffMs,
@@ -166,7 +170,7 @@ final class RetryExecutor
                 }
 
                 $this->logger->warning('Retrying operation', [
-                    'key' => $key,
+                    'key' => KeyRedactor::redact($key),
                     'attempt' => $attemptBeforeInspection,
                     'backoffType' => $backoffType->name,
                     'sleepMs' => $sleepMs,
@@ -197,7 +201,7 @@ final class RetryExecutor
             if (!$switched) {
                 $this->regionCache->invalidate($regionId);
                 $this->logger->info('NotLeader hint peer unknown, invalidated region', [
-                    'key' => $key,
+                    'key' => KeyRedactor::redact($key),
                     'regionId' => $regionId,
                     'hintStoreId' => $leaderStoreId,
                 ]);
@@ -205,7 +209,7 @@ final class RetryExecutor
         } else {
             $this->regionCache->invalidate($regionId);
             $this->logger->info('NotLeader without hint, invalidated region', [
-                'key' => $key,
+                'key' => KeyRedactor::redact($key),
                 'regionId' => $regionId,
             ]);
         }

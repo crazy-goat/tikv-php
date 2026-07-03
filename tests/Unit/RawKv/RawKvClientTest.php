@@ -1081,7 +1081,9 @@ class RawKvClientTest extends TestCase
 
         $logger->expects($this->once())
             ->method('warning')
-            ->with('Retrying operation', $this->callback(fn(array $context): bool => $context['key'] === 'key'
+            ->with('Retrying operation', $this->callback(fn(array $context): bool => is_string($context['key'])
+                && str_contains($context['key'], 'bytes')
+                && ! str_contains($context['key'], 'key')
                 && $context['attempt'] === 0
                 && $context['backoffType'] === 'None'
                 && $context['sleepMs'] === 0));
@@ -1113,7 +1115,10 @@ class RawKvClientTest extends TestCase
 
         $logger->expects($this->once())
             ->method('info')
-            ->with('Invalidated region on retry', ['key' => 'key', 'regionId' => 1]);
+            ->with('Invalidated region on retry', $this->callback(fn(array $context): bool => is_string($context['key'])
+                && str_contains($context['key'], 'bytes')
+                && ! str_contains($context['key'], 'key')
+                && $context['regionId'] === 1));
 
         $client->get('key');
     }
@@ -1135,7 +1140,9 @@ class RawKvClientTest extends TestCase
 
         $logger->expects($this->once())
             ->method('error')
-            ->with('ServerBusy budget exhausted', $this->callback(fn(array $context): bool => $context['key'] === 'key'
+            ->with('ServerBusy budget exhausted', $this->callback(fn(array $context): bool => is_string($context['key'])
+                && str_contains($context['key'], 'bytes')
+                && ! str_contains($context['key'], 'key')
                 && $context['serverBusyBudgetMs'] === 0));
 
         $this->expectException(TiKvException::class);
@@ -1158,7 +1165,9 @@ class RawKvClientTest extends TestCase
 
         $logger->expects($this->once())
             ->method('error')
-            ->with('Fatal error, not retrying', $this->callback(fn(array $context): bool => $context['key'] === 'key'
+            ->with('Fatal error, not retrying', $this->callback(fn(array $context): bool => is_string($context['key'])
+                && str_contains($context['key'], 'bytes')
+                && ! str_contains($context['key'], 'key')
                 && $context['error'] === 'RaftEntryTooLarge'));
 
         $this->expectException(TiKvException::class);

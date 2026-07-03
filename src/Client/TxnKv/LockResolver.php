@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -30,7 +31,7 @@ final readonly class LockResolver
 
     public function resolveLock(string $key, int $lockTs, int $callerStartTs): void
     {
-        $this->logger->debug('Resolving lock', ['key' => $key, 'lockTs' => $lockTs]);
+        $this->logger->debug('Resolving lock', ['key' => KeyRedactor::redact($key), 'lockTs' => $lockTs]);
 
         $status = $this->checkTxnStatus($key, $lockTs, $callerStartTs);
 
@@ -44,7 +45,7 @@ final readonly class LockResolver
             if ($ttl > 0) {
                 $sleepMs = min($ttl, $this->maxBackoffMs);
                 $this->logger->debug('Lock still active, waiting', [
-                    'key' => $key,
+                    'key' => KeyRedactor::redact($key),
                     'ttl' => $ttl,
                     'sleepMs' => $sleepMs,
                 ]);
@@ -88,7 +89,7 @@ final readonly class LockResolver
         $request->setRollbackIfNotExist(true);
 
         $this->logger->debug('CheckTxnStatus', [
-            'primaryLock' => $primaryLock,
+            'primaryLock' => KeyRedactor::redact($primaryLock),
             'lockTs' => $lockTs,
         ]);
 
@@ -110,7 +111,7 @@ final readonly class LockResolver
         $error = $response->getError();
         if ($error !== null) {
             $this->logger->warning('CheckTxnStatus returned error', [
-                'primaryLock' => $primaryLock,
+                'primaryLock' => KeyRedactor::redact($primaryLock),
                 'lockTs' => $lockTs,
             ]);
         }
@@ -131,7 +132,7 @@ final readonly class LockResolver
     private function resolveLockCommitted(string $key, int $lockTs, int $commitTs): void
     {
         $this->logger->debug('Resolving lock as committed', [
-            'key' => $key,
+            'key' => KeyRedactor::redact($key),
             'lockTs' => $lockTs,
             'commitTs' => $commitTs,
         ]);
@@ -150,7 +151,7 @@ final readonly class LockResolver
     private function resolveLockRolledBack(string $key, int $lockTs): void
     {
         $this->logger->debug('Resolving lock as rolled back', [
-            'key' => $key,
+            'key' => KeyRedactor::redact($key),
             'lockTs' => $lockTs,
         ]);
 

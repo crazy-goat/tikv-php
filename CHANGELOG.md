@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced `array_merge` in scan loops with `array_push` to avoid O(n²) copying across regions (#97)
 - `getPrimaryKey()` now uses `array_key_first()` instead of `array_keys()`, avoiding O(n) memory allocation on every call (#114)
 - PHPStan analysis now sets an explicit memory limit of 1G, preventing crashes with the default 128M limit (#115)
+- Raw keys are now automatically redacted in log context across `RegionCache`, `RetryExecutor`, `Transaction`, and `LockResolver` — added `KeyRedactor` utility that replaces raw keys with a hex prefix + length, preventing sensitive-data leakage into log aggregation. A custom redaction callable can be injected via `KeyRedactor::setRedactor()`. (#88)
 - `get()`, `batchGet()`, and `Transaction::get()` now correctly distinguish empty-string values from missing keys by checking the response's `not_found` flag instead of treating empty values as null (#77)
 - `batchPut()` with a scalar TTL now expands the TTL to one element per pair instead of sending a 1-element array for an N-key batch, ensuring every key receives the intended expiry (#78)
 - `LockResolverTest` now executes (all 11 tests) instead of erroring on every method — replaced `createMock()` of generated protobuf messages with real `CheckTxnStatusResponse`/`ResolveLockResponse` instances constructed via setters, restoring coverage of the commit/rollback/wait/region-error decision matrix (#99)

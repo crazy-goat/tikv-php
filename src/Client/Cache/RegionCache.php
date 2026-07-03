@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Cache;
 
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -27,7 +28,7 @@ class RegionCache implements RegionCacheInterface
     {
         $index = $this->binarySearch($key);
         if ($index === null) {
-            $this->logger->debug('Region cache miss', ['key' => $key]);
+            $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
             return null;
         }
 
@@ -35,16 +36,16 @@ class RegionCache implements RegionCacheInterface
 
         if ($this->isExpired($entry)) {
             $this->removeByIndex($index);
-            $this->logger->debug('Region cache miss', ['key' => $key]);
+            $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
             return null;
         }
 
         if ($entry->region->endKey !== '' && $key >= $entry->region->endKey) {
-            $this->logger->debug('Region cache miss', ['key' => $key]);
+            $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
             return null;
         }
 
-        $this->logger->debug('Region cache hit', ['key' => $key, 'regionId' => $entry->region->regionId]);
+        $this->logger->debug('Region cache hit', ['key' => KeyRedactor::redact($key), 'regionId' => $entry->region->regionId]);
 
         return $this->resolveRegionInfo($entry);
     }
@@ -60,8 +61,8 @@ class RegionCache implements RegionCacheInterface
 
         $this->logger->debug('Region cached', [
             'regionId' => $region->regionId,
-            'startKey' => $region->startKey,
-            'endKey' => $region->endKey,
+            'startKey' => KeyRedactor::redact($region->startKey),
+            'endKey' => KeyRedactor::redact($region->endKey),
             'ttl' => $entry->expiresAt - $this->now(),
         ]);
     }

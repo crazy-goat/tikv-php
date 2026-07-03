@@ -275,8 +275,10 @@ class RegionCacheTest extends TestCase
             ->with(
                 'Region cached',
                 $this->callback(fn($context): bool => $context['regionId'] === $region->regionId
-                    && $context['startKey'] === $region->startKey
-                    && $context['endKey'] === $region->endKey
+                    && is_string($context['startKey'])
+                    && str_contains($context['startKey'], 'bytes')
+                    && is_string($context['endKey'])
+                    && str_contains($context['endKey'], 'bytes')
                     && isset($context['ttl'])
                     && is_int($context['ttl']))
             );
@@ -295,7 +297,10 @@ class RegionCacheTest extends TestCase
             ->method('debug')
             ->with(
                 'Region cache hit',
-                ['key' => 'm', 'regionId' => $region->regionId]
+                $this->callback(fn($context): bool => $context['regionId'] === $region->regionId
+                    && is_string($context['key'])
+                    && str_contains($context['key'], 'bytes')
+                    && ! str_contains($context['key'], 'm'))
             );
 
         $cache->getByKey('m');
@@ -308,7 +313,12 @@ class RegionCacheTest extends TestCase
 
         $logger->expects($this->once())
             ->method('debug')
-            ->with('Region cache miss', ['key' => 'any_key']);
+            ->with(
+                'Region cache miss',
+                $this->callback(fn($context): bool => is_string($context['key'])
+                    && str_contains($context['key'], 'bytes')
+                    && ! str_contains($context['key'], 'any_key'))
+            );
 
         $cache->getByKey('any_key');
     }
