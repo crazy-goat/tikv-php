@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Channel eviction in `GrpcClient`: idle channels are closed after a configurable TTL (default 10 min); at most `maxChannels` (default 64) are cached, evicting the least recently used channel when at capacity; channels in `TRANSIENT_FAILURE` or `SHUTDOWN` states are now reaped on next access (previously only `FATAL_FAILURE` was reaped). (#89)
+- `__destruct()` on `GrpcClient` — closes all cached channels when the reference is dropped without an explicit `close()` call. (#89)
 - `GrpcResponseParser::setMaxMessageSize()` — configurable maximum protobuf message size guard before `mergeFromString()`, preventing potential DoS from oversized messages (defense in depth for CVE-2026-6409). Default is 0 (unlimited). (#75)
 - Unit tests for `GrpcResponseParser` max message size: within limit, exceeds limit, null message, zero disables limit. (#75)
 - `TlsConfigBuilder::withCaCertFile()`, `withCaCertPem()`, `withClientCertFile()`, `withClientCertPem()` — explicit API to distinguish file paths from inline PEM content, replacing the ambiguous `file_exists()` guessing in legacy methods. The new methods support an optional `$baseDir` parameter to restrict allowed directories. The legacy `withCaCert()` and `withClientCert()` are deprecated. (#87)
