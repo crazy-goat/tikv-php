@@ -100,9 +100,8 @@ class ExecDetailsV2 extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\TimeDetail $var
      * @return $this
      */
-    public function setTimeDetail($var)
+    public function setTimeDetail(\CrazyGoat\Proto\Kvrpcpb\TimeDetail|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\TimeDetail::class);
         $this->time_detail = $var;
 
         return $this;
@@ -136,9 +135,8 @@ class ExecDetailsV2 extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ScanDetailV2 $var
      * @return $this
      */
-    public function setScanDetailV2($var)
+    public function setScanDetailV2(\CrazyGoat\Proto\Kvrpcpb\ScanDetailV2|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ScanDetailV2::class);
         $this->scan_detail_v2 = $var;
 
         return $this;
@@ -172,9 +170,8 @@ class ExecDetailsV2 extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\WriteDetail $var
      * @return $this
      */
-    public function setWriteDetail($var)
+    public function setWriteDetail(\CrazyGoat\Proto\Kvrpcpb\WriteDetail|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\WriteDetail::class);
         $this->write_detail = $var;
 
         return $this;
@@ -208,9 +205,8 @@ class ExecDetailsV2 extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\TimeDetailV2 $var
      * @return $this
      */
-    public function setTimeDetailV2($var)
+    public function setTimeDetailV2(\CrazyGoat\Proto\Kvrpcpb\TimeDetailV2|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\TimeDetailV2::class);
         $this->time_detail_v2 = $var;
 
         return $this;
@@ -244,9 +240,8 @@ class ExecDetailsV2 extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\RUV2 $var
      * @return $this
      */
-    public function setRuV2($var)
+    public function setRuV2(\CrazyGoat\Proto\Kvrpcpb\RUV2|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\RUV2::class);
         $this->ru_v2 = $var;
 
         return $this;

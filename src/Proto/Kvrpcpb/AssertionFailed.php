@@ -67,7 +67,7 @@ class AssertionFailed extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -89,9 +89,9 @@ class AssertionFailed extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -99,7 +99,7 @@ class AssertionFailed extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.Assertion assertion = 3;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Assertion}
      */
     public function getAssertion()
     {
@@ -108,10 +108,10 @@ class AssertionFailed extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.Assertion assertion = 3;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Assertion}
      * @return $this
      */
-    public function setAssertion($var)
+    public function setAssertion(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\Assertion::class);
         $this->assertion = $var;
@@ -133,7 +133,7 @@ class AssertionFailed extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setExistingStartTs($var)
+    public function setExistingStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->existing_start_ts = $var;
@@ -155,7 +155,7 @@ class AssertionFailed extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setExistingCommitTs($var)
+    public function setExistingCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->existing_commit_ts = $var;

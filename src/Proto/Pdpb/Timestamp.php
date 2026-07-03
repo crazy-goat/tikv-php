@@ -62,7 +62,7 @@ class Timestamp extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPhysical($var)
+    public function setPhysical(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->physical = $var;
@@ -84,7 +84,7 @@ class Timestamp extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLogical($var)
+    public function setLogical(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->logical = $var;
@@ -112,7 +112,7 @@ class Timestamp extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setSuffixBits($var)
+    public function setSuffixBits(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->suffix_bits = $var;

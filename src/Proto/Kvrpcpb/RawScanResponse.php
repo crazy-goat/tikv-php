@@ -62,9 +62,8 @@ class RawScanResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -84,7 +83,7 @@ class RawScanResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KvPair[] $var
      * @return $this
      */
-    public function setKvs($var)
+    public function setKvs(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\KvPair::class);
         $this->kvs = $arr;

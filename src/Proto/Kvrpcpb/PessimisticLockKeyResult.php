@@ -75,7 +75,7 @@ class PessimisticLockKeyResult extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.PessimisticLockKeyResultType type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\PessimisticLockKeyResultType}
      */
     public function getType()
     {
@@ -84,10 +84,10 @@ class PessimisticLockKeyResult extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.PessimisticLockKeyResultType type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\PessimisticLockKeyResultType}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\PessimisticLockKeyResultType::class);
         $this->type = $var;
@@ -109,9 +109,9 @@ class PessimisticLockKeyResult extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setValue($var)
+    public function setValue(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->value = $var;
 
         return $this;
@@ -131,9 +131,8 @@ class PessimisticLockKeyResult extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setExistence($var)
+    public function setExistence(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->existence = $var;
 
         return $this;
@@ -169,7 +168,7 @@ class PessimisticLockKeyResult extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockedWithConflictTs($var)
+    public function setLockedWithConflictTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->locked_with_conflict_ts = $var;
@@ -197,9 +196,8 @@ class PessimisticLockKeyResult extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setSkipResolvingLock($var)
+    public function setSkipResolvingLock(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->skip_resolving_lock = $var;
 
         return $this;

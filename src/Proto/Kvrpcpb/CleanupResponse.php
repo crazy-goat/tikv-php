@@ -70,9 +70,8 @@ class CleanupResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -102,9 +101,8 @@ class CleanupResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyError $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Kvrpcpb\KeyError|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\KeyError::class);
         $this->error = $var;
 
         return $this;
@@ -128,7 +126,7 @@ class CleanupResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitVersion($var)
+    public function setCommitVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_version = $var;

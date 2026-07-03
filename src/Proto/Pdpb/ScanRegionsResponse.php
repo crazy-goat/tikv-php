@@ -78,9 +78,8 @@ class ScanRegionsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -104,7 +103,7 @@ class ScanRegionsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region[] $var
      * @return $this
      */
-    public function setRegionMetas($var)
+    public function setRegionMetas(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Region::class);
         $this->region_metas = $arr;
@@ -126,7 +125,7 @@ class ScanRegionsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setLeaders($var)
+    public function setLeaders(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->leaders = $arr;
@@ -152,7 +151,7 @@ class ScanRegionsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Region[] $var
      * @return $this
      */
-    public function setRegions($var)
+    public function setRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\Region::class);
         $this->regions = $arr;

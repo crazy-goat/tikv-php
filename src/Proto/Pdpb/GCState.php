@@ -77,9 +77,8 @@ class GCState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\KeyspaceScope $var
      * @return $this
      */
-    public function setKeyspaceScope($var)
+    public function setKeyspaceScope(\CrazyGoat\Proto\Pdpb\KeyspaceScope|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\KeyspaceScope::class);
         $this->keyspace_scope = $var;
 
         return $this;
@@ -99,9 +98,8 @@ class GCState extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsKeyspaceLevelGc($var)
+    public function setIsKeyspaceLevelGc(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_keyspace_level_gc = $var;
 
         return $this;
@@ -121,7 +119,7 @@ class GCState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTxnSafePoint($var)
+    public function setTxnSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->txn_safe_point = $var;
@@ -143,7 +141,7 @@ class GCState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGcSafePoint($var)
+    public function setGcSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->gc_safe_point = $var;
@@ -165,7 +163,7 @@ class GCState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\GCBarrierInfo[] $var
      * @return $this
      */
-    public function setGcBarriers($var)
+    public function setGcBarriers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\GCBarrierInfo::class);
         $this->gc_barriers = $arr;

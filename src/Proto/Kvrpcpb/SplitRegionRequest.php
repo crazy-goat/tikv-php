@@ -21,8 +21,7 @@ class SplitRegionRequest extends \Google\Protobuf\Internal\Message
      */
     protected $context = null;
     /**
-     * Generated from protobuf field <code>bytes split_key = 2 [deprecated = true];</code>
-     * @deprecated
+     * Generated from protobuf field <code>bytes split_key = 2;</code>
      */
     protected $split_key = '';
     /**
@@ -81,37 +80,30 @@ class SplitRegionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
     }
 
     /**
-     * Generated from protobuf field <code>bytes split_key = 2 [deprecated = true];</code>
+     * Generated from protobuf field <code>bytes split_key = 2;</code>
      * @return string
-     * @deprecated
      */
     public function getSplitKey()
     {
-        if ($this->split_key !== '') {
-            @trigger_error('split_key is deprecated.', E_USER_DEPRECATED);
-        }
         return $this->split_key;
     }
 
     /**
-     * Generated from protobuf field <code>bytes split_key = 2 [deprecated = true];</code>
+     * Generated from protobuf field <code>bytes split_key = 2;</code>
      * @param string $var
      * @return $this
-     * @deprecated
      */
-    public function setSplitKey($var)
+    public function setSplitKey(string $var)
     {
-        @trigger_error('split_key is deprecated.', E_USER_DEPRECATED);
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->split_key = $var;
 
         return $this;
@@ -135,7 +127,7 @@ class SplitRegionRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setSplitKeys($var)
+    public function setSplitKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->split_keys = $arr;
@@ -161,9 +153,8 @@ class SplitRegionRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsRawKv($var)
+    public function setIsRawKv(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_raw_kv = $var;
 
         return $this;

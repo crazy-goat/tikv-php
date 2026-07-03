@@ -67,9 +67,9 @@ class BatchResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;
@@ -89,9 +89,9 @@ class BatchResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setOtherError($var)
+    public function setOtherError(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->other_error = $var;
 
         return $this;
@@ -121,9 +121,8 @@ class BatchResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ExecDetails $var
      * @return $this
      */
-    public function setExecDetails($var)
+    public function setExecDetails(\CrazyGoat\Proto\Kvrpcpb\ExecDetails|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ExecDetails::class);
         $this->exec_details = $var;
 
         return $this;
@@ -143,7 +142,7 @@ class BatchResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region[] $var
      * @return $this
      */
-    public function setRetryRegions($var)
+    public function setRetryRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Region::class);
         $this->retry_regions = $arr;
@@ -165,7 +164,7 @@ class BatchResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\ShardInfo[] $var
      * @return $this
      */
-    public function setRetryShards($var)
+    public function setRetryShards(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\ShardInfo::class);
         $this->retry_shards = $arr;

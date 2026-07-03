@@ -55,7 +55,7 @@ class BatchRaftMessage extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\RaftMessage[] $var
      * @return $this
      */
-    public function setMsgs($var)
+    public function setMsgs(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\RaftServerpb\RaftMessage::class);
         $this->msgs = $arr;
@@ -81,7 +81,7 @@ class BatchRaftMessage extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLastObservedTime($var)
+    public function setLastObservedTime(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->last_observed_time = $var;

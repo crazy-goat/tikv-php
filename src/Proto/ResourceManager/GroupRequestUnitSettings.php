@@ -57,9 +57,8 @@ class GroupRequestUnitSettings extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucket $var
      * @return $this
      */
-    public function setRU($var)
+    public function setRU(\CrazyGoat\Proto\ResourceManager\TokenBucket|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\TokenBucket::class);
         $this->r_u = $var;
 
         return $this;

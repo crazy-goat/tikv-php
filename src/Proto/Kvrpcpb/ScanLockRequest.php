@@ -92,9 +92,8 @@ class ScanLockRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -118,7 +117,7 @@ class ScanLockRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMaxVersion($var)
+    public function setMaxVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->max_version = $var;
@@ -144,9 +143,9 @@ class ScanLockRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setStartKey($var)
+    public function setStartKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->start_key = $var;
 
         return $this;
@@ -170,7 +169,7 @@ class ScanLockRequest extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setLimit($var)
+    public function setLimit(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->limit = $var;
@@ -196,9 +195,9 @@ class ScanLockRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEndKey($var)
+    public function setEndKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->end_key = $var;
 
         return $this;

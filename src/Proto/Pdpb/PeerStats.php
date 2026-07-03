@@ -62,9 +62,8 @@ class PeerStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setPeer($var)
+    public function setPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->peer = $var;
 
         return $this;
@@ -84,7 +83,7 @@ class PeerStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setDownSeconds($var)
+    public function setDownSeconds(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->down_seconds = $var;

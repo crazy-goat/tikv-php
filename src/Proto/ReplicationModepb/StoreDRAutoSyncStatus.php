@@ -14,6 +14,14 @@ use Google\Protobuf\RepeatedField;
  */
 class StoreDRAutoSyncStatus extends \Google\Protobuf\Internal\Message
 {
+    /**
+     * Generated from protobuf field <code>.replication_modepb.DRAutoSyncState state = 1;</code>
+     */
+    protected $state = 0;
+    /**
+     * Generated from protobuf field <code>uint64 state_id = 2;</code>
+     */
+    protected $state_id = 0;
 
     /**
      * Constructor.
@@ -21,11 +29,57 @@ class StoreDRAutoSyncStatus extends \Google\Protobuf\Internal\Message
      * @param array $data {
      *     Optional. Data for populating the Message object.
      *
+     *     @type int $state
+     *     @type int|string $state_id
      * }
      */
     public function __construct($data = NULL) {
         \CrazyGoat\Proto\GPBMetadata\ReplicationModepb::initOnce();
         parent::__construct($data);
+    }
+
+    /**
+     * Generated from protobuf field <code>.replication_modepb.DRAutoSyncState state = 1;</code>
+     * @return int one of the values in {@see \CrazyGoat\Proto\ReplicationModepb\DRAutoSyncState}
+     */
+    public function getState()
+    {
+        return $this->state;
+    }
+
+    /**
+     * Generated from protobuf field <code>.replication_modepb.DRAutoSyncState state = 1;</code>
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\ReplicationModepb\DRAutoSyncState}
+     * @return $this
+     */
+    public function setState(int $var)
+    {
+        GPBUtil::checkEnum($var, \CrazyGoat\Proto\ReplicationModepb\DRAutoSyncState::class);
+        $this->state = $var;
+
+        return $this;
+    }
+
+    /**
+     * Generated from protobuf field <code>uint64 state_id = 2;</code>
+     * @return int|string
+     */
+    public function getStateId()
+    {
+        return $this->state_id;
+    }
+
+    /**
+     * Generated from protobuf field <code>uint64 state_id = 2;</code>
+     * @param int|string $var
+     * @return $this
+     */
+    public function setStateId(int|string $var)
+    {
+        GPBUtil::checkUint64($var);
+        $this->state_id = $var;
+
+        return $this;
     }
 
 }

@@ -62,9 +62,8 @@ class UpdateGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -84,7 +83,7 @@ class UpdateGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSafePoint($var)
+    public function setSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->safe_point = $var;

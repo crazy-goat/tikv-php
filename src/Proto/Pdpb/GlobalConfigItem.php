@@ -75,9 +75,9 @@ class GlobalConfigItem extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setName($var)
+    public function setName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->name = $var;
 
         return $this;
@@ -101,9 +101,9 @@ class GlobalConfigItem extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setValue($var)
+    public function setValue(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->value = $var;
 
         return $this;
@@ -133,9 +133,8 @@ class GlobalConfigItem extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Error $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Pdpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Error::class);
         $this->error = $var;
 
         return $this;
@@ -143,7 +142,7 @@ class GlobalConfigItem extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.EventType kind = 4;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Pdpb\EventType}
      */
     public function getKind()
     {
@@ -152,10 +151,10 @@ class GlobalConfigItem extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.EventType kind = 4;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Pdpb\EventType}
      * @return $this
      */
-    public function setKind($var)
+    public function setKind(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Pdpb\EventType::class);
         $this->kind = $var;
@@ -183,9 +182,9 @@ class GlobalConfigItem extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPayload($var)
+    public function setPayload(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->payload = $var;
 
         return $this;

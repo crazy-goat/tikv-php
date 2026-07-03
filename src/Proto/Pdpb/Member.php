@@ -97,9 +97,9 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setName($var)
+    public function setName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->name = $var;
 
         return $this;
@@ -123,7 +123,7 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMemberId($var)
+    public function setMemberId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->member_id = $var;
@@ -145,7 +145,7 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setPeerUrls($var)
+    public function setPeerUrls(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::STRING);
         $this->peer_urls = $arr;
@@ -167,7 +167,7 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setClientUrls($var)
+    public function setClientUrls(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::STRING);
         $this->client_urls = $arr;
@@ -189,7 +189,7 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setLeaderPriority($var)
+    public function setLeaderPriority(int $var)
     {
         GPBUtil::checkInt32($var);
         $this->leader_priority = $var;
@@ -211,9 +211,9 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setDeployPath($var)
+    public function setDeployPath(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->deploy_path = $var;
 
         return $this;
@@ -233,9 +233,9 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setBinaryVersion($var)
+    public function setBinaryVersion(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->binary_version = $var;
 
         return $this;
@@ -255,9 +255,9 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setGitHash($var)
+    public function setGitHash(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->git_hash = $var;
 
         return $this;
@@ -277,9 +277,9 @@ class Member extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setDcLocation($var)
+    public function setDcLocation(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->dc_location = $var;
 
         return $this;

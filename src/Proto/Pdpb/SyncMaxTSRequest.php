@@ -70,9 +70,8 @@ class SyncMaxTSRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -102,9 +101,8 @@ class SyncMaxTSRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Timestamp $var
      * @return $this
      */
-    public function setMaxTs($var)
+    public function setMaxTs(\CrazyGoat\Proto\Pdpb\Timestamp|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\Timestamp::class);
         $this->max_ts = $var;
 
         return $this;
@@ -128,9 +126,8 @@ class SyncMaxTSRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setSkipCheck($var)
+    public function setSkipCheck(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->skip_check = $var;
 
         return $this;

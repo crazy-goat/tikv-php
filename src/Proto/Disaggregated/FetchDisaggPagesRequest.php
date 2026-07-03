@@ -84,9 +84,8 @@ class FetchDisaggPagesRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\DisaggTaskMeta $var
      * @return $this
      */
-    public function setSnapshotId($var)
+    public function setSnapshotId(\CrazyGoat\Proto\Disaggregated\DisaggTaskMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\DisaggTaskMeta::class);
         $this->snapshot_id = $var;
 
         return $this;
@@ -106,7 +105,7 @@ class FetchDisaggPagesRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTableId($var)
+    public function setTableId(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->table_id = $var;
@@ -128,7 +127,7 @@ class FetchDisaggPagesRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSegmentId($var)
+    public function setSegmentId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->segment_id = $var;
@@ -156,7 +155,7 @@ class FetchDisaggPagesRequest extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setPageIds($var)
+    public function setPageIds(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->page_ids = $arr;

@@ -40,7 +40,7 @@ class Error extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.ErrorType type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Pdpb\ErrorType}
      */
     public function getType()
     {
@@ -49,10 +49,10 @@ class Error extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.ErrorType type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Pdpb\ErrorType}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Pdpb\ErrorType::class);
         $this->type = $var;
@@ -74,9 +74,9 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setMessage($var)
+    public function setMessage(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->message = $var;
 
         return $this;

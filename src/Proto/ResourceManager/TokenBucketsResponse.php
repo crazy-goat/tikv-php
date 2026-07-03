@@ -62,9 +62,8 @@ class TokenBucketsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\Error $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\ResourceManager\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\Error::class);
         $this->error = $var;
 
         return $this;
@@ -84,7 +83,7 @@ class TokenBucketsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucketResponse[] $var
      * @return $this
      */
-    public function setResponses($var)
+    public function setResponses(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\ResourceManager\TokenBucketResponse::class);
         $this->responses = $arr;

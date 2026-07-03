@@ -10,10 +10,36 @@ use Google\Protobuf\Internal\GPBUtil;
 use Google\Protobuf\RepeatedField;
 
 /**
+ * The key used to encrypt the user data.
+ *
  * Generated from protobuf message <code>encryptionpb.DataKey</code>
  */
 class DataKey extends \Google\Protobuf\Internal\Message
 {
+    /**
+     * A sequence of secret bytes used to encrypt data.
+     *
+     * Generated from protobuf field <code>bytes key = 1;</code>
+     */
+    protected $key = '';
+    /**
+     * Method of encryption algorithm used to encrypted data.
+     *
+     * Generated from protobuf field <code>.encryptionpb.EncryptionMethod method = 2;</code>
+     */
+    protected $method = 0;
+    /**
+     * Creation time of the key.
+     *
+     * Generated from protobuf field <code>uint64 creation_time = 3;</code>
+     */
+    protected $creation_time = 0;
+    /**
+     * A flag for the key have ever been exposed.
+     *
+     * Generated from protobuf field <code>bool was_exposed = 4;</code>
+     */
+    protected $was_exposed = false;
 
     /**
      * Constructor.
@@ -21,11 +47,122 @@ class DataKey extends \Google\Protobuf\Internal\Message
      * @param array $data {
      *     Optional. Data for populating the Message object.
      *
+     *     @type string $key
+     *           A sequence of secret bytes used to encrypt data.
+     *     @type int $method
+     *           Method of encryption algorithm used to encrypted data.
+     *     @type int|string $creation_time
+     *           Creation time of the key.
+     *     @type bool $was_exposed
+     *           A flag for the key have ever been exposed.
      * }
      */
     public function __construct($data = NULL) {
         \CrazyGoat\Proto\GPBMetadata\Encryptionpb::initOnce();
         parent::__construct($data);
+    }
+
+    /**
+     * A sequence of secret bytes used to encrypt data.
+     *
+     * Generated from protobuf field <code>bytes key = 1;</code>
+     * @return string
+     */
+    public function getKey()
+    {
+        return $this->key;
+    }
+
+    /**
+     * A sequence of secret bytes used to encrypt data.
+     *
+     * Generated from protobuf field <code>bytes key = 1;</code>
+     * @param string $var
+     * @return $this
+     */
+    public function setKey(string $var)
+    {
+        GPBUtil::checkString($var, false);
+        $this->key = $var;
+
+        return $this;
+    }
+
+    /**
+     * Method of encryption algorithm used to encrypted data.
+     *
+     * Generated from protobuf field <code>.encryptionpb.EncryptionMethod method = 2;</code>
+     * @return int one of the values in {@see \CrazyGoat\Proto\Encryptionpb\EncryptionMethod}
+     */
+    public function getMethod()
+    {
+        return $this->method;
+    }
+
+    /**
+     * Method of encryption algorithm used to encrypted data.
+     *
+     * Generated from protobuf field <code>.encryptionpb.EncryptionMethod method = 2;</code>
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Encryptionpb\EncryptionMethod}
+     * @return $this
+     */
+    public function setMethod(int $var)
+    {
+        GPBUtil::checkEnum($var, \CrazyGoat\Proto\Encryptionpb\EncryptionMethod::class);
+        $this->method = $var;
+
+        return $this;
+    }
+
+    /**
+     * Creation time of the key.
+     *
+     * Generated from protobuf field <code>uint64 creation_time = 3;</code>
+     * @return int|string
+     */
+    public function getCreationTime()
+    {
+        return $this->creation_time;
+    }
+
+    /**
+     * Creation time of the key.
+     *
+     * Generated from protobuf field <code>uint64 creation_time = 3;</code>
+     * @param int|string $var
+     * @return $this
+     */
+    public function setCreationTime(int|string $var)
+    {
+        GPBUtil::checkUint64($var);
+        $this->creation_time = $var;
+
+        return $this;
+    }
+
+    /**
+     * A flag for the key have ever been exposed.
+     *
+     * Generated from protobuf field <code>bool was_exposed = 4;</code>
+     * @return bool
+     */
+    public function getWasExposed()
+    {
+        return $this->was_exposed;
+    }
+
+    /**
+     * A flag for the key have ever been exposed.
+     *
+     * Generated from protobuf field <code>bool was_exposed = 4;</code>
+     * @param bool $var
+     * @return $this
+     */
+    public function setWasExposed(bool $var)
+    {
+        $this->was_exposed = $var;
+
+        return $this;
     }
 
 }

@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `RawKvClient::ingest()` — bulk-import key-value pairs into TiKV via SST (Sorted String Table) ingestion. Bypasses the normal Raft write path and directly ingests pre-sorted data into TiKV regions, achieving much higher throughput for large data loads. All TiKV stores are switched to import mode during the operation and switched back to normal mode on completion (even on failure). Supports optional TTL. (#29)
+- `SstIngestor` in `src/Client/RawKv/` — handles the SST ingest logic: sorting keys, grouping by region, streaming SST data via the TiKV ImportSST `RawWrite` RPC, and ingesting via the `Ingest` RPC. Uses `try/finally` to ensure stores are always switched back to normal mode. (#29)
+- `GrpcClientInterface::callStreaming()` — client-streaming gRPC support for SST import's `Write`/`RawWrite`/`Upload` RPCs. Opens a streaming call, sends multiple request messages, and receives a single response. (#29)
+- `PdClientInterface::getAllStores()` — retrieve all TiKV stores from PD, needed for SwitchMode operations during SST ingest. (#29)
+- `TimeoutConfig::ingestTimeoutMs` — configurable timeout for SST ingest operations (default: 60 seconds). (#29)
+- `RawKvClient::OP_INGEST` — operation type constant for ingest operations. (#29)
+- Generated `import_sstpb` and `brpb` protobuf PHP classes from `kvproto`. (#29)
+- Unit tests for `SstIngestor` covering: empty input, key sorting, region grouping, SwitchMode lifecycle (import + normal), error recovery (stores switched back on failure), TTL support, multiple stores, and empty store address handling. (#29)
+- Unit tests for `RawKvClient::ingest()` covering: client closed validation, empty array, empty key, key size, and value size validation. (#29)
+
+### Added
 - `CodecInterface` in `src/Client/Codec/` — defines the contract for key encoding/decoding across TiKV API versions (V1 passthrough, V2 prefix-based). Includes `encodeKey()`/`decodeKey()` for user keys, `encodeRegionKey()`/`decodeRegionKey()` for PD region lookups, `encodeRange()`/`decodeRange()` for key ranges, and `getApiVersion()`/`getKeyspaceId()`/`getKeyspaceName()` metadata accessors. (#28)
 - `Mode` enum in `src/Client/Codec/` — Raw/Txn key-space mode used by API V2 key prefix encoding. Provides `prefixByte()` (0x72 for Raw, 0x78 for Txn) and `fromPrefixByte()` factory. (#28)
 - `MemComparableCodec` in `src/Client/Codec/` — Memory Comparable Encoding (MCE) for region boundary keys, implementing TiDB's `codec.EncodeBytes`/`DecodeBytes` convention. Escapes 0x00/0xFF bytes with padding and appends a terminator so that encoded keys sort in the same byte-wise order as the original keys. (#28)

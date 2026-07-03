@@ -52,7 +52,7 @@ class ReadState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAppliedIndex($var)
+    public function setAppliedIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->applied_index = $var;
@@ -74,7 +74,7 @@ class ReadState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSafeTs($var)
+    public function setSafeTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->safe_ts = $var;

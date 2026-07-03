@@ -50,7 +50,7 @@ class ConfChange extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.eraftpb.ConfChangeType change_type = 2;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Eraftpb\ConfChangeType}
      */
     public function getChangeType()
     {
@@ -59,10 +59,10 @@ class ConfChange extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.eraftpb.ConfChangeType change_type = 2;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Eraftpb\ConfChangeType}
      * @return $this
      */
-    public function setChangeType($var)
+    public function setChangeType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Eraftpb\ConfChangeType::class);
         $this->change_type = $var;
@@ -84,7 +84,7 @@ class ConfChange extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setNodeId($var)
+    public function setNodeId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->node_id = $var;
@@ -106,9 +106,9 @@ class ConfChange extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->context = $var;
 
         return $this;
@@ -128,7 +128,7 @@ class ConfChange extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setId($var)
+    public function setId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->id = $var;

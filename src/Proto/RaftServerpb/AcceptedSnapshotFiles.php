@@ -47,7 +47,7 @@ class AcceptedSnapshotFiles extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setFileName($var)
+    public function setFileName(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::STRING);
         $this->file_name = $arr;

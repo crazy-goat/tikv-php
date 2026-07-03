@@ -79,9 +79,9 @@ class TokenBucketResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setResourceGroupName($var)
+    public function setResourceGroupName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->resource_group_name = $var;
 
         return $this;
@@ -105,7 +105,7 @@ class TokenBucketResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\GrantedRUTokenBucket[] $var
      * @return $this
      */
-    public function setGrantedRUTokens($var)
+    public function setGrantedRUTokens(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\ResourceManager\GrantedRUTokenBucket::class);
         $this->granted_r_u_tokens = $arr;
@@ -131,7 +131,7 @@ class TokenBucketResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\GrantedRawResourceTokenBucket[] $var
      * @return $this
      */
-    public function setGrantedResourceTokens($var)
+    public function setGrantedResourceTokens(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\ResourceManager\GrantedRawResourceTokenBucket::class);
         $this->granted_resource_tokens = $arr;
@@ -175,9 +175,8 @@ class TokenBucketResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\KeyspaceIDValue $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(\CrazyGoat\Proto\ResourceManager\KeyspaceIDValue|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\KeyspaceIDValue::class);
         $this->keyspace_id = $var;
 
         return $this;

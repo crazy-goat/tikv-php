@@ -62,9 +62,9 @@ class TableShardInfos extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setExecutorId($var)
+    public function setExecutorId(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->executor_id = $var;
 
         return $this;
@@ -88,7 +88,7 @@ class TableShardInfos extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\ShardInfo[] $var
      * @return $this
      */
-    public function setShardInfos($var)
+    public function setShardInfos(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\ShardInfo::class);
         $this->shard_infos = $arr;

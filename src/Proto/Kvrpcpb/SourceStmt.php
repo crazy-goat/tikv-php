@@ -65,7 +65,7 @@ class SourceStmt extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -87,7 +87,7 @@ class SourceStmt extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setConnectionId($var)
+    public function setConnectionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->connection_id = $var;
@@ -109,7 +109,7 @@ class SourceStmt extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStmtId($var)
+    public function setStmtId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->stmt_id = $var;
@@ -135,9 +135,9 @@ class SourceStmt extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setSessionAlias($var)
+    public function setSessionAlias(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->session_alias = $var;
 
         return $this;

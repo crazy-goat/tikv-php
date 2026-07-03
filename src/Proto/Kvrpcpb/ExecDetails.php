@@ -72,9 +72,8 @@ class ExecDetails extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\TimeDetail $var
      * @return $this
      */
-    public function setTimeDetail($var)
+    public function setTimeDetail(\CrazyGoat\Proto\Kvrpcpb\TimeDetail|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\TimeDetail::class);
         $this->time_detail = $var;
 
         return $this;
@@ -108,9 +107,8 @@ class ExecDetails extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ScanDetail $var
      * @return $this
      */
-    public function setScanDetail($var)
+    public function setScanDetail(\CrazyGoat\Proto\Kvrpcpb\ScanDetail|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ScanDetail::class);
         $this->scan_detail = $var;
 
         return $this;

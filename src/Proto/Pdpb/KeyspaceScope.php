@@ -52,7 +52,7 @@ class KeyspaceScope extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;

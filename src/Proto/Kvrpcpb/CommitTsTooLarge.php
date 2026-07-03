@@ -54,7 +54,7 @@ class CommitTsTooLarge extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitTs($var)
+    public function setCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_ts = $var;

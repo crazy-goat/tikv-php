@@ -67,9 +67,8 @@ class ReportSplitRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -99,9 +98,8 @@ class ReportSplitRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setLeft($var)
+    public function setLeft(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->left = $var;
 
         return $this;
@@ -131,9 +129,8 @@ class ReportSplitRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setRight($var)
+    public function setRight(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->right = $var;
 
         return $this;

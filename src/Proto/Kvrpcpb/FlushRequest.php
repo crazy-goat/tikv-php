@@ -98,9 +98,8 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -120,7 +119,7 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Mutation[] $var
      * @return $this
      */
-    public function setMutations($var)
+    public function setMutations(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\Mutation::class);
         $this->mutations = $arr;
@@ -142,9 +141,9 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimaryKey($var)
+    public function setPrimaryKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary_key = $var;
 
         return $this;
@@ -164,7 +163,7 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -186,7 +185,7 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinCommitTs($var)
+    public function setMinCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_commit_ts = $var;
@@ -212,7 +211,7 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGeneration($var)
+    public function setGeneration(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->generation = $var;
@@ -234,7 +233,7 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockTtl($var)
+    public function setLockTtl(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_ttl = $var;
@@ -244,7 +243,7 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.AssertionLevel assertion_level = 8;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\AssertionLevel}
      */
     public function getAssertionLevel()
     {
@@ -253,10 +252,10 @@ class FlushRequest extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.AssertionLevel assertion_level = 8;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\AssertionLevel}
      * @return $this
      */
-    public function setAssertionLevel($var)
+    public function setAssertionLevel(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\AssertionLevel::class);
         $this->assertion_level = $var;

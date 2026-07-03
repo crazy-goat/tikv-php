@@ -57,9 +57,9 @@ class CheckLockObserverResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->error = $var;
 
         return $this;
@@ -79,9 +79,8 @@ class CheckLockObserverResponse extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsClean($var)
+    public function setIsClean(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_clean = $var;
 
         return $this;
@@ -101,7 +100,7 @@ class CheckLockObserverResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\LockInfo[] $var
      * @return $this
      */
-    public function setLocks($var)
+    public function setLocks(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\LockInfo::class);
         $this->locks = $arr;

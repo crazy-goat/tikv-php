@@ -36,6 +36,8 @@ PROTO_FILES="
   raft_serverpb.proto
   disk_usage.proto
   eraftpb.proto
+  import_sstpb.proto
+  brpb.proto
 "
 
 echo "=== TiKV PHP Proto Generator ==="

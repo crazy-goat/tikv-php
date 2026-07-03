@@ -72,7 +72,7 @@ class WriteConflict extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -94,7 +94,7 @@ class WriteConflict extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setConflictTs($var)
+    public function setConflictTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->conflict_ts = $var;
@@ -116,9 +116,9 @@ class WriteConflict extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -138,9 +138,9 @@ class WriteConflict extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimary($var)
+    public function setPrimary(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary = $var;
 
         return $this;
@@ -160,7 +160,7 @@ class WriteConflict extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setConflictCommitTs($var)
+    public function setConflictCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->conflict_commit_ts = $var;
@@ -170,7 +170,7 @@ class WriteConflict extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.WriteConflict.Reason reason = 6;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\WriteConflict\Reason}
      */
     public function getReason()
     {
@@ -179,10 +179,10 @@ class WriteConflict extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.WriteConflict.Reason reason = 6;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\WriteConflict\Reason}
      * @return $this
      */
-    public function setReason($var)
+    public function setReason(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\WriteConflict\Reason::class);
         $this->reason = $var;

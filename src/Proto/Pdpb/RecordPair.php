@@ -52,9 +52,9 @@ class RecordPair extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->key = $var;
 
         return $this;
@@ -74,7 +74,7 @@ class RecordPair extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setValue($var)
+    public function setValue(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->value = $var;

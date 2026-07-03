@@ -94,7 +94,7 @@ class WaitForEntry extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTxn($var)
+    public function setTxn(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->txn = $var;
@@ -120,7 +120,7 @@ class WaitForEntry extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWaitForTxn($var)
+    public function setWaitForTxn(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->wait_for_txn = $var;
@@ -146,7 +146,7 @@ class WaitForEntry extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKeyHash($var)
+    public function setKeyHash(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->key_hash = $var;
@@ -172,9 +172,9 @@ class WaitForEntry extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -198,9 +198,9 @@ class WaitForEntry extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setResourceGroupTag($var)
+    public function setResourceGroupTag(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->resource_group_tag = $var;
 
         return $this;
@@ -224,7 +224,7 @@ class WaitForEntry extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWaitTime($var)
+    public function setWaitTime(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->wait_time = $var;

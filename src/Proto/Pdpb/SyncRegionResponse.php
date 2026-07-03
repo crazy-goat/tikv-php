@@ -100,9 +100,8 @@ class SyncRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -128,7 +127,7 @@ class SyncRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region[] $var
      * @return $this
      */
-    public function setRegions($var)
+    public function setRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Region::class);
         $this->regions = $arr;
@@ -150,7 +149,7 @@ class SyncRegionResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartIndex($var)
+    public function setStartIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_index = $var;
@@ -172,7 +171,7 @@ class SyncRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RegionStat[] $var
      * @return $this
      */
-    public function setRegionStats($var)
+    public function setRegionStats(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\RegionStat::class);
         $this->region_stats = $arr;
@@ -194,7 +193,7 @@ class SyncRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setRegionLeaders($var)
+    public function setRegionLeaders(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->region_leaders = $arr;
@@ -220,7 +219,7 @@ class SyncRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Buckets[] $var
      * @return $this
      */
-    public function setBuckets($var)
+    public function setBuckets(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Buckets::class);
         $this->buckets = $arr;
@@ -242,7 +241,7 @@ class SyncRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\PeersStats[] $var
      * @return $this
      */
-    public function setDownPeers($var)
+    public function setDownPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\PeersStats::class);
         $this->down_peers = $arr;
@@ -264,7 +263,7 @@ class SyncRegionResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\Peers[] $var
      * @return $this
      */
-    public function setPendingPeers($var)
+    public function setPendingPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\Peers::class);
         $this->pending_peers = $arr;

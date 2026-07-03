@@ -52,9 +52,8 @@ class TabletSnapshotRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\TabletSnapshotHead $var
      * @return $this
      */
-    public function setHead($var)
+    public function setHead(\CrazyGoat\Proto\RaftServerpb\TabletSnapshotHead|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\TabletSnapshotHead::class);
         $this->writeOneof(1, $var);
 
         return $this;
@@ -79,9 +78,8 @@ class TabletSnapshotRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\TabletSnapshotPreview $var
      * @return $this
      */
-    public function setPreview($var)
+    public function setPreview(\CrazyGoat\Proto\RaftServerpb\TabletSnapshotPreview|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\TabletSnapshotPreview::class);
         $this->writeOneof(2, $var);
 
         return $this;
@@ -106,9 +104,8 @@ class TabletSnapshotRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\TabletSnapshotFileChunk $var
      * @return $this
      */
-    public function setChunk($var)
+    public function setChunk(\CrazyGoat\Proto\RaftServerpb\TabletSnapshotFileChunk|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\TabletSnapshotFileChunk::class);
         $this->writeOneof(3, $var);
 
         return $this;
@@ -133,9 +130,8 @@ class TabletSnapshotRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\TabletSnapshotEnd $var
      * @return $this
      */
-    public function setEnd($var)
+    public function setEnd(\CrazyGoat\Proto\RaftServerpb\TabletSnapshotEnd|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\TabletSnapshotEnd::class);
         $this->writeOneof(4, $var);
 
         return $this;

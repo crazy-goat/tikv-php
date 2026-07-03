@@ -62,7 +62,7 @@ class BatchCommandsEmptyRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTestId($var)
+    public function setTestId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->test_id = $var;
@@ -88,7 +88,7 @@ class BatchCommandsEmptyRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setDelayTime($var)
+    public function setDelayTime(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->delay_time = $var;

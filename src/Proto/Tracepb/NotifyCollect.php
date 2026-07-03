@@ -49,7 +49,7 @@ class NotifyCollect extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTraceId($var)
+    public function setTraceId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->trace_id = $var;

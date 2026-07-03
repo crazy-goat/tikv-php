@@ -80,9 +80,8 @@ class RawCoprocessorRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -102,9 +101,9 @@ class RawCoprocessorRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCoprName($var)
+    public function setCoprName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->copr_name = $var;
 
         return $this;
@@ -128,9 +127,9 @@ class RawCoprocessorRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCoprVersionReq($var)
+    public function setCoprVersionReq(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->copr_version_req = $var;
 
         return $this;
@@ -150,7 +149,7 @@ class RawCoprocessorRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\KeyRange[] $var
      * @return $this
      */
-    public function setRanges($var)
+    public function setRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\KeyRange::class);
         $this->ranges = $arr;
@@ -172,9 +171,9 @@ class RawCoprocessorRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;

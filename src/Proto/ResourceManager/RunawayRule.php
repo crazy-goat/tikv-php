@@ -57,7 +57,7 @@ class RunawayRule extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setExecElapsedTimeMs($var)
+    public function setExecElapsedTimeMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->exec_elapsed_time_ms = $var;
@@ -79,7 +79,7 @@ class RunawayRule extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProcessedKeys($var)
+    public function setProcessedKeys(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->processed_keys = $var;
@@ -101,7 +101,7 @@ class RunawayRule extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRequestUnit($var)
+    public function setRequestUnit(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->request_unit = $var;

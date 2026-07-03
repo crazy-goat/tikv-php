@@ -62,7 +62,7 @@ class DiskFull extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setStoreId($var)
+    public function setStoreId(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->store_id = $arr;
@@ -88,9 +88,9 @@ class DiskFull extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setReason($var)
+    public function setReason(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->reason = $var;
 
         return $this;

@@ -54,7 +54,7 @@ class AwakenRegions extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setAbnormalStores($var)
+    public function setAbnormalStores(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->abnormal_stores = $arr;

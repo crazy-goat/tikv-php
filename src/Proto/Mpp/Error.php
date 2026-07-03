@@ -57,7 +57,7 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setCode($var)
+    public function setCode(int $var)
     {
         GPBUtil::checkInt32($var);
         $this->code = $var;
@@ -79,9 +79,9 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setMsg($var)
+    public function setMsg(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->msg = $var;
 
         return $this;
@@ -101,7 +101,7 @@ class Error extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMppVersion($var)
+    public function setMppVersion(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->mpp_version = $var;

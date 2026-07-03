@@ -47,9 +47,9 @@ class TiFlashSystemTableRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setSql($var)
+    public function setSql(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->sql = $var;
 
         return $this;

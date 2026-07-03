@@ -62,9 +62,8 @@ class IsBootstrappedResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -84,9 +83,8 @@ class IsBootstrappedResponse extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setBootstrapped($var)
+    public function setBootstrapped(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->bootstrapped = $var;
 
         return $this;

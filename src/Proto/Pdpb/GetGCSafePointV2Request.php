@@ -62,9 +62,8 @@ class GetGCSafePointV2Request extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -84,7 +83,7 @@ class GetGCSafePointV2Request extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;

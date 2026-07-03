@@ -47,7 +47,7 @@ class DebugInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\MvccDebugInfo[] $var
      * @return $this
      */
-    public function setMvccInfo($var)
+    public function setMvccInfo(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\MvccDebugInfo::class);
         $this->mvcc_info = $arr;

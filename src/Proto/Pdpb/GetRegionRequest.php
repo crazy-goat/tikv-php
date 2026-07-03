@@ -67,9 +67,8 @@ class GetRegionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -89,9 +88,9 @@ class GetRegionRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setRegionKey($var)
+    public function setRegionKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->region_key = $var;
 
         return $this;
@@ -111,9 +110,8 @@ class GetRegionRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setNeedBuckets($var)
+    public function setNeedBuckets(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->need_buckets = $var;
 
         return $this;

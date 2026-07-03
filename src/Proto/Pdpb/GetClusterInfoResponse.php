@@ -72,9 +72,8 @@ class GetClusterInfoResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -82,7 +81,7 @@ class GetClusterInfoResponse extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>repeated .pdpb.ServiceMode serviceModes = 2;</code>
-     * @return RepeatedField<int>
+     * @return RepeatedField<int> one of the values in {@see \CrazyGoat\Proto\Pdpb\ServiceMode}
      */
     public function getServiceModes()
     {
@@ -91,10 +90,10 @@ class GetClusterInfoResponse extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>repeated .pdpb.ServiceMode serviceModes = 2;</code>
-     * @param int[] $var
+     * @param int[] $var one of the values in {@see \CrazyGoat\Proto\Pdpb\ServiceMode}
      * @return $this
      */
-    public function setServiceModes($var)
+    public function setServiceModes(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::ENUM, \CrazyGoat\Proto\Pdpb\ServiceMode::class);
         $this->serviceModes = $arr;
@@ -122,7 +121,7 @@ class GetClusterInfoResponse extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setTsoUrls($var)
+    public function setTsoUrls(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::STRING);
         $this->tso_urls = $arr;

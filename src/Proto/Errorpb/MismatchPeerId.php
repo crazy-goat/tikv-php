@@ -55,7 +55,7 @@ class MismatchPeerId extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRequestPeerId($var)
+    public function setRequestPeerId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->request_peer_id = $var;
@@ -77,7 +77,7 @@ class MismatchPeerId extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStorePeerId($var)
+    public function setStorePeerId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->store_peer_id = $var;

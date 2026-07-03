@@ -62,9 +62,8 @@ class RaftLocalState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Eraftpb\HardState $var
      * @return $this
      */
-    public function setHardState($var)
+    public function setHardState(\CrazyGoat\Proto\Eraftpb\HardState|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Eraftpb\HardState::class);
         $this->hard_state = $var;
 
         return $this;
@@ -84,7 +83,7 @@ class RaftLocalState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLastIndex($var)
+    public function setLastIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->last_index = $var;

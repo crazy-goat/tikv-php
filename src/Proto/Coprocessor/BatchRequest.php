@@ -122,9 +122,8 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -144,7 +143,7 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTp($var)
+    public function setTp(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->tp = $var;
@@ -166,9 +165,9 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;
@@ -188,7 +187,7 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\RegionInfo[] $var
      * @return $this
      */
-    public function setRegions($var)
+    public function setRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\RegionInfo::class);
         $this->regions = $arr;
@@ -210,7 +209,7 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -236,7 +235,7 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSchemaVer($var)
+    public function setSchemaVer(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->schema_ver = $var;
@@ -262,7 +261,7 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\TableRegions[] $var
      * @return $this
      */
-    public function setTableRegions($var)
+    public function setTableRegions(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\TableRegions::class);
         $this->table_regions = $arr;
@@ -284,9 +283,9 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setLogId($var)
+    public function setLogId(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->log_id = $var;
 
         return $this;
@@ -310,7 +309,7 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setConnectionId($var)
+    public function setConnectionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->connection_id = $var;
@@ -336,9 +335,9 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setConnectionAlias($var)
+    public function setConnectionAlias(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->connection_alias = $var;
 
         return $this;
@@ -362,7 +361,7 @@ class BatchRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\TableShardInfos[] $var
      * @return $this
      */
-    public function setTableShardInfos($var)
+    public function setTableShardInfos(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\TableShardInfos::class);
         $this->table_shard_infos = $arr;

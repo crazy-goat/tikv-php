@@ -57,7 +57,7 @@ class ScanInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTotal($var)
+    public function setTotal(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->total = $var;
@@ -79,7 +79,7 @@ class ScanInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProcessed($var)
+    public function setProcessed(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->processed = $var;
@@ -101,7 +101,7 @@ class ScanInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadBytes($var)
+    public function setReadBytes(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->read_bytes = $var;

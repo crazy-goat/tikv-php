@@ -67,9 +67,8 @@ class GroupRawResourceSettings extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucket $var
      * @return $this
      */
-    public function setCpu($var)
+    public function setCpu(\CrazyGoat\Proto\ResourceManager\TokenBucket|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\TokenBucket::class);
         $this->cpu = $var;
 
         return $this;
@@ -99,9 +98,8 @@ class GroupRawResourceSettings extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucket $var
      * @return $this
      */
-    public function setIoRead($var)
+    public function setIoRead(\CrazyGoat\Proto\ResourceManager\TokenBucket|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\TokenBucket::class);
         $this->io_read = $var;
 
         return $this;
@@ -131,9 +129,8 @@ class GroupRawResourceSettings extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\TokenBucket $var
      * @return $this
      */
-    public function setIoWrite($var)
+    public function setIoWrite(\CrazyGoat\Proto\ResourceManager\TokenBucket|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\TokenBucket::class);
         $this->io_write = $var;
 
         return $this;

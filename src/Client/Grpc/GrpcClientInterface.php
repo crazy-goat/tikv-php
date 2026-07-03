@@ -32,6 +32,31 @@ interface GrpcClientInterface
     ): Message;
 
     /**
+     * Execute a client-streaming gRPC call.
+     *
+     * Opens a client-streaming RPC: sends a sequence of request messages
+     * and receives a single response. Used for SST import (Write/Upload).
+     *
+     * @template T of Message
+     * @param string $address Target address
+     * @param string $service Service name (e.g., "import_sstpb.ImportSST")
+     * @param string $method Method name (e.g., "Write")
+     * @param Message[] $requests Sequence of request messages to stream
+     * @param class-string<T> $responseClass Response message class name
+     * @param int|null $timeoutMs Optional timeout in milliseconds
+     * @return T Response message
+     * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException On gRPC error
+     */
+    public function callStreaming(
+        string $address,
+        string $service,
+        string $method,
+        array $requests,
+        string $responseClass,
+        ?int $timeoutMs = null,
+    ): Message;
+
+    /**
      * Close all open channels and release resources.
      */
     public function close(): void;

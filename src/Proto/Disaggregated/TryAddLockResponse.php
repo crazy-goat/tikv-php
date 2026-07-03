@@ -57,9 +57,8 @@ class TryAddLockResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\S3LockResult $var
      * @return $this
      */
-    public function setResult($var)
+    public function setResult(\CrazyGoat\Proto\Disaggregated\S3LockResult|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\S3LockResult::class);
         $this->result = $var;
 
         return $this;

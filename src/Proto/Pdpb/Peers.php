@@ -47,7 +47,7 @@ class Peers extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setPeers($var)
+    public function setPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->peers = $arr;

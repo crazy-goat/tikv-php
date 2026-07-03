@@ -62,7 +62,7 @@ class AvailabilityContext extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFromRegionId($var)
+    public function setFromRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->from_region_id = $var;
@@ -94,9 +94,8 @@ class AvailabilityContext extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setFromRegionEpoch($var)
+    public function setFromRegionEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->from_region_epoch = $var;
 
         return $this;
@@ -116,9 +115,8 @@ class AvailabilityContext extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setUnavailable($var)
+    public function setUnavailable(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->unavailable = $var;
 
         return $this;
@@ -138,9 +136,8 @@ class AvailabilityContext extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setTrimmed($var)
+    public function setTrimmed(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->trimmed = $var;
 
         return $this;

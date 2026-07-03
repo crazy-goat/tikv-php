@@ -97,7 +97,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGC($var)
+    public function setGC(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->GC = $var;
@@ -119,7 +119,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGet($var)
+    public function setGet(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Get = $var;
@@ -141,7 +141,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setScan($var)
+    public function setScan(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Scan = $var;
@@ -163,7 +163,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCoprocessor($var)
+    public function setCoprocessor(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Coprocessor = $var;
@@ -185,7 +185,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setDelete($var)
+    public function setDelete(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Delete = $var;
@@ -207,7 +207,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setDeleteRange($var)
+    public function setDeleteRange(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->DeleteRange = $var;
@@ -229,7 +229,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPut($var)
+    public function setPut(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Put = $var;
@@ -251,7 +251,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPrewrite($var)
+    public function setPrewrite(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Prewrite = $var;
@@ -273,7 +273,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAcquirePessimisticLock($var)
+    public function setAcquirePessimisticLock(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->AcquirePessimisticLock = $var;
@@ -295,7 +295,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommit($var)
+    public function setCommit(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Commit = $var;
@@ -317,7 +317,7 @@ class QueryStats extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRollback($var)
+    public function setRollback(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->Rollback = $var;

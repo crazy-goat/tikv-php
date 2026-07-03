@@ -52,7 +52,7 @@ class SplitID extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setNewRegionId($var)
+    public function setNewRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->new_region_id = $var;
@@ -74,7 +74,7 @@ class SplitID extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setNewPeerIds($var)
+    public function setNewPeerIds(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->new_peer_ids = $arr;

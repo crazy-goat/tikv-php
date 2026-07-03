@@ -84,7 +84,7 @@ class RequestHeader extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setClusterId($var)
+    public function setClusterId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->cluster_id = $var;
@@ -112,7 +112,7 @@ class RequestHeader extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSenderId($var)
+    public function setSenderId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->sender_id = $var;
@@ -140,9 +140,9 @@ class RequestHeader extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCallerId($var)
+    public function setCallerId(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->caller_id = $var;
 
         return $this;
@@ -168,9 +168,9 @@ class RequestHeader extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCallerComponent($var)
+    public function setCallerComponent(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->caller_component = $var;
 
         return $this;

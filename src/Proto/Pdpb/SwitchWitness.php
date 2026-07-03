@@ -52,7 +52,7 @@ class SwitchWitness extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPeerId($var)
+    public function setPeerId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->peer_id = $var;
@@ -74,9 +74,8 @@ class SwitchWitness extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsWitness($var)
+    public function setIsWitness(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_witness = $var;
 
         return $this;

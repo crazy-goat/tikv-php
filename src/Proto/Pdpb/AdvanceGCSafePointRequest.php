@@ -67,9 +67,8 @@ class AdvanceGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -99,9 +98,8 @@ class AdvanceGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\KeyspaceScope $var
      * @return $this
      */
-    public function setKeyspaceScope($var)
+    public function setKeyspaceScope(\CrazyGoat\Proto\Pdpb\KeyspaceScope|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\KeyspaceScope::class);
         $this->keyspace_scope = $var;
 
         return $this;
@@ -121,7 +119,7 @@ class AdvanceGCSafePointRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTarget($var)
+    public function setTarget(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->target = $var;

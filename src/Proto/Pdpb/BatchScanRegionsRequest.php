@@ -92,9 +92,8 @@ class BatchScanRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -114,9 +113,8 @@ class BatchScanRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setNeedBuckets($var)
+    public function setNeedBuckets(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->need_buckets = $var;
 
         return $this;
@@ -140,7 +138,7 @@ class BatchScanRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\KeyRange[] $var
      * @return $this
      */
-    public function setRanges($var)
+    public function setRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\KeyRange::class);
         $this->ranges = $arr;
@@ -166,7 +164,7 @@ class BatchScanRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setLimit($var)
+    public function setLimit(int $var)
     {
         GPBUtil::checkInt32($var);
         $this->limit = $var;
@@ -198,9 +196,8 @@ class BatchScanRegionsRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setContainAllKeyRange($var)
+    public function setContainAllKeyRange(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->contain_all_key_range = $var;
 
         return $this;

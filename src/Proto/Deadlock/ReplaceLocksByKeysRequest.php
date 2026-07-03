@@ -47,7 +47,7 @@ class ReplaceLocksByKeysRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Deadlock\ReplaceLockByKeyItem[] $var
      * @return $this
      */
-    public function setItems($var)
+    public function setItems(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Deadlock\ReplaceLockByKeyItem::class);
         $this->items = $arr;

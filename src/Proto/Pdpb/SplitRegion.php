@@ -40,7 +40,7 @@ class SplitRegion extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.CheckPolicy policy = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Pdpb\CheckPolicy}
      */
     public function getPolicy()
     {
@@ -49,10 +49,10 @@ class SplitRegion extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.CheckPolicy policy = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Pdpb\CheckPolicy}
      * @return $this
      */
-    public function setPolicy($var)
+    public function setPolicy(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Pdpb\CheckPolicy::class);
         $this->policy = $var;
@@ -74,7 +74,7 @@ class SplitRegion extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setKeys($var)
+    public function setKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->keys = $arr;

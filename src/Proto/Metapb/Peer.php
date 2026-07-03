@@ -62,7 +62,7 @@ class Peer extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setId($var)
+    public function setId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->id = $var;
@@ -84,7 +84,7 @@ class Peer extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStoreId($var)
+    public function setStoreId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->store_id = $var;
@@ -94,7 +94,7 @@ class Peer extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.metapb.PeerRole role = 3;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Metapb\PeerRole}
      */
     public function getRole()
     {
@@ -103,10 +103,10 @@ class Peer extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.metapb.PeerRole role = 3;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Metapb\PeerRole}
      * @return $this
      */
-    public function setRole($var)
+    public function setRole(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Metapb\PeerRole::class);
         $this->role = $var;
@@ -128,9 +128,8 @@ class Peer extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsWitness($var)
+    public function setIsWitness(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_witness = $var;
 
         return $this;

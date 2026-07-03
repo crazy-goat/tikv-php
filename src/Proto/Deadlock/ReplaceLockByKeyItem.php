@@ -62,7 +62,7 @@ class ReplaceLockByKeyItem extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKeyHash($var)
+    public function setKeyHash(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->key_hash = $var;
@@ -84,9 +84,9 @@ class ReplaceLockByKeyItem extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -106,7 +106,7 @@ class ReplaceLockByKeyItem extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setOldLockTs($var)
+    public function setOldLockTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->old_lock_ts = $var;
@@ -128,7 +128,7 @@ class ReplaceLockByKeyItem extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setNewLockTs($var)
+    public function setNewLockTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->new_lock_ts = $var;

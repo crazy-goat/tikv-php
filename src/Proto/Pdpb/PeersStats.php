@@ -47,7 +47,7 @@ class PeersStats extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\PeerStats[] $var
      * @return $this
      */
-    public function setPeers($var)
+    public function setPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\PeerStats::class);
         $this->peers = $arr;

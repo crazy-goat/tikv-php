@@ -59,7 +59,7 @@ class SafePointEvent extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;
@@ -81,7 +81,7 @@ class SafePointEvent extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSafePoint($var)
+    public function setSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->safe_point = $var;
@@ -91,7 +91,7 @@ class SafePointEvent extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.EventType type = 3;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Pdpb\EventType}
      */
     public function getType()
     {
@@ -100,10 +100,10 @@ class SafePointEvent extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.pdpb.EventType type = 3;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Pdpb\EventType}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Pdpb\EventType::class);
         $this->type = $var;

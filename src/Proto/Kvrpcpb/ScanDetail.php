@@ -69,9 +69,8 @@ class ScanDetail extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ScanInfo $var
      * @return $this
      */
-    public function setWrite($var)
+    public function setWrite(\CrazyGoat\Proto\Kvrpcpb\ScanInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ScanInfo::class);
         $this->write = $var;
 
         return $this;
@@ -101,9 +100,8 @@ class ScanDetail extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ScanInfo $var
      * @return $this
      */
-    public function setLock($var)
+    public function setLock(\CrazyGoat\Proto\Kvrpcpb\ScanInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ScanInfo::class);
         $this->lock = $var;
 
         return $this;
@@ -133,9 +131,8 @@ class ScanDetail extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ScanInfo $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(\CrazyGoat\Proto\Kvrpcpb\ScanInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ScanInfo::class);
         $this->data = $var;
 
         return $this;

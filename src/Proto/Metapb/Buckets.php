@@ -79,7 +79,7 @@ class Buckets extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -105,7 +105,7 @@ class Buckets extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setVersion($var)
+    public function setVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->version = $var;
@@ -131,7 +131,7 @@ class Buckets extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setKeys($var)
+    public function setKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->keys = $arr;
@@ -167,9 +167,8 @@ class Buckets extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\BucketStats $var
      * @return $this
      */
-    public function setStats($var)
+    public function setStats(\CrazyGoat\Proto\Metapb\BucketStats|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\BucketStats::class);
         $this->stats = $var;
 
         return $this;
@@ -193,7 +192,7 @@ class Buckets extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPeriodInMs($var)
+    public function setPeriodInMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->period_in_ms = $var;

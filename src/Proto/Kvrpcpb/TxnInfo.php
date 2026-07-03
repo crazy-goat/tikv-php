@@ -60,7 +60,7 @@ class TxnInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTxn($var)
+    public function setTxn(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->txn = $var;
@@ -82,7 +82,7 @@ class TxnInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStatus($var)
+    public function setStatus(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->status = $var;
@@ -108,9 +108,8 @@ class TxnInfo extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTxnFile($var)
+    public function setIsTxnFile(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_txn_file = $var;
 
         return $this;

@@ -87,9 +87,8 @@ class DelegateRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -109,7 +108,7 @@ class DelegateRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -131,7 +130,7 @@ class DelegateRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\KeyRange[] $var
      * @return $this
      */
-    public function setRanges($var)
+    public function setRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\KeyRange::class);
         $this->ranges = $arr;
@@ -159,7 +158,7 @@ class DelegateRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMemTableSequence($var)
+    public function setMemTableSequence(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->mem_table_sequence = $var;
@@ -187,7 +186,7 @@ class DelegateRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSnapshotSequence($var)
+    public function setSnapshotSequence(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->snapshot_sequence = $var;

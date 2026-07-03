@@ -74,9 +74,8 @@ class EstablishMPPConnectionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Mpp\TaskMeta $var
      * @return $this
      */
-    public function setSenderMeta($var)
+    public function setSenderMeta(\CrazyGoat\Proto\Mpp\TaskMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Mpp\TaskMeta::class);
         $this->sender_meta = $var;
 
         return $this;
@@ -110,9 +109,8 @@ class EstablishMPPConnectionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Mpp\TaskMeta $var
      * @return $this
      */
-    public function setReceiverMeta($var)
+    public function setReceiverMeta(\CrazyGoat\Proto\Mpp\TaskMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Mpp\TaskMeta::class);
         $this->receiver_meta = $var;
 
         return $this;

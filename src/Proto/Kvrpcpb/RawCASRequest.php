@@ -95,9 +95,8 @@ class RawCASRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -117,9 +116,9 @@ class RawCASRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -139,9 +138,9 @@ class RawCASRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setValue($var)
+    public function setValue(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->value = $var;
 
         return $this;
@@ -161,9 +160,8 @@ class RawCASRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setPreviousNotExist($var)
+    public function setPreviousNotExist(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->previous_not_exist = $var;
 
         return $this;
@@ -183,9 +181,9 @@ class RawCASRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPreviousValue($var)
+    public function setPreviousValue(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->previous_value = $var;
 
         return $this;
@@ -205,9 +203,9 @@ class RawCASRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setCf($var)
+    public function setCf(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->cf = $var;
 
         return $this;
@@ -227,7 +225,7 @@ class RawCASRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTtl($var)
+    public function setTtl(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->ttl = $var;
@@ -253,9 +251,8 @@ class RawCASRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setDelete($var)
+    public function setDelete(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->delete = $var;
 
         return $this;

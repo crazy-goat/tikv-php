@@ -64,7 +64,7 @@ class ForUpdateTSConstraint extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setIndex($var)
+    public function setIndex(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->index = $var;
@@ -90,7 +90,7 @@ class ForUpdateTSConstraint extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setExpectedForUpdateTs($var)
+    public function setExpectedForUpdateTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->expected_for_update_ts = $var;

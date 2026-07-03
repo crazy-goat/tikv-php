@@ -10,10 +10,24 @@ use Google\Protobuf\Internal\GPBUtil;
 use Google\Protobuf\RepeatedField;
 
 /**
+ * General encryption metadata for any data type.
+ *
  * Generated from protobuf message <code>encryptionpb.EncryptionMeta</code>
  */
 class EncryptionMeta extends \Google\Protobuf\Internal\Message
 {
+    /**
+     * ID of the key used to encrypt the data.
+     *
+     * Generated from protobuf field <code>uint64 key_id = 1;</code>
+     */
+    protected $key_id = 0;
+    /**
+     * Initialization vector (IV) of the data.
+     *
+     * Generated from protobuf field <code>bytes iv = 2;</code>
+     */
+    protected $iv = '';
 
     /**
      * Constructor.
@@ -21,11 +35,67 @@ class EncryptionMeta extends \Google\Protobuf\Internal\Message
      * @param array $data {
      *     Optional. Data for populating the Message object.
      *
+     *     @type int|string $key_id
+     *           ID of the key used to encrypt the data.
+     *     @type string $iv
+     *           Initialization vector (IV) of the data.
      * }
      */
     public function __construct($data = NULL) {
         \CrazyGoat\Proto\GPBMetadata\Encryptionpb::initOnce();
         parent::__construct($data);
+    }
+
+    /**
+     * ID of the key used to encrypt the data.
+     *
+     * Generated from protobuf field <code>uint64 key_id = 1;</code>
+     * @return int|string
+     */
+    public function getKeyId()
+    {
+        return $this->key_id;
+    }
+
+    /**
+     * ID of the key used to encrypt the data.
+     *
+     * Generated from protobuf field <code>uint64 key_id = 1;</code>
+     * @param int|string $var
+     * @return $this
+     */
+    public function setKeyId(int|string $var)
+    {
+        GPBUtil::checkUint64($var);
+        $this->key_id = $var;
+
+        return $this;
+    }
+
+    /**
+     * Initialization vector (IV) of the data.
+     *
+     * Generated from protobuf field <code>bytes iv = 2;</code>
+     * @return string
+     */
+    public function getIv()
+    {
+        return $this->iv;
+    }
+
+    /**
+     * Initialization vector (IV) of the data.
+     *
+     * Generated from protobuf field <code>bytes iv = 2;</code>
+     * @param string $var
+     * @return $this
+     */
+    public function setIv(string $var)
+    {
+        GPBUtil::checkString($var, false);
+        $this->iv = $var;
+
+        return $this;
     }
 
 }

@@ -83,7 +83,7 @@ class Span extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSpanId($var)
+    public function setSpanId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->span_id = $var;
@@ -105,7 +105,7 @@ class Span extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setParentId($var)
+    public function setParentId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->parent_id = $var;
@@ -127,7 +127,7 @@ class Span extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBeginUnixNs($var)
+    public function setBeginUnixNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->begin_unix_ns = $var;
@@ -149,7 +149,7 @@ class Span extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setDurationNs($var)
+    public function setDurationNs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->duration_ns = $var;
@@ -171,9 +171,9 @@ class Span extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEvent($var)
+    public function setEvent(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->event = $var;
 
         return $this;
@@ -193,7 +193,7 @@ class Span extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tracepb\Property[] $var
      * @return $this
      */
-    public function setProperties($var)
+    public function setProperties(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Tracepb\Property::class);
         $this->properties = $arr;

@@ -72,9 +72,8 @@ class AdvanceTxnSafePointResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -94,7 +93,7 @@ class AdvanceTxnSafePointResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setOldTxnSafePoint($var)
+    public function setOldTxnSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->old_txn_safe_point = $var;
@@ -116,7 +115,7 @@ class AdvanceTxnSafePointResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setNewTxnSafePoint($var)
+    public function setNewTxnSafePoint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->new_txn_safe_point = $var;
@@ -138,9 +137,9 @@ class AdvanceTxnSafePointResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setBlockerDescription($var)
+    public function setBlockerDescription(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->blocker_description = $var;
 
         return $this;

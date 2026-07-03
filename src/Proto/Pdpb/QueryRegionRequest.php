@@ -89,9 +89,8 @@ class QueryRegionRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -115,9 +114,8 @@ class QueryRegionRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setNeedBuckets($var)
+    public function setNeedBuckets(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->need_buckets = $var;
 
         return $this;
@@ -141,7 +139,7 @@ class QueryRegionRequest extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setIds($var)
+    public function setIds(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->ids = $arr;
@@ -167,7 +165,7 @@ class QueryRegionRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setKeys($var)
+    public function setKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->keys = $arr;
@@ -193,7 +191,7 @@ class QueryRegionRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setPrevKeys($var)
+    public function setPrevKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->prev_keys = $arr;

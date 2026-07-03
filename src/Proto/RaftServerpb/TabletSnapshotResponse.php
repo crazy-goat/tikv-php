@@ -57,9 +57,8 @@ class TabletSnapshotResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\AcceptedSnapshotFiles $var
      * @return $this
      */
-    public function setFiles($var)
+    public function setFiles(\CrazyGoat\Proto\RaftServerpb\AcceptedSnapshotFiles|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\AcceptedSnapshotFiles::class);
         $this->files = $var;
 
         return $this;

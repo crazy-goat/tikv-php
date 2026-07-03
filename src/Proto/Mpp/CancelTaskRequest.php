@@ -64,9 +64,8 @@ class CancelTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Mpp\TaskMeta $var
      * @return $this
      */
-    public function setMeta($var)
+    public function setMeta(\CrazyGoat\Proto\Mpp\TaskMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Mpp\TaskMeta::class);
         $this->meta = $var;
 
         return $this;
@@ -96,9 +95,8 @@ class CancelTaskRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Mpp\Error $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Mpp\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Mpp\Error::class);
         $this->error = $var;
 
         return $this;

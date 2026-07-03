@@ -52,9 +52,9 @@ class Snapshot extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;
@@ -84,9 +84,8 @@ class Snapshot extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Eraftpb\SnapshotMetadata $var
      * @return $this
      */
-    public function setMetadata($var)
+    public function setMetadata(\CrazyGoat\Proto\Eraftpb\SnapshotMetadata|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Eraftpb\SnapshotMetadata::class);
         $this->metadata = $var;
 
         return $this;

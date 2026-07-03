@@ -62,7 +62,7 @@ class RemoteParentSpan extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTraceId($var)
+    public function setTraceId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->trace_id = $var;
@@ -88,7 +88,7 @@ class RemoteParentSpan extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSpanId($var)
+    public function setSpanId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->span_id = $var;

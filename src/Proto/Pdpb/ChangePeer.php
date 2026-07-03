@@ -18,6 +18,10 @@ class ChangePeer extends \Google\Protobuf\Internal\Message
      * Generated from protobuf field <code>.metapb.Peer peer = 1;</code>
      */
     protected $peer = null;
+    /**
+     * Generated from protobuf field <code>.eraftpb.ConfChangeType change_type = 2;</code>
+     */
+    protected $change_type = 0;
 
     /**
      * Constructor.
@@ -26,6 +30,7 @@ class ChangePeer extends \Google\Protobuf\Internal\Message
      *     Optional. Data for populating the Message object.
      *
      *     @type \CrazyGoat\Proto\Metapb\Peer $peer
+     *     @type int $change_type
      * }
      */
     public function __construct($data = NULL) {
@@ -57,10 +62,31 @@ class ChangePeer extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setPeer($var)
+    public function setPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->peer = $var;
+
+        return $this;
+    }
+
+    /**
+     * Generated from protobuf field <code>.eraftpb.ConfChangeType change_type = 2;</code>
+     * @return int one of the values in {@see \CrazyGoat\Proto\Eraftpb\ConfChangeType}
+     */
+    public function getChangeType()
+    {
+        return $this->change_type;
+    }
+
+    /**
+     * Generated from protobuf field <code>.eraftpb.ConfChangeType change_type = 2;</code>
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Eraftpb\ConfChangeType}
+     * @return $this
+     */
+    public function setChangeType(int $var)
+    {
+        GPBUtil::checkEnum($var, \CrazyGoat\Proto\Eraftpb\ConfChangeType::class);
+        $this->change_type = $var;
 
         return $this;
     }

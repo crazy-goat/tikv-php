@@ -70,9 +70,9 @@ class ServerIsBusy extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setReason($var)
+    public function setReason(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->reason = $var;
 
         return $this;
@@ -96,7 +96,7 @@ class ServerIsBusy extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBackoffMs($var)
+    public function setBackoffMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->backoff_ms = $var;
@@ -118,7 +118,7 @@ class ServerIsBusy extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setEstimatedWaitMs($var)
+    public function setEstimatedWaitMs(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->estimated_wait_ms = $var;
@@ -144,7 +144,7 @@ class ServerIsBusy extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAppliedIndex($var)
+    public function setAppliedIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->applied_index = $var;

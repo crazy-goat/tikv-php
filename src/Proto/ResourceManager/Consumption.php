@@ -115,9 +115,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setRRU($var)
+    public function setRRU(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->r_r_u = $var;
 
         return $this;
@@ -137,9 +136,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setWRU($var)
+    public function setWRU(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->w_r_u = $var;
 
         return $this;
@@ -159,9 +157,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setReadBytes($var)
+    public function setReadBytes(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->read_bytes = $var;
 
         return $this;
@@ -181,9 +178,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setWriteBytes($var)
+    public function setWriteBytes(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->write_bytes = $var;
 
         return $this;
@@ -203,9 +199,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setTotalCpuTimeMs($var)
+    public function setTotalCpuTimeMs(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->total_cpu_time_ms = $var;
 
         return $this;
@@ -225,9 +220,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setSqlLayerCpuTimeMs($var)
+    public function setSqlLayerCpuTimeMs(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->sql_layer_cpu_time_ms = $var;
 
         return $this;
@@ -247,9 +241,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setKvReadRpcCount($var)
+    public function setKvReadRpcCount(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->kv_read_rpc_count = $var;
 
         return $this;
@@ -269,9 +262,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setKvWriteRpcCount($var)
+    public function setKvWriteRpcCount(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->kv_write_rpc_count = $var;
 
         return $this;
@@ -291,7 +283,7 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadCrossAzTrafficBytes($var)
+    public function setReadCrossAzTrafficBytes(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->read_cross_az_traffic_bytes = $var;
@@ -313,7 +305,7 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setWriteCrossAzTrafficBytes($var)
+    public function setWriteCrossAzTrafficBytes(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->write_cross_az_traffic_bytes = $var;
@@ -341,9 +333,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setTikvRUV2($var)
+    public function setTikvRUV2(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->tikv_r_u_v2 = $var;
 
         return $this;
@@ -363,9 +354,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setTidbRUV2($var)
+    public function setTidbRUV2(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->tidb_r_u_v2 = $var;
 
         return $this;
@@ -389,9 +379,8 @@ class Consumption extends \Google\Protobuf\Internal\Message
      * @param float $var
      * @return $this
      */
-    public function setTiflashRUV2($var)
+    public function setTiflashRUV2(float $var)
     {
-        GPBUtil::checkDouble($var);
         $this->tiflash_r_u_v2 = $var;
 
         return $this;

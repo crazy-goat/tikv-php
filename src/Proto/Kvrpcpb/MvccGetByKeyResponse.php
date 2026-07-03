@@ -67,9 +67,8 @@ class MvccGetByKeyResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -89,9 +88,9 @@ class MvccGetByKeyResponse extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->error = $var;
 
         return $this;
@@ -121,9 +120,8 @@ class MvccGetByKeyResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\MvccInfo $var
      * @return $this
      */
-    public function setInfo($var)
+    public function setInfo(\CrazyGoat\Proto\Kvrpcpb\MvccInfo|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\MvccInfo::class);
         $this->info = $var;
 
         return $this;

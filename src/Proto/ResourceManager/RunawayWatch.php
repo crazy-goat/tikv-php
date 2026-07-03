@@ -59,7 +59,7 @@ class RunawayWatch extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLastingDurationMs($var)
+    public function setLastingDurationMs(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->lasting_duration_ms = $var;
@@ -69,7 +69,7 @@ class RunawayWatch extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.RunawayWatchType type = 2;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\ResourceManager\RunawayWatchType}
      */
     public function getType()
     {
@@ -78,10 +78,10 @@ class RunawayWatch extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.resource_manager.RunawayWatchType type = 2;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\ResourceManager\RunawayWatchType}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\ResourceManager\RunawayWatchType::class);
         $this->type = $var;

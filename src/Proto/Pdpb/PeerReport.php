@@ -15,6 +15,14 @@ use Google\Protobuf\RepeatedField;
 class PeerReport extends \Google\Protobuf\Internal\Message
 {
     /**
+     * Generated from protobuf field <code>.raft_serverpb.RaftLocalState raft_state = 1;</code>
+     */
+    protected $raft_state = null;
+    /**
+     * Generated from protobuf field <code>.raft_serverpb.RegionLocalState region_state = 2;</code>
+     */
+    protected $region_state = null;
+    /**
      * Generated from protobuf field <code>bool is_force_leader = 3;</code>
      */
     protected $is_force_leader = false;
@@ -37,6 +45,8 @@ class PeerReport extends \Google\Protobuf\Internal\Message
      * @param array $data {
      *     Optional. Data for populating the Message object.
      *
+     *     @type \CrazyGoat\Proto\RaftServerpb\RaftLocalState $raft_state
+     *     @type \CrazyGoat\Proto\RaftServerpb\RegionLocalState $region_state
      *     @type bool $is_force_leader
      *     @type bool $has_commit_merge
      *           The peer has proposed but uncommitted commit merge.
@@ -47,6 +57,68 @@ class PeerReport extends \Google\Protobuf\Internal\Message
     public function __construct($data = NULL) {
         \CrazyGoat\Proto\GPBMetadata\Pdpb::initOnce();
         parent::__construct($data);
+    }
+
+    /**
+     * Generated from protobuf field <code>.raft_serverpb.RaftLocalState raft_state = 1;</code>
+     * @return \CrazyGoat\Proto\RaftServerpb\RaftLocalState|null
+     */
+    public function getRaftState()
+    {
+        return $this->raft_state;
+    }
+
+    public function hasRaftState()
+    {
+        return isset($this->raft_state);
+    }
+
+    public function clearRaftState()
+    {
+        unset($this->raft_state);
+    }
+
+    /**
+     * Generated from protobuf field <code>.raft_serverpb.RaftLocalState raft_state = 1;</code>
+     * @param \CrazyGoat\Proto\RaftServerpb\RaftLocalState $var
+     * @return $this
+     */
+    public function setRaftState(\CrazyGoat\Proto\RaftServerpb\RaftLocalState|null $var)
+    {
+        $this->raft_state = $var;
+
+        return $this;
+    }
+
+    /**
+     * Generated from protobuf field <code>.raft_serverpb.RegionLocalState region_state = 2;</code>
+     * @return \CrazyGoat\Proto\RaftServerpb\RegionLocalState|null
+     */
+    public function getRegionState()
+    {
+        return $this->region_state;
+    }
+
+    public function hasRegionState()
+    {
+        return isset($this->region_state);
+    }
+
+    public function clearRegionState()
+    {
+        unset($this->region_state);
+    }
+
+    /**
+     * Generated from protobuf field <code>.raft_serverpb.RegionLocalState region_state = 2;</code>
+     * @param \CrazyGoat\Proto\RaftServerpb\RegionLocalState $var
+     * @return $this
+     */
+    public function setRegionState(\CrazyGoat\Proto\RaftServerpb\RegionLocalState|null $var)
+    {
+        $this->region_state = $var;
+
+        return $this;
     }
 
     /**
@@ -63,9 +135,8 @@ class PeerReport extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsForceLeader($var)
+    public function setIsForceLeader(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_force_leader = $var;
 
         return $this;
@@ -89,9 +160,8 @@ class PeerReport extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setHasCommitMerge($var)
+    public function setHasCommitMerge(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->has_commit_merge = $var;
 
         return $this;
@@ -115,7 +185,7 @@ class PeerReport extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAppliedIndex($var)
+    public function setAppliedIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->applied_index = $var;

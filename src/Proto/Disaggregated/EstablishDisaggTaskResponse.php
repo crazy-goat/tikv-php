@@ -84,9 +84,8 @@ class EstablishDisaggTaskResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\EstablishDisaggTaskError $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Disaggregated\EstablishDisaggTaskError|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\EstablishDisaggTaskError::class);
         $this->error = $var;
 
         return $this;
@@ -116,7 +115,7 @@ class EstablishDisaggTaskResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStoreId($var)
+    public function setStoreId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->store_id = $var;
@@ -148,9 +147,8 @@ class EstablishDisaggTaskResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\DisaggTaskMeta $var
      * @return $this
      */
-    public function setSnapshotId($var)
+    public function setSnapshotId(\CrazyGoat\Proto\Disaggregated\DisaggTaskMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\DisaggTaskMeta::class);
         $this->snapshot_id = $var;
 
         return $this;
@@ -174,7 +172,7 @@ class EstablishDisaggTaskResponse extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setTables($var)
+    public function setTables(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->tables = $arr;

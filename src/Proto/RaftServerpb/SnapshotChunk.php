@@ -62,9 +62,8 @@ class SnapshotChunk extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\RaftMessage $var
      * @return $this
      */
-    public function setMessage($var)
+    public function setMessage(\CrazyGoat\Proto\RaftServerpb\RaftMessage|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\RaftMessage::class);
         $this->message = $var;
 
         return $this;
@@ -84,9 +83,9 @@ class SnapshotChunk extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->data = $var;
 
         return $this;

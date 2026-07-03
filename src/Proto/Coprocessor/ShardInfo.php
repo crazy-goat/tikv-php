@@ -57,7 +57,7 @@ class ShardInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setShardId($var)
+    public function setShardId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->shard_id = $var;
@@ -79,7 +79,7 @@ class ShardInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setShardEpoch($var)
+    public function setShardEpoch(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->shard_epoch = $var;
@@ -101,7 +101,7 @@ class ShardInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Coprocessor\KeyRange[] $var
      * @return $this
      */
-    public function setRanges($var)
+    public function setRanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Coprocessor\KeyRange::class);
         $this->ranges = $arr;

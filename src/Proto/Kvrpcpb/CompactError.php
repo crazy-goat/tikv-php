@@ -52,9 +52,8 @@ class CompactError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CompactErrorInvalidStartKey $var
      * @return $this
      */
-    public function setErrInvalidStartKey($var)
+    public function setErrInvalidStartKey(\CrazyGoat\Proto\Kvrpcpb\CompactErrorInvalidStartKey|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CompactErrorInvalidStartKey::class);
         $this->writeOneof(1, $var);
 
         return $this;
@@ -79,9 +78,8 @@ class CompactError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CompactErrorPhysicalTableNotExist $var
      * @return $this
      */
-    public function setErrPhysicalTableNotExist($var)
+    public function setErrPhysicalTableNotExist(\CrazyGoat\Proto\Kvrpcpb\CompactErrorPhysicalTableNotExist|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CompactErrorPhysicalTableNotExist::class);
         $this->writeOneof(2, $var);
 
         return $this;
@@ -106,9 +104,8 @@ class CompactError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CompactErrorCompactInProgress $var
      * @return $this
      */
-    public function setErrCompactInProgress($var)
+    public function setErrCompactInProgress(\CrazyGoat\Proto\Kvrpcpb\CompactErrorCompactInProgress|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CompactErrorCompactInProgress::class);
         $this->writeOneof(3, $var);
 
         return $this;
@@ -133,9 +130,8 @@ class CompactError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\CompactErrorTooManyPendingTasks $var
      * @return $this
      */
-    public function setErrTooManyPendingTasks($var)
+    public function setErrTooManyPendingTasks(\CrazyGoat\Proto\Kvrpcpb\CompactErrorTooManyPendingTasks|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\CompactErrorTooManyPendingTasks::class);
         $this->writeOneof(4, $var);
 
         return $this;

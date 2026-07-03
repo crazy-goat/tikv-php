@@ -136,9 +136,9 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimaryLock($var)
+    public function setPrimaryLock(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary_lock = $var;
 
         return $this;
@@ -158,7 +158,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockVersion($var)
+    public function setLockVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_version = $var;
@@ -180,9 +180,9 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKey($var)
+    public function setKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->key = $var;
 
         return $this;
@@ -202,7 +202,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockTtl($var)
+    public function setLockTtl(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_ttl = $var;
@@ -228,7 +228,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTxnSize($var)
+    public function setTxnSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->txn_size = $var;
@@ -238,7 +238,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.Op lock_type = 6;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Op}
      */
     public function getLockType()
     {
@@ -247,10 +247,10 @@ class LockInfo extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.Op lock_type = 6;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Op}
      * @return $this
      */
-    public function setLockType($var)
+    public function setLockType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\Op::class);
         $this->lock_type = $var;
@@ -272,7 +272,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLockForUpdateTs($var)
+    public function setLockForUpdateTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->lock_for_update_ts = $var;
@@ -298,9 +298,8 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setUseAsyncCommit($var)
+    public function setUseAsyncCommit(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->use_async_commit = $var;
 
         return $this;
@@ -320,7 +319,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinCommitTs($var)
+    public function setMinCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_commit_ts = $var;
@@ -342,7 +341,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setSecondaries($var)
+    public function setSecondaries(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->secondaries = $arr;
@@ -372,7 +371,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setDurationToLastUpdateMs($var)
+    public function setDurationToLastUpdateMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->duration_to_last_update_ms = $var;
@@ -408,7 +407,7 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\LockInfo[] $var
      * @return $this
      */
-    public function setSharedLockInfos($var)
+    public function setSharedLockInfos(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Kvrpcpb\LockInfo::class);
         $this->shared_lock_infos = $arr;
@@ -434,9 +433,8 @@ class LockInfo extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTxnFile($var)
+    public function setIsTxnFile(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_txn_file = $var;
 
         return $this;

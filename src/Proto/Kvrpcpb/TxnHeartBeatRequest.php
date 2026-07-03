@@ -103,9 +103,8 @@ class TxnHeartBeatRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -129,9 +128,9 @@ class TxnHeartBeatRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPrimaryLock($var)
+    public function setPrimaryLock(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->primary_lock = $var;
 
         return $this;
@@ -155,7 +154,7 @@ class TxnHeartBeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartVersion($var)
+    public function setStartVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_version = $var;
@@ -181,7 +180,7 @@ class TxnHeartBeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAdviseLockTtl($var)
+    public function setAdviseLockTtl(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->advise_lock_ttl = $var;
@@ -211,7 +210,7 @@ class TxnHeartBeatRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMinCommitTs($var)
+    public function setMinCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->min_commit_ts = $var;
@@ -237,9 +236,8 @@ class TxnHeartBeatRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsTxnFile($var)
+    public function setIsTxnFile(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_txn_file = $var;
 
         return $this;

@@ -75,7 +75,7 @@ class HealthFeedback extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStoreId($var)
+    public function setStoreId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->store_id = $var;
@@ -111,7 +111,7 @@ class HealthFeedback extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFeedbackSeqNo($var)
+    public function setFeedbackSeqNo(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->feedback_seq_no = $var;
@@ -139,7 +139,7 @@ class HealthFeedback extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setSlowScore($var)
+    public function setSlowScore(int $var)
     {
         GPBUtil::checkInt32($var);
         $this->slow_score = $var;

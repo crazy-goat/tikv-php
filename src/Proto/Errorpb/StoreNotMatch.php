@@ -65,7 +65,7 @@ class StoreNotMatch extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRequestStoreId($var)
+    public function setRequestStoreId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->request_store_id = $var;
@@ -91,7 +91,7 @@ class StoreNotMatch extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setActualStoreId($var)
+    public function setActualStoreId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->actual_store_id = $var;

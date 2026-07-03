@@ -72,9 +72,8 @@ class SplitAndScatterRegionsResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ResponseHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\ResponseHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\ResponseHeader::class);
         $this->header = $var;
 
         return $this;
@@ -94,7 +93,7 @@ class SplitAndScatterRegionsResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setSplitFinishedPercentage($var)
+    public function setSplitFinishedPercentage(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->split_finished_percentage = $var;
@@ -116,7 +115,7 @@ class SplitAndScatterRegionsResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setScatterFinishedPercentage($var)
+    public function setScatterFinishedPercentage(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->scatter_finished_percentage = $var;
@@ -138,7 +137,7 @@ class SplitAndScatterRegionsResponse extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setRegionsId($var)
+    public function setRegionsId(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->regions_id = $arr;

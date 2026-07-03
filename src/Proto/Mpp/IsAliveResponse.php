@@ -52,9 +52,8 @@ class IsAliveResponse extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setAvailable($var)
+    public function setAvailable(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->available = $var;
 
         return $this;
@@ -74,7 +73,7 @@ class IsAliveResponse extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMppVersion($var)
+    public function setMppVersion(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->mpp_version = $var;

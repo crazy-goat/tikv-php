@@ -50,9 +50,8 @@ class TraceRecord extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tracepb\Report $var
      * @return $this
      */
-    public function setReport($var)
+    public function setReport(\CrazyGoat\Proto\Tracepb\Report|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Tracepb\Report::class);
         $this->writeOneof(1, $var);
 
         return $this;
@@ -77,9 +76,8 @@ class TraceRecord extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tracepb\NotifyCollect $var
      * @return $this
      */
-    public function setNotifyCollect($var)
+    public function setNotifyCollect(\CrazyGoat\Proto\Tracepb\NotifyCollect|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Tracepb\NotifyCollect::class);
         $this->writeOneof(2, $var);
 
         return $this;

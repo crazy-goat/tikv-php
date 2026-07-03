@@ -67,7 +67,7 @@ class RaftApplyState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAppliedIndex($var)
+    public function setAppliedIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->applied_index = $var;
@@ -89,7 +89,7 @@ class RaftApplyState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLastCommitIndex($var)
+    public function setLastCommitIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->last_commit_index = $var;
@@ -111,7 +111,7 @@ class RaftApplyState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitIndex($var)
+    public function setCommitIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_index = $var;
@@ -133,7 +133,7 @@ class RaftApplyState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitTerm($var)
+    public function setCommitTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_term = $var;
@@ -165,9 +165,8 @@ class RaftApplyState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\RaftTruncatedState $var
      * @return $this
      */
-    public function setTruncatedState($var)
+    public function setTruncatedState(\CrazyGoat\Proto\RaftServerpb\RaftTruncatedState|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\RaftTruncatedState::class);
         $this->truncated_state = $var;
 
         return $this;

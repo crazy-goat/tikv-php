@@ -312,7 +312,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRegionId($var)
+    public function setRegionId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->region_id = $var;
@@ -344,9 +344,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setRegionEpoch($var)
+    public function setRegionEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->region_epoch = $var;
 
         return $this;
@@ -376,9 +375,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer $var
      * @return $this
      */
-    public function setPeer($var)
+    public function setPeer(\CrazyGoat\Proto\Metapb\Peer|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->peer = $var;
 
         return $this;
@@ -398,7 +396,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTerm($var)
+    public function setTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->term = $var;
@@ -408,7 +406,7 @@ class Context extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.CommandPri priority = 6;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\CommandPri}
      */
     public function getPriority()
     {
@@ -417,10 +415,10 @@ class Context extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.CommandPri priority = 6;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\CommandPri}
      * @return $this
      */
-    public function setPriority($var)
+    public function setPriority(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\CommandPri::class);
         $this->priority = $var;
@@ -430,7 +428,7 @@ class Context extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.IsolationLevel isolation_level = 7;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\IsolationLevel}
      */
     public function getIsolationLevel()
     {
@@ -439,10 +437,10 @@ class Context extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.IsolationLevel isolation_level = 7;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\IsolationLevel}
      * @return $this
      */
-    public function setIsolationLevel($var)
+    public function setIsolationLevel(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\IsolationLevel::class);
         $this->isolation_level = $var;
@@ -464,9 +462,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setNotFillCache($var)
+    public function setNotFillCache(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->not_fill_cache = $var;
 
         return $this;
@@ -486,9 +483,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setSyncLog($var)
+    public function setSyncLog(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->sync_log = $var;
 
         return $this;
@@ -512,9 +508,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setRecordTimeStat($var)
+    public function setRecordTimeStat(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->record_time_stat = $var;
 
         return $this;
@@ -538,9 +533,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setRecordScanStat($var)
+    public function setRecordScanStat(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->record_scan_stat = $var;
 
         return $this;
@@ -560,9 +554,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setReplicaRead($var)
+    public function setReplicaRead(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->replica_read = $var;
 
         return $this;
@@ -588,7 +581,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setResolvedLocks($var)
+    public function setResolvedLocks(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->resolved_locks = $arr;
@@ -610,7 +603,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setMaxExecutionDurationMs($var)
+    public function setMaxExecutionDurationMs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->max_execution_duration_ms = $var;
@@ -638,7 +631,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setAppliedIndex($var)
+    public function setAppliedIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->applied_index = $var;
@@ -666,7 +659,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTaskId($var)
+    public function setTaskId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->task_id = $var;
@@ -694,9 +687,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setStaleRead($var)
+    public function setStaleRead(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->stale_read = $var;
 
         return $this;
@@ -720,9 +712,9 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setResourceGroupTag($var)
+    public function setResourceGroupTag(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->resource_group_tag = $var;
 
         return $this;
@@ -732,7 +724,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * Used to tell TiKV whether operations are allowed or not on different disk usages.
      *
      * Generated from protobuf field <code>.kvrpcpb.DiskFullOpt disk_full_opt = 19;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\DiskFullOpt}
      */
     public function getDiskFullOpt()
     {
@@ -743,10 +735,10 @@ class Context extends \Google\Protobuf\Internal\Message
      * Used to tell TiKV whether operations are allowed or not on different disk usages.
      *
      * Generated from protobuf field <code>.kvrpcpb.DiskFullOpt disk_full_opt = 19;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\DiskFullOpt}
      * @return $this
      */
-    public function setDiskFullOpt($var)
+    public function setDiskFullOpt(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\DiskFullOpt::class);
         $this->disk_full_opt = $var;
@@ -772,9 +764,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsRetryRequest($var)
+    public function setIsRetryRequest(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_retry_request = $var;
 
         return $this;
@@ -784,7 +775,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * API version implies the encode of the key and value.
      *
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 21;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      */
     public function getApiVersion()
     {
@@ -795,10 +786,10 @@ class Context extends \Google\Protobuf\Internal\Message
      * API version implies the encode of the key and value.
      *
      * Generated from protobuf field <code>.kvrpcpb.APIVersion api_version = 21;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\APIVersion}
      * @return $this
      */
-    public function setApiVersion($var)
+    public function setApiVersion(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\APIVersion::class);
         $this->api_version = $var;
@@ -826,7 +817,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setCommittedLocks($var)
+    public function setCommittedLocks(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->committed_locks = $arr;
@@ -862,9 +853,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tracepb\TraceContext $var
      * @return $this
      */
-    public function setTraceContext($var)
+    public function setTraceContext(\CrazyGoat\Proto\Tracepb\TraceContext|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Tracepb\TraceContext::class);
         $this->trace_context = $var;
 
         return $this;
@@ -890,9 +880,9 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setRequestSource($var)
+    public function setRequestSource(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->request_source = $var;
 
         return $this;
@@ -916,7 +906,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTxnSource($var)
+    public function setTxnSource(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->txn_source = $var;
@@ -944,7 +934,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setBusyThresholdMs($var)
+    public function setBusyThresholdMs(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->busy_threshold_ms = $var;
@@ -980,9 +970,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\ResourceControlContext $var
      * @return $this
      */
-    public function setResourceControlContext($var)
+    public function setResourceControlContext(\CrazyGoat\Proto\Kvrpcpb\ResourceControlContext|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\ResourceControlContext::class);
         $this->resource_control_context = $var;
 
         return $this;
@@ -1008,9 +997,9 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setKeyspaceName($var)
+    public function setKeyspaceName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->keyspace_name = $var;
 
         return $this;
@@ -1036,7 +1025,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(int $var)
     {
         GPBUtil::checkUint32($var);
         $this->keyspace_id = $var;
@@ -1064,7 +1053,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBucketsVersion($var)
+    public function setBucketsVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->buckets_version = $var;
@@ -1102,9 +1091,8 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\SourceStmt $var
      * @return $this
      */
-    public function setSourceStmt($var)
+    public function setSourceStmt(\CrazyGoat\Proto\Kvrpcpb\SourceStmt|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\SourceStmt::class);
         $this->source_stmt = $var;
 
         return $this;
@@ -1128,7 +1116,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setClusterId($var)
+    public function setClusterId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->cluster_id = $var;
@@ -1154,9 +1142,9 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setTraceId($var)
+    public function setTraceId(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->trace_id = $var;
 
         return $this;
@@ -1192,7 +1180,7 @@ class Context extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTraceControlFlags($var)
+    public function setTraceControlFlags(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->trace_control_flags = $var;

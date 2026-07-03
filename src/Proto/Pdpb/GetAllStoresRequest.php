@@ -65,9 +65,8 @@ class GetAllStoresRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -91,9 +90,8 @@ class GetAllStoresRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setExcludeTombstoneStores($var)
+    public function setExcludeTombstoneStores(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->exclude_tombstone_stores = $var;
 
         return $this;

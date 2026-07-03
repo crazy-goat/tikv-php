@@ -75,7 +75,7 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.Op type = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Op}
      */
     public function getType()
     {
@@ -84,10 +84,10 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.kvrpcpb.Op type = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Kvrpcpb\Op}
      * @return $this
      */
-    public function setType($var)
+    public function setType(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Kvrpcpb\Op::class);
         $this->type = $var;
@@ -109,7 +109,7 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTs($var)
+    public function setStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_ts = $var;
@@ -131,7 +131,7 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitTs($var)
+    public function setCommitTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_ts = $var;
@@ -153,9 +153,9 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setShortValue($var)
+    public function setShortValue(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->short_value = $var;
 
         return $this;
@@ -175,9 +175,8 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setHasOverlappedRollback($var)
+    public function setHasOverlappedRollback(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->has_overlapped_rollback = $var;
 
         return $this;
@@ -197,9 +196,8 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setHasGcFence($var)
+    public function setHasGcFence(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->has_gc_fence = $var;
 
         return $this;
@@ -219,7 +217,7 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGcFence($var)
+    public function setGcFence(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->gc_fence = $var;
@@ -241,7 +239,7 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLastChangeTs($var)
+    public function setLastChangeTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->last_change_ts = $var;
@@ -263,7 +261,7 @@ class MvccWrite extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setVersionsToLastChange($var)
+    public function setVersionsToLastChange(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->versions_to_last_change = $var;

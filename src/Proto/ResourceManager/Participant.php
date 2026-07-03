@@ -72,9 +72,9 @@ class Participant extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setName($var)
+    public function setName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->name = $var;
 
         return $this;
@@ -98,7 +98,7 @@ class Participant extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setId($var)
+    public function setId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->id = $var;
@@ -126,7 +126,7 @@ class Participant extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setListenUrls($var)
+    public function setListenUrls(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::STRING);
         $this->listen_urls = $arr;

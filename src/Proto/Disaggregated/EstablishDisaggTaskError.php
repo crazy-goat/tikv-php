@@ -51,9 +51,8 @@ class EstablishDisaggTaskError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\ErrorRegion $var
      * @return $this
      */
-    public function setErrorRegion($var)
+    public function setErrorRegion(\CrazyGoat\Proto\Disaggregated\ErrorRegion|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\ErrorRegion::class);
         $this->writeOneof(1, $var);
 
         return $this;
@@ -78,9 +77,8 @@ class EstablishDisaggTaskError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\ErrorLocked $var
      * @return $this
      */
-    public function setErrorLocked($var)
+    public function setErrorLocked(\CrazyGoat\Proto\Disaggregated\ErrorLocked|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\ErrorLocked::class);
         $this->writeOneof(2, $var);
 
         return $this;
@@ -105,9 +103,8 @@ class EstablishDisaggTaskError extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Disaggregated\ErrorOther $var
      * @return $this
      */
-    public function setErrorOther($var)
+    public function setErrorOther(\CrazyGoat\Proto\Disaggregated\ErrorOther|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Disaggregated\ErrorOther::class);
         $this->writeOneof(99, $var);
 
         return $this;

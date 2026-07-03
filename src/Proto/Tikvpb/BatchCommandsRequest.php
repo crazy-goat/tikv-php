@@ -52,7 +52,7 @@ class BatchCommandsRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Tikvpb\BatchCommandsRequest\Request[] $var
      * @return $this
      */
-    public function setRequests($var)
+    public function setRequests(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Tikvpb\BatchCommandsRequest\Request::class);
         $this->requests = $arr;
@@ -74,7 +74,7 @@ class BatchCommandsRequest extends \Google\Protobuf\Internal\Message
      * @param int[]|string[] $var
      * @return $this
      */
-    public function setRequestIds($var)
+    public function setRequestIds(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::UINT64);
         $this->request_ids = $arr;

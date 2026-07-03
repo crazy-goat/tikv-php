@@ -54,7 +54,7 @@ class ChangePeerV2 extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\ChangePeer[] $var
      * @return $this
      */
-    public function setChanges($var)
+    public function setChanges(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Pdpb\ChangePeer::class);
         $this->changes = $arr;

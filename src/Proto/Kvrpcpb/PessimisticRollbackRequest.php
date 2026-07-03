@@ -74,9 +74,8 @@ class PessimisticRollbackRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\Context $var
      * @return $this
      */
-    public function setContext($var)
+    public function setContext(\CrazyGoat\Proto\Kvrpcpb\Context|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\Context::class);
         $this->context = $var;
 
         return $this;
@@ -96,7 +95,7 @@ class PessimisticRollbackRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartVersion($var)
+    public function setStartVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_version = $var;
@@ -118,7 +117,7 @@ class PessimisticRollbackRequest extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setForUpdateTs($var)
+    public function setForUpdateTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->for_update_ts = $var;
@@ -140,7 +139,7 @@ class PessimisticRollbackRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setKeys($var)
+    public function setKeys(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::BYTES);
         $this->keys = $arr;

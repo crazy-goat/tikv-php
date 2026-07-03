@@ -62,7 +62,7 @@ class TimeInterval extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTimestamp($var)
+    public function setStartTimestamp(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start_timestamp = $var;
@@ -88,7 +88,7 @@ class TimeInterval extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setEndTimestamp($var)
+    public function setEndTimestamp(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->end_timestamp = $var;

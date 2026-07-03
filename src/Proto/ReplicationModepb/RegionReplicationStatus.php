@@ -10,10 +10,22 @@ use Google\Protobuf\Internal\GPBUtil;
 use Google\Protobuf\RepeatedField;
 
 /**
+ * The replication status sync from TiKV to PD.
+ *
  * Generated from protobuf message <code>replication_modepb.RegionReplicationStatus</code>
  */
 class RegionReplicationStatus extends \Google\Protobuf\Internal\Message
 {
+    /**
+     * Generated from protobuf field <code>.replication_modepb.RegionReplicationState state = 1;</code>
+     */
+    protected $state = 0;
+    /**
+     * Unique ID of the state, it increases after each state transfer.
+     *
+     * Generated from protobuf field <code>uint64 state_id = 2;</code>
+     */
+    protected $state_id = 0;
 
     /**
      * Constructor.
@@ -21,11 +33,62 @@ class RegionReplicationStatus extends \Google\Protobuf\Internal\Message
      * @param array $data {
      *     Optional. Data for populating the Message object.
      *
+     *     @type int $state
+     *     @type int|string $state_id
+     *           Unique ID of the state, it increases after each state transfer.
      * }
      */
     public function __construct($data = NULL) {
         \CrazyGoat\Proto\GPBMetadata\ReplicationModepb::initOnce();
         parent::__construct($data);
+    }
+
+    /**
+     * Generated from protobuf field <code>.replication_modepb.RegionReplicationState state = 1;</code>
+     * @return int one of the values in {@see \CrazyGoat\Proto\ReplicationModepb\RegionReplicationState}
+     */
+    public function getState()
+    {
+        return $this->state;
+    }
+
+    /**
+     * Generated from protobuf field <code>.replication_modepb.RegionReplicationState state = 1;</code>
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\ReplicationModepb\RegionReplicationState}
+     * @return $this
+     */
+    public function setState(int $var)
+    {
+        GPBUtil::checkEnum($var, \CrazyGoat\Proto\ReplicationModepb\RegionReplicationState::class);
+        $this->state = $var;
+
+        return $this;
+    }
+
+    /**
+     * Unique ID of the state, it increases after each state transfer.
+     *
+     * Generated from protobuf field <code>uint64 state_id = 2;</code>
+     * @return int|string
+     */
+    public function getStateId()
+    {
+        return $this->state_id;
+    }
+
+    /**
+     * Unique ID of the state, it increases after each state transfer.
+     *
+     * Generated from protobuf field <code>uint64 state_id = 2;</code>
+     * @param int|string $var
+     * @return $this
+     */
+    public function setStateId(int|string $var)
+    {
+        GPBUtil::checkUint64($var);
+        $this->state_id = $var;
+
+        return $this;
     }
 
 }

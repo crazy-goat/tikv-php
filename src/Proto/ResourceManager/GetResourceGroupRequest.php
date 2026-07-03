@@ -68,9 +68,9 @@ class GetResourceGroupRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setResourceGroupName($var)
+    public function setResourceGroupName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->resource_group_name = $var;
 
         return $this;
@@ -90,9 +90,8 @@ class GetResourceGroupRequest extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setWithRuStats($var)
+    public function setWithRuStats(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->with_ru_stats = $var;
 
         return $this;
@@ -134,9 +133,8 @@ class GetResourceGroupRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\KeyspaceIDValue $var
      * @return $this
      */
-    public function setKeyspaceId($var)
+    public function setKeyspaceId(\CrazyGoat\Proto\ResourceManager\KeyspaceIDValue|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\KeyspaceIDValue::class);
         $this->keyspace_id = $var;
 
         return $this;

@@ -102,7 +102,7 @@ class Region extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setId($var)
+    public function setId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->id = $var;
@@ -128,9 +128,9 @@ class Region extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setStartKey($var)
+    public function setStartKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->start_key = $var;
 
         return $this;
@@ -150,9 +150,9 @@ class Region extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setEndKey($var)
+    public function setEndKey(string $var)
     {
-        GPBUtil::checkString($var, False);
+        GPBUtil::checkString($var, false);
         $this->end_key = $var;
 
         return $this;
@@ -182,9 +182,8 @@ class Region extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\RegionEpoch $var
      * @return $this
      */
-    public function setRegionEpoch($var)
+    public function setRegionEpoch(\CrazyGoat\Proto\Metapb\RegionEpoch|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\RegionEpoch::class);
         $this->region_epoch = $var;
 
         return $this;
@@ -204,7 +203,7 @@ class Region extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setPeers($var)
+    public function setPeers(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->peers = $arr;
@@ -246,9 +245,8 @@ class Region extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Encryptionpb\EncryptionMeta $var
      * @return $this
      */
-    public function setEncryptionMeta($var)
+    public function setEncryptionMeta(\CrazyGoat\Proto\Encryptionpb\EncryptionMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Encryptionpb\EncryptionMeta::class);
         $this->encryption_meta = $var;
 
         return $this;
@@ -274,9 +272,8 @@ class Region extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setIsInFlashback($var)
+    public function setIsInFlashback(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->is_in_flashback = $var;
 
         return $this;
@@ -300,7 +297,7 @@ class Region extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFlashbackStartTs($var)
+    public function setFlashbackStartTs(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->flashback_start_ts = $var;

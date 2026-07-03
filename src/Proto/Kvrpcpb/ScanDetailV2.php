@@ -188,7 +188,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProcessedVersions($var)
+    public function setProcessedVersions(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->processed_versions = $var;
@@ -216,7 +216,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProcessedVersionsSize($var)
+    public function setProcessedVersionsSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->processed_versions_size = $var;
@@ -248,7 +248,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTotalVersions($var)
+    public function setTotalVersions(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->total_versions = $var;
@@ -276,7 +276,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRocksdbDeleteSkippedCount($var)
+    public function setRocksdbDeleteSkippedCount(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->rocksdb_delete_skipped_count = $var;
@@ -304,7 +304,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRocksdbKeySkippedCount($var)
+    public function setRocksdbKeySkippedCount(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->rocksdb_key_skipped_count = $var;
@@ -330,7 +330,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRocksdbBlockCacheHitCount($var)
+    public function setRocksdbBlockCacheHitCount(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->rocksdb_block_cache_hit_count = $var;
@@ -356,7 +356,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRocksdbBlockReadCount($var)
+    public function setRocksdbBlockReadCount(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->rocksdb_block_read_count = $var;
@@ -382,7 +382,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRocksdbBlockReadByte($var)
+    public function setRocksdbBlockReadByte(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->rocksdb_block_read_byte = $var;
@@ -408,7 +408,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRocksdbBlockReadNanos($var)
+    public function setRocksdbBlockReadNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->rocksdb_block_read_nanos = $var;
@@ -434,7 +434,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGetSnapshotNanos($var)
+    public function setGetSnapshotNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->get_snapshot_nanos = $var;
@@ -460,7 +460,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadIndexProposeWaitNanos($var)
+    public function setReadIndexProposeWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->read_index_propose_wait_nanos = $var;
@@ -486,7 +486,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadIndexConfirmWaitNanos($var)
+    public function setReadIndexConfirmWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->read_index_confirm_wait_nanos = $var;
@@ -512,7 +512,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setReadPoolScheduleWaitNanos($var)
+    public function setReadPoolScheduleWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->read_pool_schedule_wait_nanos = $var;
@@ -544,7 +544,7 @@ class ScanDetailV2 extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTotalVersionsSize($var)
+    public function setTotalVersionsSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->total_versions_size = $var;

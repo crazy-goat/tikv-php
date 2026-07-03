@@ -87,9 +87,8 @@ class RaftSnapshotData extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setRegion($var)
+    public function setRegion(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->region = $var;
 
         return $this;
@@ -109,7 +108,7 @@ class RaftSnapshotData extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setFileSize($var)
+    public function setFileSize(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->file_size = $var;
@@ -131,7 +130,7 @@ class RaftSnapshotData extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\KeyValue[] $var
      * @return $this
      */
-    public function setData($var)
+    public function setData(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\RaftServerpb\KeyValue::class);
         $this->data = $arr;
@@ -153,7 +152,7 @@ class RaftSnapshotData extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setVersion($var)
+    public function setVersion(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->version = $var;
@@ -185,9 +184,8 @@ class RaftSnapshotData extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\SnapshotMeta $var
      * @return $this
      */
-    public function setMeta($var)
+    public function setMeta(\CrazyGoat\Proto\RaftServerpb\SnapshotMeta|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\SnapshotMeta::class);
         $this->meta = $var;
 
         return $this;
@@ -207,7 +205,7 @@ class RaftSnapshotData extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setRemovedRecords($var)
+    public function setRemovedRecords(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->removed_records = $arr;
@@ -229,7 +227,7 @@ class RaftSnapshotData extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\MergedRecord[] $var
      * @return $this
      */
-    public function setMergedRecords($var)
+    public function setMergedRecords(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\RaftServerpb\MergedRecord::class);
         $this->merged_records = $arr;

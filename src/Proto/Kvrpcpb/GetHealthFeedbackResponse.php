@@ -69,9 +69,8 @@ class GetHealthFeedbackResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Errorpb\Error $var
      * @return $this
      */
-    public function setRegionError($var)
+    public function setRegionError(\CrazyGoat\Proto\Errorpb\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Errorpb\Error::class);
         $this->region_error = $var;
 
         return $this;
@@ -101,9 +100,8 @@ class GetHealthFeedbackResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Kvrpcpb\HealthFeedback $var
      * @return $this
      */
-    public function setHealthFeedback($var)
+    public function setHealthFeedback(\CrazyGoat\Proto\Kvrpcpb\HealthFeedback|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Kvrpcpb\HealthFeedback::class);
         $this->health_feedback = $var;
 
         return $this;

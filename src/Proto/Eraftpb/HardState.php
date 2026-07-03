@@ -57,7 +57,7 @@ class HardState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTerm($var)
+    public function setTerm(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->term = $var;
@@ -79,7 +79,7 @@ class HardState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setVote($var)
+    public function setVote(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->vote = $var;
@@ -101,7 +101,7 @@ class HardState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommit($var)
+    public function setCommit(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit = $var;

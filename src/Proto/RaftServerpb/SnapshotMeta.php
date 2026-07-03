@@ -101,7 +101,7 @@ class SnapshotMeta extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\SnapshotCFFile[] $var
      * @return $this
      */
-    public function setCfFiles($var)
+    public function setCfFiles(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\RaftServerpb\SnapshotCFFile::class);
         $this->cf_files = $arr;
@@ -127,9 +127,8 @@ class SnapshotMeta extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setForBalance($var)
+    public function setForBalance(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->for_balance = $var;
 
         return $this;
@@ -153,9 +152,8 @@ class SnapshotMeta extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setForWitness($var)
+    public function setForWitness(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->for_witness = $var;
 
         return $this;
@@ -179,7 +177,7 @@ class SnapshotMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStart($var)
+    public function setStart(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->start = $var;
@@ -205,7 +203,7 @@ class SnapshotMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setGenerateDurationSec($var)
+    public function setGenerateDurationSec(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->generate_duration_sec = $var;
@@ -233,9 +231,9 @@ class SnapshotMeta extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setTabletSnapPath($var)
+    public function setTabletSnapPath(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->tablet_snap_path = $var;
 
         return $this;
@@ -263,7 +261,7 @@ class SnapshotMeta extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitIndexHint($var)
+    public function setCommitIndexHint(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_index_hint = $var;

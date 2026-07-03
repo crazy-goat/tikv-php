@@ -67,9 +67,8 @@ class BootstrapRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Pdpb\RequestHeader $var
      * @return $this
      */
-    public function setHeader($var)
+    public function setHeader(\CrazyGoat\Proto\Pdpb\RequestHeader|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Pdpb\RequestHeader::class);
         $this->header = $var;
 
         return $this;
@@ -99,9 +98,8 @@ class BootstrapRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Store $var
      * @return $this
      */
-    public function setStore($var)
+    public function setStore(\CrazyGoat\Proto\Metapb\Store|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Store::class);
         $this->store = $var;
 
         return $this;
@@ -131,9 +129,8 @@ class BootstrapRequest extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setRegion($var)
+    public function setRegion(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->region = $var;
 
         return $this;

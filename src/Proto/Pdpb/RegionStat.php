@@ -72,7 +72,7 @@ class RegionStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBytesWritten($var)
+    public function setBytesWritten(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->bytes_written = $var;
@@ -94,7 +94,7 @@ class RegionStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setBytesRead($var)
+    public function setBytesRead(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->bytes_read = $var;
@@ -120,7 +120,7 @@ class RegionStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKeysWritten($var)
+    public function setKeysWritten(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->keys_written = $var;
@@ -142,7 +142,7 @@ class RegionStat extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setKeysRead($var)
+    public function setKeysRead(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->keys_read = $var;

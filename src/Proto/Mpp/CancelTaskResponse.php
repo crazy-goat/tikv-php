@@ -57,9 +57,8 @@ class CancelTaskResponse extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Mpp\Error $var
      * @return $this
      */
-    public function setError($var)
+    public function setError(\CrazyGoat\Proto\Mpp\Error|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Mpp\Error::class);
         $this->error = $var;
 
         return $this;

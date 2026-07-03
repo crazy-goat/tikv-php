@@ -182,7 +182,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStoreBatchWaitNanos($var)
+    public function setStoreBatchWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->store_batch_wait_nanos = $var;
@@ -208,7 +208,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProposeSendWaitNanos($var)
+    public function setProposeSendWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->propose_send_wait_nanos = $var;
@@ -234,7 +234,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPersistLogNanos($var)
+    public function setPersistLogNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->persist_log_nanos = $var;
@@ -260,7 +260,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRaftDbWriteLeaderWaitNanos($var)
+    public function setRaftDbWriteLeaderWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->raft_db_write_leader_wait_nanos = $var;
@@ -286,7 +286,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRaftDbSyncLogNanos($var)
+    public function setRaftDbSyncLogNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->raft_db_sync_log_nanos = $var;
@@ -312,7 +312,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setRaftDbWriteMemtableNanos($var)
+    public function setRaftDbWriteMemtableNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->raft_db_write_memtable_nanos = $var;
@@ -338,7 +338,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setCommitLogNanos($var)
+    public function setCommitLogNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->commit_log_nanos = $var;
@@ -364,7 +364,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApplyBatchWaitNanos($var)
+    public function setApplyBatchWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->apply_batch_wait_nanos = $var;
@@ -390,7 +390,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApplyLogNanos($var)
+    public function setApplyLogNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->apply_log_nanos = $var;
@@ -416,7 +416,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApplyMutexLockNanos($var)
+    public function setApplyMutexLockNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->apply_mutex_lock_nanos = $var;
@@ -442,7 +442,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApplyWriteLeaderWaitNanos($var)
+    public function setApplyWriteLeaderWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->apply_write_leader_wait_nanos = $var;
@@ -468,7 +468,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApplyWriteWalNanos($var)
+    public function setApplyWriteWalNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->apply_write_wal_nanos = $var;
@@ -494,7 +494,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setApplyWriteMemtableNanos($var)
+    public function setApplyWriteMemtableNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->apply_write_memtable_nanos = $var;
@@ -520,7 +520,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLatchWaitNanos($var)
+    public function setLatchWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->latch_wait_nanos = $var;
@@ -546,7 +546,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setProcessNanos($var)
+    public function setProcessNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->process_nanos = $var;
@@ -572,7 +572,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setThrottleNanos($var)
+    public function setThrottleNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->throttle_nanos = $var;
@@ -598,7 +598,7 @@ class WriteDetail extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setPessimisticLockWaitNanos($var)
+    public function setPessimisticLockWaitNanos(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->pessimistic_lock_wait_nanos = $var;

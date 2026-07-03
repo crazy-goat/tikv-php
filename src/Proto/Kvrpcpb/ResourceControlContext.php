@@ -74,9 +74,9 @@ class ResourceControlContext extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setResourceGroupName($var)
+    public function setResourceGroupName(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->resource_group_name = $var;
 
         return $this;
@@ -112,9 +112,8 @@ class ResourceControlContext extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\ResourceManager\Consumption $var
      * @return $this
      */
-    public function setPenalty($var)
+    public function setPenalty(\CrazyGoat\Proto\ResourceManager\Consumption|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\ResourceManager\Consumption::class);
         $this->penalty = $var;
 
         return $this;
@@ -140,7 +139,7 @@ class ResourceControlContext extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setOverridePriority($var)
+    public function setOverridePriority(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->override_priority = $var;

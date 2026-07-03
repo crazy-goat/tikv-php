@@ -50,6 +50,7 @@ final class RawKvClient
     public const OP_SCAN = 'scan';
     public const OP_DELETE_RANGE = 'delete_range';
     public const OP_CHECKSUM = 'checksum';
+    public const OP_INGEST = 'ingest';
 
     public const OPT_TIMEOUT = 'timeout';
     public const OPT_SLOW_LOG = 'slowLog';
@@ -66,6 +67,7 @@ final class RawKvClient
     private readonly RawKvBatch $batch;
     private readonly RawKvScanner $scanner;
     private readonly RawKvRangeOps $rangeOps;
+    private readonly SstIngestor $ingestor;
 
     /**
      * @param string[] $pdEndpoints
@@ -150,6 +152,13 @@ final class RawKvClient
             $serverBusyBudgetMs,
             $this->logger,
             $this->slowLogConfig,
+        );
+        $this->ingestor = new SstIngestor(
+            $grpc,
+            $pdClient,
+            $regionResolver,
+            $timeoutConfig,
+            $this->logger,
         );
     }
 
@@ -591,6 +600,46 @@ final class RawKvClient
         $this->ensureOpen();
 
         return $this->rangeOps->checksum($startKey, $endKey);
+    }
+
+    // ========================================================================
+    // SST Ingest (bulk import)
+    // ========================================================================
+
+    /**
+     * Bulk-import key-value pairs into TiKV via SST ingestion.
+     *
+     * This bypasses the normal Raft write path and directly ingests pre-sorted
+     * data into TiKV regions, achieving much higher throughput for large data
+     * loads.
+     *
+     * The key-value pairs are sorted by key, grouped by region, and written
+     * as SST files via the TiKV ImportSST service. All TiKV stores are
+     * switched to import mode during the operation and switched back to
+     * normal mode on completion (even on failure).
+     *
+     * @param array<string, string> $keyValuePairs Key-value pairs (sorted or unsorted)
+     * @param int|null $ttl Time-to-live in seconds (null = no TTL)
+     *
+     * @throws ClientClosedException
+     * @throws GrpcException
+     * @throws RegionException
+     */
+    public function ingest(array $keyValuePairs, ?int $ttl = null): void
+    {
+        $this->ensureOpen();
+
+        if ($keyValuePairs === []) {
+            return;
+        }
+
+        foreach ($keyValuePairs as $key => $value) {
+            $this->validateKeyNotEmpty($key, 'ingest');
+            $this->validateKeySize($key, 'ingest');
+            $this->validateValueSize($value, 'ingest');
+        }
+
+        $this->ingestor->ingest($keyValuePairs, $ttl);
     }
 
     // ========================================================================

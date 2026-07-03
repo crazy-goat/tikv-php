@@ -77,7 +77,7 @@ class RegionLocalState extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.raft_serverpb.PeerState state = 1;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\RaftServerpb\PeerState}
      */
     public function getState()
     {
@@ -86,10 +86,10 @@ class RegionLocalState extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.raft_serverpb.PeerState state = 1;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\RaftServerpb\PeerState}
      * @return $this
      */
-    public function setState($var)
+    public function setState(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\RaftServerpb\PeerState::class);
         $this->state = $var;
@@ -121,9 +121,8 @@ class RegionLocalState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Region $var
      * @return $this
      */
-    public function setRegion($var)
+    public function setRegion(\CrazyGoat\Proto\Metapb\Region|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\Metapb\Region::class);
         $this->region = $var;
 
         return $this;
@@ -153,9 +152,8 @@ class RegionLocalState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\MergeState $var
      * @return $this
      */
-    public function setMergeState($var)
+    public function setMergeState(\CrazyGoat\Proto\RaftServerpb\MergeState|null $var)
     {
-        GPBUtil::checkMessage($var, \CrazyGoat\Proto\RaftServerpb\MergeState::class);
         $this->merge_state = $var;
 
         return $this;
@@ -179,7 +177,7 @@ class RegionLocalState extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setTabletIndex($var)
+    public function setTabletIndex(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->tablet_index = $var;
@@ -211,7 +209,7 @@ class RegionLocalState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\Peer[] $var
      * @return $this
      */
-    public function setRemovedRecords($var)
+    public function setRemovedRecords(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\Peer::class);
         $this->removed_records = $arr;
@@ -239,7 +237,7 @@ class RegionLocalState extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\RaftServerpb\MergedRecord[] $var
      * @return $this
      */
-    public function setMergedRecords($var)
+    public function setMergedRecords(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\RaftServerpb\MergedRecord::class);
         $this->merged_records = $arr;

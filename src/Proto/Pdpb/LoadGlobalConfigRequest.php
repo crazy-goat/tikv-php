@@ -52,7 +52,7 @@ class LoadGlobalConfigRequest extends \Google\Protobuf\Internal\Message
      * @param string[] $var
      * @return $this
      */
-    public function setNames($var)
+    public function setNames(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::STRING);
         $this->names = $arr;
@@ -74,9 +74,9 @@ class LoadGlobalConfigRequest extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setConfigPath($var)
+    public function setConfigPath(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->config_path = $var;
 
         return $this;

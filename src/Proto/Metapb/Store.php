@@ -130,7 +130,7 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setId($var)
+    public function setId(int|string $var)
     {
         GPBUtil::checkUint64($var);
         $this->id = $var;
@@ -156,9 +156,9 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setAddress($var)
+    public function setAddress(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->address = $var;
 
         return $this;
@@ -166,7 +166,7 @@ class Store extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.metapb.StoreState state = 3;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Metapb\StoreState}
      */
     public function getState()
     {
@@ -175,10 +175,10 @@ class Store extends \Google\Protobuf\Internal\Message
 
     /**
      * Generated from protobuf field <code>.metapb.StoreState state = 3;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Metapb\StoreState}
      * @return $this
      */
-    public function setState($var)
+    public function setState(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Metapb\StoreState::class);
         $this->state = $var;
@@ -200,7 +200,7 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param \CrazyGoat\Proto\Metapb\StoreLabel[] $var
      * @return $this
      */
-    public function setLabels($var)
+    public function setLabels(array|RepeatedField $var)
     {
         $arr = GPBUtil::checkRepeatedField($var, \Google\Protobuf\Internal\GPBType::MESSAGE, \CrazyGoat\Proto\Metapb\StoreLabel::class);
         $this->labels = $arr;
@@ -222,9 +222,9 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setVersion($var)
+    public function setVersion(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->version = $var;
 
         return $this;
@@ -250,9 +250,9 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setPeerAddress($var)
+    public function setPeerAddress(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->peer_address = $var;
 
         return $this;
@@ -276,9 +276,9 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setStatusAddress($var)
+    public function setStatusAddress(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->status_address = $var;
 
         return $this;
@@ -298,9 +298,9 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setGitHash($var)
+    public function setGitHash(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->git_hash = $var;
 
         return $this;
@@ -324,7 +324,7 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setStartTimestamp($var)
+    public function setStartTimestamp(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->start_timestamp = $var;
@@ -346,9 +346,9 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param string $var
      * @return $this
      */
-    public function setDeployPath($var)
+    public function setDeployPath(string $var)
     {
-        GPBUtil::checkString($var, True);
+        GPBUtil::checkString($var, true);
         $this->deploy_path = $var;
 
         return $this;
@@ -372,7 +372,7 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param int|string $var
      * @return $this
      */
-    public function setLastHeartbeat($var)
+    public function setLastHeartbeat(int|string $var)
     {
         GPBUtil::checkInt64($var);
         $this->last_heartbeat = $var;
@@ -398,9 +398,8 @@ class Store extends \Google\Protobuf\Internal\Message
      * @param bool $var
      * @return $this
      */
-    public function setPhysicallyDestroyed($var)
+    public function setPhysicallyDestroyed(bool $var)
     {
-        GPBUtil::checkBool($var);
         $this->physically_destroyed = $var;
 
         return $this;
@@ -410,7 +409,7 @@ class Store extends \Google\Protobuf\Internal\Message
      * NodeState is used to replace StoreState which will be deprecated in the future.
      *
      * Generated from protobuf field <code>.metapb.NodeState node_state = 13;</code>
-     * @return int
+     * @return int one of the values in {@see \CrazyGoat\Proto\Metapb\NodeState}
      */
     public function getNodeState()
     {
@@ -421,10 +420,10 @@ class Store extends \Google\Protobuf\Internal\Message
      * NodeState is used to replace StoreState which will be deprecated in the future.
      *
      * Generated from protobuf field <code>.metapb.NodeState node_state = 13;</code>
-     * @param int $var
+     * @param int $var one of the values in {@see \CrazyGoat\Proto\Metapb\NodeState}
      * @return $this
      */
-    public function setNodeState($var)
+    public function setNodeState(int $var)
     {
         GPBUtil::checkEnum($var, \CrazyGoat\Proto\Metapb\NodeState::class);
         $this->node_state = $var;
