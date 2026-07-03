@@ -90,6 +90,8 @@ Set in your environment:
 export PD_ENDPOINTS="192.168.1.100:2379,192.168.1.101:2379"
 ```
 
+> **Note**: The library itself does not read any environment variables. The example above shows how your application can read `PD_ENDPOINTS` and pass it to the client. All configuration must be passed explicitly via constructor arguments or the `$options` array.
+
 ## TLS/SSL Configuration
 
 ### Server Verification Only
@@ -328,18 +330,37 @@ Monitor cache performance via logs:
 
 ## Timeouts
 
-### Current Timeout Behavior
+### Per-Operation Timeouts
 
-The client uses gRPC's default timeouts:
+The client supports configurable per-operation gRPC timeouts via `TimeoutConfig` / `options['timeout']`:
 
-- Connection timeout: System default
-- Request timeout: No timeout (infinite)
+```php
+$options = [
+    'timeout' => [
+        'readTimeoutMs' => 5000,         // default: 5000
+        'writeTimeoutMs' => 5000,        // default: 5000
+        'batchReadTimeoutMs' => 10000,   // default: 10000
+        'batchWriteTimeoutMs' => 10000,  // default: 10000
+        'scanTimeoutMs' => 20000,        // default: 20000
+        'deleteRangeTimeoutMs' => 30000, // default: 30000
+    ],
+];
 
-**Note**: Configurable per-operation timeouts are planned (see [Issue #27](superpowers/plans/27-configurable-timeouts.md)).
+$client = RawKvClient::create(
+    pdEndpoints: ['127.0.0.1:2379'],
+    options: $options
+);
+```
+
+When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught and retried by the retry executor unless the budget is exhausted.
+
+### Default Timeouts
+
+By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range). Set any value to `0` to disable it (not recommended in production).
 
 ### Handling Slow Operations
 
-For now, implement timeouts at the application level:
+For additional application-level safeguards:
 
 ```php
 // Using PHP's pcntl_alarm (CLI only)
@@ -421,6 +442,8 @@ return [
     ],
 ];
 ```
+
+> **Note**: The `TIKV_*` environment variables shown are **application-level conventions** — the library does not read any environment variables directly. Your application is responsible for reading env vars and passing the values to the client constructor.
 
 ### Health Checks
 

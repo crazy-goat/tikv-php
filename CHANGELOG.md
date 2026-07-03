@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `LockResolverTest` now executes (all 11 tests) instead of erroring on every method — replaced `createMock()` of generated protobuf messages with real `CheckTxnStatusResponse`/`ResolveLockResponse` instances constructed via setters, restoring coverage of the commit/rollback/wait/region-error decision matrix (#99)
 - `close()` is now exception-safe across `GrpcClient`, `RawKvClient`, and `TxnKvClient` — a throw from one channel/sub-client no longer leaks the rest or leaves the client in a non-idempotent state (#107)
 - `RetryExecutor::execute()` is now bounded by a configurable attempt cap (`maxAttempts`, default 30) and an optional wall-clock deadline (`deadlineMs`), independent of accumulated backoff. Previously, errors classified as `BackoffType::None` (e.g. `EpochNotMatch`) returned `sleepMs=0`, so `totalBackoffMs` never grew and the `while (true)` loop drove an infinite zero-sleep 100%-CPU busy loop. New exhaustion throws `RetryBudgetExhaustedException` (extends `TiKvException`) (#72)
+- Corrected `CHANGELOG.md`, `README.md`, and `docs/configuration.md` to reference actual APIs, constants, and file paths instead of nonexistent ones (`GrpcClient::setTimeout()` → `TimeoutConfig`/`options['timeout']`, `MAX_RAW_SCAN_LIMIT` → `MAX_SCAN_LIMIT`, removed dead `RegionContext.php` and `docs/superpowers/` link, moved shipped "In Progress" features to "Recently Completed", clarified env var usage as application-level wiring) (#101)
 
 ## [0.2.0] - 2026-05-11
 
@@ -48,8 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TxnKV client with full ACID transaction support (begin/commit/rollback, snapshot reads, pessimistic locking)
 - Lazy auto-paginating `ScanIterator` for RawKV scans — fetches next pages transparently on iteration
 - Auto-split large batches by key count and total byte size — prevents oversized gRPC requests
-- Configurable per-operation gRPC timeouts via `GrpcClient::setTimeout()`
-- Scan limit guard (`MAX_RAW_SCAN_LIMIT = 10240`) — prevents accidental unbounded scans
+- Configurable per-operation gRPC timeouts via `TimeoutConfig` / `options['timeout']`
+- Scan limit guard (`MAX_SCAN_LIMIT = 10240`) — prevents accidental unbounded scans
 - Per-key TTL support in `batchPut()` — accepts `int|array $ttl` for individual key expiration times
 - E2E tests running against a real TiKV cluster in CI via GitHub Actions
 

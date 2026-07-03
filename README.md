@@ -285,7 +285,8 @@ src/
 │   │   ├── RawKvClient.php          # Main client (20+ operations)
 │   │   ├── CasResult.php            # CompareAndSwap result
 │   │   ├── ChecksumResult.php       # Checksum result
-│   │   └── RegionContext.php        # Region context helper
+│   │   ├── ScanIterator.php         # Lazy auto-paginating scan iterator
+│   │   └── Dto/                     # Shared DTOs (KeyValue, RegionInfo, PeerInfo)
 │   ├── Retry/
 │   │   └── BackoffType.php          # Retry backoff strategies
 │   └── Tls/
@@ -377,8 +378,6 @@ enable-ttl = true
 
 ## Roadmap
 
-See [Implementation Plans](docs/superpowers/plans/README.md) for the full roadmap and feature comparison with Go and Java clients.
-
 ### Recently Completed
 - ✅ TLS/SSL Support
 - ✅ PSR-3 Logging
@@ -386,11 +385,9 @@ See [Implementation Plans](docs/superpowers/plans/README.md) for the full roadma
 - ✅ Connection Pooling
 - ✅ Batch Async Execution
 - ✅ Retry with Exponential Backoff
-
-### In Progress
-- 🚧 Per-key TTL in BatchPut
-- 🚧 Scan limit enforcement (MAX 10240)
-- 🚧 Batch auto-splitting by size/count
+- ✅ Per-key TTL in BatchPut
+- ✅ Scan limit enforcement (MAX 10240)
+- ✅ Batch auto-splitting by size/count
 
 ## Contributing
 
