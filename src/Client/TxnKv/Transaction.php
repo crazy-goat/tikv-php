@@ -1040,6 +1040,20 @@ final class Transaction
         $this->closed = true;
     }
 
+    public function __destruct()
+    {
+        if ($this->status === TransactionStatus::Active && !$this->closed) {
+            try {
+                $this->rollback();
+            } catch (\Throwable $e) {
+                $this->logger->error('Transaction destruct rollback failed', [
+                    'txnId' => $this->txnId,
+                    'exception' => $e,
+                ]);
+            }
+        }
+    }
+
     private function retryExecutor(): RetryExecutor
     {
         $this->retryExecutor ??= new RetryExecutor(

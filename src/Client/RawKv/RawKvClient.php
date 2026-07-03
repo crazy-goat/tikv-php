@@ -671,4 +671,9 @@ final class RawKvClient
             $this->logger->error('Failed to close PD client', ['exception' => $e]);
         }
     }
+
+    public function __destruct()
+    {
+        $this->close();
+    }
 }

@@ -42,7 +42,8 @@ final class PdClient implements PdClientInterface
             $this->tso = new TimestampOracle(
                 $this->grpc,
                 $this->pdAddress,
-                $this,
+                $this->getClusterId(...),
+                $this->setClusterId(...),
                 $this->logger,
             );
         }

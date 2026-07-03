@@ -394,13 +394,23 @@ class TransactionTest extends TestCase
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($region);
 
-        $response = $this->makeScanResponse([
+        $scanResponse = $this->makeScanResponse([
             'k1' => 'scanned-v1',
             'k2' => 'scanned-v2',
         ]);
 
-        $this->grpc->expects($this->once())->method('call')->willReturn($response);
+        $rollbackResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+
+        $this->grpc->method('call')
+            ->willReturnCallback(
+                fn(string $addr, string $svc, string $method): object => match ($method) {
+                    'KvScan' => $scanResponse,
+                    'KvBatchRollback' => $rollbackResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                }
+            );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'local-v1');

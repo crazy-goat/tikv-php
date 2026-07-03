@@ -197,6 +197,11 @@ final class TxnKvClient
         }
     }
 
+    public function __destruct()
+    {
+        $this->close();
+    }
+
     private function ensureOpen(): void
     {
         if ($this->closed) {
