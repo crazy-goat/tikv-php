@@ -15,7 +15,7 @@ final class TlsConfig
 
     public function isEnabled(): bool
     {
-        return $this->caCert !== null;
+        return $this->caCert !== null || $this->clientCert !== null || $this->clientKey !== null;
     }
 
     /**

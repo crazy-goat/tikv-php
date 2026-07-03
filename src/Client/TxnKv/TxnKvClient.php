@@ -84,7 +84,11 @@ final class TxnKvClient
             $tlsConfig = $builder->build();
         }
 
-        $grpc = new GrpcClient($resolvedLogger, $tlsConfig);
+        $grpc = new GrpcClient(
+            $resolvedLogger,
+            $tlsConfig,
+            allowInsecure: (bool) ($options['insecure'] ?? false),
+        );
         $pdAddress = $pdEndpoints[0];
         $storeCache = new StoreCache(logger: $resolvedLogger);
         $pdClient = new PdClient($grpc, $pdAddress, $resolvedLogger, $storeCache);

@@ -23,6 +23,7 @@ final class GrpcClient implements GrpcClientInterface
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly ?TlsConfig $tlsConfig = null,
+        private readonly bool $allowInsecure = false,
     ) {
     }
 
@@ -107,15 +108,24 @@ final class GrpcClient implements GrpcClientInterface
         }
 
         if (!isset($this->channels[$address])) {
-            $this->logger->debug('Opening gRPC channel', [
-                'address' => $address,
-                'tls' => $this->tlsConfig?->isEnabled() ?? false,
-            ]);
-
             $tlsEnabled = $this->tlsConfig instanceof TlsConfig && $this->tlsConfig->isEnabled();
-            $credentials = $tlsEnabled
-                ? $this->createTlsCredentials()
-                : ChannelCredentials::createInsecure();
+
+            if ($tlsEnabled) {
+                $this->logger->debug('Opening gRPC channel with TLS', [
+                    'address' => $address,
+                ]);
+                $credentials = $this->createTlsCredentials();
+            } elseif ($this->allowInsecure) {
+                $this->logger->warning('Opening INSECURE gRPC channel (allowInsecure=true)', [
+                    'address' => $address,
+                ]);
+                $credentials = ChannelCredentials::createInsecure();
+            } else {
+                throw new InvalidStateException(
+                    'Cannot open gRPC channel: TLS is not configured and insecure connections are not allowed. '
+                    . 'Either configure TLS via the "tls" option, or set "insecure" to true in options.',
+                );
+            }
 
             $this->channels[$address] = new Channel($address, [
                 'credentials' => $credentials,

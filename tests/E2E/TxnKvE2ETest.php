@@ -26,7 +26,7 @@ class TxnKvE2ETest extends TestCase
     public static function setUpBeforeClass(): void
     {
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
-        self::$client = TxnKvClient::create($pdEndpoints);
+        self::$client = TxnKvClient::create($pdEndpoints, options: ['insecure' => true]);
     }
 
     public static function tearDownAfterClass(): void
@@ -491,7 +491,7 @@ class TxnKvE2ETest extends TestCase
     private function createFreshTxnClient(): TxnKvClient
     {
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
-        return TxnKvClient::create($pdEndpoints);
+        return TxnKvClient::create($pdEndpoints, options: ['insecure' => true]);
     }
 
     public function testCloseThenBeginThrowsClientClosedException(): void

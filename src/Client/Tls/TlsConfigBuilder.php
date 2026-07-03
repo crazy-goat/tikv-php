@@ -106,6 +106,14 @@ final class TlsConfigBuilder
 
     public function build(): TlsConfig
     {
+        // Validate: client cert/key without CA cert is a partial/incomplete config
+        if (($this->clientCert !== null || $this->clientKey !== null) && $this->caCert === null) {
+            throw new InvalidArgumentException(
+                'Partial TLS configuration: client certificate or key provided without CA certificate. '
+                . 'A CA certificate (caCert) is required when using client certificates.',
+            );
+        }
+
         return new TlsConfig($this->caCert, $this->clientCert, $this->clientKey);
     }
 
