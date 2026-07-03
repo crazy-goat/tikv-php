@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Atomic mode for Compare-And-Swap (CAS): CAS and Put-If-Absent now require `setAtomicForCAS(true)` to be called first, enabling the TiKV `for_cas` atomic code path. Disabled by default for performance. (#103)
 - Dedicated CI lane for gRPC-dependent unit tests with the PHP gRPC extension loaded and skipped tests failing (#117)
 - E2E tests for client lifecycle: Close then get/put/delete/scan/... throws ClientClosedException, double close is idempotent, transaction before close remains usable (#55)
 - Removed `__construct()` from `GrpcClientInterface` — interfaces should not enforce constructor signatures; all consumers use DI or concrete class instantiation (#46)
