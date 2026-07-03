@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Fix 3 unit tests that failed in Docker: correct mock expectations for `BatchAsyncExecutor` short-circuit behavior and skip unreadable-file test when running as root. (#178)
+
 ### Added
 - `RawKvClient::ingest()` — bulk-import key-value pairs into TiKV via SST (Sorted String Table) ingestion. Bypasses the normal Raft write path and directly ingests pre-sorted data into TiKV regions, achieving much higher throughput for large data loads. All TiKV stores are switched to import mode during the operation and switched back to normal mode on completion (even on failure). Supports optional TTL. (#29)
 - `SstIngestor` in `src/Client/RawKv/` — handles the SST ingest logic: sorting keys, grouping by region, streaming SST data via the TiKV ImportSST `RawWrite` RPC, and ingesting via the `Ingest` RPC. Uses `try/finally` to ensure stores are always switched back to normal mode. (#29)
