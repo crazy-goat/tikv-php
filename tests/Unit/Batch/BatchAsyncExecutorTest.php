@@ -154,14 +154,10 @@ class BatchAsyncExecutorTest extends TestCase
         // Region 3: success (future returns OK)
 
         $okCall = $this->createMock(Call::class);
-        $okResponse = new RawGetResponse();
-        $okResponse->setValue('ok');
-        $okCall->expects($this->once())
-            ->method('startBatch')
-            ->willReturn([
-                'status' => ['code' => 0, 'details' => 'OK'],
-                'message' => $okResponse->serializeToString(),
-            ]);
+        // Region 3 never reaches wait phase — the executor short-circuits
+        // (cancelAll + break) on the first wait-phase failure in region 2.
+        $okCall->expects($this->never())
+            ->method('startBatch');
 
         $failingCall = $this->createMock(Call::class);
         $failingCall->expects($this->once())
@@ -203,11 +199,10 @@ class BatchAsyncExecutorTest extends TestCase
             ]);
 
         $failingCall2 = $this->createMock(Call::class);
-        $failingCall2->expects($this->once())
-            ->method('startBatch')
-            ->willReturn([
-                'status' => ['code' => 4, 'details' => 'DeadlineExceeded'],
-            ]);
+        // Region 2 is cancelled after region 1 fails in the wait phase —
+        // startBatch is never reached because the executor short-circuits.
+        $failingCall2->expects($this->never())
+            ->method('startBatch');
 
         $calls = [
             1 => fn(): GrpcFuture => new GrpcFuture($failingCall1, RawGetResponse::class),
