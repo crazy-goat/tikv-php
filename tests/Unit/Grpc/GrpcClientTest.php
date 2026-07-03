@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use PHPUnit\Framework\TestCase;
@@ -38,6 +39,25 @@ class GrpcClientTest extends TestCase
         $this->client->close();
         $this->client->close();
         $this->expectNotToPerformAssertions();
+    }
+
+    public function testCallAfterCloseThrowsInvalidStateException(): void
+    {
+        $this->client->close();
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('gRPC client is closed');
+
+        $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
+        $request->setKey('test');
+
+        $this->client->call(
+            '127.0.0.1:20160',
+            'tikvpb.Tikv',
+            'RawGet',
+            $request,
+            \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
+        );
     }
 
     public function testCallWithInvalidAddressThrowsGrpcException(): void
