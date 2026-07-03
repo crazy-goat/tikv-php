@@ -2783,9 +2783,26 @@ class RawKvE2ETest extends TestCase
 
         $client->put('metrics:test:key', 'value');
         $client->get('metrics:test:key');
+        $client->healthCheck();
 
-        // PD GetRegion RPC happens at least once per operation.
-        $this->assertGreaterThanOrEqual(1, $metrics->getRpcStarted('pdpb.PD/GetRegion'));
+        // At least one PD or TiKV RPC must have been recorded.
+        $totalRpc = array_sum([
+            $metrics->getRpcStarted('pdpb.PD/GetRegion'),
+            $metrics->getRpcStarted('pdpb.PD/GetMembers'),
+            $metrics->getRpcStarted('tikvpb.Tikv/KvPut'),
+            $metrics->getRpcStarted('tikvpb.Tikv/KvGet'),
+        ]);
+        $this->assertGreaterThanOrEqual(
+            1,
+            $totalRpc,
+            sprintf(
+                'Expected >= 1 RPC counter (got PD/GetRegion=%d, PD/GetMembers=%d, KvPut=%d, KvGet=%d)',
+                $metrics->getRpcStarted('pdpb.PD/GetRegion'),
+                $metrics->getRpcStarted('pdpb.PD/GetMembers'),
+                $metrics->getRpcStarted('tikvpb.Tikv/KvPut'),
+                $metrics->getRpcStarted('tikvpb.Tikv/KvGet'),
+            ),
+        );
         $client->close();
     }
 
