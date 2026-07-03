@@ -884,44 +884,40 @@ final class Transaction
      */
     private function finalizeScanResults(array $results, string $startKey, string $endKey, int $limit): array
     {
-        $merged = [];
-        $seenKeys = [];
-
-        // First pass: process TiKV results, substituting write-set values
+        // Build a map of TiKV results (key => value)
+        $tikvMap = [];
         foreach ($results as $entry) {
-            $key = $entry['key'];
-            $seenKeys[$key] = true;
+            $tikvMap[$entry['key']] = $entry['value'];
+        }
+
+        // Collect all unique keys: from TiKV results + write-set keys in range
+        $allKeys = array_keys($tikvMap);
+        foreach (array_keys($this->writeSet) as $key) {
+            // Check if key is in range [startKey, endKey)
+            if ($key >= $startKey && ($endKey === '' || $key < $endKey)) {
+                $allKeys[] = $key;
+            }
+        }
+        $allKeys = array_unique($allKeys);
+        sort($allKeys);
+
+        // Build merged result set in key order
+        $merged = [];
+        foreach ($allKeys as $key) {
+            if (count($merged) >= $limit) {
+                break;
+            }
+
             if (array_key_exists($key, $this->writeSet)) {
+                // Write set value takes precedence
                 if ($this->writeSet[$key] !== null) {
                     $merged[] = ['key' => $key, 'value' => $this->writeSet[$key]];
                 }
                 // else: deleted in write set, omit from results
-            } else {
-                $merged[] = $entry;
+            } elseif (array_key_exists($key, $tikvMap)) {
+                // Key came from TiKV and not in write set
+                $merged[] = ['key' => $key, 'value' => $tikvMap[$key]];
             }
-        }
-
-        // Second pass: add write-set keys that are in range but not returned by TiKV
-        if (count($merged) < $limit) {
-            foreach ($this->writeSet as $key => $value) {
-                if (isset($seenKeys[$key])) {
-                    continue;
-                }
-                // Check if key is in range [startKey, endKey)
-                if ($key >= $startKey && ($endKey === '' || $key < $endKey)) {
-                    if ($value !== null) {
-                        $merged[] = ['key' => $key, 'value' => $value];
-                    }
-                    if (count($merged) >= $limit) {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Apply the limit
-        if (count($merged) > $limit) {
-            return array_slice($merged, 0, $limit);
         }
 
         return $merged;

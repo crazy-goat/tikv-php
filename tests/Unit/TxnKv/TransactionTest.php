@@ -294,7 +294,7 @@ class TransactionTest extends TestCase
         return $response;
     }
 
-    public function testScanWithLimitZeroUsesDefaultScanLimit(): void
+    public function testScanWithLimitZeroUsesMaxScanLimit(): void
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
@@ -304,9 +304,8 @@ class TransactionTest extends TestCase
             $this->anything(),
             $this->anything(),
             $this->anything(),
-            // Protobuf checkUint32 sign-extends values > 0x7FFFFFFF,
-            // so 4294967295 (uint32 max) is stored as -1 on 64-bit PHP
-            $this->callback(fn(ScanRequest $request): bool => ($request->getLimit() & 0xFFFFFFFF) === 4294967295),
+            // Limit=0 is normalized to MAX_SCAN_LIMIT (10240)
+            $this->callback(fn(ScanRequest $request): bool => $request->getLimit() === 10240),
             $this->anything(),
         )->willReturn($this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']));
 
@@ -424,6 +423,108 @@ class TransactionTest extends TestCase
         $result = $txn->scan('', '');
 
         $this->assertSame([], $result);
+    }
+
+    public function testScanLimitExceedingMaxThrowsInvalidArgument(): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit (99999) exceeds maximum allowed scan limit of 10240');
+
+        $txn->scan('', '', 99999);
+    }
+
+    public function testScanLimitAppliedAfterWriteSetMerge(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // TiKV returns 5 keys, but limit is 3
+        $response = $this->makeScanResponse([
+            'k1' => 'v1',
+            'k2' => 'v2',
+            'k3' => 'v3',
+            'k4' => 'v4',
+            'k5' => 'v5',
+        ]);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('', '', 3);
+
+        $this->assertCount(3, $result);
+        $this->assertSame('k1', $result[0]['key']);
+        $this->assertSame('k2', $result[1]['key']);
+        $this->assertSame('k3', $result[2]['key']);
+    }
+
+    public function testScanIncludesInRangeWriteSetKeysNotReturnedByTiKv(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // TiKV returns k1, k3. Write set has k2 (in range) which should appear.
+        $response = $this->makeScanResponse([
+            'k1' => 'scanned-v1',
+            'k3' => 'scanned-v3',
+        ]);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'local-v1');
+        $txn->set('k2', 'local-v2');
+        $result = $txn->scan('', '', 10);
+
+        $this->assertCount(3, $result);
+        $this->assertSame('local-v1', $result[0]['value']);
+        $this->assertSame('local-v2', $result[1]['value']);
+        $this->assertSame('scanned-v3', $result[2]['value']);
+    }
+
+    public function testScanExcludesWriteSetKeysOutsideRange(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response = $this->makeScanResponse(['k1' => 'v1']);
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('z-outside', 'should-not-appear');
+        $result = $txn->scan('a', 'z');
+
+        $this->assertCount(1, $result);
+        $this->assertSame('k1', $result[0]['key']);
+    }
+
+    public function testScanWithDeleteReducesCountBelowLimit(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // TiKV returns 3 keys, but one is deleted in write set
+        $response = $this->makeScanResponse([
+            'k1' => 'v1',
+            'k2' => 'v2',
+            'k3' => 'v3',
+        ]);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->delete('k2');
+        $result = $txn->scan('', '', 3);
+
+        $this->assertCount(2, $result);
+        $this->assertSame('k1', $result[0]['key']);
+        $this->assertSame('k3', $result[1]['key']);
     }
 
     // ========================================================================
