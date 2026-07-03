@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -50,6 +51,7 @@ final class RawKvClient
     public const OP_DELETE_RANGE = 'delete_range';
 
     public const OPT_TIMEOUT = 'timeout';
+    public const OPT_SLOW_LOG = 'slowLog';
 
     private bool $closed = false;
 
@@ -146,12 +148,35 @@ final class RawKvClient
             );
         }
 
+        $slowLogConfig = null;
+        if (isset($options[self::OPT_SLOW_LOG]) && is_array($options[self::OPT_SLOW_LOG])) {
+            $s = $options[self::OPT_SLOW_LOG];
+            $defaults = new SlowLogConfig();
+            $slowLogConfig = new SlowLogConfig(
+                readThresholdMs: isset($s['readThresholdMs']) && is_int($s['readThresholdMs'])
+                    ? $s['readThresholdMs'] : $defaults->readThresholdMs,
+                writeThresholdMs: isset($s['writeThresholdMs']) && is_int($s['writeThresholdMs'])
+                    ? $s['writeThresholdMs'] : $defaults->writeThresholdMs,
+                batchReadThresholdMs: isset($s['batchReadThresholdMs']) && is_int($s['batchReadThresholdMs'])
+                    ? $s['batchReadThresholdMs'] : $defaults->batchReadThresholdMs,
+                batchWriteThresholdMs: isset($s['batchWriteThresholdMs']) && is_int($s['batchWriteThresholdMs'])
+                    ? $s['batchWriteThresholdMs'] : $defaults->batchWriteThresholdMs,
+                scanThresholdMs: isset($s['scanThresholdMs']) && is_int($s['scanThresholdMs'])
+                    ? $s['scanThresholdMs'] : $defaults->scanThresholdMs,
+                deleteRangeThresholdMs: isset($s['deleteRangeThresholdMs']) && is_int($s['deleteRangeThresholdMs'])
+                    ? $s['deleteRangeThresholdMs'] : $defaults->deleteRangeThresholdMs,
+                checksumThresholdMs: isset($s['checksumThresholdMs']) && is_int($s['checksumThresholdMs'])
+                    ? $s['checksumThresholdMs'] : $defaults->checksumThresholdMs,
+            );
+        }
+
         return new self(
             $pdClient,
             $grpc,
             new RegionCache(logger: $resolvedLogger),
             logger: $resolvedLogger,
             timeoutConfig: $timeoutConfig,
+            slowLogConfig: $slowLogConfig,
         );
     }
 
@@ -169,11 +194,30 @@ final class RawKvClient
         ?RawKvBatch $batch = null,
         ?RawKvScanner $scanner = null,
         ?RawKvRangeOps $rangeOps = null,
+        private readonly ?SlowLogConfig $slowLogConfig = null,
     ) {
         $regionResolver ??= new RegionResolver($pdClient, $regionCache);
-        $this->crud = $crud ?? new RawKvCrud($grpc, $regionResolver, $timeoutConfig);
-        $this->atomic = $atomic ?? new RawKvAtomic($grpc, $regionResolver, $timeoutConfig);
-        $this->batch = $batch ?? new RawKvBatch($grpc, $regionResolver, $timeoutConfig, $this->logger);
+        $this->crud = $crud ?? new RawKvCrud(
+            $grpc,
+            $regionResolver,
+            $timeoutConfig,
+            $this->logger,
+            $this->slowLogConfig,
+        );
+        $this->atomic = $atomic ?? new RawKvAtomic(
+            $grpc,
+            $regionResolver,
+            $timeoutConfig,
+            $this->logger,
+            $this->slowLogConfig,
+        );
+        $this->batch = $batch ?? new RawKvBatch(
+            $grpc,
+            $regionResolver,
+            $timeoutConfig,
+            $this->logger,
+            $this->slowLogConfig,
+        );
         $this->scanner = $scanner ?? new RawKvScanner(
             $pdClient,
             $grpc,
@@ -183,6 +227,7 @@ final class RawKvClient
             $serverBusyBudgetMs,
             $regionCache,
             $this->logger,
+            $this->slowLogConfig,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -193,6 +238,7 @@ final class RawKvClient
             $maxBackoffMs,
             $serverBusyBudgetMs,
             $this->logger,
+            $this->slowLogConfig,
         );
     }
 

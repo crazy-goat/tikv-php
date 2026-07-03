@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -34,6 +35,7 @@ final readonly class RawKvRangeOps
         private int $maxBackoffMs,
         private int $serverBusyBudgetMs,
         private LoggerInterface $logger,
+        private ?SlowLogConfig $slowLogConfig = null,
     ) {
     }
 
@@ -99,15 +101,19 @@ final readonly class RawKvRangeOps
                 $request->setCf($columnFamily);
             }
 
-            /** @var RawDeleteRangeResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'RawDeleteRange',
-                $request,
-                RawDeleteRangeResponse::class,
-                $this->timeoutConfig->deleteRangeTimeoutMs,
+            $response = $this->measure(
+                'delete_range',
+                $startKey,
+                fn(): RawDeleteRangeResponse => $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'RawDeleteRange',
+                    $request,
+                    RawDeleteRangeResponse::class,
+                    $this->timeoutConfig->deleteRangeTimeoutMs,
+                )
             );
+            /** @var RawDeleteRangeResponse $response */
             RegionErrorHandler::check($response);
 
             $error = $response->getError();
@@ -139,15 +145,19 @@ final readonly class RawKvRangeOps
             $request->setAlgorithm(ChecksumAlgorithm::Crc64_Xor);
             $request->setRanges([$range]);
 
-            /** @var RawChecksumResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'RawChecksum',
-                $request,
-                RawChecksumResponse::class,
-                $this->timeoutConfig->deleteRangeTimeoutMs,
+            $response = $this->measure(
+                'checksum',
+                $startKey,
+                fn(): RawChecksumResponse => $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'RawChecksum',
+                    $request,
+                    RawChecksumResponse::class,
+                    $this->timeoutConfig->deleteRangeTimeoutMs,
+                )
             );
+            /** @var RawChecksumResponse $response */
             RegionErrorHandler::check($response);
 
             $error = $response->getError();
@@ -173,5 +183,40 @@ final readonly class RawKvRangeOps
             $this->regionResolver,
             $this->logger,
         );
+    }
+
+    /**
+     * Measure the execution time of a callable and log a warning if it
+     * exceeds the configured threshold for the given operation type.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    private function measure(string $operation, string $key, callable $fn): mixed
+    {
+        if (!$this->slowLogConfig instanceof \CrazyGoat\TiKV\Client\Grpc\SlowLogConfig) {
+            return $fn();
+        }
+
+        $threshold = $this->slowLogConfig->getThreshold($operation);
+        if ($threshold <= 0) {
+            return $fn();
+        }
+
+        $start = hrtime(true);
+        try {
+            return $fn();
+        } finally {
+            $durationMs = (hrtime(true) - $start) / 1_000_000;
+            if ($durationMs > $threshold) {
+                $this->logger->warning('Slow TiKV operation', [
+                    'operation' => $operation,
+                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
+                    'duration_ms' => round($durationMs, 2),
+                    'threshold_ms' => $threshold,
+                ]);
+            }
+        }
     }
 }

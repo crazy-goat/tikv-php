@@ -14,11 +14,14 @@ use CrazyGoat\Proto\Kvrpcpb\RawPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 final readonly class RawKvCrud
 {
@@ -26,6 +29,8 @@ final readonly class RawKvCrud
         private GrpcClientInterface $grpc,
         private RegionResolver $regionResolver,
         private TimeoutConfig $timeoutConfig,
+        private LoggerInterface $logger = new NullLogger(),
+        private ?SlowLogConfig $slowLogConfig = null,
     ) {
     }
 
@@ -42,15 +47,15 @@ final readonly class RawKvCrud
                 $request->setCf($columnFamily);
             }
 
-            /** @var RawGetResponse $response */
-            $response = $this->grpc->call(
+            $response = $this->measure('read', $key, fn(): RawGetResponse => $this->grpc->call(
                 $address,
                 'tikvpb.Tikv',
                 'RawGet',
                 $request,
                 RawGetResponse::class,
                 $this->timeoutMs('read'),
-            );
+            ));
+            /** @var RawGetResponse $response */
             RegionErrorHandler::check($response);
 
             if ($response->getNotFound()) {
@@ -87,15 +92,17 @@ final readonly class RawKvCrud
                 $request->setCf($columnFamily);
             }
 
-            $response = $this->grpc->call(
+            $response = $this->measure('write', $key, fn(): RawPutResponse => $this->grpc->call(
                 $address,
                 'tikvpb.Tikv',
                 'RawPut',
                 $request,
                 RawPutResponse::class,
                 $this->timeoutMs('write'),
-            );
+            ));
+            /** @var RawPutResponse $response */
             RegionErrorHandler::check($response);
+
             return null;
         });
     }
@@ -120,15 +127,17 @@ final readonly class RawKvCrud
                 $request->setCf($columnFamily);
             }
 
-            $response = $this->grpc->call(
+            $response = $this->measure('write', $key, fn(): RawDeleteResponse => $this->grpc->call(
                 $address,
                 'tikvpb.Tikv',
                 'RawDelete',
                 $request,
                 RawDeleteResponse::class,
                 $this->timeoutMs('write'),
-            );
+            ));
+            /** @var RawDeleteResponse $response */
             RegionErrorHandler::check($response);
+
             return null;
         });
     }
@@ -146,15 +155,15 @@ final readonly class RawKvCrud
                 $request->setCf($columnFamily);
             }
 
-            /** @var RawGetKeyTTLResponse $response */
-            $response = $this->grpc->call(
+            $response = $this->measure('read', $key, fn(): RawGetKeyTTLResponse => $this->grpc->call(
                 $address,
                 'tikvpb.Tikv',
                 'RawGetKeyTTL',
                 $request,
                 RawGetKeyTTLResponse::class,
                 $this->timeoutMs('read'),
-            );
+            ));
+            /** @var RawGetKeyTTLResponse $response */
             RegionErrorHandler::check($response);
 
             $error = $response->getError();
@@ -178,5 +187,40 @@ final readonly class RawKvCrud
             'write' => $this->timeoutConfig->writeTimeoutMs,
             default => null,
         };
+    }
+
+    /**
+     * Measure the execution time of a callable and log a warning if it
+     * exceeds the configured threshold for the given operation type.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    private function measure(string $operation, string $key, callable $fn): mixed
+    {
+        if (!$this->slowLogConfig instanceof \CrazyGoat\TiKV\Client\Grpc\SlowLogConfig) {
+            return $fn();
+        }
+
+        $threshold = $this->slowLogConfig->getThreshold($operation);
+        if ($threshold <= 0) {
+            return $fn();
+        }
+
+        $start = hrtime(true);
+        try {
+            return $fn();
+        } finally {
+            $durationMs = (hrtime(true) - $start) / 1_000_000;
+            if ($durationMs > $threshold) {
+                $this->logger->warning('Slow TiKV operation', [
+                    'operation' => $operation,
+                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
+                    'duration_ms' => round($durationMs, 2),
+                    'threshold_ms' => $threshold,
+                ]);
+            }
+        }
     }
 }

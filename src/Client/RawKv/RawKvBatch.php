@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -38,6 +39,7 @@ final readonly class RawKvBatch
         private RegionResolver $regionResolver,
         private TimeoutConfig $timeoutConfig,
         private LoggerInterface $logger,
+        private ?SlowLogConfig $slowLogConfig = null,
     ) {
     }
 
@@ -382,8 +384,12 @@ final readonly class RawKvBatch
 
             if ($allInRegion) {
                 $future = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
+                $response = $this->measure(
+                    'batch_read',
+                    $key,
+                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
+                );
                 /** @var RawBatchGetResponse $response */
-                $response = $future->wait();
                 RegionErrorHandler::check($response);
                 return $response;
             }
@@ -410,8 +416,12 @@ final readonly class RawKvBatch
             foreach ($groups as $group) {
                 $f = $group['region'];
                 $future = $this->executeBatchGetForRegionAsync($f, $group['keys'], $columnFamily);
+                $response = $this->measure(
+                    'batch_read',
+                    $key,
+                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
+                );
                 /** @var RawBatchGetResponse $response */
-                $response = $future->wait();
                 RegionErrorHandler::check($response);
                 foreach ($response->getPairs() as $pair) {
                     $allPairs[] = $pair;
@@ -456,7 +466,12 @@ final readonly class RawKvBatch
 
             if ($allInRegion) {
                 $future = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
-                $response = $future->wait();
+                $response = $this->measure(
+                    'batch_write',
+                    $firstKey,
+                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
+                );
+                /** @var RawBatchPutResponse $response */
                 RegionErrorHandler::check($response);
                 return null;
             }
@@ -488,7 +503,12 @@ final readonly class RawKvBatch
                 $batchTtls = $group['ttls'];
                 $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
                 $future = $this->executeBatchPutForRegionAsync($f, $group['pairs'], $batchTtl, $forCas, $columnFamily);
-                $response = $future->wait();
+                $response = $this->measure(
+                    'batch_write',
+                    $firstKey,
+                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
+                );
+                /** @var RawBatchPutResponse $response */
                 RegionErrorHandler::check($response);
             }
 
@@ -525,7 +545,12 @@ final readonly class RawKvBatch
 
             if ($allInRegion) {
                 $future = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
-                $response = $future->wait();
+                $response = $this->measure(
+                    'batch_write',
+                    $key,
+                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
+                );
+                /** @var RawBatchDeleteResponse $response */
                 RegionErrorHandler::check($response);
                 return null;
             }
@@ -549,7 +574,12 @@ final readonly class RawKvBatch
             foreach ($groups as $group) {
                 $f = $group['region'];
                 $future = $this->executeBatchDeleteForRegionAsync($f, $group['keys'], $forCas, $columnFamily);
-                $response = $future->wait();
+                $response = $this->measure(
+                    'batch_write',
+                    $key,
+                    fn(): \Google\Protobuf\Internal\Message => $future->wait(),
+                );
+                /** @var RawBatchDeleteResponse $response */
                 RegionErrorHandler::check($response);
             }
 
@@ -575,5 +605,40 @@ final readonly class RawKvBatch
     private function resolveRegion(string $key): RegionInfo
     {
         return $this->regionResolver->getRegionInfo($key);
+    }
+
+    /**
+     * Measure the execution time of a callable and log a warning if it
+     * exceeds the configured threshold for the given operation type.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    private function measure(string $operation, string $key, callable $fn): mixed
+    {
+        if (!$this->slowLogConfig instanceof \CrazyGoat\TiKV\Client\Grpc\SlowLogConfig) {
+            return $fn();
+        }
+
+        $threshold = $this->slowLogConfig->getThreshold($operation);
+        if ($threshold <= 0) {
+            return $fn();
+        }
+
+        $start = hrtime(true);
+        try {
+            return $fn();
+        } finally {
+            $durationMs = (hrtime(true) - $start) / 1_000_000;
+            if ($durationMs > $threshold) {
+                $this->logger->warning('Slow TiKV operation', [
+                    'operation' => $operation,
+                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
+                    'duration_ms' => round($durationMs, 2),
+                    'threshold_ms' => $threshold,
+                ]);
+            }
+        }
     }
 }
