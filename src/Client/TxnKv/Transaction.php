@@ -63,6 +63,7 @@ final class Transaction
     /** @var string[] keys pending pessimistic lock (batched at commit time) */
     private array $pendingLockKeys = [];
     private bool $closed = false;
+    private ?int $maxForUpdateTs = null;
     private ?RetryExecutor $retryExecutor = null;
 
     private const OPTIMISTIC_LOCK_TTL_MS = 3000;
@@ -70,6 +71,7 @@ final class Transaction
     /** Maximum scan limit to prevent unbounded memory usage */
     private const MAX_SCAN_LIMIT = 10240;
     /** TiKV KvScan treats limit=0 as "return 0 results" */
+    private const PESSIMISTIC_LOCK_RETRY_DELAY_MS = 100;
 
     public function __construct(
         private readonly string $txnId,
@@ -158,11 +160,9 @@ final class Transaction
             if ($error !== null) {
                 $locked = $error->getLocked();
                 if ($locked !== null) {
-                    $this->lockResolver->resolveLock(
-                        $key,
-                        (int) $locked->getLockVersion(),
-                        $this->startTs,
-                    );
+                    $rawPrimary = $locked->getPrimaryLock();
+                    $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $key);
+                    $this->lockResolver->resolveLock($lockPrimary, $locked);
                     throw new TxnRetryableException('Lock encountered, resolved - retry', BackoffType::TxnLock);
                 }
 
@@ -447,7 +447,7 @@ final class Transaction
         $request->setLockTtl(self::OPTIMISTIC_LOCK_TTL_MS);
 
         if ($this->pessimistic) {
-            $forUpdateTs = $this->startTs;
+            $forUpdateTs = $this->maxForUpdateTs ?? $this->startTs;
             $request->setForUpdateTs($forUpdateTs);
             $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
             $actions = [];
@@ -489,11 +489,9 @@ final class Transaction
         foreach ($errors as $keyError) {
             $locked = $keyError->getLocked();
             if ($locked !== null) {
-                $this->lockResolver->resolveLock(
-                    $locked->getKey(),
-                    (int) $locked->getLockVersion(),
-                    $this->startTs,
-                );
+                $rawPrimary = $locked->getPrimaryLock();
+                $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
+                $this->lockResolver->resolveLock($lockPrimary, $locked);
                 throw new TxnRetryableException(
                     'Lock conflict during prewrite, resolved - retry',
                     BackoffType::TxnLock,
@@ -533,11 +531,9 @@ final class Transaction
     {
         $locked = $error->getLocked();
         if ($locked !== null) {
-            $this->lockResolver->resolveLock(
-                $locked->getKey(),
-                (int) $locked->getLockVersion(),
-                $this->startTs,
-            );
+            $rawPrimary = $locked->getPrimaryLock();
+            $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
+            $this->lockResolver->resolveLock($lockPrimary, $locked);
             throw new TxnRetryableException(
                 'Lock encountered during rollback, resolved - retry',
                 BackoffType::TxnLock,
@@ -755,23 +751,36 @@ final class Transaction
                 $mutations[] = $mutation;
             }
 
-            $request = new PessimisticLockRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setMutations($mutations);
-            $request->setPrimaryLock($primary);
-            $request->setStartVersion($this->startTs);
-            $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
-            $request->setForUpdateTs($this->startTs);
-            $request->setIsFirstLock($isFirstLock);
-            $request->setReturnValues(true);
+            // Get a fresh PD timestamp for for_update_ts (fix #3).
+            $forUpdateTs = $this->pdClient->getTimestamp();
+            if ($this->maxForUpdateTs === null || $forUpdateTs > $this->maxForUpdateTs) {
+                $this->maxForUpdateTs = $forUpdateTs;
+            }
 
-            $this->logger->debug('PessimisticLock', [
-                'txnId' => $this->txnId,
-                'regionId' => $region->regionId,
-                'keyCount' => count($regionKeys),
-            ]);
+            $elapsedMs = 0;
+            $attempt = 0;
+            do {
+                $attempt++;
+                $request = new PessimisticLockRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                $request->setMutations($mutations);
+                $request->setPrimaryLock($primary);
+                $request->setStartVersion($this->startTs);
+                $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
+                $request->setForUpdateTs($forUpdateTs);
+                $request->setIsFirstLock($isFirstLock);
+                $request->setReturnValues(true);
 
-            try {
+                $this->logger->debug('PessimisticLock', [
+                    'txnId' => $this->txnId,
+                    'regionId' => $region->regionId,
+                    'keyCount' => count($regionKeys),
+                    'attempt' => $attempt,
+                    'forUpdateTs' => $forUpdateTs,
+                ]);
+
+                // GrpcException is NOT caught – transport errors propagate
+                // through the retry/classifier path (fix #1).
                 /** @var PessimisticLockResponse $response */
                 $response = $this->grpc->call(
                     $address,
@@ -785,6 +794,8 @@ final class Transaction
                 $this->handleRegionError($response, $region);
 
                 $errors = $response->getErrors();
+                $needRetry = false;
+
                 if (count($errors) > 0) {
                     foreach ($errors as $keyError) {
                         $deadlock = $keyError->getDeadlock();
@@ -799,11 +810,13 @@ final class Transaction
 
                         $locked = $keyError->getLocked();
                         if ($locked !== null) {
-                            $this->lockResolver->resolveLock(
-                                $locked->getKey(),
-                                (int) $locked->getLockVersion(),
-                                $this->startTs,
-                            );
+                            // Resolve the conflicting lock, then re-attempt acquisition (fix #2).
+                            // Use the lock's real primary key for status check (fix #4).
+                            $rawPrimary = $locked->getPrimaryLock();
+                            $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
+                            $this->lockResolver->resolveLock($lockPrimary, $locked);
+                            $needRetry = true;
+                            break;
                         }
 
                         $conflict = $keyError->getConflict();
@@ -814,13 +827,44 @@ final class Transaction
                         }
                     }
                 }
-            } catch (GrpcException $e) {
-                $this->logger->warning('Pessimistic lock failed, will retry on prewrite', [
-                    'regionId' => $region->regionId,
-                    'keyCount' => count($regionKeys),
-                    'error' => $e->getMessage(),
+
+                if (!$needRetry) {
+                    // Lock acquired successfully.
+                    break;
+                }
+
+                // Backoff before re-attempting the lock.
+                $delayMs = min(
+                    self::PESSIMISTIC_LOCK_RETRY_DELAY_MS * (1 << min($attempt, 6)),
+                    10000,
+                );
+
+                // Cap cumulative sleep to maxBackoffMs.
+                $remainingMs = $this->maxBackoffMs - $elapsedMs;
+                if ($remainingMs <= 0) {
+                    $this->logger->warning('Pessimistic lock retry budget exhausted', [
+                        'txnId' => $this->txnId,
+                        'elapsedMs' => $elapsedMs,
+                    ]);
+                    break;
+                }
+                $delayMs = min($delayMs, $remainingMs);
+
+                $this->logger->debug('Pessimistic lock conflict, retrying', [
+                    'txnId' => $this->txnId,
+                    'attempt' => $attempt,
+                    'delayMs' => $delayMs,
+                    'elapsedMs' => $elapsedMs,
                 ]);
-            }
+                usleep($delayMs * 1000);
+                $elapsedMs += $delayMs;
+
+                // Re-fetch a fresh timestamp for the retry attempt.
+                $forUpdateTs = $this->pdClient->getTimestamp();
+                if ($forUpdateTs > $this->maxForUpdateTs) {
+                    $this->maxForUpdateTs = $forUpdateTs;
+                }
+            } while ($elapsedMs < $this->maxBackoffMs);
 
             $isFirstLock = false;
         }
@@ -956,11 +1000,9 @@ final class Transaction
             if ($error !== null) {
                 $locked = $error->getLocked();
                 if ($locked !== null) {
-                    $this->lockResolver->resolveLock(
-                        $locked->getKey(),
-                        (int) $locked->getLockVersion(),
-                        $this->startTs,
-                    );
+                    $rawPrimary = $locked->getPrimaryLock();
+                    $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
+                    $this->lockResolver->resolveLock($lockPrimary, $locked);
                     throw new TxnRetryableException(
                         'Lock encountered during scan, resolved - retry',
                         BackoffType::TxnLock,
