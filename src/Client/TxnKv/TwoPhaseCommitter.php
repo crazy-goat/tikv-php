@@ -116,7 +116,10 @@ final readonly class TwoPhaseCommitter
             $this->prewriteForRegion($region, $regionMutations, $primary, $state);
         }
 
-        $commitTs = $this->pdClient->getTimestamp();
+        // Reuse an existing commit timestamp on retry: a second commit() after a failed
+        // commit phase must never allocate a new ts (issue #217). Once TXN-10 makes the
+        // status Committed at the commit point, a second commit() will be rejected here.
+        $commitTs = $state->getCommitTs() ?? $this->pdClient->getTimestamp();
         $state->setCommitTs($commitTs);
 
         $this->commitKeys($allKeys, $state, $retryExecutor, $classifier);

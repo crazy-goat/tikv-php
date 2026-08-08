@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `Transaction::commit()` no longer allocates a new commit timestamp when retried after a failed commit phase — the stored commit timestamp is reused, eliminating the risk of a transaction being committed at two different timestamps (partial-transaction visibility window). (#217)
 - Fix 3 unit tests that failed in Docker: correct mock expectations for `BatchAsyncExecutor` short-circuit behavior and skip unreadable-file test when running as root. (#178)
 
 ### Added
