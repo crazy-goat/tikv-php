@@ -6,11 +6,13 @@ namespace CrazyGoat\TiKV\Tests\Unit\Retry;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class ErrorClassifierTest extends TestCase
@@ -249,5 +251,55 @@ class ErrorClassifierTest extends TestCase
     public function testEmptyMessageReturnsNull(): void
     {
         $this->assertNull(ErrorClassifier::classify(new TiKvException('')));
+    }
+
+    // ========================================================================
+    // Invalid store address: always fatal, before any message matching
+    // ========================================================================
+
+    public function testInvalidStoreAddressExceptionIsAlwaysFatal(): void
+    {
+        $this->assertNull(ErrorClassifier::classify(
+            new InvalidStoreAddressException('PD returned store address "127.0.0.1:20160" outside the allowed set'),
+        ));
+    }
+
+    /**
+     * The raw address inside the exception message may contain retry
+     * keywords; the early instanceof check must win over message matching so
+     * the rejection is never retried.
+     *
+     * @return array<string, array{string}>
+     */
+    public static function provideRetryKeywords(): array
+    {
+        return [
+            'EpochNotMatch' => ['EpochNotMatch'],
+            'epoch not match lowercase' => ['epoch not match'],
+            'ServerIsBusy' => ['ServerIsBusy'],
+            'StaleCommand' => ['StaleCommand'],
+            'RegionNotFound' => ['RegionNotFound'],
+            'NotLeader' => ['NotLeader'],
+            'DiskFull' => ['DiskFull'],
+            'RegionNotInitialized' => ['RegionNotInitialized'],
+            'ReadIndexNotReady' => ['ReadIndexNotReady'],
+            'ProposalInMergingMode' => ['ProposalInMergingMode'],
+            'RecoveryInProgress' => ['RecoveryInProgress'],
+            'IsWitness' => ['IsWitness'],
+            'MaxTimestampNotSynced' => ['MaxTimestampNotSynced'],
+            'RaftEntryTooLarge' => ['RaftEntryTooLarge'],
+            'KeyNotInRegion' => ['KeyNotInRegion'],
+        ];
+    }
+
+    #[DataProvider('provideRetryKeywords')]
+    public function testInvalidStoreAddressContainingRetryKeywordIsFatal(string $keyword): void
+    {
+        $exception = new InvalidStoreAddressException(sprintf(
+            'PD returned store address "%s-host:20160" for store 1 outside the allowed set',
+            $keyword,
+        ));
+
+        $this->assertNull(ErrorClassifier::classify($exception));
     }
 }

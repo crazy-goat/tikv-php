@@ -106,3 +106,16 @@ PHP version, including 8.5 (only parameters and return types accept
 added for issue #306). PHPStan level 9 also rejects casting `mixed` to string
 (`(string) $level` in a PSR-3 `log($level, …)` implementation) — narrow with
 `is_string()` instead.
+
+## `$` in PCRE matches before a trailing newline — anchor with `\A…\z` for strict string validation
+
+In PHP, `preg_match('/^...$/', $s)` returns 1 for `"evil:20160\n"` because `$`
+also matches immediately before a final newline. Any strict string-format
+check (store addresses, identifiers, ports) must use `\A…\z` instead — and
+when the validated value is numeric, also range-check it (`0` or `99999` pass
+`\d{1,5}`). This bit the SEC-03 store-address validation in issue #306: the
+original `/^[A-Za-z0-9._-]+:\d{1,5}$/` accepted a trailing-newline address
+(the gRPC target parser tolerates it) and out-of-range ports; the fixed
+`RegionResolver::parseHostPort()` parses host/port explicitly with `\A…\z`
+anchors and a 1–65535 port range, and additionally accepts bracketed IPv6
+(`[2001:db8::1]:20160`) with an `inet_pton` check on the host.

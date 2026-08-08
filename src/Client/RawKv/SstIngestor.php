@@ -17,6 +17,7 @@ use CrazyGoat\Proto\ImportSstpb\SwitchModeRequest;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -52,6 +53,8 @@ final readonly class SstIngestor
      *
      * @throws GrpcException On gRPC transport error
      * @throws RegionException On region error
+     * @throws InvalidStoreAddressException When PD returns a store address
+     *     that fails validation (malformed or outside the allowed set)
      */
     public function ingest(array $keyValuePairs, ?int $ttl = null): void
     {
@@ -110,6 +113,8 @@ final readonly class SstIngestor
             }
 
             try {
+                $this->regionResolver->validateStoreAddress($address, (int) $store->getId());
+
                 $request = new SwitchModeRequest();
                 $request->setMode($mode);
 

@@ -26,6 +26,7 @@ final readonly class ConnectionBundle
     /**
      * @param list<string> $allowedStoreHosts
      * @param (Closure(string): bool)|null $storeHostPolicy
+     * @param list<string> $pdEndpoints
      */
     public function __construct(
         public GrpcClientInterface $grpc,
@@ -38,6 +39,7 @@ final readonly class ConnectionBundle
         public MetricsInterface $metrics,
         public array $allowedStoreHosts = [],
         public ?Closure $storeHostPolicy = null,
+        public array $pdEndpoints = [],
     ) {
     }
 }

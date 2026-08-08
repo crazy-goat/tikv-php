@@ -92,6 +92,7 @@ final class RawKvClient
             slowLogConfig: $bundle->slowLogConfig,
             allowedStoreHosts: $bundle->allowedStoreHosts,
             storeHostPolicy: $bundle->storeHostPolicy,
+            pdEndpoints: $bundle->pdEndpoints,
         );
     }
 
@@ -115,6 +116,8 @@ final class RawKvClient
         private readonly array $allowedStoreHosts = [],
         /** @var (Closure(string): bool)|null */
         private readonly ?Closure $storeHostPolicy = null,
+        /** @var list<string> */
+        private readonly array $pdEndpoints = [],
     ) {
         $regionResolver ??= new RegionResolver(
             $pdClient,
@@ -123,6 +126,7 @@ final class RawKvClient
             $this->allowedStoreHosts,
             $this->storeHostPolicy,
             $this->logger,
+            $this->pdEndpoints,
         );
         $this->crud = $crud ?? new RawKvCrud(
             $grpc,
@@ -261,6 +265,7 @@ final class RawKvClient
             $this->allowedStoreHosts,
             $this->storeHostPolicy,
             $this->logger,
+            $this->pdEndpoints,
         );
 
         return new RetryExecutor(

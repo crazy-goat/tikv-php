@@ -45,6 +45,7 @@ final class TxnKvClient
             timeoutConfig: $bundle->timeoutConfig,
             allowedStoreHosts: $bundle->allowedStoreHosts,
             storeHostPolicy: $bundle->storeHostPolicy,
+            pdEndpoints: $bundle->pdEndpoints,
         );
     }
 
@@ -60,6 +61,8 @@ final class TxnKvClient
         private readonly array $allowedStoreHosts = [],
         /** @var (Closure(string): bool)|null */
         private readonly ?Closure $storeHostPolicy = null,
+        /** @var list<string> */
+        private readonly array $pdEndpoints = [],
     ) {
         $this->metrics = new NoOpMetrics();
         $this->regionResolver = $regionResolver
@@ -70,6 +73,7 @@ final class TxnKvClient
                 $this->allowedStoreHosts,
                 $this->storeHostPolicy,
                 $this->logger,
+                $this->pdEndpoints,
             );
     }
 

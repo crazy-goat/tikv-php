@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Retry;
 
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
@@ -23,6 +24,14 @@ final class ErrorClassifier
      */
     public static function classify(TiKvException $e): ?BackoffType
     {
+        // A rejected store address is always fatal. Checked before any message
+        // matching: the raw address inside the exception may contain retry
+        // keywords (e.g. "EpochNotMatch"), which would otherwise classify the
+        // rejection as retryable and hide it behind up to 30 retries.
+        if ($e instanceof InvalidStoreAddressException) {
+            return null;
+        }
+
         // === Primary path: typed error kind on RegionException ===
         if ($e instanceof RegionException && $e->errorKind instanceof ErrorKind) {
             return self::classifyByKind($e->errorKind);

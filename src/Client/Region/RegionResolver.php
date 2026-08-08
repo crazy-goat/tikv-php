@@ -19,11 +19,16 @@ use Psr\Log\NullLogger;
 final readonly class RegionResolver
 {
     /**
-     * @param string[] $allowedStoreHosts Hostnames, DNS suffixes (leading dot
-     *     optional) or CIDR ranges the store host must match. Empty when no
-     *     host restriction is configured (backward compatible).
+     * @param string[] $allowedStoreHosts Exact hostnames, DNS suffixes
+     *     (leading dot: matches the domain itself and any subdomain) or
+     *     CIDR ranges the store host must match.
      * @param (Closure(string): bool)|null $storeHostPolicy Custom policy that
-     *     receives the full address; when set it overrides $allowedStoreHosts.
+     *     receives the full address; when set it overrides $allowedStoreHosts
+     *     and the default PD-derived policy.
+     * @param list<string> $pdEndpoints Configured PD endpoints the default
+     *     host policy is derived from. Only used when neither
+     *     $allowedStoreHosts nor $storeHostPolicy is set. Empty only for
+     *     direct construction (permissive: no default policy applies).
      */
     public function __construct(
         private PdClientInterface $pdClient,
@@ -32,6 +37,7 @@ final readonly class RegionResolver
         private array $allowedStoreHosts = [],
         private ?Closure $storeHostPolicy = null,
         private LoggerInterface $logger = new NullLogger(),
+        private array $pdEndpoints = [],
     ) {
     }
 
@@ -145,24 +151,37 @@ final readonly class RegionResolver
             throw new StoreNotFoundException($storeId);
         }
 
-        // Unconditional format check: gRPC target strings are not restricted
-        // to host:port — grpc-core also accepts unix:/path, unix-abstract:,
-        // dns:/// and ipv4:/ipv6: schemes. A rogue/on-path PD must never be
-        // able to redirect the client to an arbitrary target, so anything
-        // that is not a bare host:port is rejected regardless of policy.
-        if (preg_match('/^[A-Za-z0-9._-]+:\d{1,5}$/', $address) !== 1) {
+        $this->validateStoreAddress($address, $storeId);
+
+        return $address;
+    }
+
+    /**
+     * Validate a PD-supplied store address before it is used as a gRPC
+     * channel target (used by resolveStoreAddress() and by callers that
+     * handle store addresses directly, e.g. SstIngestor). Enforces the
+     * unconditional host:port format check (bracketed IPv6 allowed) and the
+     * configured host policy.
+     *
+     * @throws InvalidStoreAddressException when the address is malformed or
+     *     outside the allowed set
+     */
+    public function validateStoreAddress(string $address, int $storeId): void
+    {
+        $parsed = $this->parseHostPort($address);
+        if ($parsed === null) {
             $this->logger->error('PD returned a store address that is not a bare host:port', [
                 'storeId' => $storeId,
                 'address' => $address,
             ]);
             throw new InvalidStoreAddressException(sprintf(
-                'PD returned malformed store address "%s" for store %d (expected host:port)',
+                'PD returned malformed store address "%s" for store %d (expected host:port, port 1-65535)',
                 $address,
                 $storeId,
             ));
         }
 
-        if (!$this->isStoreAddressAllowed($address)) {
+        if (!$this->isStoreAddressAllowed($address, $parsed['host'])) {
             $this->logger->error('PD returned a store address outside the allowed set', [
                 'storeId' => $storeId,
                 'address' => $address,
@@ -174,30 +193,138 @@ final readonly class RegionResolver
                 $storeId,
             ));
         }
+    }
 
-        return $address;
+    /**
+     * Parse a bare host:port or bracketed IPv6 [addr]:port string. The
+     * format check is unconditional and independent of the host policy.
+     *
+     * @return array{host: string, port: int}|null null when the address is
+     *     not a valid bare host:port (schemes such as unix:, dns:/// and
+     *     trailing-newline / out-of-range-port variants are rejected)
+     */
+    private function parseHostPort(string $address): ?array
+    {
+        if ($address === '') {
+            return null;
+        }
+
+        if ($address[0] === '[') {
+            $close = strpos($address, ']');
+            if ($close === false || $close < 2 || !isset($address[$close + 1]) || $address[$close + 1] !== ':') {
+                return null;
+            }
+
+            $host = substr($address, 1, $close - 1);
+            $portPart = substr($address, $close + 2);
+            $packed = @inet_pton($host);
+            if ($packed === false || strlen($packed) !== 16) {
+                return null;
+            }
+        } else {
+            $colon = strrpos($address, ':');
+            if ($colon === false || $colon === 0 || $colon === strlen($address) - 1) {
+                return null;
+            }
+
+            $host = substr($address, 0, $colon);
+            $portPart = substr($address, $colon + 1);
+            if (preg_match('/\A[A-Za-z0-9._-]+\z/', $host) !== 1) {
+                return null;
+            }
+        }
+
+        if (preg_match('/\A[0-9]+\z/', $portPart) !== 1) {
+            return null;
+        }
+
+        $port = (int) $portPart;
+        if ($port < 1 || $port > 65535) {
+            return null;
+        }
+
+        return ['host' => $host, 'port' => $port];
     }
 
     /**
      * Decide whether a validated host:port address may be connected to.
      */
-    private function isStoreAddressAllowed(string $address): bool
+    private function isStoreAddressAllowed(string $address, string $host): bool
     {
-        if ($this->storeHostPolicy instanceof \Closure) {
+        if ($this->storeHostPolicy instanceof Closure) {
             return (bool) ($this->storeHostPolicy)($address);
         }
 
-        if ($this->allowedStoreHosts === []) {
-            return true;
-        }
+        if ($this->allowedStoreHosts !== []) {
+            foreach ($this->allowedStoreHosts as $entry) {
+                if ($this->matchesHostEntry($host, $entry)) {
+                    return true;
+                }
+            }
 
-        $host = strstr($address, ':', true);
-        if ($host === false) {
             return false;
         }
 
-        foreach ($this->allowedStoreHosts as $entry) {
-            if ($this->matchesHostEntry($host, $entry)) {
+        if ($this->pdEndpoints !== []) {
+            return $this->matchesDefaultPolicy($host);
+        }
+
+        return true;
+    }
+
+    /**
+     * Match a store host against a single allowlist entry. An entry with a
+     * leading dot is a DNS suffix (matches the domain itself and any
+     * subdomain); any other entry matches the hostname exactly.
+     */
+    private function matchesHostEntry(string $host, string $entry): bool
+    {
+        if (str_contains($entry, '/')) {
+            return $this->matchesCidr($host, $entry);
+        }
+
+        if ($entry !== '' && $entry[0] === '.') {
+            return $host === substr($entry, 1) || str_ends_with($host, $entry);
+        }
+
+        return $host === $entry;
+    }
+
+    /**
+     * The default host policy, derived from the configured PD endpoints
+     * (applied only when neither allowedStoreHosts nor storeHostPolicy is
+     * configured): the store host must equal a configured PD host exactly,
+     * be a single-label name (same network namespace, e.g. compose/K8s short
+     * names), share the last two DNS labels with a configured PD host, or be
+     * an IP in the same /16 subnet as a configured PD IP endpoint.
+     */
+    private function matchesDefaultPolicy(string $host): bool
+    {
+        if (!str_contains($host, '.')) {
+            return true;
+        }
+
+        foreach ($this->pdEndpoints as $endpoint) {
+            $parsed = $this->parseHostPort($endpoint);
+            if ($parsed === null) {
+                continue;
+            }
+
+            $pdHost = $parsed['host'];
+
+            if (strcasecmp($host, $pdHost) === 0) {
+                return true;
+            }
+
+            $pdLabels = explode('.', $pdHost);
+            if (count($pdLabels) >= 3) {
+                $sharedSuffix = '.' . implode('.', array_slice($pdLabels, -2));
+                if (str_ends_with($host, $sharedSuffix)) {
+                    return true;
+                }
+            }
+
+            if ($this->isSameIpv16Subnet($host, $pdHost)) {
                 return true;
             }
         }
@@ -205,17 +332,15 @@ final readonly class RegionResolver
         return false;
     }
 
-    private function matchesHostEntry(string $host, string $entry): bool
+    private function isSameIpv16Subnet(string $a, string $b): bool
     {
-        if (str_contains($entry, '/')) {
-            return $this->matchesCidr($host, $entry);
+        $packedA = @inet_pton($a);
+        $packedB = @inet_pton($b);
+        if ($packedA === false || $packedB === false || strlen($packedA) !== strlen($packedB)) {
+            return false;
         }
 
-        // DNS suffix: entry may be written as 'example.com' or '.example.com';
-        // both match the domain itself and any subdomain.
-        $suffix = ltrim($entry, '.');
-
-        return $host === $suffix || str_ends_with($host, '.' . $suffix);
+        return substr($packedA, 0, 2) === substr($packedB, 0, 2);
     }
 
     private function matchesCidr(string $host, string $cidr): bool

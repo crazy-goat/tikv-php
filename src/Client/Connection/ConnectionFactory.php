@@ -77,14 +77,16 @@ final class ConnectionFactory
             metrics: $metrics,
             allowedStoreHosts: $storeHostValidation['allowedStoreHosts'],
             storeHostPolicy: $storeHostValidation['storeHostPolicy'],
+            pdEndpoints: array_values($pdEndpoints),
         );
     }
 
     /**
      * Parse and validate the store-address host restriction options.
      *
-     * Both are opt-in: when neither is configured no host policy is
-     * enforced (only the unconditional format check applies).
+     * Both are opt-in. When neither is configured, the default host policy
+     * derived from the configured PD endpoints applies (see
+     * RegionResolver::matchesDefaultPolicy()).
      *
      * @param array<string, mixed> $options
      * @return array{allowedStoreHosts: list<string>, storeHostPolicy: ?Closure}
