@@ -40,7 +40,7 @@ final class PdClient implements PdClientInterface
     ) {
     }
 
-    public function getTimestamp(): int
+    public function getTimestamp(?int $timeoutMs = null): int
     {
         if (!$this->tso instanceof TimestampOracle) {
             $this->tso = new TimestampOracle(
@@ -52,7 +52,7 @@ final class PdClient implements PdClientInterface
             );
         }
 
-        return $this->tso->getTimestamp();
+        return $this->tso->getTimestamp($timeoutMs);
     }
 
     public function getRegion(string $key): RegionInfo

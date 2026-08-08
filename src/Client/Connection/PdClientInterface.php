@@ -55,10 +55,12 @@ interface PdClientInterface
     /**
      * Get a monotonically increasing timestamp from PD.
      *
+     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD error
      */
-    public function getTimestamp(): int;
+    public function getTimestamp(?int $timeoutMs = null): int;
 
     /**
      * Get the learned cluster ID, or null if not yet discovered.

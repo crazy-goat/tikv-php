@@ -83,8 +83,11 @@ final class TxnKvClient
             $this->grpc,
             $this->regionResolver,
             $this->regionCache,
-            $this->maxBackoffMs,
-            $this->logger,
+            $this->pdClient,
+            $startTs,
+            timeoutConfig: $this->timeoutConfig,
+            maxBackoffMs: $this->maxBackoffMs,
+            logger: $this->logger,
         );
 
         return new Transaction(

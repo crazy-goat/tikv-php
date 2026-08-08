@@ -67,3 +67,18 @@ docker-compose.txnkv.yml up`.
 CI runs the Grpc testsuite with `--coverage-xml` under PCOV, but no
 coverage floor is enforced anywhere (`composer.json` has no
 `coverage:check`). Don't block PRs on coverage percentages.
+
+## Every TiKV `*_ts` protobuf field must be a PD TSO timestamp, never a monotonic-clock value
+
+TiKV interprets every timestamp protobuf field (`caller_start_ts`,
+`current_ts`, `start_version`, `commit_version`, `for_update_ts`, …) as a
+PD TSO timestamp: `physical_ms_since_epoch << 18 | logical`, on the order of
+`1e17`. `hrtime()`/`microtime()` return boot/process-relative values (~`1e9`)
+that are orders of magnitude smaller, are not comparable across processes,
+and reset on reboot. Sending them in a timestamp field breaks TiKV's lock
+TTL-expiry and min-commit-ts logic (issue #270: abandoned locks were never
+detected as expired). Always obtain timestamps from
+`PdClientInterface::getTimestamp()` (PD TSO, fails closed). The only
+legitimate uses of `hrtime`/`microtime` in timestamp positions are duration
+measurements (differences) and logging — and `TimestampOracle::getTimestamp()`
+accepts an optional `$timeoutMs` so TSO fetches can carry a finite deadline.

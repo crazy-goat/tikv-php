@@ -36,16 +36,18 @@ final readonly class TimestampOracle
      * so callers must observe the failure and decide whether to retry or
      * abort the transaction.
      *
+     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     *
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
      */
-    public function getTimestamp(): int
+    public function getTimestamp(?int $timeoutMs = null): int
     {
         $request = new TsoRequest();
         $request->setHeader($this->createHeader());
         $request->setCount(1);
 
         try {
-            $response = $this->callTso($request);
+            $response = $this->callTso($request, $timeoutMs);
 
             return $this->extractTimestamp($response);
         } catch (GrpcException $e) {
@@ -82,7 +84,7 @@ final readonly class TimestampOracle
      * any other gRPC failure propagates immediately so the caller can
      * fail closed.
      */
-    private function callTso(TsoRequest $request): TsoResponse
+    private function callTso(TsoRequest $request, ?int $timeoutMs): TsoResponse
     {
         try {
             $response = $this->grpc->call(
@@ -91,6 +93,7 @@ final readonly class TimestampOracle
                 'Tso',
                 $request,
                 TsoResponse::class,
+                $timeoutMs,
             );
 
             $this->learnClusterId($response);
@@ -115,6 +118,7 @@ final readonly class TimestampOracle
                 'Tso',
                 $request,
                 TsoResponse::class,
+                $timeoutMs,
             );
 
             $this->learnClusterId($response);

@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Kvrpcpb\Action;
+use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
@@ -25,6 +26,8 @@ class LockResolverTest extends TestCase
 {
     private const TEST_KEY = 'test-key';
     private const LOCK_TS = 100;
+    private const CALLER_START_TS = (1 << 42) | 17;
+    private const TSO_TIMESTAMP = (1 << 42) | 999;
 
     private const REGION_ID = 1;
     private const LEADER_STORE_ID = 1;
@@ -40,12 +43,16 @@ class LockResolverTest extends TestCase
     private LoggerInterface&MockObject $logger;
     private RegionInfo $region;
 
+    /** @var CheckTxnStatusRequest[] Requests captured from KvCheckTxnStatus calls */
+    private array $checkTxnStatusRequests = [];
+
     protected function setUp(): void
     {
         $this->grpc = $this->createMock(GrpcClientInterface::class);
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->logger = $this->createMock(LoggerInterface::class);
+        $this->checkTxnStatusRequests = [];
 
         $this->region = new RegionInfo(
             regionId: self::REGION_ID,
@@ -56,16 +63,20 @@ class LockResolverTest extends TestCase
         );
     }
 
-    private function createResolver(): LockResolver
+    private function createResolver(int $callerStartTs = self::CALLER_START_TS): LockResolver
     {
         $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
+
+        // Fresh TSO for every checkTxnStatus; individual tests override with expects().
+        $this->pdClient->method('getTimestamp')->willReturn(self::TSO_TIMESTAMP);
 
         return new LockResolver(
             $this->grpc,
             $regionResolver,
             $this->regionCache,
-            20000,
-            $this->logger,
+            $this->pdClient,
+            $callerStartTs,
+            logger: $this->logger,
         );
     }
 
@@ -125,6 +136,9 @@ class LockResolverTest extends TestCase
                 $checkResponses,
             ): object {
                 if ($method === 'KvCheckTxnStatus') {
+                    if ($request instanceof CheckTxnStatusRequest) {
+                        $this->checkTxnStatusRequests[] = $request;
+                    }
                     if (!isset($checkResponses[$checkIndex])) {
                         throw new \RuntimeException('Unexpected extra KvCheckTxnStatus call');
                     }
@@ -313,6 +327,50 @@ class LockResolverTest extends TestCase
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+    }
+
+    // ========================================================================
+    // checkTxnStatus() must send PD TSO timestamps, never hrtime()-derived values
+    // ========================================================================
+
+    public function testCheckTxnStatusSendsCallerStartTsAndFreshTsoFromPd(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $freshTso = (1 << 42) | 4242;
+        $this->pdClient->expects($this->once())
+            ->method('getTimestamp')
+            ->with($this->greaterThan(0)) // the TSO call must carry a finite timeout
+            ->willReturn($freshTso);
+
+        $this->mockGrpcCalls($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertCount(1, $this->checkTxnStatusRequests);
+        $request = $this->checkTxnStatusRequests[0];
+        $this->assertSame(self::CALLER_START_TS, $request->getCallerStartTs());
+        $this->assertSame($freshTso, $request->getCurrentTs());
+    }
+
+    public function testCheckTxnStatusSendsTsoMagnitudeTimestamps(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->mockGrpcCalls($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertCount(1, $this->checkTxnStatusRequests);
+        $request = $this->checkTxnStatusRequests[0];
+        // Regression guard: hrtime()-derived values are ~1e9, genuine TSO
+        // values are physical_ms << 18 (roughly 1e17).
+        $this->assertGreaterThan(1 << 40, $request->getCallerStartTs());
+        $this->assertGreaterThan(1 << 40, $request->getCurrentTs());
     }
 
     // ========================================================================

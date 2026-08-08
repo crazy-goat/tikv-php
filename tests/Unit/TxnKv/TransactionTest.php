@@ -63,8 +63,8 @@ class TransactionTest extends TestCase
             $this->grpc,
             $this->regionResolver,
             $this->regionCache,
-            20000,
-            new \Psr\Log\NullLogger(),
+            $this->pdClient,
+            1000, // matches createTransaction default startTs
         );
     }
 
@@ -1867,8 +1867,8 @@ class TransactionTest extends TestCase
             $this->grpc,
             $this->regionResolver,
             $this->regionCache,
-            20000,
-            new \Psr\Log\NullLogger(),
+            $this->pdClient,
+            1000, // matches the transaction startTs below
         );
 
         $txn = $this->createTransaction([
