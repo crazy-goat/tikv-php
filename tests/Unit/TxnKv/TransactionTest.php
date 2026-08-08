@@ -1711,6 +1711,103 @@ class TransactionTest extends TestCase
         $this->assertSame(TransactionStatus::Active, $txn->getStatus());
     }
 
+    /**
+     * A second commit() after a failed commit phase must reuse the stored
+     * commit timestamp instead of minting a new one, so a single
+     * transaction is never committed at two different timestamps.
+     *
+     * Issue #217 / TXN-12 AC: two commit() calls result in exactly one
+     * PdClient::getTimestamp() call for the commit phase.
+     */
+    public function testCommitRetryReusesCommitTimestampAfterSecondaryFailure(): void
+    {
+        $region1 = $this->makeRegion(1, '', 'k3');
+        $region2 = $this->makeRegion(2, 'k3', '');
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+        );
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+
+        // Mint a fresh ts per call so a second mint would be detectable.
+        $timestampCalls = 0;
+        $this->pdClient->method('getTimestamp')->willReturnCallback(function () use (&$timestampCalls): int {
+            $timestampCalls++;
+            return 9000 + $timestampCalls;
+        });
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        // First commit of the secondary region fails with a commit-phase
+        // key error; the retry commit succeeds.
+        $firstSecondaryCommit = true;
+        $commitVersions = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$firstSecondaryCommit,
+                &$commitVersions,
+                $prewriteResponse,
+                $commitResponse,
+            ): object {
+                if ($method === 'KvCommit' && $request instanceof \CrazyGoat\Proto\Kvrpcpb\CommitRequest) {
+                    $context = $request->getContext();
+                    $regionId = $context !== null ? $context->getRegionId() : -1;
+                    $commitVersions[] = $request->getCommitVersion();
+                    if ($regionId === 2 && $firstSecondaryCommit) {
+                        $firstSecondaryCommit = false;
+                        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+                        $keyError = new KeyError();
+                        $keyError->setRetryable('simulated commit failure');
+                        $errorResponse->setError($keyError);
+                        return $errorResponse;
+                    }
+                }
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->set('k4', 'v4');
+
+        try {
+            $txn->commit();
+            $this->fail('First commit should fail on the secondary region');
+        } catch (TransactionConflictException) {
+            // Expected: secondary commit failed after the primary committed.
+        }
+
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(9001, $txn->getCommitTs());
+
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(9001, $txn->getCommitTs());
+        // Exactly one PD timestamp for the whole transaction: the retried
+        // commit() must not mint a new one.
+        $this->assertSame(1, $timestampCalls);
+        // Every commit request across both attempts used the same ts.
+        $this->assertNotEmpty($commitVersions);
+        foreach ($commitVersions as $commitTs) {
+            $this->assertSame(9001, $commitTs);
+        }
+    }
+
     public function testPessimisticRollbackUsesMaxForUpdateTsNotStartTs(): void
     {
         $capturedRollbackForUpdateTs = null;
