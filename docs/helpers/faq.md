@@ -119,3 +119,20 @@ original `/^[A-Za-z0-9._-]+:\d{1,5}$/` accepted a trailing-newline address
 `RegionResolver::parseHostPort()` parses host/port explicitly with `\A…\z`
 anchors and a 1–65535 port range, and additionally accepts bracketed IPv6
 (`[2001:db8::1]:20160`) with an `inet_pton` check on the host.
+
+## Classify the store-address host before policy matching — IPs are not DNS names
+
+The default PD-derived store-host policy (issue #306, SEC-03 round 2) must
+classify the host before applying any rule; DNS-style suffix matching on an
+IP literal is a security hole. Bracketed IPv6 literals are trusted only when
+byte-identical (`inet_pton`) to a configured PD IPv6 endpoint — zone-id forms
+(`[fe80::1%eth0]:20160`; PHP ≥ 8.2 `inet_pton` accepts them) and IPv4-mapped
+forms (`[::ffff:10.0.0.1]:20160`) are rejected, no subnet/suffix rules apply.
+IPv4 literals only match by byte equality or /16 subnet (first two octets) —
+`10.0.0.1` shares the textual suffix `.0.1` with `127.0.0.1` and must NOT
+match it. Digit-leading hosts (`2130706433`, `017700000001`, `0x7f000001`)
+are system-resolver numeric-IP aliases and are rejected. Separately, a host
+that is itself a reserved gRPC/URI scheme name (`unix:20160`, `dns:20160`,
+`ipv4:20160`, `vsock:20160`, …) is rejected case-insensitively in
+`RegionResolver::validateStoreAddress()` before the policy runs, because
+grpc-core treats the prefix as a URI scheme at `new Channel()` time.

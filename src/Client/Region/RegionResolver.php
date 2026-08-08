@@ -19,6 +19,29 @@ use Psr\Log\NullLogger;
 final readonly class RegionResolver
 {
     /**
+     * Host names that grpc-core interprets as URI schemes when they appear
+     * as the host part of a channel target (unix:20160 is a socket target,
+     * not a host "unix" on port 20160). Rejected case-insensitively for
+     * every PD-supplied address, independent of the host policy.
+     *
+     * @var array<string, true>
+     */
+    private const RESERVED_SCHEME_HOSTS = [
+        'unix' => true,
+        'unix-abstract' => true,
+        'unix-gram' => true,
+        'unix-dgram' => true,
+        'dns' => true,
+        'ipv4' => true,
+        'ipv6' => true,
+        'vsock' => true,
+        'http' => true,
+        'https' => true,
+        'tcp' => true,
+        'tls' => true,
+    ];
+
+    /**
      * @param string[] $allowedStoreHosts Exact hostnames, DNS suffixes
      *     (leading dot: matches the domain itself and any subdomain) or
      *     CIDR ranges the store host must match.
@@ -160,7 +183,8 @@ final readonly class RegionResolver
      * Validate a PD-supplied store address before it is used as a gRPC
      * channel target (used by resolveStoreAddress() and by callers that
      * handle store addresses directly, e.g. SstIngestor). Enforces the
-     * unconditional host:port format check (bracketed IPv6 allowed) and the
+     * unconditional host:port format check (bracketed IPv6 allowed, host
+     * names that are reserved gRPC/URI scheme names rejected) and the
      * configured host policy.
      *
      * @throws InvalidStoreAddressException when the address is malformed or
@@ -178,6 +202,20 @@ final readonly class RegionResolver
                 'PD returned malformed store address "%s" for store %d (expected host:port, port 1-65535)',
                 $address,
                 $storeId,
+            ));
+        }
+
+        if (isset(self::RESERVED_SCHEME_HOSTS[strtolower($parsed['host'])])) {
+            $this->logger->error('PD returned a store address whose host is a reserved gRPC scheme name', [
+                'storeId' => $storeId,
+                'address' => $address,
+                'host' => $parsed['host'],
+            ]);
+            throw new InvalidStoreAddressException(sprintf(
+                'PD returned store address "%s" for store %d: host "%s" is a reserved gRPC/URI scheme name',
+                $address,
+                $storeId,
+                $parsed['host'],
             ));
         }
 
@@ -266,7 +304,7 @@ final readonly class RegionResolver
         }
 
         if ($this->pdEndpoints !== []) {
-            return $this->matchesDefaultPolicy($host);
+            return $this->matchesDefaultPolicy($host, $address);
         }
 
         return true;
@@ -293,13 +331,35 @@ final readonly class RegionResolver
     /**
      * The default host policy, derived from the configured PD endpoints
      * (applied only when neither allowedStoreHosts nor storeHostPolicy is
-     * configured): the store host must equal a configured PD host exactly,
-     * be a single-label name (same network namespace, e.g. compose/K8s short
-     * names), share the last two DNS labels with a configured PD host, or be
-     * an IP in the same /16 subnet as a configured PD IP endpoint.
+     * configured). The host is classified BEFORE any rule is applied:
+     *
+     * - bracketed IPv6 literals are allowed only when byte-identical
+     *   (inet_pton) to a configured PD IPv6 endpoint; zone-id forms
+     *   (e.g. fe80::1%eth0) and IPv4-mapped IPv6 literals are rejected;
+     * - IPv4 literals are allowed only when equal to a configured PD IPv4
+     *   literal or in the same /16 subnet (first two octets) — IPs are
+     *   compared by address bytes and never suffix-matched;
+     * - digit-leading hosts (2130706433, 017700000001, 0x7f000001, …) are
+     *   numeric-IP aliases resolved by the system resolver and are rejected;
+     * - everything else follows the DNS rules: exact match to a configured
+     *   PD host, single-label names (same network namespace, e.g. compose/
+     *   K8s short names), or shared last two DNS labels.
      */
-    private function matchesDefaultPolicy(string $host): bool
+    private function matchesDefaultPolicy(string $host, string $address): bool
     {
+        if (str_starts_with($address, '[')) {
+            return $this->matchesDefaultIpv6Policy($host);
+        }
+
+        $packed = @inet_pton($host);
+        if ($packed !== false && strlen($packed) === 4) {
+            return $this->matchesDefaultIpv4Policy($host, $packed);
+        }
+
+        if ($host !== '' && ctype_digit($host[0])) {
+            return false;
+        }
+
         if (!str_contains($host, '.')) {
             return true;
         }
@@ -323,8 +383,47 @@ final readonly class RegionResolver
                     return true;
                 }
             }
+        }
 
-            if ($this->isSameIpv16Subnet($host, $pdHost)) {
+        return false;
+    }
+
+    /**
+     * IPv6 branch of the default policy: the store host must be a plain
+     * IPv6 literal byte-identical to a configured PD IPv6 endpoint. Zone-id
+     * (fe80::1%eth0) and IPv4-mapped (::ffff:x.x.x.x) literals never match.
+     */
+    private function matchesDefaultIpv6Policy(string $host): bool
+    {
+        if (str_contains($host, '%')) {
+            return false;
+        }
+
+        $packed = @inet_pton($host);
+        if ($packed === false || strlen($packed) !== 16) {
+            return false;
+        }
+
+        if (stripos($host, '::ffff:') !== false) {
+            return false;
+        }
+
+        if (str_starts_with($packed, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")) {
+            return false;
+        }
+
+        foreach ($this->pdEndpoints as $endpoint) {
+            $parsed = $this->parseHostPort($endpoint);
+            if ($parsed === null) {
+                continue;
+            }
+
+            $pdPacked = @inet_pton($parsed['host']);
+            if ($pdPacked === false || strlen($pdPacked) !== 16) {
+                continue;
+            }
+
+            if ($pdPacked === $packed) {
                 return true;
             }
         }
@@ -332,15 +431,29 @@ final readonly class RegionResolver
         return false;
     }
 
-    private function isSameIpv16Subnet(string $a, string $b): bool
+    /**
+     * IPv4 branch of the default policy: the store host must equal a
+     * configured PD IPv4 literal or share its /16 subnet (first two octets).
+     */
+    private function matchesDefaultIpv4Policy(string $host, string $packed): bool
     {
-        $packedA = @inet_pton($a);
-        $packedB = @inet_pton($b);
-        if ($packedA === false || $packedB === false || strlen($packedA) !== strlen($packedB)) {
-            return false;
+        foreach ($this->pdEndpoints as $endpoint) {
+            $parsed = $this->parseHostPort($endpoint);
+            if ($parsed === null) {
+                continue;
+            }
+
+            $pdPacked = @inet_pton($parsed['host']);
+            if ($pdPacked === false || strlen($pdPacked) !== 4) {
+                continue;
+            }
+
+            if ($pdPacked === $packed || substr($pdPacked, 0, 2) === substr($packed, 0, 2)) {
+                return true;
+            }
         }
 
-        return substr($packedA, 0, 2) === substr($packedB, 0, 2);
+        return false;
     }
 
     private function matchesCidr(string $host, string $cidr): bool

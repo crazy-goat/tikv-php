@@ -77,9 +77,14 @@ $client = RawKvClient::create([
 Store addresses are not configured by the application — they are returned by PD
 inside `GetStore` responses and are used as gRPC targets for all data traffic.
 Since gRPC target strings may also carry schemes such as `unix:`,
-`unix-abstract:` or `dns:///`, the client unconditionally rejects any store
+`unix-abstract:` or `dns:///` — and a bare host can itself be a scheme name
+(`unix:20160`, `dns:20160`, `ipv4:20160`, …) that grpc-core interprets as a
+URI at `new Channel()` time — the client unconditionally rejects any store
 address that is not a bare `host:port` (or a bracketed IPv6 `[addr]:port`)
-with the port in the range 1–65535, and logs the rejection before throwing
+with the port in the range 1–65535, and additionally rejects case-insensitively
+any host equal to a reserved gRPC/URI scheme name (`unix`, `unix-abstract`,
+`unix-gram`, `unix-dgram`, `dns`, `ipv4`, `ipv6`, `vsock`, `http`, `https`,
+`tcp`, `tls`). The rejection is logged before throwing
 `InvalidStoreAddressException`. This format check is applied everywhere a
 PD-supplied address becomes a channel target — including the SST ingest
 `SwitchMode` calls — and is never retried.
@@ -88,17 +93,27 @@ PD-supplied address becomes a channel target — including the SST ingest
 
 When neither `allowedStoreHosts` nor `storeHostPolicy` is configured, the
 client derives a host policy from the **configured PD endpoints** (the first
-argument of `create()`). A store host is allowed when any of the following
-holds:
+argument of `create()`). The store host is classified **before** any rule is
+applied:
 
-- it equals a configured PD host exactly, or
-- it is a single-label name (no `.`) — same-network-namespace names such as
-  compose/Kubernetes short names (`tikv1` next to `pd`), or
-- it shares the last two DNS labels with a configured PD host (e.g.
-  `tikv-0.tikv-hl.ns.svc` next to `pd-0.pd-hl.ns.svc`), or
-- it is an IP address in the same /16 subnet as a configured PD IP endpoint
-  (e.g. PD at `127.0.0.1:2379` → stores at `127.0.0.x:20160` in local
-  development).
+- **bracketed IPv6 literals** (`[addr]:port`) are allowed only when
+  byte-identical (`inet_pton`) to a configured PD IPv6 endpoint. Zone-id
+  forms (`[fe80::1%eth0]:20160`) and IPv4-mapped forms
+  (`[::ffff:10.0.0.1]:20160`) are rejected; no suffix or subnet rules apply
+  to IPv6;
+- **IPv4 literals** (dotted quads) are allowed only when they equal a
+  configured PD IPv4 literal (e.g. PD at `127.0.0.1:2379` → store at
+  `127.0.0.1:20160`) or fall into the same /16 subnet — first two octets
+  (e.g. PD at `10.0.5.1:2379` → store at `10.0.5.9:20160`). IPs are compared
+  by address bytes and are **never** suffix-matched: `10.0.0.1` does not
+  match PD `127.0.0.1` even though both end in `.0.1`;
+- **digit-leading hosts** (`2130706433`, `017700000001`, `0x7f000001`, …)
+  are numeric-IP aliases resolved by the system resolver, and are rejected;
+- **DNS names** are allowed when they equal a configured PD host exactly,
+  are single-label names (no `.`) — same-network-namespace names such as
+  compose/Kubernetes short names (`tikv1` next to `pd`) — or share the last
+  two DNS labels with a configured PD host (e.g. `tikv-0.tikv-hl.ns.svc`
+  next to `pd-0.pd-hl.ns.svc`).
 
 Anything else — `attacker.example.com`, unrelated domains — is rejected with a
 logged `InvalidStoreAddressException`. This makes the rogue-PD redirect

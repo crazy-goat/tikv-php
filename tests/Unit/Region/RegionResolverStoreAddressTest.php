@@ -410,6 +410,140 @@ class RegionResolverStoreAddressTest extends TestCase
         $this->assertSame('10.0.0.7:20160', $resolver->resolveStoreAddress(1));
     }
 
+    // ========================================================================
+    // Round 2: host classification in the default policy + reserved schemes
+    // ========================================================================
+
+    /**
+     * @param list<string> $pdEndpoints
+     */
+    #[DataProvider('defaultPolicyIpClassificationRejectionsProvider')]
+    public function testDefaultPolicyRejectsMisclassifiedIpTargets(string $address, array $pdEndpoints): void
+    {
+        $this->pdClient->expects($this->once())->method('getStore')->willReturn($this->store($address));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: $pdEndpoints,
+        );
+
+        $this->expectException(InvalidStoreAddressException::class);
+        $resolver->resolveStoreAddress(1);
+    }
+
+    /**
+     * @return array<string, array{string, list<string>}>
+     */
+    public static function defaultPolicyIpClassificationRejectionsProvider(): array
+    {
+        return [
+            'bracketed ipv6 without a matching pd ipv6' => ['[::1]:20160', ['127.0.0.1:2379']],
+            'bracketed ipv6 doc literal without a matching pd ipv6' => ['[dead:beef::1]:20160', ['127.0.0.1:2379']],
+            'bracketed ipv6 with zone id' => ['[fe80::1%eth0]:20160', ['127.0.0.1:2379']],
+            'bracketed ipv4-mapped ipv6' => ['[::ffff:10.0.0.1]:20160', ['127.0.0.1:2379']],
+            'decimal ipv4 alias' => ['2130706433:20160', ['127.0.0.1:2379']],
+            'octal ipv4 alias' => ['017700000001:20160', ['127.0.0.1:2379']],
+            'hex ipv4 alias' => ['0x7f000001:20160', ['127.0.0.1:2379']],
+            'dotted ipv4 colliding only by textual suffix' => ['10.0.0.1:20160', ['127.0.0.1:2379']],
+        ];
+    }
+
+    public function testDefaultPolicyAllowsIpv4ExactlyEqualToPdIp(): void
+    {
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('127.0.0.1:20160'));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['127.0.0.1:2379'],
+        );
+
+        $this->assertSame('127.0.0.1:20160', $resolver->resolveStoreAddress(1));
+    }
+
+    public function testDefaultPolicyAllowsIpv4InSame16Subnet(): void
+    {
+        // /16 rule: first two octets must match; no textual suffix matching.
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('10.0.5.9:20160'));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['10.0.5.1:2379'],
+        );
+
+        $this->assertSame('10.0.5.9:20160', $resolver->resolveStoreAddress(1));
+    }
+
+    public function testDefaultPolicyAllowsBracketedIpv6EqualToPdEndpoint(): void
+    {
+        $this->pdClient->expects($this->exactly(2))->method('getStore')->willReturnOnConsecutiveCalls(
+            $this->store('[::1]:20160'),
+            $this->store('[dead:beef::1]:20160'),
+        );
+
+        $loopbackResolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['[::1]:2379'],
+        );
+        $this->assertSame('[::1]:20160', $loopbackResolver->resolveStoreAddress(1));
+
+        $docLiteralResolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['[dead:beef::1]:2379'],
+        );
+        $this->assertSame('[dead:beef::1]:20160', $docLiteralResolver->resolveStoreAddress(1));
+    }
+
+    #[DataProvider('reservedSchemeHostProvider')]
+    public function testRejectsReservedGrpcSchemeNamesAsHosts(string $address): void
+    {
+        // Unconditional: rejected even without pdEndpoints (permissive
+        // policy) because grpc-core interprets these hosts as URI schemes.
+        $this->pdClient->expects($this->once())->method('getStore')->willReturn($this->store($address));
+
+        $resolver = new RegionResolver($this->pdClient, $this->regionCache);
+
+        try {
+            $resolver->resolveStoreAddress(1);
+            $this->fail('Expected InvalidStoreAddressException');
+        } catch (\Throwable $e) {
+            $this->assertNotInstanceOf(StoreNotFoundException::class, $e);
+            $this->assertInstanceOf(InvalidStoreAddressException::class, $e);
+            $this->assertStringContainsString('reserved gRPC', $e->getMessage());
+        }
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function reservedSchemeHostProvider(): array
+    {
+        return [
+            'unix' => ['unix:20160'],
+            'unix uppercase' => ['UNIX:20160'],
+            'unix-abstract' => ['unix-abstract:20160'],
+            'unix-abstract uppercase' => ['Unix-Abstract:20160'],
+            'unix-gram' => ['unix-gram:20160'],
+            'unix-dgram' => ['unix-dgram:20160'],
+            'dns' => ['dns:20160'],
+            'dns uppercase' => ['DNS:20160'],
+            'ipv4' => ['ipv4:20160'],
+            'ipv6' => ['ipv6:20160'],
+            'ipv6 uppercase' => ['IPv6:20160'],
+            'vsock' => ['vsock:20160'],
+            'http' => ['http:20160'],
+            'https' => ['https:20160'],
+            'tcp' => ['tcp:20160'],
+            'tls' => ['tls:20160'],
+        ];
+    }
+
     public function testStoreNotFoundStillThrowsStoreNotFoundException(): void
     {
         $this->pdClient->expects($this->once())->method('getStore')->willReturn(null);
