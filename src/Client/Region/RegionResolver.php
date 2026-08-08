@@ -271,7 +271,7 @@ final readonly class RegionResolver
             }
         } else {
             $colon = strrpos($address, ':');
-            if ($colon === false || $colon === 0 || $colon === strlen($address) - 1) {
+            if (in_array($colon, [false, 0, strlen($address) - 1], true)) {
                 return null;
             }
 
@@ -282,7 +282,7 @@ final readonly class RegionResolver
             }
         }
 
-        if (preg_match('/\A[0-9]+\z/', $portPart) !== 1) {
+        if (preg_match('/\A\d+\z/', $portPart) !== 1) {
             return null;
         }
 
@@ -397,7 +397,7 @@ final readonly class RegionResolver
 
         $packed = @inet_pton($host);
         if ($packed !== false && strlen($packed) === 4) {
-            return $this->matchesDefaultIpv4Policy($host, $packed);
+            return $this->matchesDefaultIpv4Policy($packed);
         }
 
         if ($host !== '' && ctype_digit($host[0])) {
@@ -486,7 +486,10 @@ final readonly class RegionResolver
             }
 
             $pdPacked = @inet_pton($parsed['host']);
-            if ($pdPacked === false || strlen($pdPacked) !== 16) {
+            if ($pdPacked === false) {
+                continue;
+            }
+            if (strlen($pdPacked) !== 16) {
                 continue;
             }
 
@@ -502,7 +505,7 @@ final readonly class RegionResolver
      * IPv4 branch of the default policy: the store host must equal a
      * configured PD IPv4 literal or share its /16 subnet (first two octets).
      */
-    private function matchesDefaultIpv4Policy(string $host, string $packed): bool
+    private function matchesDefaultIpv4Policy(string $packed): bool
     {
         foreach ($this->pdEndpoints as $endpoint) {
             $parsed = $this->parseHostPort($endpoint);
@@ -511,7 +514,10 @@ final readonly class RegionResolver
             }
 
             $pdPacked = @inet_pton($parsed['host']);
-            if ($pdPacked === false || strlen($pdPacked) !== 4) {
+            if ($pdPacked === false) {
+                continue;
+            }
+            if (strlen($pdPacked) !== 4) {
                 continue;
             }
 
