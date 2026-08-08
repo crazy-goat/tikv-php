@@ -446,6 +446,15 @@ class RegionResolverStoreAddressTest extends TestCase
             'octal ipv4 alias' => ['017700000001:20160', ['127.0.0.1:2379']],
             'hex ipv4 alias' => ['0x7f000001:20160', ['127.0.0.1:2379']],
             'dotted ipv4 colliding only by textual suffix' => ['10.0.0.1:20160', ['127.0.0.1:2379']],
+            'dns suffix derived from pd ipv4 literal' => ['attacker.0.1:20160', ['10.0.0.1:2379']],
+            'dns suffix derived from pd ipv4-mapped ipv6 literal' => [
+                'attacker.0.1:20160',
+                ['[::ffff:127.0.0.1]:2379'],
+            ],
+            'dns suffix derived from pd digit-leading numeric alias' => [
+                'attacker.456.789:20160',
+                ['123.456.789:2379'],
+            ],
         ];
     }
 
@@ -541,7 +550,201 @@ class RegionResolverStoreAddressTest extends TestCase
             'https' => ['https:20160'],
             'tcp' => ['tcp:20160'],
             'tls' => ['tls:20160'],
+            'xds' => ['xds:20160'],
+            'xds uppercase' => ['XDS:20160'],
+            'google-c2p' => ['google-c2p:20160'],
+            'google-c2p uppercase' => ['GOOGLE-C2P:20160'],
+            'google-c2p-experimental' => ['google-c2p-experimental:20160'],
+            'google-c2p-experimental uppercase' => ['GOOGLE-C2P-EXPERIMENTAL:20160'],
         ];
+    }
+
+    // ========================================================================
+    // Round 3: port trust policy
+    // ========================================================================
+
+    public function testDefaultPolicyRejectsPrivilegedPortUnder16Rule(): void
+    {
+        // The /16 rule matches the host, but port 1 is a privileged port
+        // below 1024 and is not listed in allowedStorePorts.
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('10.0.5.9:1'));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['10.0.5.1:2379'],
+        );
+
+        $this->expectException(InvalidStoreAddressException::class);
+        $resolver->resolveStoreAddress(1);
+    }
+
+    public function testDefaultPolicyRejectsPrivilegedPortOnExactPdHost(): void
+    {
+        // Host matches the configured PD host exactly; the port guard still
+        // rejects port 80.
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('pd-0.pd.svc:80'));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['pd-0.pd.svc:2379'],
+        );
+
+        $this->expectException(InvalidStoreAddressException::class);
+        $resolver->resolveStoreAddress(1);
+    }
+
+    public function testDefaultPolicyAllowsPrivilegedPortWhenExplicitlyListed(): void
+    {
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('10.0.5.9:1'));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['10.0.5.1:2379'],
+            allowedStorePorts: [1],
+        );
+
+        $this->assertSame('10.0.5.9:1', $resolver->resolveStoreAddress(1));
+    }
+
+    public function testDefaultPolicyRequiresPortInAllowedStorePortsWhenSet(): void
+    {
+        // When allowedStorePorts is set, the port must be listed — even
+        // ports above 1024 are rejected if not listed.
+        $this->pdClient->expects($this->exactly(2))->method('getStore')->willReturnOnConsecutiveCalls(
+            $this->store('10.0.5.9:2020'),
+            $this->store('10.0.5.9:20160'),
+        );
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['10.0.5.1:2379'],
+            allowedStorePorts: [20160],
+        );
+
+        try {
+            $resolver->resolveStoreAddress(1);
+            $this->fail('Expected InvalidStoreAddressException');
+        } catch (\Throwable $e) {
+            $this->assertInstanceOf(InvalidStoreAddressException::class, $e);
+        }
+
+        $this->assertSame('10.0.5.9:20160', $resolver->resolveStoreAddress(1));
+    }
+
+    #[DataProvider('emptyAllowedStorePortsProvider')]
+    public function testDefaultPolicyRejectsEveryPortWhenAllowedStorePortsIsEmpty(string $address): void
+    {
+        $this->pdClient->expects($this->once())->method('getStore')->willReturn($this->store($address));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['10.0.5.1:2379'],
+            allowedStorePorts: [],
+        );
+
+        $this->expectException(InvalidStoreAddressException::class);
+        $resolver->resolveStoreAddress(1);
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function emptyAllowedStorePortsProvider(): array
+    {
+        return [
+            'standard tikv port' => ['10.0.5.9:20160'],
+            'privileged port' => ['10.0.5.9:1'],
+        ];
+    }
+
+    public function testExplicitAllowlistHonorsAllowedStorePorts(): void
+    {
+        $this->pdClient->expects($this->exactly(2))->method('getStore')->willReturnOnConsecutiveCalls(
+            $this->store('127.0.0.1:20160'),
+            $this->store('127.0.0.1:80'),
+        );
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            allowedStoreHosts: ['127.0.0.1'],
+            allowedStorePorts: [20160],
+        );
+
+        $this->assertSame('127.0.0.1:20160', $resolver->resolveStoreAddress(1));
+
+        $this->expectException(InvalidStoreAddressException::class);
+        $resolver->resolveStoreAddress(1);
+    }
+
+    public function testExplicitAllowlistHostOnlyBehaviorUnchangedWithoutPorts(): void
+    {
+        // Backward compatibility: without allowedStorePorts the explicit
+        // host allowlist does not restrict ports, so a privileged port on a
+        // listed host still passes.
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('127.0.0.1:1'));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            allowedStoreHosts: ['127.0.0.1'],
+        );
+
+        $this->assertSame('127.0.0.1:1', $resolver->resolveStoreAddress(1));
+    }
+
+    public function testExplicitAllowlistAllowsPrivilegedPortWhenExplicitlyListed(): void
+    {
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('127.0.0.1:1'));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            allowedStoreHosts: ['127.0.0.1'],
+            allowedStorePorts: [1],
+        );
+
+        $this->assertSame('127.0.0.1:1', $resolver->resolveStoreAddress(1));
+    }
+
+    public function testPermissiveDirectConstructionIgnoresPortGuard(): void
+    {
+        // No pdEndpoints: only the unconditional format check applies, so
+        // a privileged port is accepted (unchanged behavior).
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('10.0.0.7:1'));
+
+        $resolver = new RegionResolver($this->pdClient, $this->regionCache);
+
+        $this->assertSame('10.0.0.7:1', $resolver->resolveStoreAddress(1));
+    }
+
+    public function testStoreHostPolicyTakesPrecedenceOverPortPolicy(): void
+    {
+        // The custom callable sees the full address and is not subject to
+        // the port policy (unchanged, takes precedence).
+        $this->pdClient->expects($this->once())->method('getStore')
+            ->willReturn($this->store('10.0.5.9:1'));
+
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            storeHostPolicy: static fn (string $address): bool => true,
+            pdEndpoints: ['10.0.5.1:2379'],
+            allowedStorePorts: [20160],
+        );
+
+        $this->assertSame('10.0.5.9:1', $resolver->resolveStoreAddress(1));
     }
 
     public function testStoreNotFoundStillThrowsStoreNotFoundException(): void

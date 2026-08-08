@@ -136,3 +136,41 @@ that is itself a reserved gRPC/URI scheme name (`unix:20160`, `dns:20160`,
 `ipv4:20160`, `vsock:20160`, …) is rejected case-insensitively in
 `RegionResolver::validateStoreAddress()` before the policy runs, because
 grpc-core treats the prefix as a URI scheme at `new Channel()` time.
+
+## Store ports are part of the trust decision — the default policy rejects privileged ports
+
+A store host that passes the default PD-derived policy is only half the
+trust question: with PD at `10.0.0.1:2379` the /16 rule admits
+`10.0.0.2:1`, and an exact trusted host with port `1` is equally
+dangerous — a compromised PD could redirect traffic to an arbitrary
+service on the same host or subnet. Since round 3 of SEC-03 (issue #306)
+the default policy therefore requires the store port to be `>= 1024`
+unless it is explicitly listed in the new `options['allowedStorePorts']`;
+when that option is set, the port must be in the list (it narrows or
+relaxes the guard). On the explicit `allowedStoreHosts` path ports stay
+unrestricted unless `allowedStorePorts` is set (backward compatible).
+`storeHostPolicy` receives the full `host:port` and is never touched by
+the port policy.
+
+## The shared-suffix rule must be derived from DNS-name PD hosts only
+
+Round 3 of SEC-03 (issue #306) closed a second suffix bypass: the default
+policy derives the last-two-DNS-label suffix from the configured PD
+hosts, but with PD at `10.0.0.1:2379` the textual suffix `.0.1` admitted
+`attacker.0.1:20160` even though the PD host is an IP literal. The suffix
+rule now runs only when the PD host is a real dotted DNS name
+(`isDottedDnsName()`): entries that parse via `inet_pton` (IPv4/IPv6
+literals, including IPv4-mapped forms like `::ffff:127.0.0.1`), that are
+digit-leading (`123.456.789`), or single-label never contribute a suffix.
+Exact-match and /16 rules are unchanged.
+
+## grpc-core 1.80 registers more resolver schemes than the classic set
+
+Besides `unix`, `unix-abstract`, `dns`, `ipv4`, `ipv6`, `vsock`, `http`,
+`https`, `tcp`, `tls`, grpc-core 1.80 also treats `xds`,
+`google-c2p` and `google-c2p-experimental` as URI schemes when they
+appear as the host part of a channel target (`xds:20160` etc.). The
+reserved-scheme rejection set in `RegionResolver::validateStoreAddress()`
+must keep up with the grpc-core release that ships with the runtime —
+when bumping the `grpc` extension, re-check the scheme list added for
+SEC-03 (issue #306).

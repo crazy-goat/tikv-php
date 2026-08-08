@@ -84,7 +84,8 @@ address that is not a bare `host:port` (or a bracketed IPv6 `[addr]:port`)
 with the port in the range 1–65535, and additionally rejects case-insensitively
 any host equal to a reserved gRPC/URI scheme name (`unix`, `unix-abstract`,
 `unix-gram`, `unix-dgram`, `dns`, `ipv4`, `ipv6`, `vsock`, `http`, `https`,
-`tcp`, `tls`). The rejection is logged before throwing
+`tcp`, `tls`, `xds`, `google-c2p`, `google-c2p-experimental`). The rejection
+is logged before throwing
 `InvalidStoreAddressException`. This format check is applied everywhere a
 PD-supplied address becomes a channel target — including the SST ingest
 `SwitchMode` calls — and is never retried.
@@ -112,8 +113,18 @@ applied:
 - **DNS names** are allowed when they equal a configured PD host exactly,
   are single-label names (no `.`) — same-network-namespace names such as
   compose/Kubernetes short names (`tikv1` next to `pd`) — or share the last
-  two DNS labels with a configured PD host (e.g. `tikv-0.tikv-hl.ns.svc`
-  next to `pd-0.pd-hl.ns.svc`).
+  two DNS labels with a configured PD host that is itself a real dotted DNS
+  name (e.g. `tikv-0.tikv-hl.ns.svc` next to `pd-0.pd-hl.ns.svc`). PD entries
+  that are IP literals, digit-leading numeric aliases or single-label names
+  never contribute a suffix — with PD at `10.0.0.1:2379`, `attacker.0.1:20160`
+  is rejected even though it textually ends in `.0.1`.
+
+With the default policy, the **address port** is part of the trust decision
+as well: ports below 1024 (privileged ports) are rejected unless explicitly
+listed in `options['allowedStorePorts']`. When `allowedStorePorts` is set,
+only ports listed in it are accepted (this applies to every default-policy
+match branch: exact PD host, /16 subnet, single-label and shared suffix).
+Standard TiKV ports (20160+) pass the default guard without configuration.
 
 Anything else — `attacker.example.com`, unrelated domains — is rejected with a
 logged `InvalidStoreAddressException`. This makes the rogue-PD redirect
@@ -135,12 +146,22 @@ $client = RawKvClient::create(
             '10.0.0.0/8',       // IPv4/IPv6 CIDR range
             '2001:db8::1',      // exact IPv6 address (store form: [2001:db8::1]:20160)
         ],
+        'allowedStorePorts' => [20160, 20161],  // optional: ports the store
+                                                // address may use (default: null
+                                                // = unrestricted on this path,
+                                                // privileged-port guard on the
+                                                // default path)
     ],
 );
 ```
 
 Note the difference between `tikv-0.tikv.svc` (exact hostname only — `evil.tikv-0.tikv.svc`
 is rejected) and `.tikv.svc` (suffix — `tikv-0.tikv.svc` and any subdomain match).
+
+With an explicit `allowedStoreHosts` list, ports are unrestricted unless
+`allowedStorePorts` is set; when it is set, the port must be in the list
+(host-only behavior is unchanged when the option is absent). `storeHostPolicy`
+receives the full address and is never subject to the port policy.
 
 Or provide a fully custom policy (a callable receiving the full `host:port`
 string and returning whether it is allowed). When set, it overrides both

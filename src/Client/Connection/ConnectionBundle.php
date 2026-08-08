@@ -27,6 +27,7 @@ final readonly class ConnectionBundle
      * @param list<string> $allowedStoreHosts
      * @param (Closure(string): bool)|null $storeHostPolicy
      * @param list<string> $pdEndpoints
+     * @param list<int>|null $allowedStorePorts null = unrestricted
      */
     public function __construct(
         public GrpcClientInterface $grpc,
@@ -40,6 +41,7 @@ final readonly class ConnectionBundle
         public array $allowedStoreHosts = [],
         public ?Closure $storeHostPolicy = null,
         public array $pdEndpoints = [],
+        public ?array $allowedStorePorts = null,
     ) {
     }
 }

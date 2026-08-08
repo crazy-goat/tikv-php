@@ -39,6 +39,9 @@ final readonly class RegionResolver
         'https' => true,
         'tcp' => true,
         'tls' => true,
+        'xds' => true,
+        'google-c2p' => true,
+        'google-c2p-experimental' => true,
     ];
 
     /**
@@ -52,6 +55,11 @@ final readonly class RegionResolver
      *     host policy is derived from. Only used when neither
      *     $allowedStoreHosts nor $storeHostPolicy is set. Empty only for
      *     direct construction (permissive: no default policy applies).
+     * @param list<int>|null $allowedStorePorts Ports a store address may
+     *     use. null (default) leaves the port unrestricted on the explicit
+     *     allowlist path and applies the privilege-port guard (>= 1024) on
+     *     the default PD-derived policy path; when set, the port must be
+     *     listed in both paths. Ignored when $storeHostPolicy is set.
      */
     public function __construct(
         private PdClientInterface $pdClient,
@@ -61,6 +69,7 @@ final readonly class RegionResolver
         private ?Closure $storeHostPolicy = null,
         private LoggerInterface $logger = new NullLogger(),
         private array $pdEndpoints = [],
+        private ?array $allowedStorePorts = null,
     ) {
     }
 
@@ -219,11 +228,12 @@ final readonly class RegionResolver
             ));
         }
 
-        if (!$this->isStoreAddressAllowed($address, $parsed['host'])) {
+        if (!$this->isStoreAddressAllowed($address, $parsed['host'], $parsed['port'])) {
             $this->logger->error('PD returned a store address outside the allowed set', [
                 'storeId' => $storeId,
                 'address' => $address,
                 'allowedStoreHosts' => $this->allowedStoreHosts,
+                'allowedStorePorts' => $this->allowedStorePorts,
             ]);
             throw new InvalidStoreAddressException(sprintf(
                 'PD returned store address "%s" for store %d outside the allowed set',
@@ -287,7 +297,7 @@ final readonly class RegionResolver
     /**
      * Decide whether a validated host:port address may be connected to.
      */
-    private function isStoreAddressAllowed(string $address, string $host): bool
+    private function isStoreAddressAllowed(string $address, string $host, int $port): bool
     {
         if ($this->storeHostPolicy instanceof Closure) {
             return (bool) ($this->storeHostPolicy)($address);
@@ -296,7 +306,7 @@ final readonly class RegionResolver
         if ($this->allowedStoreHosts !== []) {
             foreach ($this->allowedStoreHosts as $entry) {
                 if ($this->matchesHostEntry($host, $entry)) {
-                    return true;
+                    return $this->isPortAllowed($port);
                 }
             }
 
@@ -304,10 +314,41 @@ final readonly class RegionResolver
         }
 
         if ($this->pdEndpoints !== []) {
-            return $this->matchesDefaultPolicy($host, $address);
+            return $this->matchesDefaultPolicy($host, $address) && $this->isDefaultPortAllowed($port);
         }
 
+        // Direct construction without pdEndpoints stays permissive: only
+        // the unconditional format check applies.
         return true;
+    }
+
+    /**
+     * Port check for the explicit host-allowlist path: unrestricted when
+     * allowedStorePorts is not configured, otherwise the port must be
+     * listed (backward compatible: host-only behavior when unset).
+     */
+    private function isPortAllowed(int $port): bool
+    {
+        if ($this->allowedStorePorts === null) {
+            return true;
+        }
+
+        return in_array($port, $this->allowedStorePorts, true);
+    }
+
+    /**
+     * Port check for the default PD-derived policy: privileged ports
+     * (below 1024) are rejected unless explicitly listed in
+     * allowedStorePorts; when allowedStorePorts is set, the port must be
+     * listed in it.
+     */
+    private function isDefaultPortAllowed(int $port): bool
+    {
+        if ($this->allowedStorePorts !== null) {
+            return in_array($port, $this->allowedStorePorts, true);
+        }
+
+        return $port >= 1024;
     }
 
     /**
@@ -343,7 +384,10 @@ final readonly class RegionResolver
      *   numeric-IP aliases resolved by the system resolver and are rejected;
      * - everything else follows the DNS rules: exact match to a configured
      *   PD host, single-label names (same network namespace, e.g. compose/
-     *   K8s short names), or shared last two DNS labels.
+     *   K8s short names), or shared last two DNS labels with a configured
+     *   PD host that is itself a real dotted DNS name (PD entries that are
+     *   IP literals, digit-leading or single-label never contribute a
+     *   suffix — e.g. PD 10.0.0.1 must not accept attacker.0.1).
      */
     private function matchesDefaultPolicy(string $host, string $address): bool
     {
@@ -376,6 +420,15 @@ final readonly class RegionResolver
                 return true;
             }
 
+            // The shared-suffix rule only applies when the PD host is a
+            // real dotted DNS name. PD entries that are IP literals
+            // (inet_pton), digit-leading numeric aliases or single-label
+            // names must never contribute a suffix — e.g. PD 10.0.0.1 must
+            // not make "attacker.0.1" trusted via the textual '.0.1'.
+            if (!$this->isDottedDnsName($pdHost)) {
+                continue;
+            }
+
             $pdLabels = explode('.', $pdHost);
             if (count($pdLabels) >= 3) {
                 $sharedSuffix = '.' . implode('.', array_slice($pdLabels, -2));
@@ -386,6 +439,20 @@ final readonly class RegionResolver
         }
 
         return false;
+    }
+
+    /**
+     * True when the host is a dotted DNS name rather than an IP literal or
+     * a numeric-IP alias: not empty, not digit-leading, contains at least
+     * one dot, and does not parse as an IPv4/IPv6 literal via inet_pton.
+     */
+    private function isDottedDnsName(string $host): bool
+    {
+        if ($host === '' || ctype_digit($host[0]) || !str_contains($host, '.')) {
+            return false;
+        }
+
+        return @inet_pton($host) === false;
     }
 
     /**
