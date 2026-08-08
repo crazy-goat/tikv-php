@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Connection;
 
+use Closure;
 use CrazyGoat\TiKV\Client\Cache\StoreCache;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
@@ -22,6 +23,10 @@ use Psr\Log\LoggerInterface;
  */
 final readonly class ConnectionBundle
 {
+    /**
+     * @param list<string> $allowedStoreHosts
+     * @param (Closure(string): bool)|null $storeHostPolicy
+     */
     public function __construct(
         public GrpcClientInterface $grpc,
         public PdClientInterface $pdClient,
@@ -31,6 +36,8 @@ final readonly class ConnectionBundle
         public ?SlowLogConfig $slowLogConfig,
         public LoggerInterface $logger,
         public MetricsInterface $metrics,
+        public array $allowedStoreHosts = [],
+        public ?Closure $storeHostPolicy = null,
     ) {
     }
 }

@@ -82,3 +82,27 @@ detected as expired). Always obtain timestamps from
 legitimate uses of `hrtime`/`microtime` in timestamp positions are duration
 measurements (differences) and logging — and `TimestampOracle::getTimestamp()`
 accepts an optional `$timeoutMs` so TSO fetches can carry a finite deadline.
+
+## gRPC target strings accept more than host:port — always validate PD-supplied addresses
+
+The grpc-core channel constructor (`Grpc\Channel`) treats the target string
+as a URI: besides `host:port` it also accepts `unix:/path/to.sock`,
+`unix-abstract:<name>`, `dns:///host:port`, `ipv4:` and `ipv6:` schemes, and
+an empty check on the address lets all of them through. Since store addresses
+arrive from PD (a network peer, plaintext by default), every address used as a
+channel target must be validated before it reaches `new Channel()`. In this
+repo `RegionResolver::resolveStoreAddress()` enforces a strict `host:port`
+regex unconditionally and throws the distinct `InvalidStoreAddressException`
+(logged) instead of `StoreNotFoundException` when PD returns something else
+(issue #306, SEC-03).
+
+## PHP properties can never be typed `callable` (even nullable) — use `Closure`
+
+`private ?callable $x` and `private callable $x` are fatal errors in every
+PHP version, including 8.5 (only parameters and return types accept
+`callable`). When a class needs to hold a callable, type the property
+`?\Closure` and convert user-supplied callables at the boundary with
+`Closure::fromCallable()` (see `ConnectionFactory::resolveStoreHostValidation()`,
+added for issue #306). PHPStan level 9 also rejects casting `mixed` to string
+(`(string) $level` in a PSR-3 `log($level, …)` implementation) — narrow with
+`is_string()` instead.

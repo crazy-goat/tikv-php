@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Connection;
 
+use Closure;
 use CrazyGoat\TiKV\Client\Cache\StoreCache;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
@@ -63,6 +64,7 @@ final class ConnectionFactory
 
         $timeoutConfig = self::buildTimeoutConfig($options);
         $slowLogConfig = self::buildSlowLogConfig($options);
+        $storeHostValidation = self::resolveStoreHostValidation($options);
 
         return new ConnectionBundle(
             grpc: $grpc,
@@ -73,7 +75,54 @@ final class ConnectionFactory
             slowLogConfig: $slowLogConfig,
             logger: $resolvedLogger,
             metrics: $metrics,
+            allowedStoreHosts: $storeHostValidation['allowedStoreHosts'],
+            storeHostPolicy: $storeHostValidation['storeHostPolicy'],
         );
+    }
+
+    /**
+     * Parse and validate the store-address host restriction options.
+     *
+     * Both are opt-in: when neither is configured no host policy is
+     * enforced (only the unconditional format check applies).
+     *
+     * @param array<string, mixed> $options
+     * @return array{allowedStoreHosts: list<string>, storeHostPolicy: ?Closure}
+     */
+    private static function resolveStoreHostValidation(array $options): array
+    {
+        $allowedStoreHosts = [];
+        if (isset($options['allowedStoreHosts'])) {
+            if (!is_array($options['allowedStoreHosts'])) {
+                throw new InvalidArgumentException(
+                    "options['allowedStoreHosts'] must be an array of hostnames, DNS suffixes or CIDR ranges",
+                );
+            }
+
+            foreach ($options['allowedStoreHosts'] as $entry) {
+                if (!is_string($entry) || $entry === '') {
+                    throw new InvalidArgumentException(
+                        "options['allowedStoreHosts'] entries must be non-empty strings",
+                    );
+                }
+                $allowedStoreHosts[] = $entry;
+            }
+        }
+
+        $storeHostPolicy = null;
+        if (isset($options['storeHostPolicy'])) {
+            if (!is_callable($options['storeHostPolicy'])) {
+                throw new InvalidArgumentException(
+                    'options[\'storeHostPolicy\'] must be callable',
+                );
+            }
+            $storeHostPolicy = Closure::fromCallable($options['storeHostPolicy']);
+        }
+
+        return [
+            'allowedStoreHosts' => $allowedStoreHosts,
+            'storeHostPolicy' => $storeHostPolicy,
+        ];
     }
 
     /**

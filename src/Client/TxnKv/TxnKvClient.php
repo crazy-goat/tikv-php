@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\TxnKv;
 
+use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
@@ -42,6 +43,8 @@ final class TxnKvClient
             $bundle->grpc,
             logger: $bundle->logger,
             timeoutConfig: $bundle->timeoutConfig,
+            allowedStoreHosts: $bundle->allowedStoreHosts,
+            storeHostPolicy: $bundle->storeHostPolicy,
         );
     }
 
@@ -53,10 +56,21 @@ final class TxnKvClient
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
+        /** @var list<string> */
+        private readonly array $allowedStoreHosts = [],
+        /** @var (Closure(string): bool)|null */
+        private readonly ?Closure $storeHostPolicy = null,
     ) {
         $this->metrics = new NoOpMetrics();
         $this->regionResolver = $regionResolver
-            ?? new RegionResolver($this->pdClient, $this->regionCache, $this->metrics);
+            ?? new RegionResolver(
+                $this->pdClient,
+                $this->regionCache,
+                $this->metrics,
+                $this->allowedStoreHosts,
+                $this->storeHostPolicy,
+                $this->logger,
+            );
     }
 
     /**

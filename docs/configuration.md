@@ -72,6 +72,49 @@ $client = RawKvClient::create([
 
 **Note**: Currently only the first endpoint is used. Future versions will support failover.
 
+### Store Address Validation
+
+Store addresses are not configured by the application — they are returned by PD
+inside `GetStore` responses and are used as gRPC targets for all data traffic.
+Since gRPC target strings may also carry schemes such as `unix:`,
+`unix-abstract:` or `dns:///`, the client unconditionally rejects any store
+address that is not a bare `host:port` and logs the rejection before throwing
+`InvalidStoreAddressException`.
+
+Additionally, you can restrict which hosts the client is allowed to connect to
+(opt-in). A rogue or on-path PD could otherwise redirect the client and the
+data it writes to an arbitrary internal service:
+
+```php
+$client = RawKvClient::create(
+    ['192.168.1.100:2379'],
+    options: [
+        'allowedStoreHosts' => [
+            'tikv-0.tikv.svc',  // exact hostname
+            '.tikv.svc',        // DNS suffix (domain + subdomains)
+            '10.0.0.0/8',       // IPv4/IPv6 CIDR range
+        ],
+    ],
+);
+```
+
+Or provide a fully custom policy (a callable receiving the full `host:port`
+string and returning whether it is allowed). When set, it overrides
+`allowedStoreHosts`:
+
+```php
+$client = RawKvClient::create(
+    ['192.168.1.100:2379'],
+    options: [
+        'storeHostPolicy' => fn (string $address): bool => $address === '192.168.1.10:20160',
+    ],
+);
+```
+
+When neither option is configured only the format check applies and any bare
+`host:port` is accepted (backward compatible). TLS with hostname verification
+remains the stronger control — see the TLS section below.
+
 ### Environment Variables
 
 For flexibility, use environment variables:
@@ -576,6 +619,7 @@ while (true) {
 Before deploying to production:
 
 - [ ] PD endpoints are correct and accessible
+- [ ] Store address allowlist configured (`allowedStoreHosts`) or TLS with hostname verification enforced
 - [ ] TLS certificates are configured (if required)
 - [ ] Logging is configured with appropriate level
 - [ ] Log files have correct permissions
