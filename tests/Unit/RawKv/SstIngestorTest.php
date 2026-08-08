@@ -13,6 +13,7 @@ use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -323,6 +324,97 @@ class SstIngestorTest extends TestCase
         // No regions resolved, so no write/ingest calls either.
         $this->grpc->expects($this->never())->method('callStreaming');
 
+        $this->ingestor->ingest(['key1' => 'value1']);
+    }
+
+    // ========================================================================
+    // Store address validation (PD-supplied addresses must not reach the
+    // channel constructor unvalidated)
+    // ========================================================================
+
+    public function testIngestRejectsMalformedStoreAddressBeforeSwitchModeCall(): void
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('unix:/var/run/docker.sock');
+
+        $this->pdClient->method('getAllStores')->willReturn([$store]);
+
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callStreaming');
+
+        $this->expectException(InvalidStoreAddressException::class);
+        $this->ingestor->ingest(['key1' => 'value1']);
+    }
+
+    public function testIngestRejectsStoreAddressWithSchemePrefixBeforeSwitchModeCall(): void
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('dns:///tikv-0.tikv.svc.cluster.local:20160');
+
+        $this->pdClient->method('getAllStores')->willReturn([$store]);
+
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callStreaming');
+
+        $this->expectException(InvalidStoreAddressException::class);
+        $this->ingestor->ingest(['key1' => 'value1']);
+    }
+
+    public function testIngestRejectsStoreAddressOutsideAllowlistBeforeSwitchModeCall(): void
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('10.1.2.3:20160');
+
+        $this->pdClient->method('getAllStores')->willReturn([$store]);
+
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callStreaming');
+
+        $this->regionResolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            allowedStoreHosts: ['127.0.0.1'],
+        );
+        $this->ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+        );
+
+        $this->expectException(InvalidStoreAddressException::class);
+        $this->ingestor->ingest(['key1' => 'value1']);
+    }
+
+    public function testIngestValidatesDefaultPolicyDerivedFromPdEndpoints(): void
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('attacker.example.com:20160');
+
+        $this->pdClient->method('getAllStores')->willReturn([$store]);
+
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callStreaming');
+
+        $this->regionResolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            pdEndpoints: ['pd:2379'],
+        );
+        $this->ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+        );
+
+        $this->expectException(InvalidStoreAddressException::class);
         $this->ingestor->ingest(['key1' => 'value1']);
     }
 }

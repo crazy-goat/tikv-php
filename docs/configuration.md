@@ -72,6 +72,118 @@ $client = RawKvClient::create([
 
 **Note**: Currently only the first endpoint is used. Future versions will support failover.
 
+### Store Address Validation
+
+Store addresses are not configured by the application — they are returned by PD
+inside `GetStore` responses and are used as gRPC targets for all data traffic.
+Since gRPC target strings may also carry schemes such as `unix:`,
+`unix-abstract:` or `dns:///` — and a bare host can itself be a scheme name
+(`unix:20160`, `dns:20160`, `ipv4:20160`, …) that grpc-core interprets as a
+URI at `new Channel()` time — the client unconditionally rejects any store
+address that is not a bare `host:port` (or a bracketed IPv6 `[addr]:port`)
+with the port in the range 1–65535, and additionally rejects case-insensitively
+any host equal to a reserved gRPC/URI scheme name (`unix`, `unix-abstract`,
+`unix-gram`, `unix-dgram`, `dns`, `ipv4`, `ipv6`, `vsock`, `http`, `https`,
+`tcp`, `tls`, `xds`, `google-c2p`, `google-c2p-experimental`). The rejection
+is logged before throwing
+`InvalidStoreAddressException`. This format check is applied everywhere a
+PD-supplied address becomes a channel target — including the SST ingest
+`SwitchMode` calls — and is never retried.
+
+#### Default policy: derived from the configured PD endpoints
+
+When neither `allowedStoreHosts` nor `storeHostPolicy` is configured, the
+client derives a host policy from the **configured PD endpoints** (the first
+argument of `create()`). The store host is classified **before** any rule is
+applied:
+
+- **bracketed IPv6 literals** (`[addr]:port`) are allowed only when
+  byte-identical (`inet_pton`) to a configured PD IPv6 endpoint. Zone-id
+  forms (`[fe80::1%eth0]:20160`) and IPv4-mapped forms
+  (`[::ffff:10.0.0.1]:20160`) are rejected; no suffix or subnet rules apply
+  to IPv6;
+- **IPv4 literals** (dotted quads) are allowed only when they equal a
+  configured PD IPv4 literal (e.g. PD at `127.0.0.1:2379` → store at
+  `127.0.0.1:20160`) or fall into the same /16 subnet — first two octets
+  (e.g. PD at `10.0.5.1:2379` → store at `10.0.5.9:20160`). IPs are compared
+  by address bytes and are **never** suffix-matched: `10.0.0.1` does not
+  match PD `127.0.0.1` even though both end in `.0.1`;
+- **digit-leading hosts** (`2130706433`, `017700000001`, `0x7f000001`, …)
+  are numeric-IP aliases resolved by the system resolver, and are rejected;
+- **DNS names** are allowed when they equal a configured PD host exactly,
+  are single-label names (no `.`) — same-network-namespace names such as
+  compose/Kubernetes short names (`tikv1` next to `pd`) — or share the last
+  two DNS labels with a configured PD host that is itself a real dotted DNS
+  name (e.g. `tikv-0.tikv-hl.ns.svc` next to `pd-0.pd-hl.ns.svc`). PD entries
+  that are IP literals, digit-leading numeric aliases or single-label names
+  never contribute a suffix — with PD at `10.0.0.1:2379`, `attacker.0.1:20160`
+  is rejected even though it textually ends in `.0.1`.
+
+With the default policy, the **address port** is part of the trust decision
+as well: ports below 1024 (privileged ports) are rejected unless explicitly
+listed in `options['allowedStorePorts']`. When `allowedStorePorts` is set,
+only ports listed in it are accepted (this applies to every default-policy
+match branch: exact PD host, /16 subnet, single-label and shared suffix).
+Standard TiKV ports (20160+) pass the default guard without configuration.
+
+Anything else — `attacker.example.com`, unrelated domains — is rejected with a
+logged `InvalidStoreAddressException`. This makes the rogue-PD redirect
+protection active by default: no configuration is required, and a compromised
+or on-path PD cannot redirect the client to an arbitrary host.
+
+#### Explicit restrictions (opt-in)
+
+You can restrict which hosts the client is allowed to connect to explicitly:
+
+```php
+$client = RawKvClient::create(
+    ['192.168.1.100:2379'],
+    options: [
+        'allowedStoreHosts' => [
+            'tikv-0.tikv.svc',  // exact hostname (subdomains NOT included),
+                                // exact IPs like '192.168.1.10' also work
+            '.tikv.svc',        // DNS suffix: the domain itself and any subdomain
+            '10.0.0.0/8',       // IPv4/IPv6 CIDR range
+            '2001:db8::1',      // exact IPv6 address (store form: [2001:db8::1]:20160)
+        ],
+        'allowedStorePorts' => [20160, 20161],  // optional: ports the store
+                                                // address may use (default: null
+                                                // = unrestricted on this path,
+                                                // privileged-port guard on the
+                                                // default path)
+    ],
+);
+```
+
+Note the difference between `tikv-0.tikv.svc` (exact hostname only — `evil.tikv-0.tikv.svc`
+is rejected) and `.tikv.svc` (suffix — `tikv-0.tikv.svc` and any subdomain match).
+
+With an explicit `allowedStoreHosts` list, ports are unrestricted unless
+`allowedStorePorts` is set; when it is set, the port must be in the list
+(host-only behavior is unchanged when the option is absent). `storeHostPolicy`
+receives the full address and is never subject to the port policy.
+
+Or provide a fully custom policy (a callable receiving the full `host:port`
+string and returning whether it is allowed). When set, it overrides both
+`allowedStoreHosts` and the default PD-derived policy:
+
+```php
+$client = RawKvClient::create(
+    ['192.168.1.100:2379'],
+    options: [
+        'storeHostPolicy' => fn (string $address): bool => $address === '192.168.1.10:20160',
+    ],
+);
+```
+
+To allow any bare `host:port` (not recommended — this disables the default
+rogue-PD protection), pass a `storeHostPolicy` that always returns `true`, or
+list the exact entries you need in `allowedStoreHosts`.
+
+The format check is unconditional and independent of the host policy. TLS with
+hostname verification remains the stronger control — see the TLS section
+below.
+
 ### Environment Variables
 
 For flexibility, use environment variables:
@@ -576,6 +688,7 @@ while (true) {
 Before deploying to production:
 
 - [ ] PD endpoints are correct and accessible
+- [ ] Store address policy reviewed: default PD-derived policy, explicit `allowedStoreHosts`/`storeHostPolicy`, or TLS with hostname verification enforced
 - [ ] TLS certificates are configured (if required)
 - [ ] Logging is configured with appropriate level
 - [ ] Log files have correct permissions

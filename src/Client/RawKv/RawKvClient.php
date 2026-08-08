@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
@@ -89,6 +90,10 @@ final class RawKvClient
             logger: $bundle->logger,
             timeoutConfig: $bundle->timeoutConfig,
             slowLogConfig: $bundle->slowLogConfig,
+            allowedStoreHosts: $bundle->allowedStoreHosts,
+            storeHostPolicy: $bundle->storeHostPolicy,
+            pdEndpoints: $bundle->pdEndpoints,
+            allowedStorePorts: $bundle->allowedStorePorts,
         );
     }
 
@@ -108,8 +113,25 @@ final class RawKvClient
         ?RawKvRangeOps $rangeOps = null,
         private readonly ?SlowLogConfig $slowLogConfig = null,
         private readonly MetricsInterface $metrics = new NoOpMetrics(),
+        /** @var list<string> */
+        private readonly array $allowedStoreHosts = [],
+        /** @var (Closure(string): bool)|null */
+        private readonly ?Closure $storeHostPolicy = null,
+        /** @var list<string> */
+        private readonly array $pdEndpoints = [],
+        /** @var list<int>|null */
+        private readonly ?array $allowedStorePorts = null,
     ) {
-        $regionResolver ??= new RegionResolver($pdClient, $regionCache, $metrics);
+        $regionResolver ??= new RegionResolver(
+            $pdClient,
+            $regionCache,
+            $metrics,
+            $this->allowedStoreHosts,
+            $this->storeHostPolicy,
+            $this->logger,
+            $this->pdEndpoints,
+            $this->allowedStorePorts,
+        );
         $this->crud = $crud ?? new RawKvCrud(
             $grpc,
             $regionResolver,
@@ -240,7 +262,16 @@ final class RawKvClient
 
     private function createRetryExecutor(): RetryExecutor
     {
-        $regionResolver = new RegionResolver($this->pdClient, $this->regionCache, $this->metrics);
+        $regionResolver = new RegionResolver(
+            $this->pdClient,
+            $this->regionCache,
+            $this->metrics,
+            $this->allowedStoreHosts,
+            $this->storeHostPolicy,
+            $this->logger,
+            $this->pdEndpoints,
+            $this->allowedStorePorts,
+        );
 
         return new RetryExecutor(
             $this->maxBackoffMs,

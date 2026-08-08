@@ -82,3 +82,95 @@ detected as expired). Always obtain timestamps from
 legitimate uses of `hrtime`/`microtime` in timestamp positions are duration
 measurements (differences) and logging — and `TimestampOracle::getTimestamp()`
 accepts an optional `$timeoutMs` so TSO fetches can carry a finite deadline.
+
+## gRPC target strings accept more than host:port — always validate PD-supplied addresses
+
+The grpc-core channel constructor (`Grpc\Channel`) treats the target string
+as a URI: besides `host:port` it also accepts `unix:/path/to.sock`,
+`unix-abstract:<name>`, `dns:///host:port`, `ipv4:` and `ipv6:` schemes, and
+an empty check on the address lets all of them through. Since store addresses
+arrive from PD (a network peer, plaintext by default), every address used as a
+channel target must be validated before it reaches `new Channel()`. In this
+repo `RegionResolver::resolveStoreAddress()` enforces a strict `host:port`
+regex unconditionally and throws the distinct `InvalidStoreAddressException`
+(logged) instead of `StoreNotFoundException` when PD returns something else
+(issue #306, SEC-03).
+
+## PHP properties can never be typed `callable` (even nullable) — use `Closure`
+
+`private ?callable $x` and `private callable $x` are fatal errors in every
+PHP version, including 8.5 (only parameters and return types accept
+`callable`). When a class needs to hold a callable, type the property
+`?\Closure` and convert user-supplied callables at the boundary with
+`Closure::fromCallable()` (see `ConnectionFactory::resolveStoreHostValidation()`,
+added for issue #306). PHPStan level 9 also rejects casting `mixed` to string
+(`(string) $level` in a PSR-3 `log($level, …)` implementation) — narrow with
+`is_string()` instead.
+
+## `$` in PCRE matches before a trailing newline — anchor with `\A…\z` for strict string validation
+
+In PHP, `preg_match('/^...$/', $s)` returns 1 for `"evil:20160\n"` because `$`
+also matches immediately before a final newline. Any strict string-format
+check (store addresses, identifiers, ports) must use `\A…\z` instead — and
+when the validated value is numeric, also range-check it (`0` or `99999` pass
+`\d{1,5}`). This bit the SEC-03 store-address validation in issue #306: the
+original `/^[A-Za-z0-9._-]+:\d{1,5}$/` accepted a trailing-newline address
+(the gRPC target parser tolerates it) and out-of-range ports; the fixed
+`RegionResolver::parseHostPort()` parses host/port explicitly with `\A…\z`
+anchors and a 1–65535 port range, and additionally accepts bracketed IPv6
+(`[2001:db8::1]:20160`) with an `inet_pton` check on the host.
+
+## Classify the store-address host before policy matching — IPs are not DNS names
+
+The default PD-derived store-host policy (issue #306, SEC-03 round 2) must
+classify the host before applying any rule; DNS-style suffix matching on an
+IP literal is a security hole. Bracketed IPv6 literals are trusted only when
+byte-identical (`inet_pton`) to a configured PD IPv6 endpoint — zone-id forms
+(`[fe80::1%eth0]:20160`; PHP ≥ 8.2 `inet_pton` accepts them) and IPv4-mapped
+forms (`[::ffff:10.0.0.1]:20160`) are rejected, no subnet/suffix rules apply.
+IPv4 literals only match by byte equality or /16 subnet (first two octets) —
+`10.0.0.1` shares the textual suffix `.0.1` with `127.0.0.1` and must NOT
+match it. Digit-leading hosts (`2130706433`, `017700000001`, `0x7f000001`)
+are system-resolver numeric-IP aliases and are rejected. Separately, a host
+that is itself a reserved gRPC/URI scheme name (`unix:20160`, `dns:20160`,
+`ipv4:20160`, `vsock:20160`, …) is rejected case-insensitively in
+`RegionResolver::validateStoreAddress()` before the policy runs, because
+grpc-core treats the prefix as a URI scheme at `new Channel()` time.
+
+## Store ports are part of the trust decision — the default policy rejects privileged ports
+
+A store host that passes the default PD-derived policy is only half the
+trust question: with PD at `10.0.0.1:2379` the /16 rule admits
+`10.0.0.2:1`, and an exact trusted host with port `1` is equally
+dangerous — a compromised PD could redirect traffic to an arbitrary
+service on the same host or subnet. Since round 3 of SEC-03 (issue #306)
+the default policy therefore requires the store port to be `>= 1024`
+unless it is explicitly listed in the new `options['allowedStorePorts']`;
+when that option is set, the port must be in the list (it narrows or
+relaxes the guard). On the explicit `allowedStoreHosts` path ports stay
+unrestricted unless `allowedStorePorts` is set (backward compatible).
+`storeHostPolicy` receives the full `host:port` and is never touched by
+the port policy.
+
+## The shared-suffix rule must be derived from DNS-name PD hosts only
+
+Round 3 of SEC-03 (issue #306) closed a second suffix bypass: the default
+policy derives the last-two-DNS-label suffix from the configured PD
+hosts, but with PD at `10.0.0.1:2379` the textual suffix `.0.1` admitted
+`attacker.0.1:20160` even though the PD host is an IP literal. The suffix
+rule now runs only when the PD host is a real dotted DNS name
+(`isDottedDnsName()`): entries that parse via `inet_pton` (IPv4/IPv6
+literals, including IPv4-mapped forms like `::ffff:127.0.0.1`), that are
+digit-leading (`123.456.789`), or single-label never contribute a suffix.
+Exact-match and /16 rules are unchanged.
+
+## grpc-core 1.80 registers more resolver schemes than the classic set
+
+Besides `unix`, `unix-abstract`, `dns`, `ipv4`, `ipv6`, `vsock`, `http`,
+`https`, `tcp`, `tls`, grpc-core 1.80 also treats `xds`,
+`google-c2p` and `google-c2p-experimental` as URI schemes when they
+appear as the host part of a channel target (`xds:20160` etc.). The
+reserved-scheme rejection set in `RegionResolver::validateStoreAddress()`
+must keep up with the grpc-core release that ships with the runtime —
+when bumping the `grpc` extension, re-check the scheme list added for
+SEC-03 (issue #306).
