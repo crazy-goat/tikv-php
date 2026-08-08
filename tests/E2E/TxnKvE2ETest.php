@@ -4,7 +4,14 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\E2E;
 
+use CrazyGoat\Proto\Kvrpcpb\Mutation;
+use CrazyGoat\Proto\Kvrpcpb\Op;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
+use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use PHPUnit\Framework\TestCase;
@@ -552,6 +559,78 @@ class TxnKvE2ETest extends TestCase
             } catch (ClientClosedException) {
                 // Expected
             }
+        }
+    }
+
+    public function testAbandonedPrewriteLockIsResolvedAfterTtlExpiry(): void
+    {
+        $key = $this->uniqueKey('txn-abandoned-lock');
+        $this->keysToCleanup[] = $key;
+
+        // Transaction A writes but never commits: only the prewrite phase runs.
+        // Keep it referenced so its destructor does not roll back before the
+        // reader below resolves the lock.
+        $txnA = $this->testClient->begin(['pessimistic' => false]);
+        $txnA->set($key, 'abandoned-value');
+        $startTs = $txnA->getStartTs();
+
+        $this->prewriteOnly($key, $startTs, 'abandoned-value');
+
+        // Wait until the lock TTL (1 s) has certainly elapsed.
+        sleep(3);
+
+        // A later reader must resolve the abandoned lock instead of blocking
+        // on it: the rolled-back put is invisible, so the read returns null.
+        $txnB = $this->testClient->begin(['pessimistic' => false]);
+        $this->assertNull($txnB->get($key));
+        $txnB->rollback();
+
+        unset($txnA);
+    }
+
+    /**
+     * Send a bare KvPrewrite for the given key, simulating a transaction
+     * abandoned right after its prewrite phase.
+     */
+    private function prewriteOnly(string $key, int $startTs, string $value): void
+    {
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        $bundle = ConnectionFactory::create($pdEndpoints);
+
+        try {
+            $region = $bundle->pdClient->getRegion($key);
+            $store = $bundle->pdClient->getStore($region->leaderStoreId);
+            $this->assertNotNull($store, 'Leader store must be resolvable for prewrite');
+
+            $mutation = new Mutation();
+            $mutation->setOp(Op::Put);
+            $mutation->setKey($key);
+            $mutation->setValue($value);
+
+            $request = new PrewriteRequest();
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setMutations([$mutation]);
+            $request->setPrimaryLock($key);
+            $request->setStartVersion($startTs);
+            $request->setLockTtl(1000);
+
+            /** @var PrewriteResponse $response */
+            $response = $bundle->grpc->call(
+                (string) $store->getAddress(),
+                'tikvpb.Tikv',
+                'KvPrewrite',
+                $request,
+                PrewriteResponse::class,
+                5000,
+            );
+
+            RegionErrorHandler::check($response);
+
+            $errors = $response->getErrors();
+            $this->assertCount(0, $errors, 'Prewrite for abandoned lock must succeed');
+        } finally {
+            $bundle->grpc->close();
+            $bundle->pdClient->close();
         }
     }
 }

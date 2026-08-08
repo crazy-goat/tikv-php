@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\Connection;
 
 use CrazyGoat\Proto\Pdpb\Timestamp;
+use CrazyGoat\Proto\Pdpb\TsoRequest;
 use CrazyGoat\Proto\Pdpb\TsoResponse;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -178,6 +179,42 @@ class TimestampOracleTest extends TestCase
             $this->fail('Expected TiKvException to be thrown');
         } catch (TiKvException) {
         }
+    }
+
+    public function testGetTimestampForwardsTimeoutToGrpcCall(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getClusterId')->willReturn(1);
+
+        $ts = new Timestamp();
+        $ts->setPhysical(1715000000000);
+        $ts->setLogical(3);
+
+        $response = new TsoResponse();
+        $response->setTimestamp($ts);
+
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                '127.0.0.1:2379',
+                'pdpb.PD',
+                'Tso',
+                $this->isInstanceOf(TsoRequest::class),
+                TsoResponse::class,
+                5000,
+            )
+            ->willReturn($response);
+
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
+
+        $this->assertSame((1715000000000 << 18) | 3, $oracle->getTimestamp(5000));
     }
 
     public function testGetTimestampWithRealPdClientInstance(): void

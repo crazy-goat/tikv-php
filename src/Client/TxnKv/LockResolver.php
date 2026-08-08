@@ -11,7 +11,9 @@ use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
@@ -26,6 +28,9 @@ final readonly class LockResolver
         private GrpcClientInterface $grpc,
         private RegionResolver $regionResolver,
         private RegionCacheInterface $regionCache,
+        private PdClientInterface $pdClient,
+        private int $callerStartTs,
+        private TimeoutConfig $timeoutConfig = new TimeoutConfig(),
         private int $maxBackoffMs = 20000,
         private LoggerInterface $logger = new NullLogger(),
     ) {
@@ -97,8 +102,10 @@ final readonly class LockResolver
         $request->setContext(RegionContextFactory::fromRegionInfo($region));
         $request->setPrimaryKey($primaryKey);
         $request->setLockTs($lockTs);
-        $request->setCallerStartTs((int) (hrtime(true) / 1_000_000));
-        $request->setCurrentTs((int) (hrtime(true) / 1_000_000));
+        // Both fields must be PD TSO MVCC timestamps: a monotonic-clock value
+        // breaks TiKV's TTL expiry and min-commit-ts logic (see issue #270).
+        $request->setCallerStartTs($this->callerStartTs);
+        $request->setCurrentTs($this->pdClient->getTimestamp($this->timeoutConfig->writeTimeoutMs));
         $request->setRollbackIfNotExist(true);
 
         $this->logger->debug('CheckTxnStatus', [

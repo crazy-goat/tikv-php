@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `LockResolver::checkTxnStatus()` no longer sends `hrtime()`-derived values as MVCC timestamps: `caller_start_ts` is now the resolving transaction's PD-allocated `start_ts` and `current_ts` is a freshly allocated PD TSO timestamp (fetched with a finite timeout). The old values were nine orders of magnitude below genuine TSO timestamps, so TiKV could never conclude that an abandoned lock had expired, blocking every later reader of the affected keys. `LockResolver`'s constructor now takes `PdClientInterface $pdClient`, `int $callerStartTs` and `TimeoutConfig $timeoutConfig` (internal collaborator, not public API). (#270)
 - `Transaction::commit()` no longer allocates a new commit timestamp when retried after a failed commit phase — the stored commit timestamp is reused, eliminating the risk of a transaction being committed at two different timestamps (partial-transaction visibility window). (#217)
 - Fix 3 unit tests that failed in Docker: correct mock expectations for `BatchAsyncExecutor` short-circuit behavior and skip unreadable-file test when running as root. (#178)
 
