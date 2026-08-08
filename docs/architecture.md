@@ -344,7 +344,7 @@ class RegionCache
 ```php
 class LockResolver
 {
-    public function resolveLock(string $key, int $lockTs, int $callerStartTs): void;
+    public function resolveLock(string $primaryLock, LockInfo $lock): void;
 }
 ```
 
