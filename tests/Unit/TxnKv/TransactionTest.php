@@ -29,6 +29,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -900,6 +901,9 @@ class TransactionTest extends TestCase
         } catch (LockWaitTimeoutException $e) {
             $this->assertSame('key', $e->getKey());
             $this->assertSame(100, $e->getTimeoutMs());
+            // Security: the message must not leak the raw key, only the redacted form.
+            $this->assertStringContainsString(KeyRedactor::redact('key'), $e->getMessage());
+            $this->assertStringNotContainsString('for key: key (', $e->getMessage());
         }
 
         $this->assertNotContains('KvPrewrite', $methodSequence);

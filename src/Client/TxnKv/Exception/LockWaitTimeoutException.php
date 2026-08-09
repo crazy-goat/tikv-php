@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\TxnKv\Exception;
 
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 
 final class LockWaitTimeoutException extends TiKvException
 {
@@ -12,7 +13,8 @@ final class LockWaitTimeoutException extends TiKvException
         private readonly string $key,
         private readonly int $timeoutMs,
     ) {
-        parent::__construct("Lock wait timeout for key: {$key} ({$timeoutMs}ms)");
+        $redacted = KeyRedactor::redact($key);
+        parent::__construct("Lock wait timeout for key: {$redacted} ({$timeoutMs}ms)");
     }
 
     public function getKey(): string
