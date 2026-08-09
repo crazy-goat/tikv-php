@@ -50,8 +50,42 @@ echo -e "${YELLOW}Step 3: Installing dependencies...${NC}"
 docker-compose run --rm php-client composer install --no-interaction
 
 echo ""
-echo -e "${YELLOW}Step 4: Running E2E tests...${NC}"
-docker-compose run --rm -e PD_ENDPOINTS=pd:2379 php-client vendor/bin/phpunit --testsuite E2E --testdox
+echo -e "${YELLOW}Step 4: Running RawKV E2E tests (V1ttl cluster)...${NC}"
+docker-compose run --rm -e PD_ENDPOINTS=pd:2379 php-client vendor/bin/phpunit --testsuite E2E-RawKV --testdox --no-coverage
+
+RAWKV_EXIT_CODE=$?
+
+if [ $RAWKV_EXIT_CODE -ne 0 ]; then
+    # cleanup happens via the EXIT trap
+    exit $RAWKV_EXIT_CODE
+fi
+
+echo ""
+echo -e "${YELLOW}Step 5: Switching to V1 cluster (txnkv override) for TxnKV E2E tests...${NC}"
+docker-compose down -v --remove-orphans 2>/dev/null || true
+docker-compose -f docker-compose.yml -f docker-compose.txnkv.yml up -d pd tikv1 tikv2 tikv3
+
+MAX_RETRIES=30
+RETRY_COUNT=0
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if docker-compose -f docker-compose.yml -f docker-compose.txnkv.yml ps | grep -q "healthy"; then
+        echo -e "${GREEN}V1 cluster is ready!${NC}"
+        break
+    fi
+    echo "Waiting for V1 cluster... ($RETRY_COUNT/$MAX_RETRIES)"
+    sleep 2
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+done
+
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+    echo -e "${RED}Timeout waiting for V1 cluster${NC}"
+    exit 1
+fi
+
+echo ""
+echo -e "${YELLOW}Step 6: Running TxnKV E2E tests (V1 cluster)...${NC}"
+docker-compose -f docker-compose.yml -f docker-compose.txnkv.yml run --rm --no-deps \
+    -e PD_ENDPOINTS=pd:2379 php-client vendor/bin/phpunit --testsuite E2E-TxnKV --testdox --no-coverage
 
 TEST_EXIT_CODE=$?
 
