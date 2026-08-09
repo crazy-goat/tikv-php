@@ -28,6 +28,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -1116,6 +1117,70 @@ class TransactionTest extends TestCase
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
         $this->assertSame(2000, $txn->getCommitTs());
         $this->assertSame(['KvPrewrite', 'KvCommit'], $methodSequence);
+    }
+
+    public function testCommitWithNumericStringKeySucceeds(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequest,
+                $prewriteResponse,
+                $commitResponse,
+            ): object {
+                if ($method === 'KvPrewrite') {
+                    $capturedRequest = $request;
+                }
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('12345', 'value');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertNotNull($capturedRequest);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PrewriteRequest::class, $capturedRequest);
+        $mutations = $capturedRequest->getMutations();
+        $this->assertCount(1, $mutations);
+        $this->assertSame('12345', $mutations[0]->getKey());
+    }
+
+    public function testWriteSetPreservesNumericKeysAsStrings(): void
+    {
+        // PHP coerces integer-like string keys ("12345", "0") to int
+        // array keys; the accessors must string-cast them back so callers
+        // only ever see strings (issue #322).
+        $state = new TransactionState();
+        $state->setWrite('12345', 'v1');
+        $state->setWrite('0', 'v2');
+
+        $writeKeys = $state->getWriteKeys();
+        $this->assertSame(['12345', '0'], $writeKeys);
+        $this->assertSame('12345', $state->getPrimaryKey());
+        $this->assertSame('v2', $state->getWriteSetValue('0'));
     }
 
     public function testCommitPessimisticWithKeys(): void

@@ -417,6 +417,10 @@ final class RawKvClient
             return [];
         }
 
+        // Keys built with array_keys() on other arrays arrive as ints for
+        // integer-like strings; normalize to strings (issue #322).
+        $keys = array_map(strval(...), $keys);
+
         foreach ($keys as $key) {
             $this->validateKeyNotEmpty($key, 'batchGet');
             $this->validateKeySize($key, 'batchGet');
@@ -444,6 +448,9 @@ final class RawKvClient
         }
 
         foreach ($keyValuePairs as $key => $value) {
+            // PHP coerces integer-like string keys ("12345", "0") to int
+            // array keys; string-cast before validating (issue #322).
+            $key = (string) $key;
             $this->validateKeyNotEmpty($key, 'batchPut');
             $this->validateKeySize($key, 'batchPut');
             $this->validateValueSize($value, 'batchPut');
@@ -474,6 +481,10 @@ final class RawKvClient
         if ($keys === []) {
             return;
         }
+
+        // Keys built with array_keys() on other arrays arrive as ints for
+        // integer-like strings; normalize to strings (issue #322).
+        $keys = array_map(strval(...), $keys);
 
         foreach ($keys as $key) {
             $this->validateKeyNotEmpty($key, 'batchDelete');
@@ -665,6 +676,9 @@ final class RawKvClient
         }
 
         foreach ($keyValuePairs as $key => $value) {
+            // PHP coerces integer-like string keys ("12345", "0") to int
+            // array keys; string-cast before validating (issue #322).
+            $key = (string) $key;
             $this->validateKeyNotEmpty($key, 'ingest');
             $this->validateKeySize($key, 'ingest');
             $this->validateValueSize($value, 'ingest');

@@ -18,6 +18,7 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
@@ -569,6 +570,38 @@ class RawKvClientTest extends TestCase
     {
         $this->grpc->expects($this->never())->method('call');
         $this->client->batchPut([]);
+    }
+
+    public function testBatchPutAcceptsNumericStringKeys(): void
+    {
+        $this->requireGrpcExtension();
+
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
+            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+        ]));
+
+        // Pre-fix: PHP coerces the "12345" array key to int, so
+        // validateKeyNotEmpty(string) throws a TypeError here. Post-fix the
+        // wire pairs are built and the request only fails at the transport
+        // layer, because there is no TiKV server in unit tests.
+        $this->expectException(BatchPartialFailureException::class);
+
+        // PHP models a literal "12345" array key as int; build the pairs
+        // through a string-typed key so the map reaches batchPut() with its
+        // declared contract (numeric-string keys must survive to the wire).
+        $pairs = $this->stringKeyedPairs('12345', 'v');
+        $this->client->batchPut($pairs);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function stringKeyedPairs(string $key, string $value): array
+    {
+        return [$key => $value];
     }
 
     // ========================================================================

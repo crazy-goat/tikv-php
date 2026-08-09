@@ -131,7 +131,10 @@ final class TransactionState
         if ($key === null) {
             throw new InvalidStateException('Write set is empty, no primary key');
         }
-        return $key;
+
+        // PHP coerces integer-like string keys ("12345", "0") to int array
+        // keys, so the key must be string-cast before returning it (issue #322).
+        return (string) $key;
     }
 
     /**
@@ -139,7 +142,7 @@ final class TransactionState
      */
     public function getWriteKeys(): array
     {
-        return array_keys($this->writeSet);
+        return array_map(strval(...), array_keys($this->writeSet));
     }
 
     public function isEmptyWriteSet(): bool
