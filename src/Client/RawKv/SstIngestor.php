@@ -159,7 +159,10 @@ final readonly class SstIngestor
         $pairs = [];
         foreach ($keyValuePairs as $key => $value) {
             $pair = new Pair();
-            $pair->setKey($key);
+            // PHP coerces integer-like string keys ("12345", "0") to int
+            // array keys; string-cast before passing to the proto setter
+            // (issue #322).
+            $pair->setKey((string) $key);
             $pair->setValue($value);
             $pair->setOp(Pair\OP::Put);
             $pairs[] = $pair;

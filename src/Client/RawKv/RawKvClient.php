@@ -227,6 +227,36 @@ final class RawKvClient
         }
     }
 
+    /**
+     * Normalize batch keys to strings. PHP coerces integer-like string keys
+     * ("12345", "0") to int when arrays are built with array_keys(); ints are
+     * cast back to strings, anything else is rejected so the string[] contract
+     * is not silently weakened (issue #322).
+     *
+     * @param array<array-key, string|int> $keys
+     * @return string[]
+     *
+     * @throws InvalidArgumentException
+     */
+    private function normalizeBatchKeys(array $keys): array
+    {
+        $normalized = [];
+        foreach ($keys as $key) {
+            if (is_int($key)) {
+                $normalized[] = (string) $key;
+            } elseif (is_string($key)) {
+                $normalized[] = $key;
+            } else {
+                throw new InvalidArgumentException(sprintf(
+                    'Batch keys must be strings or ints, %s given',
+                    get_debug_type($key),
+                ));
+            }
+        }
+
+        return $normalized;
+    }
+
     private function validateKeyNotEmpty(string $key, string $method): void
     {
         if ($key === '') {
@@ -400,7 +430,9 @@ final class RawKvClient
     // ========================================================================
 
     /**
-     * @param string[] $keys
+     * @param array<array-key, string|int> $keys Keys may be ints when built via
+     *                                           array_keys() on a map with
+     *                                           numeric-string keys (issue #322)
      * @return array<string, ?string>
      *
      * @throws ClientClosedException
@@ -416,6 +448,8 @@ final class RawKvClient
         if ($keys === []) {
             return [];
         }
+
+        $keys = $this->normalizeBatchKeys($keys);
 
         foreach ($keys as $key) {
             $this->validateKeyNotEmpty($key, 'batchGet');
@@ -444,6 +478,9 @@ final class RawKvClient
         }
 
         foreach ($keyValuePairs as $key => $value) {
+            // PHP coerces integer-like string keys ("12345", "0") to int
+            // array keys; string-cast before validating (issue #322).
+            $key = (string) $key;
             $this->validateKeyNotEmpty($key, 'batchPut');
             $this->validateKeySize($key, 'batchPut');
             $this->validateValueSize($value, 'batchPut');
@@ -459,7 +496,9 @@ final class RawKvClient
     }
 
     /**
-     * @param string[] $keys
+     * @param array<array-key, string|int> $keys Keys may be ints when built via
+     *                                           array_keys() on a map with
+     *                                           numeric-string keys (issue #322)
      *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
@@ -474,6 +513,8 @@ final class RawKvClient
         if ($keys === []) {
             return;
         }
+
+        $keys = $this->normalizeBatchKeys($keys);
 
         foreach ($keys as $key) {
             $this->validateKeyNotEmpty($key, 'batchDelete');
@@ -665,6 +706,9 @@ final class RawKvClient
         }
 
         foreach ($keyValuePairs as $key => $value) {
+            // PHP coerces integer-like string keys ("12345", "0") to int
+            // array keys; string-cast before validating (issue #322).
+            $key = (string) $key;
             $this->validateKeyNotEmpty($key, 'ingest');
             $this->validateKeySize($key, 'ingest');
             $this->validateValueSize($value, 'ingest');

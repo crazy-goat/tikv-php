@@ -164,7 +164,9 @@ final class Transaction
     }
 
     /**
-     * @param string[] $keys
+     * @param array<array-key, string|int> $keys Keys may be ints when built via
+     *                                           array_keys() on a map with
+     *                                           numeric-string keys (issue #322)
      * @return array<string, ?string>
      *
      * @throws InvalidStateException

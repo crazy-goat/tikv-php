@@ -17,6 +17,33 @@ stop with `make down`. If state gets corrupted: `make clean && make up`.
   and requires the `grpc` PHP extension; runs with `--fail-on-skipped`, so a
   missing extension fails the run locally.
 
+## PHP coerces numeric-string array keys to int — string-cast at every typed consumption point
+
+When a string that parses as an integer is used as an array key (`$map['12345']`,
+`$map['0']`), PHP stores it as an **int** key; there is no way to keep
+`'12345'` as a string key. Under `declare(strict_types=1)` this silently breaks
+every typed consumer of that key: `validateKeyNotEmpty(string $key)`, proto
+`setKey(string $var)`, `scanRegions(string $startKey)` all throw a TypeError
+that `catch (TiKvException)` does not catch, and `getPrimaryKey(): string`
+throws when the stored key is returned. Rules learned fixing it (issue #322):
+key-returning accessors (`getPrimaryKey()`, `getWriteKeys()`) must cast
+`(string)` before returning; every point that hands a foreach key to a
+string-typed parameter or setter must cast `(string) $key`; and lists built
+with `array_keys()` from such maps are normalized to strings at the public
+API boundary — `Transaction::batchGet()`, the transaction scan result merge,
+and `RawKvClient::batchGet()/batchDelete()` accept `string|int` elements,
+cast ints back to strings, and reject anything else with
+`InvalidArgumentException` (never `strval()` arbitrary elements silently).
+The same applies to keys *returned* by TiKV: scan responses and
+`BatchGetResponse` pairs store `'12345'` as int 12345 inside PHP maps, so
+`array_keys()` results must be string-cast before `hasWriteSetKey()` lookups,
+and merged result maps must not be combined with `array_merge()` (it
+renumbers int keys and drops numeric-string entries). A unit test that builds
+the map with a *literal* key also
+hides the bug in reverse: PHPStan infers the literal as `array<int, string>`
+and rejects the `array<string, string>` parameter, so construct the map via a
+string-typed key parameter (helper method) to test the real-world contract.
+
 ## There is no pre-push hook in this repo
 
 Lint is only enforced in CI. Run `composer lint` locally before pushing to

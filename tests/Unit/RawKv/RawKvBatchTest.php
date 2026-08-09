@@ -9,6 +9,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -185,6 +186,39 @@ class RawKvBatchTest extends TestCase
         // 3 keys with scalar TTL - old code would send a 1-element ttls array
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2', 'k3' => 'v3'], 60, $retryExecutor);
         $this->addToAssertionCount(1);
+    }
+
+    public function testBatchPutWithNumericStringKeys(): void
+    {
+        $this->requireGrpcExtension();
+
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
+            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+        ]));
+
+        // Pre-fix: PHP coerces the "12345"/"0" array keys to int, so
+        // KvPair::setKey(string) throws a TypeError while building the wire
+        // pairs. Post-fix the request only fails at the transport layer,
+        // because there is no TiKV server in unit tests.
+        $this->expectException(BatchPartialFailureException::class);
+
+        $retryExecutor = $this->createRetryExecutor();
+        // PHP models literal "12345"/"0" array keys as int; build the pairs
+        // through string-typed keys so they reach batchPut() with their
+        // declared contract (numeric-string keys must survive to the wire).
+        $pairs = $this->stringKeyedPairs('12345', 'v1') + $this->stringKeyedPairs('0', 'v2');
+        $this->batch->batchPut($pairs, 0, $retryExecutor);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function stringKeyedPairs(string $key, string $value): array
+    {
+        return [$key => $value];
     }
 
     private function createRetryExecutor(): RetryExecutor

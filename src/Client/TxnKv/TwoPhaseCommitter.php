@@ -714,7 +714,9 @@ final readonly class TwoPhaseCommitter
         $mutations = [];
         foreach ($state->getWriteSet() as $key => $value) {
             $mutation = new Mutation();
-            $mutation->setKey($key);
+            // PHP coerces integer-like string keys to int array keys, so
+            // string-cast before passing to the proto setter (issue #322).
+            $mutation->setKey((string) $key);
 
             if ($value === null) {
                 $mutation->setOp(Op::Del);
