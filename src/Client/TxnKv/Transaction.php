@@ -19,6 +19,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use Psr\Log\LoggerInterface;
@@ -248,6 +249,7 @@ final class Transaction
      * @throws TiKvException
      * @throws TransactionConflictException
      * @throws DeadlockException
+     * @throws LockWaitTimeoutException
      * @throws RegionException
      * @throws GrpcException
      */

@@ -34,6 +34,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -539,6 +540,7 @@ final readonly class TwoPhaseCommitter
 
             $elapsedMs = 0;
             $attempt = 0;
+            $needRetry = false;
             do {
                 $attempt++;
                 $request = new PessimisticLockRequest();
@@ -632,6 +634,16 @@ final readonly class TwoPhaseCommitter
                 $forUpdateTs = $this->pdClient->getTimestamp();
                 $state->updateMaxForUpdateTs($forUpdateTs);
             } while ($elapsedMs < $this->maxBackoffMs);
+
+            // A lock that could not be acquired within the configured wait
+            // budget must fail the transaction instead of silently continuing
+            // to prewrite without a lock (issue #219, TXN-14).
+            if ($needRetry) {
+                throw new LockWaitTimeoutException(
+                    $regionKeys[0] ?? '',
+                    $this->maxBackoffMs,
+                );
+            }
 
             $isFirstLock = false;
         }

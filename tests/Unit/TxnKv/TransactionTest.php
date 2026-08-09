@@ -23,6 +23,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
@@ -848,6 +849,61 @@ class TransactionTest extends TestCase
             $this->assertSame(42, $e->getDeadlockKeyHash());
             $this->assertSame(777, $e->getLockTs());
         }
+    }
+
+    public function testCommitPessimisticLockBudgetExhaustedThrowsLockWaitTimeout(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $lockInfo = new \CrazyGoat\Proto\Kvrpcpb\LockInfo();
+        $lockInfo->setKey('key');
+        $lockInfo->setPrimaryLock('key');
+        $lockInfo->setLockVersion(1000);
+
+        $keyError = new KeyError();
+        $keyError->setLocked($lockInfo);
+
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors([$keyError]);
+
+        $methodSequence = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method
+            ) use (
+                &$methodSequence,
+                $lockResponse,
+            ): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvCheckTxnStatus' => new \CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse(),
+                    'KvResolveLock' => new \CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true, 'maxBackoffMs' => 100]);
+        $txn->set('key', 'value');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected LockWaitTimeoutException was not thrown');
+        } catch (LockWaitTimeoutException $e) {
+            $this->assertSame('key', $e->getKey());
+            $this->assertSame(100, $e->getTimeoutMs());
+        }
+
+        $this->assertNotContains('KvPrewrite', $methodSequence);
+        $this->assertNotContains('KvCommit', $methodSequence);
     }
 
     // ========================================================================

@@ -174,3 +174,17 @@ reserved-scheme rejection set in `RegionResolver::validateStoreAddress()`
 must keep up with the grpc-core release that ships with the runtime —
 when bumping the `grpc` extension, re-check the scheme list added for
 SEC-03 (issue #306).
+
+## The pessimistic-lock retry loop usually exits via the do-while condition, not the budget guard
+
+In `TwoPhaseCommitter::pessimisticLockBatch()` the per-attempt `remainingMs
+<= 0` guard looks like the retry-budget exit, but it is almost unreachable:
+`delayMs` is capped by `remainingMs` before sleeping, so `elapsedMs` lands
+exactly on `maxBackoffMs` and the loop leaves through the
+`while ($elapsedMs < maxBackoffMs)` condition instead (issue #219, TXN-14).
+Both exits must be treated as "lock acquisition failed" — the fix throws
+`LockWaitTimeoutException` after the loop whenever `$needRetry` is still
+true. Unit-test tip: pass a small `maxBackoffMs` (e.g. 100) to
+`createTransaction(['maxBackoffMs' => …])` to exercise budget exhaustion
+without sleeping the full default 20 s budget — and `maxBackoffMs = 0`
+hits the `remainingMs <= 0` guard after the very first locked response.
