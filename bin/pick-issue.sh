@@ -43,6 +43,11 @@
 #     security/auth/xss/csrf/injection=20, performance=15, dead code=5
 #   - age:            +0.2 per day since creation, capped at 20
 #   - comments:       +1 per comment, capped at 5 (demand signal)
+#
+# Internal wire format: fields are separated by \x1f (unit separator), NOT
+# tabs. `read` treats non-whitespace IFS characters strictly, so empty
+# fields (e.g. an issue without labels) survive parsing, while tabs would
+# collapse. The jq projections gsub() the separator out of every text field.
 
 set -euo pipefail
 
@@ -60,6 +65,9 @@ TOP=5
 REPO="$DEFAULT_REPO"
 MILESTONE=""
 JSON_OUT=0
+
+SEP=$'\x1f'   # field separator; safe because projections gsub it away
+LSEP=$'\x1e'  # label separator inside the scored/labels display field
 
 shopt -s nocasematch
 
@@ -79,23 +87,27 @@ iso_to_epoch() {
     fi
 }
 
-# JSON-escape a string (backslash, double quote, newline). Portable across
-# GNU and BSD sed: newlines are parked on a control char first, then
-# rewritten to the literal two-char sequence \n.
+# JSON-escape a string (backslash, double quote, newline, stray control
+# chars). Portable across GNU and BSD sed: newlines are parked on a
+# control char first, then rewritten to the literal two-char sequence \n.
 json_escape() {
     local soh
     soh="$(printf '\001')"
-    printf '%s' "$1" | tr '\n' '\001' | \
+    printf '%s' "$1" | tr '\n' '\001' | tr "$(printf '\037\036')" '  ' | \
         sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/${soh}/\\\\n/g"
 }
 
-# Exact comma-separated membership test: in_csv "<a,b,c>" "<needle>".
-# Label names cannot contain commas, so this is exact-match safe.
-in_csv() {
-    case ",$1," in
-        *",$2,"*) return 0 ;;
-        *) return 1 ;;
-    esac
+# Label membership test. $1 is a NEWLINE-joined label list (pre-split once
+# per issue by score_line), $2 the needle. Literal comparison — robust
+# against glob characters in label names. Uses a here-string (not a process
+# substitution) so it is safe inside long loops on bash 3.2, which leaks
+# process-substitution file descriptors until the enclosing loop ends.
+has_label() {
+    local one
+    while IFS= read -r one; do
+        [ "$one" = "$2" ] && return 0
+    done <<< "$1"
+    return 1
 }
 
 usage() {
@@ -188,32 +200,35 @@ parse_args() {
     done
 }
 
-# Score one issue (fields from a TSV line) and print:
-#   score<TAB>number<TAB>title<TAB>labels_csv<TAB>rationale<TAB>age_days<TAB>comments
+# Score one issue (fields from a \x1f-separated line) and print:
+#   score\x1fnumber\x1ftitle\x1flabels_field\x1frationale\x1fage_days\x1fcomments
 score_line() {
-    local number="$1" title="$2" labels_csv="$3" created_at="$4" comments="$5"
+    local number="$1" title="$2" labels_field="$3" created_at="$4" comments="$5"
     local score=0
     local breakdown=""
     local entry tlabel tweight
+
+    # Split the \x1f-joined labels into a newline-joined list — once, not
+    # per lookup (parameter expansion, no subprocesses).
+    local labels_list
+    labels_list="${labels_field//$SEP/$'\n'}"
 
     # Type labels: first (most valuable) match wins.
     for entry in "bug:50" "security:45" "data-loss:40" "enhancement:20" \
         "performance:15" "documentation:8"; do
         tlabel="${entry%%:*}"
         tweight="${entry##*:}"
-        if in_csv "$labels_csv" "$tlabel"; then
+        if has_label "$labels_list" "$tlabel"; then
             score=$((score + tweight))
             breakdown="$breakdown type:$tlabel +$tweight"
             break
         fi
     done
-
-    # Severity and meta labels: all matches contribute.
     for entry in "severity:critical:60" "severity:high:30" \
         "severity:medium:12" "severity:low:3"; do
         tlabel="${entry%:*}"
         tweight="${entry##*:}"
-        if in_csv "$labels_csv" "$tlabel"; then
+        if has_label "$labels_list" "$tlabel"; then
             score=$((score + tweight))
             breakdown="$breakdown $tlabel +$tweight"
         fi
@@ -222,7 +237,7 @@ score_line() {
     for entry in "good first issue:+10" "help wanted:+8" "question:-5"; do
         tlabel="${entry%%:*}"
         tweight="${entry##*:}"
-        if in_csv "$labels_csv" "$tlabel"; then
+        if has_label "$labels_list" "$tlabel"; then
             score=$((score + tweight))
             breakdown="$breakdown meta:$tlabel $tweight"
         fi
@@ -270,8 +285,13 @@ score_line() {
         breakdown="$breakdown comments +$comment_pts"
     fi
 
-    printf '%d\t%s\t%s\t%s\t%s\t%d\t%d\n' \
-        "$score" "$number" "$title" "$labels_csv" "${breakdown# }" "$days" "$comments"
+    # The labels field inside the scored line uses \x1e so it cannot
+    # collide with the outer \x1f field separator.
+    local labels_out="${labels_field//$SEP/$LSEP}"
+
+    printf '%d%s%s%s%s%s%s%s%s%s%s%s%s\n' \
+        "$score" "$SEP" "$number" "$SEP" "$title" "$SEP" "$labels_out" \
+        "$SEP" "${breakdown# }" "$SEP" "$days" "$SEP" "$comments"
 }
 
 print_json() {
@@ -281,7 +301,7 @@ print_json() {
     local t n o c m x y
 
     printf '{\n  "milestones": [\n'
-    while IFS=$'\t' read -r t n o c m x y; do
+    while IFS="$SEP" read -r t n o c m x y; do
         printf '%s    {"title": "%s", "open_issues": %s, "closed_issues": %s}\n' \
             "$sep" "$(json_escape "$t")" "$o" "$c"
         sep=","
@@ -291,10 +311,15 @@ print_json() {
         "$(json_escape "$target_title")" "$(json_escape "$picked_reason")" "$shown"
 
     sep=""
-    local s num title csv rationale days cmts lbs labels_json="[]"
-    while IFS=$'\t' read -r s num title csv rationale days cmts; do
+    local s num title csv rationale days cmts lbs labels_json
+    while IFS="$SEP" read -r s num title csv rationale days cmts; do
+        # Reset per issue — an unlabeled issue must not inherit the
+        # previous issue's labels.
+        labels_json="[]"
         if [ -n "$csv" ]; then
-            lbs="$(printf '%s' "$csv" | sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/; s/,/","/g')"
+            lbs="$(printf '%s' "$csv" | tr "$LSEP" '\n' | \
+                sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/.*/"&"/' | \
+                paste -sd ',' -)"
             labels_json="[$lbs]"
         fi
         printf '%s    {"number": %s, "title": "%s", "labels": %s, "score": %s, "rationale": "%s", "age_days": %s, "comments": %s}\n' \
@@ -309,15 +334,16 @@ print_json() {
 main() {
     parse_args "$@"
 
-    # 2b. tmp dir is global so the EXIT trap can clean it up after
-    #     main() returns and its locals are gone.
+    # tmp dir is global so the EXIT trap can clean it up after main()
+    # returns and its locals are gone.
     TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pick-issue.XXXXXX")"
     trap 'rm -rf "$TMP_DIR"' EXIT
 
-    # 1. List open milestones (paginated; gh caps lists at 30 by default).
+    # 1. List open milestones (paginated; gh caps lists at 30 per page).
+    #    Columns: title\x1fnumber\x1fopen\x1fclosed
     local milestones_file="$TMP_DIR/milestones.tsv" sorted="$TMP_DIR/milestones.sorted.tsv"
     if ! gh api --paginate "repos/$REPO/milestones?state=open&per_page=100" \
-        --jq '.[] | [.title, (.number|tostring), (.open_issues|tostring), (.closed_issues|tostring)] | @tsv' \
+        --jq '.[] | [(.title | gsub("[\u0000-\u001f\u007f]"; " ")), (.number|tostring), (.open_issues|tostring), (.closed_issues|tostring)] | join("\u001f")' \
         >"$milestones_file" 2>"$TMP_DIR/gh.err"; then
         echo "gh api failed: $(cat "$TMP_DIR/gh.err")" >&2
         exit "$EXIT_GH_ERROR"
@@ -330,30 +356,31 @@ main() {
 
     # 2. Sort: version-like milestones first (semver numeric keys),
     #    everything else after (title tiebreak). Columns:
-    #    title<TAB>number<TAB>open<TAB>closed<TAB>maj<TAB>min<TAB>pat
+    #    title\x1fnumber\x1fopen\x1fclosed\x1fmaj\x1fmin\x1fpat
     : >"$sorted"
     local title number open closed
-    while IFS=$'\t' read -r title number open closed; do
+    while IFS="$SEP" read -r title number open closed; do
         if [[ "$title" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-            printf '%s\t%s\t%s\t%s\t%d\t%d\t%d\n' \
-                "$title" "$number" "$open" "$closed" \
-                "$((10#${BASH_REMATCH[1]}))" \
-                "$((10#${BASH_REMATCH[2]}))" \
+            printf '%s%s%s%s%s%s%s%s%s%s%s%s%s\n' \
+                "$title" "$SEP" "$number" "$SEP" "$open" "$SEP" "$closed" "$SEP" \
+                "$((10#${BASH_REMATCH[1]}))" "$SEP" \
+                "$((10#${BASH_REMATCH[2]}))" "$SEP" \
                 "$((10#${BASH_REMATCH[3]}))" >>"$sorted"
         else
-            printf '%s\t%s\t%s\t%s\t999999\t999999\t999999\n' \
-                "$title" "$number" "$open" "$closed" >>"$sorted"
+            printf '%s%s%s%s%s%s%s%s%s%s%s%s%s\n' \
+                "$title" "$SEP" "$number" "$SEP" "$open" "$SEP" "$closed" "$SEP" \
+                "999999" "$SEP" "999999" "$SEP" "999999" >>"$sorted"
         fi
     done <"$milestones_file"
 
-    LC_ALL=C sort -t$'\t' -k5,5n -k6,6n -k7,7n -k1,1 "$sorted" -o "$sorted"
+    LC_ALL=C sort -t "$SEP" -k5,5n -k6,6n -k7,7n -k1,1 "$sorted" -o "$sorted"
 
     # 3. Pick the target milestone: explicit override or the lowest one.
     local target_title="" target_number="" target_open="" target_closed=""
     local picked_reason=""
     if [ -n "$MILESTONE" ]; then
         local found="" t n o c _m _x _y
-        while IFS=$'\t' read -r t n o c _m _x _y; do
+        while IFS="$SEP" read -r t n o c _m _x _y; do
             if [ "$t" = "$MILESTONE" ]; then
                 found=1
                 target_title="$t"
@@ -369,7 +396,7 @@ main() {
         fi
         picked_reason="explicit --milestone override"
     else
-        read -r target_title target_number target_open target_closed _m _x _y <"$sorted"
+        IFS="$SEP" read -r target_title target_number target_open target_closed _m _x _y <"$sorted"
         picked_reason="lowest open milestone by version"
     fi
 
@@ -391,10 +418,13 @@ main() {
 
     # 5. Fetch open issues of the target milestone. /issues also returns
     #    pull requests — filtered out here. Bodies are never fetched.
-    #    Columns: number<TAB>title<TAB>labels_csv<TAB>created_at<TAB>comments
+    #    Columns: number\x1ftitle\x1fcreated_at\x1fcomments\x1flabels…
+    #    (labels come LAST and are \x1f-joined within the remainder, so
+    #    the field count stays variable-safe: an issue without labels
+    #    simply has an empty final field)
     local issues_file="$TMP_DIR/issues.tsv"
     if ! gh api --paginate "repos/$REPO/issues?state=open&milestone=$target_number&per_page=100" \
-        --jq '.[] | select(.pull_request == null) | [(.number|tostring), (.title | gsub("[\t\r\n]"; " ")), ([.labels[].name] | join(",")), .created_at, (.comments|tostring)] | @tsv' \
+        --jq '.[] | select(.pull_request == null) | [(.number|tostring), (.title | gsub("[\u0000-\u001f\u007f]"; " ")), .created_at, (.comments|tostring), ([.labels[].name | gsub("[\u0000-\u001f\u007f]"; " ")] | join("\u001f"))] | join("\u001f")' \
         >"$issues_file" 2>"$TMP_DIR/gh.err"; then
         echo "gh api failed: $(cat "$TMP_DIR/gh.err")" >&2
         exit "$EXIT_GH_ERROR"
@@ -408,13 +438,13 @@ main() {
     # 6. Score every issue.
     local scored="$TMP_DIR/scored.tsv"
     : >"$scored"
-    local number created_at comments labels_csv
-    while IFS=$'\t' read -r number title labels_csv created_at comments; do
-        score_line "$number" "$title" "$labels_csv" "$created_at" "$comments" >>"$scored"
+    local number created_at comments labels_field
+    while IFS="$SEP" read -r number title created_at comments labels_field; do
+        score_line "$number" "$title" "$labels_field" "$created_at" "$comments" >>"$scored"
     done <"$issues_file"
 
     # 7. Rank: highest score first, ties by lowest issue number.
-    LC_ALL=C sort -t$'\t' -k1,1nr -k2,2n "$scored" -o "$scored"
+    LC_ALL=C sort -t "$SEP" -k1,1nr -k2,2n "$scored" -o "$scored"
 
     local total_issues shown
     total_issues="$(wc -l <"$scored" | tr -d ' ')"
@@ -431,7 +461,7 @@ main() {
 
     echo "Open milestones:"
     local t n o c m x y marker=""
-    while IFS=$'\t' read -r t n o c m x y; do
+    while IFS="$SEP" read -r t n o c m x y; do
         if [ "$t" = "$target_title" ]; then
             marker="  <-- picked"
         else
@@ -444,10 +474,11 @@ main() {
         "$target_title" "$shown" "$total_issues"
 
     local rank=1 s num csv rationale days cmts labels_display=""
-    while IFS=$'\t' read -r s num title csv rationale days cmts; do
+    while IFS="$SEP" read -r s num title csv rationale days cmts; do
         [ "$rank" -gt "$shown" ] && break
         if [ -n "$csv" ]; then
-            labels_display="$csv"
+            # Human-readable: \x1e-joined labels back to comma-separated.
+            labels_display="$(printf '%s' "$csv" | tr "$LSEP" ',')"
         else
             labels_display="no labels"
         fi
@@ -459,7 +490,7 @@ main() {
     local best_line best_score best_num best_t
     best_line="$(head -n 1 "$scored")"
     if [ -n "$best_line" ]; then
-        IFS=$'\t' read -r best_score best_num best_t _x _y _z _w <<<"$best_line"
+        IFS="$SEP" read -r best_score best_num best_t _x _y _z _w <<<"$best_line"
         printf '\nHighest-scoring candidate: #%s (%s pts) — %s\n' "$best_num" "$best_score" "$best_t"
     fi
     echo "Pick one of these, then run the workflow (workflow.md)."
