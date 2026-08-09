@@ -818,7 +818,7 @@ class RawKvScannerTest extends TestCase
     public function testScanRetriesOnEpochNotMatchWithNarrowerRange(): void
     {
         $preSplit = $this->defaultRegion('a', 'z', regionId: 1);
-        $postSplit = new RegionInfo(
+        $postSplitLower = new RegionInfo(
             regionId: 2,
             leaderPeerId: 2,
             leaderStoreId: 1,
@@ -827,16 +827,27 @@ class RawKvScannerTest extends TestCase
             startKey: 'a',
             endKey: 'k',
         );
+        $postSplitUpper = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k',
+            endKey: 'z',
+        );
 
         // The cache serves the stale region for the first resolution and the
         // retry executor's invalidation lookup, then misses so the retry
         // falls back to PD for the post-split region.
-        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null);
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
         $this->regionCache->method('put');
         $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
 
         $this->pdClient->method('scanRegions')->willReturn([$preSplit]);
-        $this->pdClient->method('getRegion')->willReturn($postSplit);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key === 'k' ? $postSplitUpper : $postSplitLower,
+        );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $error = new Error();
@@ -845,8 +856,6 @@ class RawKvScannerTest extends TestCase
         $pair = new KvPair();
         $pair->setKey('k1');
         $pair->setValue('v1');
-        $cleanResponse = new RawScanResponse();
-        $cleanResponse->setKvs([$pair]);
 
         /** @var list<Message> $capturedRequests */
         $capturedRequests = [];
@@ -861,12 +870,23 @@ class RawKvScannerTest extends TestCase
                 &$callCount,
                 &$capturedRequests,
                 $error,
-                $cleanResponse,
+                $pair,
             ): Message {
                 $callCount++;
                 $capturedRequests[] = $request;
 
-                return $callCount === 1 ? $this->responseWithRegionError($error) : $cleanResponse;
+                if ($callCount === 1) {
+                    return $this->responseWithRegionError($error);
+                }
+
+                // The continuation over [k,z) returns no keys.
+                $response = new RawScanResponse();
+                /** @var RawScanRequest $request */
+                if ($request->getStartKey() !== 'k') {
+                    $response->setKvs([$pair]);
+                }
+
+                return $response;
             },
         );
 
@@ -874,7 +894,7 @@ class RawKvScannerTest extends TestCase
 
         $this->assertCount(1, $result);
         $this->assertSame('k1', $result[0]['key']);
-        $this->assertCount(2, $capturedRequests);
+        $this->assertCount(3, $capturedRequests);
 
         $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[1]);
         $secondRequest = $capturedRequests[1];
@@ -884,12 +904,27 @@ class RawKvScannerTest extends TestCase
         $this->assertSame(2, $regionId);
         $this->assertSame('a', $secondRequest->getStartKey());
         $this->assertSame('k', $secondRequest->getEndKey());
+
+        // A retry clipped to the fresh region must not silently drop the
+        // remainder: the rest of the range is scanned afterwards.
+        $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[2]);
+        $thirdRequest = $capturedRequests[2];
+        $context = $thirdRequest->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(3, $regionId);
+        $this->assertSame('k', $thirdRequest->getStartKey());
+        $this->assertSame('z', $thirdRequest->getEndKey());
     }
 
-    public function testReverseScanRetriesOnEpochNotMatchAndClipsStartKey(): void
+    public function testScanContinuesAfterSplitToCoverRemainder(): void
     {
+        // The outer region enumeration is stale (it ran before the split):
+        // the first attempt against the stale [a,z) fails with
+        // EpochNotMatch, the retry resolves the post-split [a,k), and the
+        // continuation must then scan [k,z) so keys of the original range
+        // are not silently dropped.
         $preSplit = $this->defaultRegion('a', 'z', regionId: 1);
-        $postSplit = new RegionInfo(
+        $postSplitLower = new RegionInfo(
             regionId: 2,
             leaderPeerId: 2,
             leaderStoreId: 1,
@@ -898,26 +933,38 @@ class RawKvScannerTest extends TestCase
             startKey: 'a',
             endKey: 'k',
         );
+        $postSplitUpper = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k',
+            endKey: 'z',
+        );
 
-        // The cache serves the stale region for the first resolution and the
-        // retry executor's invalidation lookup, then misses so the retry
-        // falls back to PD for the post-split region.
-        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null);
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
         $this->regionCache->method('put');
         $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
 
         $this->pdClient->method('scanRegions')->willReturn([$preSplit]);
-        $this->pdClient->method('getRegion')->willReturn($postSplit);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key === 'k' ? $postSplitUpper : $postSplitLower,
+        );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $error = new Error();
         $error->setMessage('epoch not match');
 
-        $pair = new KvPair();
-        $pair->setKey('k1');
-        $pair->setValue('v1');
-        $cleanResponse = new RawScanResponse();
-        $cleanResponse->setKvs([$pair]);
+        $k1 = new KvPair();
+        $k1->setKey('k1');
+        $k1->setValue('v1');
+        $k2 = new KvPair();
+        $k2->setKey('k2');
+        $k2->setValue('v2');
+        $k3 = new KvPair();
+        $k3->setKey('k3');
+        $k3->setValue('v3');
 
         /** @var list<Message> $capturedRequests */
         $capturedRequests = [];
@@ -932,12 +979,117 @@ class RawKvScannerTest extends TestCase
                 &$callCount,
                 &$capturedRequests,
                 $error,
-                $cleanResponse,
+                $k1,
+                $k2,
+                $k3,
             ): Message {
                 $callCount++;
                 $capturedRequests[] = $request;
 
-                return $callCount === 1 ? $this->responseWithRegionError($error) : $cleanResponse;
+                if ($callCount === 1) {
+                    return $this->responseWithRegionError($error);
+                }
+
+                $response = new RawScanResponse();
+                /** @var RawScanRequest $request */
+                if ($request->getStartKey() === 'k') {
+                    $response->setKvs([$k3]);
+                } else {
+                    $response->setKvs([$k1, $k2]);
+                }
+
+                return $response;
+            },
+        );
+
+        $result = $this->scanner->scan('a', 'z', 100, false);
+
+        // All three keys of the original range are returned, in order.
+        $this->assertSame(['k1', 'k2', 'k3'], array_column($result, 'key'));
+        $this->assertCount(3, $capturedRequests);
+
+        $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[2]);
+        $continuation = $capturedRequests[2];
+        $context = $continuation->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(3, $regionId);
+        $this->assertSame('k', $continuation->getStartKey());
+        $this->assertSame('z', $continuation->getEndKey());
+    }
+
+    public function testReverseScanRetriesOnEpochNotMatchAndClipsStartKey(): void
+    {
+        $preSplit = $this->defaultRegion('a', 'z', regionId: 1);
+        $postSplitLower = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'a',
+            endKey: 'k',
+        );
+        $postSplitUpper = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k',
+            endKey: 'z',
+        );
+
+        // The cache serves the stale region for the first resolution and the
+        // retry executor's invalidation lookup, then misses so the retry
+        // falls back to PD for the post-split region.
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
+        $this->regionCache->method('put');
+        $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
+
+        $this->pdClient->method('scanRegions')->willReturn([$preSplit]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key === 'k' ? $postSplitUpper : $postSplitLower,
+        );
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $error = new Error();
+        $error->setMessage('epoch not match');
+
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+
+        /** @var list<Message> $capturedRequests */
+        $capturedRequests = [];
+        $callCount = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request
+            ) use (
+                &$callCount,
+                &$capturedRequests,
+                $error,
+                $pair,
+            ): Message {
+                $callCount++;
+                $capturedRequests[] = $request;
+
+                if ($callCount === 1) {
+                    return $this->responseWithRegionError($error);
+                }
+
+                // Only the first (clipped) reverse batch returns keys; the
+                // higher remainder [k,z) is scanned but empty here.
+                $response = new RawScanResponse();
+                /** @var RawScanRequest $request */
+                if ($request->getStartKey() !== 'z') {
+                    $response->setKvs([$pair]);
+                }
+
+                return $response;
             },
         );
 
@@ -945,7 +1097,7 @@ class RawKvScannerTest extends TestCase
 
         $this->assertCount(1, $result);
         $this->assertSame('k1', $result[0]['key']);
-        $this->assertCount(2, $capturedRequests);
+        $this->assertCount(3, $capturedRequests);
 
         $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[1]);
         $secondRequest = $capturedRequests[1];
@@ -957,6 +1109,119 @@ class RawKvScannerTest extends TestCase
         $this->assertSame('k', $secondRequest->getStartKey());
         $this->assertSame('a', $secondRequest->getEndKey());
         $this->assertTrue($secondRequest->getReverse());
+
+        // The remainder [k,z) must still be scanned, not silently dropped.
+        $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[2]);
+        $thirdRequest = $capturedRequests[2];
+        $context = $thirdRequest->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(3, $regionId);
+        $this->assertSame('z', $thirdRequest->getStartKey());
+        $this->assertSame('k', $thirdRequest->getEndKey());
+        $this->assertTrue($thirdRequest->getReverse());
+    }
+
+    public function testReverseScanContinuesAfterSplitToCoverRemainder(): void
+    {
+        // Stale outer enumeration: the first reverse-scan attempt against
+        // [a,z) fails with EpochNotMatch; the retry resolves the post-split
+        // [a,k) and the remainder [k,z) is scanned afterwards. Because the
+        // scan is reverse, the remainder's (higher) keys must come FIRST.
+        $preSplit = $this->defaultRegion('a', 'z', regionId: 1);
+        $postSplitLower = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'a',
+            endKey: 'k',
+        );
+        $postSplitUpper = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
+        $this->regionCache->method('put');
+        $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
+
+        $this->pdClient->method('scanRegions')->willReturn([$preSplit]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key === 'k' ? $postSplitUpper : $postSplitLower,
+        );
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $error = new Error();
+        $error->setMessage('epoch not match');
+
+        $k1 = new KvPair();
+        $k1->setKey('k1');
+        $k1->setValue('v1');
+        $k2 = new KvPair();
+        $k2->setKey('k2');
+        $k2->setValue('v2');
+        $k3 = new KvPair();
+        $k3->setKey('k3');
+        $k3->setValue('v3');
+
+        /** @var list<Message> $capturedRequests */
+        $capturedRequests = [];
+        $callCount = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request
+            ) use (
+                &$callCount,
+                &$capturedRequests,
+                $error,
+                $k1,
+                $k2,
+                $k3,
+            ): Message {
+                $callCount++;
+                $capturedRequests[] = $request;
+
+                if ($callCount === 1) {
+                    return $this->responseWithRegionError($error);
+                }
+
+                $response = new RawScanResponse();
+                /** @var RawScanRequest $request */
+                if ($request->getStartKey() === 'z') {
+                    // Higher remainder [k,z), scanned by the continuation.
+                    $response->setKvs([$k3]);
+                } else {
+                    // Clipped lower part [a,k).
+                    $response->setKvs([$k1, $k2]);
+                }
+
+                return $response;
+            },
+        );
+
+        $result = $this->scanner->reverseScan('z', 'a', 100, false);
+
+        // Reverse order: the higher remainder keys come first.
+        $this->assertSame(['k3', 'k1', 'k2'], array_column($result, 'key'));
+        $this->assertCount(3, $capturedRequests);
+
+        $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[2]);
+        $continuation = $capturedRequests[2];
+        $context = $continuation->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(3, $regionId);
+        $this->assertSame('z', $continuation->getStartKey());
+        $this->assertSame('k', $continuation->getEndKey());
+        $this->assertTrue($continuation->getReverse());
     }
 
     public function testScanWithPermanentRegionErrorStopsAtAttemptCap(): void

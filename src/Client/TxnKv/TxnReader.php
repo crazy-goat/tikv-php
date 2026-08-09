@@ -273,6 +273,9 @@ final readonly class TxnReader
     }
 
     /**
+     * Scan one clipped sub-range, continuing past regions that were split
+     * after the outer region enumeration so no part of the range is dropped.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     private function executeScanForRegion(
@@ -283,77 +286,105 @@ final readonly class TxnReader
         callable $classifier,
         int $maxScanLimit = 10240,
     ): array {
-        // Resolve on the scan's start key: the sub-range starts inside the
-        // region, so the cache lookup hits and only the end key needs
-        // re-clipping after a split.
-        $resolutionKey = $startKey;
+        $results = [];
+        $pending = $limit;
+        $cursorStart = $startKey;
 
-        return $retryExecutor->execute($resolutionKey, function () use (
-            $startKey,
-            $endKey,
-            $resolutionKey,
-            $limit,
-            $maxScanLimit,
-        ): array {
-            // Resolve the region on every attempt so cache invalidation and
-            // leader switching performed by the retry executor take effect
-            // (issue #267): a stale captured region would otherwise reproduce
-            // the original error on each retry.
-            $fresh = $this->regionResolver->getRegionInfo($resolutionKey);
-            $address = $this->regionResolver->resolveStoreAddress($fresh->leaderStoreId);
+        while (true) {
+            // Resolve on the current start key: the sub-range starts inside
+            // the region, so the cache lookup hits and only the end key
+            // needs re-clipping after a split.
+            $freshEndKey = '';
+            $batch = $retryExecutor->execute($cursorStart, function () use (
+                $cursorStart,
+                $endKey,
+                $pending,
+                $maxScanLimit,
+                &$freshEndKey,
+            ): array {
+                // Resolve the region on every attempt so cache invalidation
+                // and leader switching performed by the retry executor take
+                // effect (issue #267): a stale captured region would
+                // otherwise reproduce the original error on each retry.
+                $fresh = $this->regionResolver->getRegionInfo($cursorStart);
+                $address = $this->regionResolver->resolveStoreAddress($fresh->leaderStoreId);
+                $freshEndKey = $fresh->endKey;
 
-            // Re-clip the sub-range against the freshly resolved region:
-            // after a split the fresh region is smaller, and TiKV rejects
-            // ranges that cross region boundaries. The resolver key is the
-            // scan's start key, so only the end key needs clipping.
-            $scanEnd = $fresh->endKey !== '' && ($endKey === '' || $fresh->endKey < $endKey)
-                ? $fresh->endKey
-                : $endKey;
+                // Re-clip the sub-range against the freshly resolved region:
+                // after a split the fresh region is smaller, and TiKV rejects
+                // ranges that cross region boundaries.
+                $scanEnd = $freshEndKey !== '' && ($endKey === '' || $freshEndKey < $endKey)
+                    ? $freshEndKey
+                    : $endKey;
 
-            $request = new ScanRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($fresh));
-            $request->setStartKey($startKey);
-            if ($scanEnd !== '') {
-                $request->setEndKey($scanEnd);
-            }
-            $request->setLimit($limit > 0 ? $limit : $maxScanLimit);
-            $request->setVersion($this->startTs);
+                $request = new ScanRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo($fresh));
+                $request->setStartKey($cursorStart);
+                if ($scanEnd !== '') {
+                    $request->setEndKey($scanEnd);
+                }
+                $request->setLimit($pending > 0 ? $pending : $maxScanLimit);
+                $request->setVersion($this->startTs);
 
-            /** @var ScanResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvScan',
-                $request,
-                ScanResponse::class,
-                $this->timeoutMs('scan'),
-            );
-            RegionErrorHandler::check($response, $this->regionCache, $fresh->regionId);
+                /** @var ScanResponse $response */
+                $response = $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'KvScan',
+                    $request,
+                    ScanResponse::class,
+                    $this->timeoutMs('scan'),
+                );
+                RegionErrorHandler::check($response, $this->regionCache, $fresh->regionId);
 
-            $error = $response->getError();
-            if ($error !== null) {
-                $locked = $error->getLocked();
-                if ($locked !== null) {
-                    $rawPrimary = $locked->getPrimaryLock();
-                    $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                    $this->lockResolver->resolveLock($lockPrimary, $locked);
-                    throw new TxnRetryableException(
-                        'Lock encountered during scan, resolved - retry',
-                        BackoffType::TxnLock,
-                    );
+                $error = $response->getError();
+                if ($error !== null) {
+                    $locked = $error->getLocked();
+                    if ($locked !== null) {
+                        $rawPrimary = $locked->getPrimaryLock();
+                        $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
+                        $this->lockResolver->resolveLock($lockPrimary, $locked);
+                        throw new TxnRetryableException(
+                            'Lock encountered during scan, resolved - retry',
+                            BackoffType::TxnLock,
+                        );
+                    }
+                }
+
+                $subResults = [];
+                foreach ($response->getPairs() as $pair) {
+                    $subResults[] = [
+                        'key' => $pair->getKey(),
+                        'value' => $pair->getValue(),
+                    ];
+                }
+
+                return $subResults;
+            }, $classifier);
+
+            array_push($results, ...$batch);
+
+            if ($pending > 0) {
+                $pending -= count($batch);
+                if ($pending <= 0) {
+                    break;
                 }
             }
 
-            $results = [];
-            foreach ($response->getPairs() as $pair) {
-                $results[] = [
-                    'key' => $pair->getKey(),
-                    'value' => $pair->getValue(),
-                ];
+            // Continue only when the fresh region ended inside the
+            // sub-range (a split occurred) and the cursor actually
+            // advanced; otherwise the whole sub-range was covered.
+            if (
+                $freshEndKey === ''
+                || $freshEndKey <= $cursorStart
+                || ($endKey !== '' && $freshEndKey >= $endKey)
+            ) {
+                break;
             }
+            $cursorStart = $freshEndKey;
+        }
 
-            return $results;
-        }, $classifier);
+        return $results;
     }
 
     /**

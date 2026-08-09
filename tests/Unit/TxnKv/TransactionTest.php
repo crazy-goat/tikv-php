@@ -1611,7 +1611,7 @@ class TransactionTest extends TestCase
     public function testScanRetriesOnEpochNotMatchWithNarrowerRange(): void
     {
         $preSplit = $this->makeRegion(1, 'a', 'z');
-        $postSplit = new RegionInfo(
+        $postSplitLower = new RegionInfo(
             regionId: 2,
             leaderPeerId: 2,
             leaderStoreId: 1,
@@ -1620,16 +1620,27 @@ class TransactionTest extends TestCase
             startKey: 'a',
             endKey: 'k',
         );
+        $postSplitUpper = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k',
+            endKey: 'z',
+        );
 
         // The cache serves the stale region for the first resolution and the
         // retry executor's invalidation lookup, then misses so the retry
         // falls back to PD for the post-split region.
-        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null);
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
         $this->regionCache->method('put');
         $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
 
         $this->pdClient->method('scanRegions')->willReturn([$preSplit]);
-        $this->pdClient->method('getRegion')->willReturn($postSplit);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key === 'k' ? $postSplitUpper : $postSplitLower,
+        );
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $error = new \CrazyGoat\Proto\Errorpb\Error();
@@ -1664,6 +1675,11 @@ class TransactionTest extends TestCase
                     return $response;
                 }
 
+                // The continuation over [k,z) returns no keys.
+                if ($request instanceof ScanRequest && $request->getStartKey() === 'k') {
+                    return new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+                }
+
                 return $cleanResponse;
             },
         );
@@ -1673,7 +1689,7 @@ class TransactionTest extends TestCase
 
         $this->assertCount(1, $result);
         $this->assertSame('k1', $result[0]['key']);
-        $this->assertCount(2, $capturedRequests);
+        $this->assertCount(3, $capturedRequests);
 
         // The retry must use the post-split region and re-clip the range.
         $context = $capturedRequests[1]->getContext();
@@ -1681,6 +1697,115 @@ class TransactionTest extends TestCase
         $this->assertSame(2, $regionId);
         $this->assertSame('a', $capturedRequests[1]->getStartKey());
         $this->assertSame('k', $capturedRequests[1]->getEndKey());
+
+        // A retry clipped to the fresh region must not silently drop the
+        // remainder: the rest of the range is scanned afterwards.
+        $context = $capturedRequests[2]->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(3, $regionId);
+        $this->assertSame('k', $capturedRequests[2]->getStartKey());
+        $this->assertSame('z', $capturedRequests[2]->getEndKey());
+    }
+
+    public function testScanContinuesAfterSplitToCoverRemainder(): void
+    {
+        // The outer region enumeration is stale (it ran before the split):
+        // the first attempt against the stale [a,z) fails with
+        // EpochNotMatch, the retry resolves the post-split [a,k), and the
+        // continuation must then scan [k,z) so keys of the original range
+        // are not silently dropped.
+        $preSplit = $this->makeRegion(1, 'a', 'z');
+        $postSplitLower = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'a',
+            endKey: 'k',
+        );
+        $postSplitUpper = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
+        $this->regionCache->method('put');
+        $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
+
+        $this->pdClient->method('scanRegions')->willReturn([$preSplit]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key === 'k' ? $postSplitUpper : $postSplitLower,
+        );
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $error = new \CrazyGoat\Proto\Errorpb\Error();
+        $error->setMessage('epoch not match');
+
+        /** @var list<ScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $callCount = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request
+            ) use (
+                &$callCount,
+                &$capturedRequests,
+                $error,
+            ): object {
+                $callCount++;
+                if ($request instanceof ScanRequest) {
+                    $capturedRequests[] = $request;
+                }
+
+                if ($callCount === 1) {
+                    $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+                    $response->setRegionError($error);
+
+                    return $response;
+                }
+
+                $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+                if ($request instanceof ScanRequest && $request->getStartKey() === 'k') {
+                    // Continuation over the post-split [k,z).
+                    $pair = new KvPair();
+                    $pair->setKey('k3');
+                    $pair->setValue('v3');
+                    $response->setPairs([$pair]);
+                } else {
+                    // Retried scan of [a,k) after the split.
+                    foreach (['k1' => 'v1', 'k2' => 'v2'] as $k => $v) {
+                        $pair = new KvPair();
+                        $pair->setKey($k);
+                        $pair->setValue($v);
+                        $response->setPairs([...$response->getPairs(), $pair]);
+                    }
+                }
+
+                return $response;
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('a', 'z', 100);
+
+        // All three keys of the original range are returned, in order.
+        $this->assertSame(['k1', 'k2', 'k3'], array_column($result, 'key'));
+        $this->assertCount(3, $capturedRequests);
+
+        $context = $capturedRequests[2]->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(3, $regionId);
+        $this->assertSame('k', $capturedRequests[2]->getStartKey());
+        $this->assertSame('z', $capturedRequests[2]->getEndKey());
     }
 
     // ========================================================================
