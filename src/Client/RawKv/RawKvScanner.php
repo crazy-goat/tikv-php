@@ -12,7 +12,6 @@ use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
-use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
@@ -46,15 +45,17 @@ final readonly class RawKvScanner
         $executor = $this->createRetryExecutor();
 
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
         $results = [];
         $remaining = $limit;
 
         $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
             $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
             $regionResults = $this->executeScanForRegion(
                 $executor,
-                $region,
                 $scanStart,
                 $scanEnd,
                 $regionLimit,
@@ -90,16 +91,18 @@ final readonly class RawKvScanner
 
         $regions = $this->pdClient->scanRegions($endKey, $startKey, 0);
         $regions = array_reverse($regions);
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
 
         $results = [];
         $remaining = $limit;
 
         $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipReverse($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
+        foreach ($clipper->clipReverse($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
             $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
             $regionResults = $this->executeScanForRegion(
                 $executor,
-                $region,
                 $scanStart,
                 $scanEnd,
                 $regionLimit,
@@ -197,7 +200,6 @@ final readonly class RawKvScanner
      */
     private function executeScanForRegion(
         RetryExecutor $executor,
-        RegionInfo $region,
         string $startKey,
         string $endKey,
         int $limit,
@@ -205,22 +207,51 @@ final readonly class RawKvScanner
         bool $reverse,
         string $columnFamily = '',
     ): array {
-        return $executor->execute($startKey, function () use (
-            $region,
+        // Forward scans resolve on the sub-range start; reverse scans resolve
+        // on the sub-range end (the lower bound). For reverse scans the wire
+        // start key can sit exactly on the region's end boundary, where the
+        // cache lookup would miss and PD would answer with the neighbouring
+        // region outside the sub-range, so the lower bound is the safe
+        // resolution key.
+        $resolutionKey = $reverse ? $endKey : $startKey;
+
+        return $executor->execute($resolutionKey, function () use (
             $startKey,
             $endKey,
+            $resolutionKey,
             $limit,
             $keyOnly,
             $reverse,
             $columnFamily,
         ): array {
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+            // Resolve the region on every attempt so cache invalidation
+            // and leader switching performed by the retry executor take
+            // effect (issue #267): a stale captured region would otherwise
+            // reproduce the original error on each retry.
+            $fresh = $this->regionResolver->getRegionInfo($resolutionKey);
+            $address = $this->regionResolver->resolveStoreAddress($fresh->leaderStoreId);
+
+            // Re-clip the sub-range against the freshly resolved region:
+            // after a split the fresh region is smaller, and TiKV rejects
+            // ranges that cross region boundaries. For forward scans the
+            // end key is clipped down; for reverse scans the start (upper)
+            // key is clipped down because the region was resolved on the
+            // lower bound.
+            $wireStartKey = $startKey;
+            $wireEndKey = $endKey;
+            if ($reverse) {
+                if ($fresh->endKey !== '' && $fresh->endKey < $wireStartKey) {
+                    $wireStartKey = $fresh->endKey;
+                }
+            } elseif ($fresh->endKey !== '' && ($wireEndKey === '' || $fresh->endKey < $wireEndKey)) {
+                $wireEndKey = $fresh->endKey;
+            }
 
             $request = new RawScanRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setStartKey($startKey);
-            if ($endKey !== '') {
-                $request->setEndKey($endKey);
+            $request->setContext(RegionContextFactory::fromRegionInfo($fresh));
+            $request->setStartKey($wireStartKey);
+            if ($wireEndKey !== '') {
+                $request->setEndKey($wireEndKey);
             }
             if ($limit > 0) {
                 $request->setLimit($limit);

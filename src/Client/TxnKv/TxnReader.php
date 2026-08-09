@@ -16,7 +16,6 @@ use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
-use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
@@ -182,14 +181,16 @@ final readonly class TxnReader
         $limit = $this->normalizeScanLimit($limit, $maxScanLimit);
 
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
         $results = [];
         $remaining = $limit;
 
         $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
             $regionLimit = $remaining > 0 ? $remaining : $limit;
             $regionResults = $this->executeScanForRegion(
-                $region,
                 $scanStart,
                 $scanEnd,
                 $regionLimit,
@@ -275,7 +276,6 @@ final readonly class TxnReader
      * @return array<array{key: string, value: ?string}>
      */
     private function executeScanForRegion(
-        RegionInfo $region,
         string $startKey,
         string $endKey,
         int $limit,
@@ -283,20 +283,38 @@ final readonly class TxnReader
         callable $classifier,
         int $maxScanLimit = 10240,
     ): array {
-        return $retryExecutor->execute($startKey, function () use (
-            $region,
+        // Resolve on the scan's start key: the sub-range starts inside the
+        // region, so the cache lookup hits and only the end key needs
+        // re-clipping after a split.
+        $resolutionKey = $startKey;
+
+        return $retryExecutor->execute($resolutionKey, function () use (
             $startKey,
             $endKey,
+            $resolutionKey,
             $limit,
             $maxScanLimit,
         ): array {
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+            // Resolve the region on every attempt so cache invalidation and
+            // leader switching performed by the retry executor take effect
+            // (issue #267): a stale captured region would otherwise reproduce
+            // the original error on each retry.
+            $fresh = $this->regionResolver->getRegionInfo($resolutionKey);
+            $address = $this->regionResolver->resolveStoreAddress($fresh->leaderStoreId);
+
+            // Re-clip the sub-range against the freshly resolved region:
+            // after a split the fresh region is smaller, and TiKV rejects
+            // ranges that cross region boundaries. The resolver key is the
+            // scan's start key, so only the end key needs clipping.
+            $scanEnd = $fresh->endKey !== '' && ($endKey === '' || $fresh->endKey < $endKey)
+                ? $fresh->endKey
+                : $endKey;
 
             $request = new ScanRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($fresh));
             $request->setStartKey($startKey);
-            if ($endKey !== '') {
-                $request->setEndKey($endKey);
+            if ($scanEnd !== '') {
+                $request->setEndKey($scanEnd);
             }
             $request->setLimit($limit > 0 ? $limit : $maxScanLimit);
             $request->setVersion($this->startTs);
@@ -310,7 +328,7 @@ final readonly class TxnReader
                 ScanResponse::class,
                 $this->timeoutMs('scan'),
             );
-            RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+            RegionErrorHandler::check($response, $this->regionCache, $fresh->regionId);
 
             $error = $response->getError();
             if ($error !== null) {
