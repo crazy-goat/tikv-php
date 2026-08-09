@@ -49,6 +49,33 @@ gh issue view <NUMBER> --json title,body,labels,state,milestone
 > exceed thousands of tokens. Keeping this in a separate context protects the
 > main session's budget for implementation and review.
 
+### Fast path: ranked candidates via `bin/pick-issue.sh`
+
+The workflow is milestone-driven, so before delegating triage to a subagent,
+run the ranking script — it costs a few tokens instead of thousands:
+
+```bash
+bin/pick-issue.sh                             # top 5 of the lowest open milestone
+bin/pick-issue.sh --milestone=v0.5.0 --top=5  # explicit milestone
+bin/pick-issue.sh --json                      # machine-readable, for scripting
+```
+
+The script lists open milestones, picks the **lowest** one (semver), scores
+its open issues — severity labels (`severity:critical`/`high`/`medium`/`low`),
+type labels (`bug`/`security`/`data-loss`/`enhancement`/`performance`/
+`documentation`), meta labels (`good first issue`/`help wanted`/`question`),
+title signals (leak/crash/security/performance/dead code), age and comment
+count — and prints the top N with an explicit per-issue score breakdown. It
+never reads issue bodies or comment text, and it always paginates (`gh` caps
+lists at 30 per page). The LLM/user still makes the final pick from the
+ranked candidates; the script only narrows the pool. If desired, a subagent
+then deep-dives into the bodies of the top candidates before the final pick.
+
+> **Release gate:** when the target milestone has 0 open issues left, the
+> script exits with code **3** and prints the release steps instead of
+> candidates — the workflow STOPS, a release must be cut and the milestone
+> closed before picking again (see "Release Gate" below).
+
 **Selection criteria (applied by the subagent, within the current
 milestone):**
 - Severity: `severity:critical` first, then `high`, `medium`, `low`
@@ -56,6 +83,38 @@ milestone):**
 - Issues about stability, data correctness, performance
 - Issues blocking other tasks
 - Issues most relevant to users (README, API documentation)
+
+---
+
+## Release Gate
+
+Work is driven by the **lowest open milestone**: a milestone is a release
+candidate, not a bottomless backlog. When the current milestone has no open
+issues left, the workflow must **stop** — do not silently pick an issue from
+a higher milestone.
+
+`bin/pick-issue.sh` enforces this:
+
+- exit code `0` → candidates printed, proceed to step 2 with the ranked list
+- exit code `1` → `gh`/API error, retry
+- exit code `2` → usage error (unknown option or milestone)
+- exit code `3` (`RELEASE NEEDED`) → the target milestone is empty; cut the
+  release, close the milestone, then re-run the script so the next milestone
+  becomes the target
+
+```bash
+# When the picker says RELEASE NEEDED:
+git checkout master && git pull origin master
+
+# 1. Tag + publish the release (adapt notes; keep a Changelog entry per step 8)
+gh release create v0.4.0 --title "v0.4.0" --notes "…"
+
+# 2. Close the finished milestone (no `gh milestone` subcommand — use the API)
+gh api --method PATCH repos/crazy-goat/tikv-php/milestones/<NUMBER> -f state=closed
+
+# 3. Re-run the picker — the next milestone becomes the target
+bin/pick-issue.sh
+```
 
 ---
 
@@ -480,10 +539,11 @@ extend `docs/troubleshooting.md` or ask the user before adding a new entry.
 ## Quick Reference – Full Cycle
 
 ```bash
-# 1. Pick an issue (via subagent)
-#    start from the LOWEST open version milestone (currently v0.4.0)
-#    → within it: severity:critical > high > medium > low, then bugs
-#    subagent: "List top 5 impactful open issues in the lowest milestone..."
+# 1. Pick an issue
+#    bin/pick-issue.sh → ranked top-5 of the LOWEST open milestone
+#    (exit code 3 = RELEASE NEEDED: cut release, close milestone, re-run)
+#    if needed, subagent deep-dives into top candidates' bodies
+#    then: "Implement issue #N..."
 
 # 2. Feature branch
 git checkout master && git pull origin master
@@ -561,7 +621,9 @@ with rationale / numbered findings list / coder report with biggest problem
 - **Issues are organized into version milestones** (`v0.4.0` … `v0.14.0`
   open). Work always starts from the **lowest version milestone with open
   issues**; a milestone is "done" when it has no open issues left, then the
-  next version becomes the working target.
+  next version becomes the working target. Run `bin/pick-issue.sh` to get
+  the ranked shortlist automatically; its exit code **3** triggers the
+  Release Gate above (cut the release, close the milestone, re-run).
 - Branch protection on `master` may require:
   - at least 1 approving review before merge
   - All status checks passing (lint, unit tests, grpc unit tests, E2E)
