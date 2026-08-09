@@ -562,6 +562,34 @@ class RawKvClientTest extends TestCase
         $this->assertSame(['missing' => null], $this->client->batchGet(['missing']));
     }
 
+    public function testBatchGetAcceptsNumericStringKeys(): void
+    {
+        $this->requireGrpcExtension();
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
+            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+        ]));
+
+        // Pre-fix: int keys from array_keys() hit validateKeyNotEmpty(string)
+        // and throw a TypeError. Post-fix the keys are normalized and the
+        // batch reaches the transport layer; with no TiKV server the reads
+        // yield nulls (issue #322).
+        $result = $this->client->batchGet(array_keys(['12345' => 'v1', '0' => 'v2']));
+
+        $this->assertSame(['12345' => null, '0' => null], $result);
+    }
+
+    public function testBatchGetThrowsOnNonStringKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Batch keys must be strings or ints, bool given');
+        $this->client->batchGet([true]); // @phpstan-ignore argument.type
+    }
+
     // ========================================================================
     // batchPut()
     // ========================================================================
@@ -583,16 +611,16 @@ class RawKvClientTest extends TestCase
             'credentials' => \Grpc\ChannelCredentials::createInsecure(),
         ]));
 
-        // Pre-fix: PHP coerces the "12345" array key to int, so
+        // Pre-fix: PHP coerces the "12345"/"0" array keys to int, so
         // validateKeyNotEmpty(string) throws a TypeError here. Post-fix the
         // wire pairs are built and the request only fails at the transport
         // layer, because there is no TiKV server in unit tests.
         $this->expectException(BatchPartialFailureException::class);
 
-        // PHP models a literal "12345" array key as int; build the pairs
+        // PHP models a literal "12345"/"0" array key as int; build the pairs
         // through a string-typed key so the map reaches batchPut() with its
         // declared contract (numeric-string keys must survive to the wire).
-        $pairs = $this->stringKeyedPairs('12345', 'v');
+        $pairs = $this->stringKeyedPairs('12345', 'v') + $this->stringKeyedPairs('0', 'w');
         $this->client->batchPut($pairs);
     }
 
@@ -612,6 +640,33 @@ class RawKvClientTest extends TestCase
     {
         $this->grpc->expects($this->never())->method('call');
         $this->client->batchDelete([]);
+    }
+
+    public function testBatchDeleteAcceptsNumericStringKeys(): void
+    {
+        $this->requireGrpcExtension();
+
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
+            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+        ]));
+
+        // Pre-fix: int keys from array_keys() hit validateKeyNotEmpty(string)
+        // and throw a TypeError. Post-fix the keys are normalized and the
+        // batch only fails at the transport layer, because there is no TiKV
+        // server in unit tests (issue #322).
+        $this->expectException(BatchPartialFailureException::class);
+
+        $this->client->batchDelete(array_keys(['12345' => 'v1', '0' => 'v2']));
+    }
+
+    public function testBatchDeleteThrowsOnNonStringKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Batch keys must be strings or ints, bool given');
+        $this->client->batchDelete([true]); // @phpstan-ignore argument.type
     }
 
     // ========================================================================

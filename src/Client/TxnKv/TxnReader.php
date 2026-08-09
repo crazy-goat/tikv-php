@@ -120,15 +120,20 @@ final readonly class TxnReader
     /**
      * Batch-read multiple keys.
      *
-     * @param string[] $keys
+     * @param array<array-key, string|int> $keys Keys may be ints when built via
+     *                                           array_keys() on a map with
+     *                                           numeric-string keys (issue #322)
      * @return array<string, ?string>
      *
+     * @throws InvalidArgumentException
      * @throws TiKvException
      */
     public function batchGet(
         array $keys,
         TransactionState $state,
     ): array {
+        $keys = $this->normalizeKeysToStrings($keys, 'batchGet');
+
         $results = [];
         $remaining = [];
         foreach ($keys as $key) {
@@ -141,7 +146,12 @@ final readonly class TxnReader
 
         if ($remaining !== []) {
             $remoteResults = $this->batchGetFromTiKV($remaining, $state);
-            $results = array_merge($results, $remoteResults);
+            // Do not use array_merge(): it renumbers integer keys, which
+            // silently drops numeric-string key results ("12345" is stored
+            // as int key 12345 and would move to index 0).
+            foreach ($remoteResults as $key => $value) {
+                $results[$key] = $value;
+            }
         }
 
         // Preserve input order.
@@ -329,6 +339,36 @@ final readonly class TxnReader
     }
 
     /**
+     * Normalize batch keys to strings. PHP coerces integer-like string keys
+     * ("12345", "0") to int when arrays are built with array_keys(); ints are
+     * cast back to strings, anything else is rejected (issue #322).
+     *
+     * @param array<array-key, string|int> $keys
+     * @return string[]
+     *
+     * @throws InvalidArgumentException
+     */
+    private function normalizeKeysToStrings(array $keys, string $operation): array
+    {
+        $normalized = [];
+        foreach ($keys as $key) {
+            if (is_int($key)) {
+                $normalized[] = (string) $key;
+            } elseif (is_string($key)) {
+                $normalized[] = $key;
+            } else {
+                throw new InvalidArgumentException(sprintf(
+                    '%s: keys must be strings or ints, %s given',
+                    $operation,
+                    get_debug_type($key),
+                ));
+            }
+        }
+
+        return $normalized;
+    }
+
+    /**
      * @throws InvalidArgumentException
      */
     private function normalizeScanLimit(int $limit, int $maxScanLimit): int
@@ -371,7 +411,10 @@ final readonly class TxnReader
             $tikvMap[$entry['key']] = $entry['value'];
         }
 
-        $allKeys = array_keys($tikvMap);
+        // TiKV returns keys as strings, but integer-like keys ("12345",
+        // "0") are stored as int keys by PHP; restore them so the state
+        // lookups and output records use strings (issue #322).
+        $allKeys = array_map(strval(...), array_keys($tikvMap));
         foreach ($state->getWriteKeys() as $key) {
             if ($key >= $startKey && ($endKey === '' || $key < $endKey)) {
                 $allKeys[] = $key;

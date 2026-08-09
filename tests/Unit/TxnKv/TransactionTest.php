@@ -424,6 +424,43 @@ class TransactionTest extends TestCase
         $this->assertSame('scanned-v2', $result[1]['value']);
     }
 
+    public function testScanNormalizesNumericStringKeysFromTiKv(): void
+    {
+        // TiKV returns keys as strings, but PHP stores "12345"/"0" as int
+        // array keys internally; the scan result must normalize them back to
+        // strings before hasWriteSetKey() lookups and output records
+        // (issue #322).
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // TiKV returns keys as strings; build the pairs from a list so the
+        // response carries the string keys "12345" and "0" (a literal array
+        // key would be coerced to int and fail KvPair::setKey(string)).
+        $pairs = [];
+        foreach (['0', '12345'] as $key) {
+            $pair = new KvPair();
+            $pair->setKey($key);
+            $pair->setValue('v-' . $key);
+            $pairs[] = $pair;
+        }
+        $response = new ScanResponse();
+        $response->setPairs($pairs);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        // '0' is also in the write set: the normalized string key must find it.
+        $txn->set('0', 'local-v0');
+        $result = $txn->scan('', '');
+
+        $this->assertCount(2, $result);
+        $this->assertSame('0', $result[0]['key']);
+        $this->assertSame('local-v0', $result[0]['value']);
+        $this->assertSame('12345', $result[1]['key']);
+        $this->assertSame('v-12345', $result[1]['value']);
+    }
+
     public function testScanWithLimitZeroAndNoResultsReturnsEmpty(): void
     {
         $region = $this->makeRegion(1, '', '');
@@ -964,6 +1001,58 @@ class TransactionTest extends TestCase
         $this->assertSame([], $txn->batchGet([]));
     }
 
+    public function testBatchGetAcceptsNumericKeysFromArrayKeys(): void
+    {
+        // PHP coerces integer-like string keys ("12345", "0") to int when
+        // an array is built and array_keys() then returns ints; the batch
+        // read path must cast them back to strings before hasWriteSetKey()
+        // and the proto setter (issue #322).
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $batchGetResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $pair = new KvPair();
+        $pair->setKey('12345');
+        $pair->setValue('remote-v1');
+        $batchGetResponse->setPairs([$pair]);
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                $batchGetResponse,
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvBatchGet') {
+                    $capturedRequest = $request;
+                }
+                return match ($method) {
+                    'KvBatchGet' => $batchGetResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('0', 'local-v0');
+
+        $result = $txn->batchGet(array_keys(['12345' => 'x', '0' => 'y']));
+
+        $this->assertSame(['12345' => 'remote-v1', '0' => 'local-v0'], $result);
+        // Only the non-write-set key reaches the wire, as the string "12345".
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchGetRequest::class, $capturedRequest);
+        $this->assertSame(['12345'], iterator_to_array($capturedRequest->getKeys()));
+    }
+
     // ========================================================================
     // get() — response error handling
     // ========================================================================
@@ -1213,6 +1302,59 @@ class TransactionTest extends TestCase
         $this->assertSame(3000, $txn->getCommitTs());
     }
 
+    public function testPessimisticLockSendsNumericStringKeyOnWire(): void
+    {
+        // Pessimistic-lock mutations must carry the numeric-string key as
+        // the string "12345" on the wire (issue #322).
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
+        $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                $prewriteResponse,
+                $commitResponse,
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $capturedRequest = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('12345', 'v1');
+        $txn->set('0', 'v2');
+        $txn->commit();
+
+        $this->assertNotNull($capturedRequest);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $capturedRequest);
+        $mutations = $capturedRequest->getMutations();
+        $this->assertCount(2, $mutations);
+        $this->assertSame('12345', $mutations[0]->getKey());
+        $this->assertSame('0', $mutations[1]->getKey());
+    }
+
     // ========================================================================
     // rollback()
     // ========================================================================
@@ -1256,6 +1398,50 @@ class TransactionTest extends TestCase
         $this->assertSame([], $txn->getWriteSet());
         $this->assertContains('KVPessimisticRollback', $methodSequence);
         $this->assertContains('KvBatchRollback', $methodSequence);
+    }
+
+    public function testRollbackWithNumericPrimaryKeySendsStringKeys(): void
+    {
+        // The first written key becomes the primary key; a numeric-string
+        // primary must reach the KvBatchRollback wire request as the string
+        // "12345", not the int 12345 (issue #322).
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvBatchRollback') {
+                    $capturedRequest = $request;
+                }
+                return match ($method) {
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('12345', 'v1');
+        $txn->set('0', 'v2');
+
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest::class, $capturedRequest);
+        $this->assertSame(['12345', '0'], iterator_to_array($capturedRequest->getKeys()));
     }
 
     // ========================================================================

@@ -29,8 +29,17 @@ throws when the stored key is returned. Rules learned fixing it (issue #322):
 key-returning accessors (`getPrimaryKey()`, `getWriteKeys()`) must cast
 `(string)` before returning; every point that hands a foreach key to a
 string-typed parameter or setter must cast `(string) $key`; and lists built
-with `array_keys()` from such maps must be normalized with `array_map(strval(...))`
-before validation. A unit test that builds the map with a *literal* key also
+with `array_keys()` from such maps are normalized to strings at the public
+API boundary — `Transaction::batchGet()`, the transaction scan result merge,
+and `RawKvClient::batchGet()/batchDelete()` accept `string|int` elements,
+cast ints back to strings, and reject anything else with
+`InvalidArgumentException` (never `strval()` arbitrary elements silently).
+The same applies to keys *returned* by TiKV: scan responses and
+`BatchGetResponse` pairs store `'12345'` as int 12345 inside PHP maps, so
+`array_keys()` results must be string-cast before `hasWriteSetKey()` lookups,
+and merged result maps must not be combined with `array_merge()` (it
+renumbers int keys and drops numeric-string entries). A unit test that builds
+the map with a *literal* key also
 hides the bug in reverse: PHPStan infers the literal as `array<int, string>`
 and rejects the `array<string, string>` parameter, so construct the map via a
 string-typed key parameter (helper method) to test the real-world contract.

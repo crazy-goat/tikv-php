@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\ImportSstpb\IngestResponse;
+use CrazyGoat\Proto\ImportSstpb\Pair;
 use CrazyGoat\Proto\ImportSstpb\RawWriteResponse;
 use CrazyGoat\Proto\ImportSstpb\SSTMeta;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
@@ -304,6 +305,59 @@ class SstIngestorTest extends TestCase
         $batchRequest = $capturedRequests[1];
         $batch = $batchRequest->getBatch();
         $this->assertSame(3600, $batch->getTtl());
+    }
+
+    public function testIngestWithNumericStringKeys(): void
+    {
+        $store = $this->defaultStore();
+        $region = $this->defaultRegion();
+
+        $this->setupStandardPdMocks($region, $store);
+        $this->setupGrpcCallMock();
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+
+        // Capture the streaming requests to verify the numeric-string keys
+        // reach the wire as strings (issue #322).
+        $capturedRequests = null;
+        $this->grpc->expects($this->once())
+            ->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                array $requests,
+            ) use (
+                $writeResponse,
+                &$capturedRequests
+): Message {
+                $capturedRequests = $requests;
+                return $writeResponse;
+            });
+
+        // PHP models literal "12345"/"0" array keys as int; build the pairs
+        // through a string-typed key so the map reaches ingest() with its
+        // declared contract (numeric-string keys must survive to the wire).
+        $pairs = $this->stringKeyedPairs('12345', 'v1') + $this->stringKeyedPairs('0', 'v2');
+        $this->ingestor->ingest($pairs);
+
+        // requests[0] is the SST meta chunk; the data batch carries the pairs.
+        $this->assertNotNull($capturedRequests);
+        $this->assertGreaterThanOrEqual(2, count($capturedRequests));
+        $keys = array_map(
+            static fn(Pair $pair): string => $pair->getKey(),
+            iterator_to_array($capturedRequests[1]->getBatch()->getPairs()),
+        );
+        $this->assertSame(['0', '12345'], $keys);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function stringKeyedPairs(string $key, string $value): array
+    {
+        return [$key => $value];
     }
 
     // ========================================================================
