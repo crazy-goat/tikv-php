@@ -249,3 +249,26 @@ resolution and the executor's invalidation lookup, then a miss) use
 `willReturnOnConsecutiveCalls($stale, $stale, null)` instead of a shared
 flag — it models the same state machine, is order-visible in the test,
 and is PHPStan-clean.
+
+## Bash 3.2 portability: process substitution, tab-IFS, BSD/GNU sed/date
+
+Lessons from building `bin/pick-issue.sh` (#457); the script itself is the
+reference implementation of each workaround.
+
+- **Process substitution leaks file descriptors inside long loops on bash
+  3.2.** A `<( ... )` used inside a `while ... done` loop keeps its
+  descriptor open until the *loop* ends, not the iteration: after a few
+  hundred lookups the fd limit is exhausted and a later `read` blocks
+  forever on a pipe nobody writes (hangs with no error). Split the data
+  once per item with parameter expansion (`${var//"$SEP"/$'\n'}`) and
+  iterate the pieces with a here-string (`<<<`).
+- **`IFS=$'\t' read` collapses empty fields.** Tab is IFS whitespace, so
+  `a<TAB><TAB>b` parses as two fields, not three — an issue without
+  labels shifted `created_at`/`comments` and produced invalid JSON. Use a
+  non-whitespace separator (e.g. `\x1f`, stripped from the data in the
+  `gh api --jq` projection) or put the variable-length part in a trailing
+  field.
+- **GNU and BSD ports of sed/date differ.** BSD `sed` has no `:a;N;$!ba`
+  newline-joining idiom — park newlines on a control char with `tr`
+  first; `date -d <ts>` is GNU, `date -j -f '%Y-%m-%dT%H:%M:%SZ' <ts>` is
+  BSD — detect the implementation at runtime.
