@@ -854,6 +854,7 @@ class TransactionTest extends TestCase
 
     public function testCommitPessimisticLockBudgetExhaustedThrowsLockWaitTimeout(): void
     {
+        $rawKey = 'sensitive-key-219'; // unique key so absence in the message is provable
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
@@ -863,8 +864,8 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getTimestamp')->willReturn(3000);
 
         $lockInfo = new \CrazyGoat\Proto\Kvrpcpb\LockInfo();
-        $lockInfo->setKey('key');
-        $lockInfo->setPrimaryLock('key');
+        $lockInfo->setKey($rawKey);
+        $lockInfo->setPrimaryLock($rawKey);
         $lockInfo->setLockVersion(1000);
 
         $keyError = new KeyError();
@@ -893,17 +894,17 @@ class TransactionTest extends TestCase
             });
 
         $txn = $this->createTransaction(['pessimistic' => true, 'maxBackoffMs' => 100]);
-        $txn->set('key', 'value');
+        $txn->set($rawKey, 'value');
 
         try {
             $txn->commit();
             $this->fail('Expected LockWaitTimeoutException was not thrown');
         } catch (LockWaitTimeoutException $e) {
-            $this->assertSame('key', $e->getKey());
+            $this->assertSame($rawKey, $e->getKey());
             $this->assertSame(100, $e->getTimeoutMs());
             // Security: the message must not leak the raw key, only the redacted form.
-            $this->assertStringContainsString(KeyRedactor::redact('key'), $e->getMessage());
-            $this->assertStringNotContainsString('for key: key (', $e->getMessage());
+            $this->assertStringContainsString(KeyRedactor::redact($rawKey), $e->getMessage());
+            $this->assertStringNotContainsString($rawKey, $e->getMessage());
         }
 
         $this->assertNotContains('KvPrewrite', $methodSequence);
