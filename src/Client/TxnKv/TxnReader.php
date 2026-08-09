@@ -16,7 +16,6 @@ use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
-use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
@@ -182,14 +181,16 @@ final readonly class TxnReader
         $limit = $this->normalizeScanLimit($limit, $maxScanLimit);
 
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
         $results = [];
         $remaining = $limit;
 
         $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
             $regionLimit = $remaining > 0 ? $remaining : $limit;
             $regionResults = $this->executeScanForRegion(
-                $region,
                 $scanStart,
                 $scanEnd,
                 $regionLimit,
@@ -272,10 +273,12 @@ final readonly class TxnReader
     }
 
     /**
+     * Scan one clipped sub-range, continuing past regions that were split
+     * after the outer region enumeration so no part of the range is dropped.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     private function executeScanForRegion(
-        RegionInfo $region,
         string $startKey,
         string $endKey,
         int $limit,
@@ -283,59 +286,105 @@ final readonly class TxnReader
         callable $classifier,
         int $maxScanLimit = 10240,
     ): array {
-        return $retryExecutor->execute($startKey, function () use (
-            $region,
-            $startKey,
-            $endKey,
-            $limit,
-            $maxScanLimit,
-        ): array {
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+        $results = [];
+        $pending = $limit;
+        $cursorStart = $startKey;
 
-            $request = new ScanRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setStartKey($startKey);
-            if ($endKey !== '') {
-                $request->setEndKey($endKey);
-            }
-            $request->setLimit($limit > 0 ? $limit : $maxScanLimit);
-            $request->setVersion($this->startTs);
+        while (true) {
+            // Resolve on the current start key: the sub-range starts inside
+            // the region, so the cache lookup hits and only the end key
+            // needs re-clipping after a split.
+            $freshEndKey = '';
+            $batch = $retryExecutor->execute($cursorStart, function () use (
+                $cursorStart,
+                $endKey,
+                $pending,
+                $maxScanLimit,
+                &$freshEndKey,
+            ): array {
+                // Resolve the region on every attempt so cache invalidation
+                // and leader switching performed by the retry executor take
+                // effect (issue #267): a stale captured region would
+                // otherwise reproduce the original error on each retry.
+                $fresh = $this->regionResolver->getRegionInfo($cursorStart);
+                $address = $this->regionResolver->resolveStoreAddress($fresh->leaderStoreId);
+                $freshEndKey = $fresh->endKey;
 
-            /** @var ScanResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvScan',
-                $request,
-                ScanResponse::class,
-                $this->timeoutMs('scan'),
-            );
-            RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+                // Re-clip the sub-range against the freshly resolved region:
+                // after a split the fresh region is smaller, and TiKV rejects
+                // ranges that cross region boundaries.
+                $scanEnd = $freshEndKey !== '' && ($endKey === '' || $freshEndKey < $endKey)
+                    ? $freshEndKey
+                    : $endKey;
 
-            $error = $response->getError();
-            if ($error !== null) {
-                $locked = $error->getLocked();
-                if ($locked !== null) {
-                    $rawPrimary = $locked->getPrimaryLock();
-                    $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                    $this->lockResolver->resolveLock($lockPrimary, $locked);
-                    throw new TxnRetryableException(
-                        'Lock encountered during scan, resolved - retry',
-                        BackoffType::TxnLock,
-                    );
+                $request = new ScanRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo($fresh));
+                $request->setStartKey($cursorStart);
+                if ($scanEnd !== '') {
+                    $request->setEndKey($scanEnd);
+                }
+                $request->setLimit($pending > 0 ? $pending : $maxScanLimit);
+                $request->setVersion($this->startTs);
+
+                /** @var ScanResponse $response */
+                $response = $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'KvScan',
+                    $request,
+                    ScanResponse::class,
+                    $this->timeoutMs('scan'),
+                );
+                RegionErrorHandler::check($response, $this->regionCache, $fresh->regionId);
+
+                $error = $response->getError();
+                if ($error !== null) {
+                    $locked = $error->getLocked();
+                    if ($locked !== null) {
+                        $rawPrimary = $locked->getPrimaryLock();
+                        $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
+                        $this->lockResolver->resolveLock($lockPrimary, $locked);
+                        throw new TxnRetryableException(
+                            'Lock encountered during scan, resolved - retry',
+                            BackoffType::TxnLock,
+                        );
+                    }
+                }
+
+                $subResults = [];
+                foreach ($response->getPairs() as $pair) {
+                    $subResults[] = [
+                        'key' => $pair->getKey(),
+                        'value' => $pair->getValue(),
+                    ];
+                }
+
+                return $subResults;
+            }, $classifier);
+
+            array_push($results, ...$batch);
+
+            if ($pending > 0) {
+                $pending -= count($batch);
+                if ($pending <= 0) {
+                    break;
                 }
             }
 
-            $results = [];
-            foreach ($response->getPairs() as $pair) {
-                $results[] = [
-                    'key' => $pair->getKey(),
-                    'value' => $pair->getValue(),
-                ];
+            // Continue only when the fresh region ended inside the
+            // sub-range (a split occurred) and the cursor actually
+            // advanced; otherwise the whole sub-range was covered.
+            if (
+                $freshEndKey === ''
+                || $freshEndKey <= $cursorStart
+                || ($endKey !== '' && $freshEndKey >= $endKey)
+            ) {
+                break;
             }
+            $cursorStart = $freshEndKey;
+        }
 
-            return $results;
-        }, $classifier);
+        return $results;
     }
 
     /**

@@ -215,3 +215,37 @@ true. Unit-test tip: pass a small `maxBackoffMs` (e.g. 100) to
 `createTransaction(['maxBackoffMs' => …])` to exercise budget exhaustion
 without sleeping the full default 20 s budget — and `maxBackoffMs = 0`
 hits the `remainingMs <= 0` guard after the very first locked response.
+
+## Retry closures must re-resolve the region inside the loop — scans resolve on the sub-range start, reverse scans on the sub-range end
+
+`RetryExecutor` invalidates the region cache and switches leader hints on
+`NotLeader`/`EpochNotMatch`, but those updates only take effect if the
+retried closure asks `RegionResolver::getRegionInfo()` again on every
+attempt. Scan closures (issue #267, GRPC-08) used to capture the
+`RegionInfo` resolved before the loop, so every retry re-sent the same
+stale region/epoch/leader up to the attempt cap. The fix moves resolution
+inside the closure AND pre-populates the cache with the `scanRegions()`
+result (otherwise every sub-range does an extra PD `getRegion` round trip
+per attempt and `switchLeader` hints are ignored). Subtleties: the forward
+scan resolves on the sub-range *start* (strictly inside the region, so
+`getByKey` hits); the reverse scan resolves on the sub-range *end* (the
+lower bound), because the wire start key can sit exactly on the region's
+end boundary where the cache lookup misses and PD answers with the
+*neighbouring* region. After a split the fresh region is smaller, so the
+wire range must be re-clipped on every attempt (end key for forward,
+start/upper key for reverse) — TiKV rejects ranges that cross region
+boundaries. Same stale-capture bug remains in `RawKvRangeOps`
+(deleteRange/checksum) as of this fix.
+
+## PHPStan `ternary.alwaysFalse` fires for by-ref bool flags mutated in a sibling closure — sequence mocks instead
+
+When a test shares state between mocked-method callbacks through a
+by-ref bool (`$flag = false; A sets $flag; B reads $flag ? x : y`),
+PHPStan analyses each closure in isolation, proves the flag is always
+false inside B, and reports `ternary.alwaysFalse` at level 9
+(`if.alwaysFalse` for the equivalent if). For mock call sequences with a
+deterministic order (e.g. stale region served for the closure's first
+resolution and the executor's invalidation lookup, then a miss) use
+`willReturnOnConsecutiveCalls($stale, $stale, null)` instead of a shared
+flag — it models the same state machine, is order-visible in the test,
+and is PHPStan-clean.

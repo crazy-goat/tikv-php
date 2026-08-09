@@ -82,6 +82,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+        );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $retryCount = 0;
@@ -121,6 +124,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+        );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $retryCount = 0;
@@ -158,6 +164,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+        );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $retryCount = 0;
@@ -195,6 +204,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+        );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $retryCount = 0;
@@ -232,6 +244,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getRegion')->willReturn($region);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $retryCount = 0;
@@ -281,6 +294,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getRegion')->willReturn($region);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $this->grpc->method('call')->willReturnCallback(function (): never {
@@ -323,6 +337,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+        );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         // maxBackoffMs=14: allows exactly 3 retries (2+4+8=14)

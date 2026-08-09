@@ -675,7 +675,7 @@ class RawKvClientTest extends TestCase
 
     public function testScanLimitZeroIsCappedToMax(): void
     {
-        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
@@ -716,7 +716,7 @@ class RawKvClientTest extends TestCase
 
     public function testScanReturnsResults(): void
     {
-        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
@@ -766,7 +766,7 @@ class RawKvClientTest extends TestCase
 
     public function testScanPrefixDelegatesToScan(): void
     {
-        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
@@ -789,7 +789,7 @@ class RawKvClientTest extends TestCase
 
     public function testScanPrefixWithKeyOnly(): void
     {
-        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
@@ -844,7 +844,7 @@ class RawKvClientTest extends TestCase
             endKey: '',
         );
 
-        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn($region);
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
@@ -898,7 +898,7 @@ class RawKvClientTest extends TestCase
             endKey: '',
         );
 
-        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn($region);
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());

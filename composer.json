@@ -45,7 +45,7 @@
         "test": "phpunit",
         "test:unit": "phpunit --testsuite Unit",
         "test:grpc": "phpunit --testsuite Grpc --fail-on-skipped --no-coverage",
-        "test:e2e": "phpunit --testsuite E2E",
+        "test:e2e": "phpunit --testsuite E2E-RawKV",
         "rector": "rector process --dry-run",
         "rector:fix": "rector process"
     }

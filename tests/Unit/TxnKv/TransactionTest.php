@@ -281,6 +281,34 @@ class TransactionTest extends TestCase
     }
 
     /**
+     * Simulate the region cache being populated with the given regions
+     * (TxnReader::scan() caches the scanRegions() result), so the retried
+     * scan closure resolves regions through the cache like in production.
+     *
+     * @param RegionInfo[] $regions regions sorted by startKey
+     */
+    private function stubScanRegionLookup(array $regions): void
+    {
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): ?RegionInfo => self::findRegionForKey($regions, $key),
+        );
+    }
+
+    /**
+     * @param RegionInfo[] $regions
+     */
+    private static function findRegionForKey(array $regions, string $key): ?RegionInfo
+    {
+        foreach ($regions as $region) {
+            if ($region->startKey <= $key && ($region->endKey === '' || $key < $region->endKey)) {
+                return $region;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * @param array<string, string> $keys
      */
     private function makeScanResponse(array $keys): ScanResponse
@@ -301,6 +329,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $this->grpc->expects($this->once())->method('call')->with(
@@ -322,6 +351,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $this->grpc->expects($this->once())->method('call')->with(
@@ -343,6 +373,7 @@ class TransactionTest extends TestCase
         $region1 = $this->makeRegion(1, '', 'k3');
         $region2 = $this->makeRegion(2, 'k3', '');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->stubScanRegionLookup([$region1, $region2]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $response1 = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
@@ -361,6 +392,7 @@ class TransactionTest extends TestCase
         $region1 = $this->makeRegion(1, '', 'k3');
         $region2 = $this->makeRegion(2, 'k3', '');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->stubScanRegionLookup([$region1, $region2]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $response1 = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
@@ -379,6 +411,7 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k2', 'k4');
         $region3 = $this->makeRegion(3, 'k4', '');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2, $region3]);
+        $this->stubScanRegionLookup([$region1, $region2, $region3]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $response1 = $this->makeScanResponse(['k1' => 'v1']);
@@ -432,6 +465,7 @@ class TransactionTest extends TestCase
         // (issue #322).
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         // TiKV returns keys as strings; build the pairs from a list so the
@@ -465,6 +499,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $this->grpc->expects($this->once())->method('call')->willReturn($this->makeScanResponse([]));
@@ -489,6 +524,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         // TiKV returns 5 keys, but limit is 3
@@ -515,6 +551,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         // TiKV returns k1, k3. Write set has k2 (in range) which should appear.
@@ -540,6 +577,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $response = $this->makeScanResponse(['k1' => 'v1']);
@@ -557,6 +595,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         // TiKV returns 3 keys, but one is deleted in write set
@@ -1452,6 +1491,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $response = $this->makeScanResponse([
@@ -1475,6 +1515,7 @@ class TransactionTest extends TestCase
     {
         $region = $this->makeRegion(1, '', '');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $response = $this->makeScanResponse(['k1' => 'v1']);
@@ -1486,6 +1527,285 @@ class TransactionTest extends TestCase
 
         $this->assertCount(1, $result);
         $this->assertSame('k1', $result[0]['key']);
+    }
+
+    // ========================================================================
+    // scan() – region re-resolution inside the retried closure (issue #267)
+    // ========================================================================
+
+    public function testScanRetriesOnNotLeaderAndResolvesFreshRegion(): void
+    {
+        $oldRegion = $this->makeRegion(1, 'a', 'z');
+        $newRegion = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 30,
+            leaderStoreId: 2,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'z',
+        );
+
+        // The cache serves the old leader once; after the retry executor
+        // switches the leader it serves the region with the new leader.
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($oldRegion, $newRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->expects($this->once())->method('switchLeader')->willReturn(true);
+
+        $this->pdClient->method('scanRegions')->willReturn([$oldRegion]);
+        $this->pdClient->method('getStore')->willReturnCallback(
+            function (int $storeId): Store {
+                $store = new Store();
+                $store->setId($storeId);
+                $store->setAddress('127.0.0.1:2016' . $storeId);
+
+                return $store;
+            },
+        );
+
+        $leader = new \CrazyGoat\Proto\Metapb\Peer();
+        $leader->setId(30);
+        $leader->setStoreId(2);
+        $notLeader = new \CrazyGoat\Proto\Errorpb\NotLeader();
+        $notLeader->setRegionId(1);
+        $notLeader->setLeader($leader);
+        $error = new \CrazyGoat\Proto\Errorpb\Error();
+        $error->setMessage('not leader');
+        $error->setNotLeader($notLeader);
+
+        $cleanResponse = $this->makeScanResponse(['k1' => 'v1']);
+        $addresses = [];
+        $callCount = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $address) use (
+                &$callCount,
+                &$addresses,
+                $error,
+                $cleanResponse,
+            ): object {
+                $callCount++;
+                $addresses[] = $address;
+
+                if ($callCount === 1) {
+                    $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+                    $response->setRegionError($error);
+
+                    return $response;
+                }
+
+                return $cleanResponse;
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('a', 'z', 100);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('k1', $result[0]['key']);
+        $this->assertSame(2, $callCount);
+        // The retry must target the NEW leader's store: proof that the
+        // closure re-resolved the region after the leader switch.
+        $this->assertSame(['127.0.0.1:20161', '127.0.0.1:20162'], $addresses);
+    }
+
+    public function testScanRetriesOnEpochNotMatchWithNarrowerRange(): void
+    {
+        $preSplit = $this->makeRegion(1, 'a', 'z');
+        $postSplitLower = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'a',
+            endKey: 'k',
+        );
+        $postSplitUpper = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k',
+            endKey: 'z',
+        );
+
+        // The cache serves the stale region for the first resolution and the
+        // retry executor's invalidation lookup, then misses so the retry
+        // falls back to PD for the post-split region.
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
+        $this->regionCache->method('put');
+        $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
+
+        $this->pdClient->method('scanRegions')->willReturn([$preSplit]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key === 'k' ? $postSplitUpper : $postSplitLower,
+        );
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $error = new \CrazyGoat\Proto\Errorpb\Error();
+        $error->setMessage('epoch not match');
+
+        $cleanResponse = $this->makeScanResponse(['k1' => 'v1']);
+
+        /** @var list<ScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $callCount = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request
+            ) use (
+                &$callCount,
+                &$capturedRequests,
+                $error,
+                $cleanResponse,
+            ): object {
+                $callCount++;
+                if ($request instanceof ScanRequest) {
+                    $capturedRequests[] = $request;
+                }
+
+                if ($callCount === 1) {
+                    $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+                    $response->setRegionError($error);
+
+                    return $response;
+                }
+
+                // The continuation over [k,z) returns no keys.
+                if ($request instanceof ScanRequest && $request->getStartKey() === 'k') {
+                    return new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+                }
+
+                return $cleanResponse;
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('a', 'z', 100);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('k1', $result[0]['key']);
+        $this->assertCount(3, $capturedRequests);
+
+        // The retry must use the post-split region and re-clip the range.
+        $context = $capturedRequests[1]->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(2, $regionId);
+        $this->assertSame('a', $capturedRequests[1]->getStartKey());
+        $this->assertSame('k', $capturedRequests[1]->getEndKey());
+
+        // A retry clipped to the fresh region must not silently drop the
+        // remainder: the rest of the range is scanned afterwards.
+        $context = $capturedRequests[2]->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(3, $regionId);
+        $this->assertSame('k', $capturedRequests[2]->getStartKey());
+        $this->assertSame('z', $capturedRequests[2]->getEndKey());
+    }
+
+    public function testScanContinuesAfterSplitToCoverRemainder(): void
+    {
+        // The outer region enumeration is stale (it ran before the split):
+        // the first attempt against the stale [a,z) fails with
+        // EpochNotMatch, the retry resolves the post-split [a,k), and the
+        // continuation must then scan [k,z) so keys of the original range
+        // are not silently dropped.
+        $preSplit = $this->makeRegion(1, 'a', 'z');
+        $postSplitLower = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'a',
+            endKey: 'k',
+        );
+        $postSplitUpper = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
+        $this->regionCache->method('put');
+        $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
+
+        $this->pdClient->method('scanRegions')->willReturn([$preSplit]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $key === 'k' ? $postSplitUpper : $postSplitLower,
+        );
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $error = new \CrazyGoat\Proto\Errorpb\Error();
+        $error->setMessage('epoch not match');
+
+        /** @var list<ScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $callCount = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request
+            ) use (
+                &$callCount,
+                &$capturedRequests,
+                $error,
+            ): object {
+                $callCount++;
+                if ($request instanceof ScanRequest) {
+                    $capturedRequests[] = $request;
+                }
+
+                if ($callCount === 1) {
+                    $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+                    $response->setRegionError($error);
+
+                    return $response;
+                }
+
+                $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+                if ($request instanceof ScanRequest && $request->getStartKey() === 'k') {
+                    // Continuation over the post-split [k,z).
+                    $pair = new KvPair();
+                    $pair->setKey('k3');
+                    $pair->setValue('v3');
+                    $response->setPairs([$pair]);
+                } else {
+                    // Retried scan of [a,k) after the split.
+                    foreach (['k1' => 'v1', 'k2' => 'v2'] as $k => $v) {
+                        $pair = new KvPair();
+                        $pair->setKey($k);
+                        $pair->setValue($v);
+                        $response->setPairs([...$response->getPairs(), $pair]);
+                    }
+                }
+
+                return $response;
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->scan('a', 'z', 100);
+
+        // All three keys of the original range are returned, in order.
+        $this->assertSame(['k1', 'k2', 'k3'], array_column($result, 'key'));
+        $this->assertCount(3, $capturedRequests);
+
+        $context = $capturedRequests[2]->getContext();
+        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $this->assertSame(3, $regionId);
+        $this->assertSame('k', $capturedRequests[2]->getStartKey());
+        $this->assertSame('z', $capturedRequests[2]->getEndKey());
     }
 
     // ========================================================================
