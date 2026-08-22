@@ -62,7 +62,9 @@ final readonly class RegionRangeClipper
     public function clipReverse(array $regions, string $startKey, string $endKey): \Generator
     {
         foreach ($regions as $region) {
-            $scanStart = ($region->endKey === '' || strcmp($startKey, $region->endKey) < 0) ? $startKey : $region->endKey;
+            $scanStart = ($region->endKey === '' || strcmp($startKey, $region->endKey) < 0)
+                ? $startKey
+                : $region->endKey;
             $scanEnd = (strcmp($endKey, $region->startKey) > 0) ? $endKey : $region->startKey;
 
             if (strcmp($scanEnd, $scanStart) >= 0 && $scanEnd !== '') {

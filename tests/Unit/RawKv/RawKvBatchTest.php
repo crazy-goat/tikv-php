@@ -231,7 +231,6 @@ class RawKvBatchTest extends TestCase
         );
 
         $method = new \ReflectionMethod(RawKvBatch::class, 'keyInRegion');
-        $method->setAccessible(true);
 
         // In byte order '0999' < '100', so it is inside ['', '100').
         self::assertTrue($method->invoke($this->batch, '0999', $region));

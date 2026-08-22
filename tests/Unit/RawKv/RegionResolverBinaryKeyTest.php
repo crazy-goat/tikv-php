@@ -55,9 +55,11 @@ final class RegionResolverBinaryKeyTest extends TestCase
 
         $result = $this->resolver->batchResolveRegions(['9', '0999', '20']);
 
-        self::assertSame(2, $result['9']->regionId);
-        self::assertSame(1, $result['0999']->regionId);
-        self::assertSame(2, $result['20']->regionId);
+        foreach (['9' => 2, '0999' => 1, '20' => 2] as $key => $expectedRegionId) {
+            $region = $result[$key] ?? null;
+            self::assertNotNull($region);
+            self::assertSame($expectedRegionId, $region->regionId);
+        }
     }
 
     public function testBatchResolveHandlesBinaryBoundaries(): void
@@ -100,7 +102,10 @@ final class RegionResolverBinaryKeyTest extends TestCase
 
         $result = $this->resolver->batchResolveRegions(['9', "\xff\xff"]);
 
-        self::assertSame(2, $result['9']->regionId);
-        self::assertSame(2, $result["\xff\xff"]->regionId);
+        foreach (['9' => 2, "\xff\xff" => 2] as $key => $expectedRegionId) {
+            $region = $result[$key] ?? null;
+            self::assertNotNull($region);
+            self::assertSame($expectedRegionId, $region->regionId);
+        }
     }
 }
