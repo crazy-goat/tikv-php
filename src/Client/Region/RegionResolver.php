@@ -156,7 +156,7 @@ final readonly class RegionResolver
             $mid = (int) (($left + $right) / 2);
             $region = $regions[$mid];
 
-            if ($region->startKey <= $key) {
+            if (strcmp($region->startKey, $key) <= 0) {
                 $result = $region;
                 $left = $mid + 1;
             } else {
@@ -164,7 +164,7 @@ final readonly class RegionResolver
             }
         }
 
-        if ($result !== null && $result->endKey !== '' && $key >= $result->endKey) {
+        if ($result !== null && $result->endKey !== '' && strcmp($key, $result->endKey) >= 0) {
             return null;
         }
 

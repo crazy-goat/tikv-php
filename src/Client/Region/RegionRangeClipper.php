@@ -35,12 +35,12 @@ final readonly class RegionRangeClipper
     public function clipForward(array $regions, string $startKey, string $endKey): \Generator
     {
         foreach ($regions as $region) {
-            $scanStart = $startKey > $region->startKey ? $startKey : $region->startKey;
+            $scanStart = strcmp($startKey, $region->startKey) > 0 ? $startKey : $region->startKey;
             $scanEnd = $endKey === ''
                 ? $region->endKey
-                : ($region->endKey !== '' && $endKey > $region->endKey ? $region->endKey : $endKey);
+                : ($region->endKey !== '' && strcmp($endKey, $region->endKey) > 0 ? $region->endKey : $endKey);
 
-            if ($scanStart >= $scanEnd && $scanEnd !== '') {
+            if (strcmp($scanStart, $scanEnd) >= 0 && $scanEnd !== '') {
                 continue;
             }
 
@@ -62,10 +62,10 @@ final readonly class RegionRangeClipper
     public function clipReverse(array $regions, string $startKey, string $endKey): \Generator
     {
         foreach ($regions as $region) {
-            $scanStart = ($region->endKey === '' || $startKey < $region->endKey) ? $startKey : $region->endKey;
-            $scanEnd = ($endKey > $region->startKey) ? $endKey : $region->startKey;
+            $scanStart = ($region->endKey === '' || strcmp($startKey, $region->endKey) < 0) ? $startKey : $region->endKey;
+            $scanEnd = (strcmp($endKey, $region->startKey) > 0) ? $endKey : $region->startKey;
 
-            if ($scanEnd >= $scanStart && $scanEnd !== '') {
+            if (strcmp($scanEnd, $scanStart) >= 0 && $scanEnd !== '') {
                 continue;
             }
 

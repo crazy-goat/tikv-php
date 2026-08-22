@@ -251,6 +251,73 @@ final class RegionRangeClipperTest extends TestCase
     }
 
     // ========================================================================
+    // Byte-order semantics (region boundaries must compare in byte order,
+    // never PHP numeric-string order)
+    // ========================================================================
+
+    public function testClipForwardUsesByteOrderNotNumericOrder(): void
+    {
+        // r1 = ['', '100'), r2 = ['100', ''). In byte order '9' > '100', so the
+        // [9, +inf) range starts inside r2; the sub-range for r1 is reversed
+        // and MUST be skipped, not yielded.
+        $regions = [
+            $this->region('', '100', regionId: 1),
+            $this->region('100', '', regionId: 2),
+        ];
+        $results = iterator_to_array($this->clipper->clipForward($regions, '9', ''));
+
+        $this->assertCount(1, $results);
+        [$region, $start, $end] = $results[0];
+        $this->assertSame(2, $region->regionId);
+        $this->assertSame('9', $start);
+        $this->assertSame('', $end);
+    }
+
+    public function testClipForwardSkippedNotReversedSubRange(): void
+    {
+        // The reproduced bug: clipForward([r1,r2], '9', '') yielded a reversed
+        // sub-range (r1, start='9', end='100') that should have been skipped.
+        // After the fix the first region yields nothing.
+        $regions = [
+            $this->region('', '100', regionId: 1),
+            $this->region('100', '', regionId: 2),
+        ];
+
+        $it = $this->clipper->clipForward($regions, '9', '');
+
+        $first = $it->current();
+        $this->assertSame(2, $first[0]->regionId);
+    }
+
+    public function testClipReverseUsesByteOrderNotNumericOrder(): void
+    {
+        // Reverse scan from ('', '9'] (startKey '9', endKey '' = unbounded
+        // lower bound) over regions in descending byte order:
+        //   r2 = ['100', '')   r1 = ['', '100')
+        // In byte order '9' > '100', so the range ('', '9'] spans:
+        //   '100'..'9'  -> r2  (scan from '9' down to '100')
+        //   '' .. '100' -> r1  (scan from '100' down to '')
+        // Both regions must be yielded, each clipped to its byte-order share.
+        $regions = [
+            $this->region('100', '', regionId: 2),
+            $this->region('', '100', regionId: 1),
+        ];
+        $results = iterator_to_array($this->clipper->clipReverse($regions, '9', ''));
+
+        $this->assertCount(2, $results);
+
+        [$r2, $s2, $e2] = $results[0];
+        $this->assertSame(2, $r2->regionId);
+        $this->assertSame('9', $s2);
+        $this->assertSame('100', $e2);
+
+        [$r1, $s1, $e1] = $results[1];
+        $this->assertSame(1, $r1->regionId);
+        $this->assertSame('100', $s1);
+        $this->assertSame('', $e1);
+    }
+
+    // ========================================================================
     // Helper
     // ========================================================================
 

@@ -110,7 +110,7 @@ final class ScanIterator implements Iterator
             return;
         }
 
-        if ($this->endKey !== '' && $this->currentStartKey >= $this->endKey) {
+        if ($this->endKey !== '' && strcmp($this->currentStartKey, $this->endKey) >= 0) {
             $this->buffer = [];
             $this->exhausted = true;
             return;

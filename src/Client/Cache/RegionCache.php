@@ -49,7 +49,7 @@ class RegionCache implements RegionCacheInterface
             return null;
         }
 
-        if ($entry->region->endKey !== '' && $key >= $entry->region->endKey) {
+        if ($entry->region->endKey !== '' && strcmp($key, $entry->region->endKey) >= 0) {
             $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
             return null;
         }
@@ -224,7 +224,7 @@ class RegionCache implements RegionCacheInterface
             $mid = (int) (($left + $right) / 2);
             $entry = $this->entries[$mid];
 
-            if ($entry->region->startKey <= $key) {
+            if (strcmp($entry->region->startKey, $key) <= 0) {
                 $result = $mid;
                 $left = $mid + 1;
             } else {
@@ -242,7 +242,7 @@ class RegionCache implements RegionCacheInterface
 
         while ($left < $right) {
             $mid = (int) (($left + $right) / 2);
-            if ($this->entries[$mid]->region->startKey < $startKey) {
+            if (strcmp($this->entries[$mid]->region->startKey, $startKey) < 0) {
                 $left = $mid + 1;
             } else {
                 $right = $mid;

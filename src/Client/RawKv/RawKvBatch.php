@@ -660,8 +660,8 @@ final readonly class RawKvBatch
      */
     private function keyInRegion(string $key, RegionInfo $region): bool
     {
-        return $key >= $region->startKey
-            && ($region->endKey === '' || $key < $region->endKey);
+        return strcmp($key, $region->startKey) >= 0
+            && ($region->endKey === '' || strcmp($key, $region->endKey) < 0);
     }
 
     /**
