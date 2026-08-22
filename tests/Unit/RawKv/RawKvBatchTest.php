@@ -214,6 +214,35 @@ class RawKvBatchTest extends TestCase
     }
 
     /**
+     * keyInRegion() must check region bounds in byte order, not PHP
+     * numeric-string order. Region bounds ['', '100']: '9' is inside in byte
+     * order, '100' is the exclusive end, '200' is outside.
+     */
+    public function testKeyInRegionUsesByteOrderNotNumericOrder(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: '100',
+        );
+
+        $method = new \ReflectionMethod(RawKvBatch::class, 'keyInRegion');
+
+        // In byte order '0999' < '100', so it is inside ['', '100').
+        self::assertTrue($method->invoke($this->batch, '0999', $region));
+        // '9' > '100' in byte order, so it belongs to the NEXT region, not this one.
+        self::assertFalse($method->invoke($this->batch, '9', $region));
+        // '100' is the exclusive end — not in this region.
+        self::assertFalse($method->invoke($this->batch, '100', $region));
+        // '200' > '100' in both byte and numeric order.
+        self::assertFalse($method->invoke($this->batch, '200', $region));
+    }
+
+    /**
      * @return array<string, string>
      */
     private function stringKeyedPairs(string $key, string $value): array
