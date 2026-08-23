@@ -73,13 +73,14 @@ final class TlsConfigBuilder
     /**
      * Set CA certificate.
      *
-     * If the value is a path to an existing file with a .pem, .crt, or .key extension,
-     * the file is read with path traversal protection. Otherwise the value is treated
-     * as inline PEM content.
+     * If the value contains a PEM header, it is treated as inline PEM content.
+     * Otherwise it is treated as a file path: the file must exist and be
+     * readable, and is read with path traversal protection. A value that looks
+     * like a path but is missing or unreadable throws instead of being silently
+     * reinterpreted as inline content.
      *
      * @deprecated Use withCaCertFile() for file paths or withCaCertPem() for inline content.
-     *             This method uses file_exists() to guess the input type, which is
-     *             ambiguous and less secure.
+     *             This method guesses the input type, which is ambiguous and less secure.
      */
     public function withCaCert(string $caCert): self
     {
@@ -89,13 +90,14 @@ final class TlsConfigBuilder
     /**
      * Set client certificate and key.
      *
-     * If the values are paths to existing files with allowed extensions,
-     * they are read with path traversal protection. Otherwise they are treated
-     * as inline PEM content.
+     * If the values contain PEM headers, they are treated as inline PEM content.
+     * Otherwise they are treated as file paths: the files must exist and be
+     * readable, and are read with path traversal protection. A value that looks
+     * like a path but is missing or unreadable throws instead of being silently
+     * reinterpreted as inline content.
      *
      * @deprecated Use withClientCertFile() for file paths or withClientCertPem() for inline content.
-     *             This method uses file_exists() to guess the input type, which is
-     *             ambiguous and less secure.
+     *             This method guesses the input type, which is ambiguous and less secure.
      */
     public function withClientCert(string $cert, string $key): self
     {
@@ -110,13 +112,21 @@ final class TlsConfigBuilder
     }
 
     /**
-     * Check whether a string looks like a file path (exists, readable).
+     * Check whether a string looks like a file path or inline PEM.
      * This is used for backward compatibility with the deprecated guessing methods.
      * Extension validation is done later in readFile().
      */
     private function resolveWithGuess(string $value): bool
     {
-        return file_exists($value) && is_readable($value);
+        $looksLikePath = !str_contains($value, '-----BEGIN');
+
+        if ($looksLikePath && (!file_exists($value) || !is_readable($value))) {
+            throw new InvalidArgumentException(
+                'TLS value looks like a file path but the file does not exist or is not readable',
+            );
+        }
+
+        return $looksLikePath;
     }
 
     /**

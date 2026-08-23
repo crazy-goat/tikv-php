@@ -39,9 +39,9 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::INFO));
 // Client options
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',
-        'clientCert' => '/path/to/client.crt',
-        'clientKey' => '/path/to/client.key',
+        'caCertFile' => '/path/to/ca.crt',
+        'clientCertFile' => '/path/to/client.crt',
+        'clientKeyFile' => '/path/to/client.key',
     ],
 ];
 
@@ -217,7 +217,8 @@ Verify the server's certificate:
 ```php
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',  // CA certificate file path or content
+        'caCertFile' => '/path/to/ca.crt',
+        'caCertBaseDir' => '/path/to', // optional: restrict to base directory
     ],
 ];
 
@@ -231,9 +232,14 @@ Client certificate authentication:
 ```php
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',
-        'clientCert' => '/path/to/client.crt',
-        'clientKey' => '/path/to/client.key',
+        'caCertFile' => '/path/to/ca.crt',
+        // Optional base-directory restrictions. Each *BaseDir applies only to
+        // the matching file read (caCertBaseDir → caCertFile/withCaCertFile;
+        // clientCertBaseDir → clientCertFile + clientKeyFile).
+        'caCertBaseDir' => '/path/to',
+        'clientCertFile' => '/path/to/client.crt',
+        'clientKeyFile' => '/path/to/client.key',
+        'clientCertBaseDir' => '/path/to',
     ],
 ];
 
@@ -242,12 +248,13 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 
 > **Important:** When providing a client certificate and key, a CA certificate is
 > **required**. The configuration will throw `InvalidArgumentException` if
-> clientCert/clientKey are provided without caCert — this prevents accidental
-> downgrade to plaintext.
+> `clientCertFile`/`clientKeyFile` (or `clientCertPem`/`clientKeyPem`) are
+> provided without a CA certificate — this prevents accidental downgrade to
+> plaintext.
 
-### Using Certificate Content
+### Using Certificate Content (Inline PEM)
 
-You can pass certificate content directly instead of file paths:
+You can pass certificate content directly instead of file paths — use the `*Pem` variants:
 
 ```php
 $caCert = file_get_contents('/path/to/ca.crt');
@@ -256,9 +263,9 @@ $clientKey = file_get_contents('/path/to/client.key');
 
 $options = [
     'tls' => [
-        'caCert' => $caCert,
-        'clientCert' => $clientCert,
-        'clientKey' => $clientKey,
+        'caCertPem' => $caCert,
+        'clientCertPem' => $clientCert,
+        'clientKeyPem' => $clientKey,
     ],
 ];
 ```
@@ -271,8 +278,8 @@ For advanced TLS configuration:
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 
 $builder = new TlsConfigBuilder();
-$builder->withCaCert('/path/to/ca.crt')
-    ->withClientCert('/path/to/client.crt', '/path/to/client.key');
+$builder->withCaCertFile('/path/to/ca.crt')
+    ->withClientCertFile('/path/to/client.crt', '/path/to/client.key');
 
 $tlsConfig = $builder->build();
 
@@ -549,9 +556,9 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::ERROR));
 // TLS configuration (recommended for production)
 $options = [
     'tls' => [
-        'caCert' => '/etc/ssl/certs/tikv-ca.crt',
-        'clientCert' => '/etc/ssl/certs/tikv-client.crt',
-        'clientKey' => '/etc/ssl/private/tikv-client.key',
+        'caCertFile' => '/etc/ssl/certs/tikv-ca.crt',
+        'clientCertFile' => '/etc/ssl/certs/tikv-client.crt',
+        'clientKeyFile' => '/etc/ssl/private/tikv-client.key',
     ],
 ];
 
@@ -571,9 +578,9 @@ return [
     'endpoints' => explode(',', getenv('TIKV_PD_ENDPOINTS') ?: '127.0.0.1:2379'),
     'tls' => [
         'enabled' => getenv('TIKV_TLS_ENABLED') === 'true',
-        'caCert' => getenv('TIKV_TLS_CA_CERT'),
-        'clientCert' => getenv('TIKV_TLS_CLIENT_CERT'),
-        'clientKey' => getenv('TIKV_TLS_CLIENT_KEY'),
+        'caCertFile' => getenv('TIKV_TLS_CA_CERT'),
+        'clientCertFile' => getenv('TIKV_TLS_CLIENT_CERT'),
+        'clientKeyFile' => getenv('TIKV_TLS_CLIENT_KEY'),
     ],
     'logging' => [
         'level' => getenv('TIKV_LOG_LEVEL') ?: 'warning',

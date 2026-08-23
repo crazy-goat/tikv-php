@@ -844,11 +844,11 @@ if (!$status['healthy']) {
 $options = [
     'tls' => [
         // Always verify server certificate
-        'caCert' => '/etc/ssl/certs/tikv-ca.crt',
-        
+        'caCertFile' => '/etc/ssl/certs/tikv-ca.crt',
+
         // Use client certificates for mutual TLS
-        'clientCert' => '/etc/ssl/certs/tikv-client.crt',
-        'clientKey' => '/etc/ssl/private/tikv-client.key',
+        'clientCertFile' => '/etc/ssl/certs/tikv-client.crt',
+        'clientKeyFile' => '/etc/ssl/private/tikv-client.key',
     ],
 ];
 
@@ -858,25 +858,25 @@ class RotatingTlsClient
     private RawKvClient $client;
     private array $config;
     private int $lastReload;
-    
+
     public function __construct(array $config)
     {
         $this->config = $config;
         $this->reload();
     }
-    
+
     public function reload(): void
     {
         if (isset($this->client)) {
             $this->client->close();
         }
-        
-        // Reload certificates from disk
+
+        // Reload certificates from disk (inline PEM content)
         $options = [
             'tls' => [
-                'caCert' => file_get_contents($this->config['caCert']),
-                'clientCert' => file_get_contents($this->config['clientCert']),
-                'clientKey' => file_get_contents($this->config['clientKey']),
+                'caCertPem' => file_get_contents($this->config['caCertFile']),
+                'clientCertPem' => file_get_contents($this->config['clientCertFile']),
+                'clientKeyPem' => file_get_contents($this->config['clientKeyFile']),
             ],
         ];
         

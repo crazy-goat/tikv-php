@@ -136,16 +136,31 @@ use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 // Configure TLS with CA certificate only (server verification)
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',  // or certificate content as string
+        'caCertFile' => '/path/to/ca.crt',
+        'caCertBaseDir' => '/path/to', // optional: restrict to base directory
     ],
 ];
 
 // Or with mutual TLS (mTLS) - client certificate authentication
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',
-        'clientCert' => '/path/to/client.crt',
-        'clientKey' => '/path/to/client.key',
+        'caCertFile' => '/path/to/ca.crt',
+        // Optional base-directory restrictions (*BaseDir apply only to their
+        // matching file reads; caCertBaseDir → caCertFile, clientCertBaseDir →
+        // clientCertFile + clientKeyFile)
+        'caCertBaseDir' => '/path/to',
+        'clientCertFile' => '/path/to/client.crt',
+        'clientKeyFile' => '/path/to/client.key',
+        'clientCertBaseDir' => '/path/to',
+    ],
+];
+
+// For inline PEM content, use the *Pem variants:
+$options = [
+    'tls' => [
+        'caCertPem' => $caPemString,
+        'clientCertPem' => $clientCertPemString,
+        'clientKeyPem' => $clientKeyPemString,
     ],
 ];
 
@@ -362,9 +377,10 @@ php examples/basic.php
 ```php
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',      // Server CA certificate
-        'clientCert' => '/path/to/client.crt', // Client certificate (for mTLS)
-        'clientKey' => '/path/to/client.key',  // Client private key (for mTLS)
+        'caCertFile' => '/path/to/ca.crt',      // Server CA certificate (file path)
+        'clientCertFile' => '/path/to/client.crt', // Client certificate (for mTLS)
+        'clientKeyFile' => '/path/to/client.key',  // Client private key (for mTLS)
+        // Or inline PEM: caCertPem, clientCertPem, clientKeyPem
     ],
 ];
 
