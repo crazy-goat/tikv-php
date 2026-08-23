@@ -382,7 +382,8 @@ The client automatically retries failed operations:
 $client = RawKvClient::create(['127.0.0.1:2379']);
 // - Max backoff: 20 seconds (non-ServerBusy errors, cumulative)
 // - Server busy budget: 60 seconds (cumulative ServerBusy sleep)
-// - Retry deadline: 30 seconds (hard wall-clock bound on one operation)
+// - Retry deadline: 30 seconds (checked before each retry attempt; the
+//   final backoff sleep may overshoot it by up to one sleep interval)
 
 // Custom retry deadline (issue #294) — bounds the blocking backoff loop so a
 // sustained ServerIsBusy episode cannot pin a PHP-FPM worker for minutes:
