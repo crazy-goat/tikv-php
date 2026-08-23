@@ -328,6 +328,91 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
      * Budget accumulates correctly: first region consumes part of budget,
      * second region exhausts the remainder.
      */
+    /**
+     * A multi-region scan has one RetryExecutor reused per region, but
+     * maxBackoffMs is a per-operation (per-region) limit (issue #271). Each
+     * region must therefore retry normally with a full budget, instead of
+     * the first region consuming the budget and later regions failing on
+     * their first retryable error.
+     *
+     * StaleCmd backoff: baseMs=2, capMs=1000, exponential 2,4,8,...
+     * With maxBackoffMs=6 every region can afford exactly two retries
+     * (2+4=6). If the budget were shared across all four regions, region 2
+     * would exhaust it on its very first retry (6+2=8 > 6) and the scan
+     * would abort. A per-region budget lets all four retry twice and succeed.
+     */
+    public function testEachRegionWithinScanRetriesWithFreshBudget(): void
+    {
+        $region1 = $this->defaultRegion('a', 'b', regionId: 1);
+        $region2 = $this->defaultRegion('b', 'c', regionId: 2);
+        $region3 = $this->defaultRegion('c', 'd', regionId: 3);
+        $region4 = $this->defaultRegion('d', 'z', regionId: 4);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2, $region3, $region4]);
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => match (true) {
+                $key < 'b' => $region1,
+                $key < 'c' => $region2,
+                $key < 'd' => $region3,
+                default => $region4,
+            },
+        );
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // Per-region retry counter: each region throws StaleCommand on its
+        // first two attempts, then succeeds with a single k/v pair.
+        $failuresPerRegion = [0, 0, 0, 0];
+        $this->grpc->method('call')->willReturnCallback(function (
+            $address,
+            $service,
+            $method,
+            $request,
+            $responseClass,
+        ) use (&$failuresPerRegion): RawScanResponse {
+            $rawRequest = $request;
+            $key = $rawRequest->getStartKey();
+            $regionIndex = match (true) {
+                $key < 'b' => 0,
+                $key < 'c' => 1,
+                $key < 'd' => 2,
+                default => 3,
+            };
+
+            if ($failuresPerRegion[$regionIndex] < 2) {
+                $failuresPerRegion[$regionIndex]++;
+                throw new TiKvException('StaleCommand');
+            }
+
+            $response = new RawScanResponse();
+            $pair = new KvPair();
+            $pair->setKey($key . '-key');
+            $pair->setValue('val');
+            $response->setKvs([$pair]);
+            return $response;
+        });
+
+        $scanner = new RawKvScanner(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            maxBackoffMs: 6,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            logger: new NullLogger(),
+        );
+
+        $results = $scanner->scan('a', 'z', 100, false);
+
+        // All four regions succeeded after retrying, so each got its own
+        // budget. A shared budget would have thrown on region 2's first retry.
+        $this->assertCount(4, $results);
+        $this->assertSame([2, 2, 2, 2], $failuresPerRegion);
+    }
+
     public function testBudgetAccumulatesAcrossRegions(): void
     {
         $region1 = $this->defaultRegion('a', 'm', regionId: 1);

@@ -18,7 +18,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 
-final class RetryExecutor
+final readonly class RetryExecutor
 {
     /**
      * Default maximum number of attempts per call. Bounds the retry loop
@@ -28,20 +28,16 @@ final class RetryExecutor
      */
     public const DEFAULT_MAX_ATTEMPTS = 30;
 
-    private int $totalBackoffMs = 0;
-    private int $serverBusyBackoffMs = 0;
-    private int $attempt = 0;
-
     public function __construct(
-        private readonly int $maxBackoffMs,
-        private readonly int $serverBusyBudgetMs,
-        private readonly RegionCacheInterface $regionCache,
-        private readonly GrpcClientInterface $grpc,
-        private readonly RegionResolver $regionResolver,
-        private readonly LoggerInterface $logger,
-        private readonly int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS,
-        private readonly int $deadlineMs = 0,
-        private readonly MetricsInterface $metrics = new NoOpMetrics(),
+        private int $maxBackoffMs,
+        private int $serverBusyBudgetMs,
+        private RegionCacheInterface $regionCache,
+        private GrpcClientInterface $grpc,
+        private RegionResolver $regionResolver,
+        private LoggerInterface $logger,
+        private int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS,
+        private int $deadlineMs = 0,
+        private MetricsInterface $metrics = new NoOpMetrics(),
     ) {
         if ($maxAttempts < 1) {
             throw new \InvalidArgumentException('maxAttempts must be >= 1');
@@ -59,7 +55,14 @@ final class RetryExecutor
      */
     public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
     {
-        $this->attempt = 0;
+        // Per-invocation retry state lives in locals, not instance fields:
+        // a single executor is reused across many operations, and
+        // maxBackoffMs/serverBusyBudgetMs are documented as per-operation
+        // limits, so every call must start with a full budget. Keeping them
+        // local also makes execute() reentrant (issue #271).
+        $totalBackoffMs = 0;
+        $serverBusyBackoffMs = 0;
+        $attempt = 0;
         $startTimeMs = $this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0;
         $lastError = null;
 
@@ -69,17 +72,17 @@ final class RetryExecutor
             // run call #attempt+1; cap once that would exceed maxAttempts.
             // Catches zero-backoff errors (e.g. EpochNotMatch classified as
             // BackoffType::None) that would otherwise drive an infinite loop.
-            if ($this->attempt >= $this->maxAttempts) {
+            if ($attempt >= $this->maxAttempts) {
                 $this->logger->error('Retry attempt cap exhausted', [
                     'key' => KeyRedactor::redact($key),
-                    'attempt' => $this->attempt,
+                    'attempt' => $attempt,
                     'maxAttempts' => $this->maxAttempts,
-                    'totalBackoffMs' => $this->totalBackoffMs,
+                    'totalBackoffMs' => $totalBackoffMs,
                 ]);
                 throw new RetryBudgetExhaustedException(
                     sprintf('Retry attempt cap (%d) exhausted for key "%s"', $this->maxAttempts, $key),
-                    $this->attempt,
-                    $this->totalBackoffMs,
+                    $attempt,
+                    $totalBackoffMs,
                     $lastError,
                 );
             }
@@ -90,13 +93,13 @@ final class RetryExecutor
                 if ($elapsedMs >= $this->deadlineMs) {
                     $this->logger->error('Retry deadline exhausted', [
                         'key' => KeyRedactor::redact($key),
-                        'attempt' => $this->attempt,
+                        'attempt' => $attempt,
                         'elapsedMs' => $elapsedMs,
                         'deadlineMs' => $this->deadlineMs,
                     ]);
                     throw new RetryBudgetExhaustedException(
                         sprintf('Retry deadline (%d ms) exhausted for key "%s"', $this->deadlineMs, $key),
-                        $this->attempt,
+                        $attempt,
                         $elapsedMs,
                         $lastError,
                     );
@@ -107,7 +110,7 @@ final class RetryExecutor
                 return $operation();
             } catch (TiKvException $e) {
                 $lastError = $e;
-                $attemptBeforeInspection = $this->attempt;
+                $attemptBeforeInspection = $attempt;
 
                 $backoffType = $this->handleNotLeader($e, $key);
 
@@ -150,23 +153,23 @@ final class RetryExecutor
                 $sleepMs = $backoffType->sleepMs($attemptBeforeInspection);
 
                 if ($backoffType === BackoffType::ServerBusy) {
-                    $this->serverBusyBackoffMs += $sleepMs;
-                    if ($this->serverBusyBackoffMs > $this->serverBusyBudgetMs) {
+                    $serverBusyBackoffMs += $sleepMs;
+                    if ($serverBusyBackoffMs > $this->serverBusyBudgetMs) {
                         $this->logger->error('ServerBusy budget exhausted', [
                             'key' => KeyRedactor::redact($key),
                             'attempt' => $attemptBeforeInspection,
-                            'serverBusyBackoffMs' => $this->serverBusyBackoffMs,
+                            'serverBusyBackoffMs' => $serverBusyBackoffMs,
                             'serverBusyBudgetMs' => $this->serverBusyBudgetMs,
                         ]);
                         throw $e;
                     }
                 } else {
-                    $this->totalBackoffMs += $sleepMs;
-                    if ($this->totalBackoffMs > $this->maxBackoffMs) {
+                    $totalBackoffMs += $sleepMs;
+                    if ($totalBackoffMs > $this->maxBackoffMs) {
                         $this->logger->error('Retry budget exhausted', [
                             'key' => KeyRedactor::redact($key),
                             'attempt' => $attemptBeforeInspection,
-                            'totalBackoffMs' => $this->totalBackoffMs,
+                            'totalBackoffMs' => $totalBackoffMs,
                             'maxBackoffMs' => $this->maxBackoffMs,
                         ]);
                         throw $e;
@@ -178,7 +181,7 @@ final class RetryExecutor
                     'attempt' => $attemptBeforeInspection,
                     'backoffType' => $backoffType->name,
                     'sleepMs' => $sleepMs,
-                    'totalBackoffMs' => $this->totalBackoffMs,
+                    'totalBackoffMs' => $totalBackoffMs,
                 ]);
 
                 $this->metrics->retryAttempted($backoffType->name);
@@ -187,7 +190,7 @@ final class RetryExecutor
                     usleep($sleepMs * 1000);
                 }
 
-                $this->attempt++;
+                $attempt++;
             }
         }
     }
