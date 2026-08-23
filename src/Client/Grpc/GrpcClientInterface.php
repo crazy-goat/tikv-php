@@ -64,6 +64,8 @@ interface GrpcClientInterface
     /**
      * Close a single channel by address, forcing reconnect on next call.
      *
+     * No-op if the client has already been closed.
+     *
      * @param string $address Channel address to close
      */
     public function closeChannel(string $address): void;
@@ -73,6 +75,7 @@ interface GrpcClientInterface
      *
      * @param string $address Target address (e.g., "127.0.0.1:2379")
      * @return Channel The gRPC channel
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
      */
     public function getChannel(string $address): Channel;
 }
