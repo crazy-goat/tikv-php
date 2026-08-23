@@ -453,39 +453,38 @@ class RetryExecutorTest extends TestCase
         $executor = $this->createExecutor(
             maxBackoffMs: 10000,
             serverBusyBudgetMs: 10000,
+            maxAttempts: 5,
         );
 
         // execute() must be reentrant: the state (attempt count, budgets) is
         // per-invocation, so a nested execute() call inside a retried
         // closure must not reset or corrupt the outer loop's counters.
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::RegionMiss;
-
+        //
+        // The outer operation fails every time and nests a succeeding
+        // execute() on each attempt. EpochNotMatch is classified as
+        // BackoffType::None (sleepMs=0), so the budget never exhausts and
+        // the outer loop is bounded only by the attempt cap (5). Under the
+        // old instance-field implementation the nested call reset
+        // $this->attempt to 0 on every iteration, so the counter never
+        // reached the cap and the loop would never have terminated.
         $nestedCalls = 0;
         $outerCalls = 0;
-        $result = $executor->execute('outer_key', function () use (
-            $executor,
-            $classifier,
-            &$nestedCalls,
-            &$outerCalls,
-        ): string {
-            $outerCalls++;
-            // First outer attempt nests a full execute() that itself retries
-            // once, then the outer operation fails and must be retried too.
-            if ($outerCalls === 1) {
+        try {
+            $executor->execute('outer_key', function () use ($executor, &$nestedCalls, &$outerCalls): string {
+                $outerCalls++;
                 $executor->execute('inner_key', function () use (&$nestedCalls): string {
                     $nestedCalls++;
-                    if ($nestedCalls === 1) {
-                        throw new TiKvException('inner error');
-                    }
                     return 'inner-ok';
-                }, $classifier);
-                throw new TiKvException('outer error');
-            }
-            return 'outer-ok';
-        }, $classifier);
+                });
+                throw new TiKvException('EpochNotMatch something');
+            });
+        } catch (RetryBudgetExhaustedException) {
+            // expected
+        }
 
-        $this->assertSame('outer-ok', $result);
-        $this->assertSame(2, $outerCalls, 'Outer op runs twice; nested call must not lift the cap');
-        $this->assertSame(2, $nestedCalls, 'Inner operation should have retried once within its own execute()');
+        // The nested calls must not have reset the outer attempt counter:
+        // the cap fires after exactly maxAttempts outer attempts.
+        $this->assertSame(5, $outerCalls, 'Outer loop must hit its own attempt cap; nested calls must not reset it');
+        $this->assertSame(5, $nestedCalls, 'Inner execute() should have succeeded once per outer attempt');
     }
 }

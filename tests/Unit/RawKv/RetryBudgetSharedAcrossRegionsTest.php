@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -63,17 +64,16 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
     }
 
     /**
-     * Multi-region scan shares one backoff budget across all regions.
+     * Each region gets its own independent backoff budget (issue #271).
      *
-     * StaleCmd backoff: baseMs=2, capMs=1000
-     * Exponential: attempt 0→2, attempt 1→4, attempt 2→8, attempt 3→16
-     * With maxBackoffMs=10: 2+4+8=14 > 10 → budget exhausted after 3 retries
-     *
-     * Under old per-region code, each region gets its own 10ms budget,
-     * allowing ~3 retries per region. Under shared budget, the ~3 retries
-     * are spread across ALL regions.
+     * StaleCmd backoff: baseMs=2, capMs=1000, exponential 2,4,8,...
+     * With maxBackoffMs=14, region 1 can afford exactly three retries
+     * (2+4+8=14) and then succeeds. Region 2 retries once (+2ms) and
+     * succeeds. If the budget were shared, region 1's full 14ms spend would
+     * leave nothing for region 2, whose first retry (14+2=16 > 14) would
+     * abort the scan. Per-region, both regions succeed.
      */
-    public function testScanSharesBackoffBudgetAcrossRegions(): void
+    public function testRegionsHaveIndependentBackoffBudgets(): void
     {
         $region1 = $this->defaultRegion('a', 'm', regionId: 1);
         $region2 = $this->defaultRegion('m', 'z', regionId: 2);
@@ -87,10 +87,31 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $retryCount = 0;
-        $this->grpc->method('call')->willReturnCallback(function () use (&$retryCount): RawScanResponse {
-            $retryCount++;
-            throw new TiKvException('StaleCommand');
+        // Per-region retry counts: region 1 spends its full 14ms budget
+        // (three retries) then succeeds; region 2 retries once and succeeds.
+        $failuresPerRegion = [0, 0];
+        $this->grpc->method('call')->willReturnCallback(function (
+            $address,
+            $service,
+            $method,
+            $request,
+            $responseClass,
+        ) use (&$failuresPerRegion): RawScanResponse {
+            $rawRequest = $request;
+            $key = $rawRequest->getStartKey();
+            $regionIndex = $key < 'm' ? 0 : 1;
+
+            if ($failuresPerRegion[$regionIndex] < ($regionIndex === 0 ? 3 : 1)) {
+                $failuresPerRegion[$regionIndex]++;
+                throw new TiKvException('StaleCommand');
+            }
+
+            $response = new RawScanResponse();
+            $pair = new KvPair();
+            $pair->setKey($key . '-key');
+            $pair->setValue('val');
+            $response->setKvs([$pair]);
+            return $response;
         });
 
         $scanner = new RawKvScanner(
@@ -98,22 +119,32 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
             $this->grpc,
             $this->regionResolver,
             new TimeoutConfig(),
-            maxBackoffMs: 10,
+            maxBackoffMs: 14,
             serverBusyBudgetMs: 600000,
             regionCache: $this->regionCache,
             logger: new NullLogger(),
         );
 
-        $this->expectException(TiKvException::class);
-        $scanner->scan('a', 'z', 100, false);
+        $results = $scanner->scan('a', 'z', 100, false);
 
-        // Shared budget: 3 retries total (2+4+8=14 > 10).
-        // Old per-region: ~3 per region × 2 regions = ~6 retries.
-        $this->assertLessThanOrEqual(4, $retryCount, 'Shared budget should limit total retries across all regions');
+        // Both regions succeeded. A shared budget (region 1's 14ms spend
+        // carrying over to region 2) would have aborted on region 2's first
+        // retry (14+2=16 > 14).
+        $this->assertCount(2, $results);
+        $this->assertSame(
+            [3, 1],
+            $failuresPerRegion,
+            'Region 2 must retry with its own fresh budget after region 1 spent its full 14ms',
+        );
     }
 
     /**
-     * Multi-region deleteRange shares one backoff budget.
+     * A multi-region deleteRange with each region on its own budget: the
+     * first region exhausts its own maxBackoffMs and the operation aborts
+     * before a later region is scanned (per-region semantics, issue #271).
+     *
+     * StaleCmd backoff 2,4,8,...; with maxBackoffMs=10 a single region
+     * exhausts after 2+4+8=14 > 10, i.e. on its third retryable failure.
      */
     public function testDeleteRangeSharesBackoffBudgetAcrossRegions(): void
     {
@@ -149,11 +180,13 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->expectException(TiKvException::class);
         $rangeOps->deleteRange('a', 'z');
 
-        $this->assertLessThanOrEqual(4, $retryCount, 'Shared budget should limit total retries across all regions');
+        $this->assertLessThanOrEqual(4, $retryCount, 'First region exhausts its own per-region budget');
     }
 
     /**
-     * checksum shares one backoff budget across regions.
+     * A multi-region checksum with each region on its own budget: the first
+     * region exhausts its own maxBackoffMs and the operation aborts before
+     * a later region is scanned (per-region semantics, issue #271).
      */
     public function testChecksumSharesBackoffBudgetAcrossRegions(): void
     {
@@ -189,11 +222,13 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->expectException(TiKvException::class);
         $rangeOps->checksum('a', 'z');
 
-        $this->assertLessThanOrEqual(4, $retryCount, 'Shared budget should limit total retries across all regions');
+        $this->assertLessThanOrEqual(4, $retryCount, 'First region exhausts its own per-region budget');
     }
 
     /**
-     * reverseScan shares one backoff budget across regions.
+     * A multi-region reverseScan with each region on its own budget: the
+     * first region exhausts its own maxBackoffMs and the scan aborts before
+     * a later region is scanned (per-region semantics, issue #271).
      */
     public function testReverseScanSharesBackoffBudgetAcrossRegions(): void
     {
@@ -229,7 +264,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->expectException(TiKvException::class);
         $scanner->reverseScan('z', 'a', 100, false);
 
-        $this->assertLessThanOrEqual(4, $retryCount, 'Shared budget should limit total retries across all regions');
+        $this->assertLessThanOrEqual(4, $retryCount, 'First region exhausts its own per-region budget');
     }
 
     /**
@@ -325,10 +360,6 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
     }
 
     /**
-     * Budget accumulates correctly: first region consumes part of budget,
-     * second region exhausts the remainder.
-     */
-    /**
      * A multi-region scan has one RetryExecutor reused per region, but
      * maxBackoffMs is a per-operation (per-region) limit (issue #271). Each
      * region must therefore retry normally with a full budget, instead of
@@ -366,14 +397,13 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         // first two attempts, then succeeds with a single k/v pair.
         $failuresPerRegion = [0, 0, 0, 0];
         $this->grpc->method('call')->willReturnCallback(function (
-            $address,
-            $service,
-            $method,
-            $request,
-            $responseClass,
+            string $address,
+            string $service,
+            string $method,
+            RawScanRequest $request,
+            string $responseClass,
         ) use (&$failuresPerRegion): RawScanResponse {
-            $rawRequest = $request;
-            $key = $rawRequest->getStartKey();
+            $key = $request->getStartKey();
             $regionIndex = match (true) {
                 $key < 'b' => 0,
                 $key < 'c' => 1,
@@ -411,47 +441,5 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         // budget. A shared budget would have thrown on region 2's first retry.
         $this->assertCount(4, $results);
         $this->assertSame([2, 2, 2, 2], $failuresPerRegion);
-    }
-
-    public function testBudgetAccumulatesAcrossRegions(): void
-    {
-        $region1 = $this->defaultRegion('a', 'm', regionId: 1);
-        $region2 = $this->defaultRegion('m', 'z', regionId: 2);
-
-        $this->regionCache->method('getByKey')->willReturn(null);
-        $this->regionCache->method('put');
-        $this->regionCache->method('invalidate');
-        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
-        $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
-        );
-        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-
-        // maxBackoffMs=14: allows exactly 3 retries (2+4+8=14)
-        // Region1 uses attempt 0 (2ms) and attempt 1 (4ms) → succeeds
-        // Region2 uses attempt 2 (8ms) → 14ms total, budget exhausted
-        $callCount = 0;
-        $this->grpc->method('call')->willReturnCallback(function () use (&$callCount): RawScanResponse {
-            $callCount++;
-            throw new TiKvException('StaleCommand');
-        });
-
-        $scanner = new RawKvScanner(
-            $this->pdClient,
-            $this->grpc,
-            $this->regionResolver,
-            new TimeoutConfig(),
-            maxBackoffMs: 14,
-            serverBusyBudgetMs: 600000,
-            regionCache: $this->regionCache,
-            logger: new NullLogger(),
-        );
-
-        $this->expectException(TiKvException::class);
-        $scanner->scan('a', 'z', 100, false);
-
-        // With budget=14: attempt 0 (2ms) + attempt 1 (4ms) + attempt 2 (8ms) = 14ms
-        // Budget exhausted at attempt 2 → 3 retries total
-        $this->assertLessThanOrEqual(4, $callCount, 'Budget exhausted across both regions');
     }
 }
