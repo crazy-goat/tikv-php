@@ -591,7 +591,19 @@ final readonly class TwoPhaseCommitter
                         if ($locked !== null) {
                             $rawPrimary = $locked->getPrimaryLock();
                             $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                            $this->lockResolver->resolveLock($lockPrimary, $locked);
+                            // Charge the whole resolve (status RPCs + TTL wait)
+                            // to this loop's budget (issue #470): pass the
+                            // remaining time so the lock wait is capped by it,
+                            // then add the wall time actually spent back into
+                            // $elapsedMs — the wait used to be invisible to
+                            // the budget and could stretch it past maxBackoffMs.
+                            $resolveStartMs = (int) (microtime(true) * 1000);
+                            $this->lockResolver->resolveLock(
+                                $lockPrimary,
+                                $locked,
+                                max(0, $this->maxBackoffMs - $elapsedMs),
+                            );
+                            $elapsedMs += max(0, (int) (microtime(true) * 1000) - $resolveStartMs);
                             $needRetry = true;
                             break;
                         }

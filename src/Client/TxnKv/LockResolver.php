@@ -43,8 +43,13 @@ final readonly class LockResolver
      * @param string $primaryLock The primary key of the transaction (from LockInfo::getPrimaryLock()).
      *                            If the lock has no primary info (e.g. pessimistic), pass the locked key itself.
      * @param LockInfo $lock The lock information from the error response.
+     * @param int $remainingDeadlineMs Remaining wall-clock budget (ms) of the calling
+     *                                 operation's retry deadline. When > 0, the lock-TTL
+     *                                 wait is capped by it so a single lock encounter
+     *                                 cannot push the operation past its deadline
+     *                                 (issue #470); 0 keeps the legacy maxBackoffMs-only cap.
      */
-    public function resolveLock(string $primaryLock, LockInfo $lock): void
+    public function resolveLock(string $primaryLock, LockInfo $lock, int $remainingDeadlineMs = 0): void
     {
         $lockTs = (int) $lock->getLockVersion();
         $this->logger->debug('Resolving lock', [
@@ -61,11 +66,15 @@ final readonly class LockResolver
         } elseif ($commitTs === 0) {
             $ttl = $status['lockTtl'] ?? 0;
             if ($ttl > 0) {
-                $sleepMs = min($ttl, $this->maxBackoffMs);
+                // The wait used to be charged to no budget (issue #470): cap
+                // it by the caller's remaining retry deadline when provided.
+                $deadlineCap = $remainingDeadlineMs > 0 ? $remainingDeadlineMs : $this->maxBackoffMs;
+                $sleepMs = min($ttl, $deadlineCap);
                 $this->logger->debug('Lock still active, waiting', [
                     'key' => KeyRedactor::redact((string) $lock->getKey()),
                     'ttl' => $ttl,
                     'sleepMs' => $sleepMs,
+                    'remainingDeadlineMs' => $remainingDeadlineMs,
                 ]);
                 usleep($sleepMs * 1000);
             }

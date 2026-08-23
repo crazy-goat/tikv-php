@@ -8,6 +8,7 @@ use CrazyGoat\Proto\Kvrpcpb\Deadlock;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
@@ -2536,5 +2537,94 @@ class TransactionTest extends TestCase
         $this->assertNotNull($capturedRollbackForUpdateTs, 'PessimisticRollbackRequest was not captured');
         // The forUpdateTs must be the fresh PD timestamp (5000), not startTs (1000).
         $this->assertSame(5000, $capturedRollbackForUpdateTs);
+    }
+
+    // ========================================================================
+    // Pessimistic lock: the resolveLock TTL wait is charged to $elapsedMs (#470)
+    // ========================================================================
+
+    public function testPessimisticLockChargesLockWaitToBudget(): void
+    {
+        // maxBackoffMs = 100: the first locked response triggers resolveLock,
+        // whose TTL wait must be charged to $elapsedMs. With the charge the
+        // loop exits via the budget guard after ~one resolve; without it
+        // (old behaviour) the wait was invisible to the budget.
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $rawKey = 'budget-key-470';
+        $lockInfo = new LockInfo();
+        $lockInfo->setKey($rawKey);
+        $lockInfo->setPrimaryLock($rawKey);
+        $lockInfo->setLockVersion(1000);
+
+        $keyError = new KeyError();
+        $keyError->setLocked($lockInfo);
+
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors([$keyError]);
+
+        $stillActiveStatus = new \CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse();
+        $stillActiveStatus->setCommitVersion(0);
+        // A 20 s TTL equals the default maxBackoffMs cap: without the #470
+        // cap-by-deadline this resolve slept the FULL ttl uncharged.
+        $stillActiveStatus->setLockTtl(20000);
+        $stillActiveStatus->setAction(\CrazyGoat\Proto\Kvrpcpb\Action::NoAction);
+
+        $resolveLockResponse = new \CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse();
+
+        $lockAttempts = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method
+            ) use (
+                &$lockAttempts,
+                $lockResponse,
+                $stillActiveStatus,
+                $resolveLockResponse,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $lockAttempts++;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    // Active lock with a 500 ms TTL: resolveLock waits (capped
+                    // by the remaining 100 ms budget passed by the committer)
+                    // before resolving as rolled back.
+                    'KvCheckTxnStatus' => $stillActiveStatus,
+                    'KvResolveLock' => $resolveLockResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true, 'maxBackoffMs' => 100]);
+        $txn->set($rawKey, 'value');
+
+        $startMs = microtime(true) * 1000;
+        try {
+            $txn->commit();
+            $this->fail('Expected LockWaitTimeoutException was not thrown');
+        } catch (LockWaitTimeoutException $e) {
+            $this->assertSame(100, $e->getTimeoutMs());
+            $this->assertStringNotContainsString($rawKey, $e->getMessage());
+        }
+        $elapsedMs = (microtime(true) * 1000) - $startMs;
+
+        // The 20 s TTL wait must be capped by the remaining budget (<= 100 ms)
+        // and charged to it; the whole commit fails in well under a second.
+        // Without #470 the uncharged sleep alone took ~20 s per encounter.
+        $this->assertLessThan(2500, $elapsedMs, 'Lock wait must be capped + charged, not silently stretch the budget');
+
+        // The charged wait must end the loop quickly: at most one extra lock
+        // attempt after the first resolve. Without the #470 charging the loop
+        // kept retrying while the budget silently stretched past maxBackoffMs.
+        $this->assertLessThanOrEqual(2, $lockAttempts);
     }
 }
