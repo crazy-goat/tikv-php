@@ -37,7 +37,7 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithCaCertFromFile(): void
     {
-        $certContent = 'test-ca-cert-content';
+        $certContent = '-----BEGIN CERTIFICATE-----\ntest-ca-cert-content\n-----END CERTIFICATE-----';
         $certPath = $this->tempDir . '/ca.crt';
         file_put_contents($certPath, $certContent);
 
@@ -50,7 +50,7 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithCaCertFromContent(): void
     {
-        $certContent = 'inline-ca-cert-content';
+        $certContent = '-----BEGIN CERTIFICATE-----\ninline-ca-cert-content\n-----END CERTIFICATE-----';
 
         $config = (new TlsConfigBuilder())
             ->withCaCert($certContent)
@@ -61,9 +61,9 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithClientCertFromFiles(): void
     {
-        $caContent = 'test-ca-cert';
-        $certContent = 'test-client-cert';
-        $keyContent = 'test-client-key';
+        $caContent = '-----BEGIN CERTIFICATE-----\ntest-ca-cert\n-----END CERTIFICATE-----';
+        $certContent = '-----BEGIN CERTIFICATE-----\ntest-client-cert\n-----END CERTIFICATE-----';
+        $keyContent = '-----BEGIN PRIVATE KEY-----\ntest-client-key\n-----END PRIVATE KEY-----';
         $caPath = $this->tempDir . '/ca.crt';
         $certPath = $this->tempDir . '/client.crt';
         $keyPath = $this->tempDir . '/client.key';
@@ -96,7 +96,7 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithCaCertFileReadsFromPath(): void
     {
-        $content = 'file-content';
+        $content = '-----BEGIN CERTIFICATE-----\nfile-content\n-----END CERTIFICATE-----';
         $path = $this->tempDir . '/ca.pem';
         file_put_contents($path, $content);
 
@@ -118,7 +118,7 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithCaCertPemStoresInlineContent(): void
     {
-        $pem = 'inline-pem-content';
+        $pem = '-----BEGIN CERTIFICATE-----inline-pem-content-----END CERTIFICATE-----';
 
         $config = (new TlsConfigBuilder())
             ->withCaCertPem($pem)
@@ -129,9 +129,9 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithClientCertFileReadsFromPaths(): void
     {
-        $caContent = 'ca-content';
-        $certContent = 'cert-content';
-        $keyContent = 'key-content';
+        $caContent = '-----BEGIN CERTIFICATE-----\nca-content\n-----END CERTIFICATE-----';
+        $certContent = '-----BEGIN CERTIFICATE-----\ncert-content\n-----END CERTIFICATE-----';
+        $keyContent = '-----BEGIN PRIVATE KEY-----\nkey-content\n-----END PRIVATE KEY-----';
         $caPath = $this->tempDir . '/ca.crt';
         $certPath = $this->tempDir . '/client.crt';
         $keyPath = $this->tempDir . '/client.key';
@@ -150,9 +150,9 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithClientCertPemStoresInlineContent(): void
     {
-        $caPem = 'inline-ca-pem';
-        $certPem = 'inline-client-cert';
-        $keyPem = 'inline-client-key';
+        $caPem = '-----BEGIN CERTIFICATE-----\ninline-ca-pem\n-----END CERTIFICATE-----';
+        $certPem = '-----BEGIN CERTIFICATE-----\ninline-client-cert\n-----END CERTIFICATE-----';
+        $keyPem = '-----BEGIN PRIVATE KEY-----\ninline-client-key\n-----END PRIVATE KEY-----';
 
         $config = (new TlsConfigBuilder())
             ->withCaCertPem($caPem)
@@ -192,7 +192,7 @@ class TlsConfigBuilderTest extends TestCase
     public function testSymlinkIsResolvedAndValidated(): void
     {
         // Create a target file with allowed extension
-        $realContent = 'real-cert-content';
+        $realContent = '-----BEGIN CERTIFICATE-----\nreal-cert-content\n-----END CERTIFICATE-----';
         $realPath = $this->tempDir . '/real.crt';
         file_put_contents($realPath, $realContent);
 
@@ -223,7 +223,7 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testBaseDirectoryRestrictionAllowsInsidePath(): void
     {
-        $content = 'inside-content';
+        $content = '-----BEGIN CERTIFICATE-----\ninside-content\n-----END CERTIFICATE-----';
         $path = $this->tempDir . '/inside.crt';
         file_put_contents($path, $content);
 
@@ -336,7 +336,7 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithCaCertFromPemFile(): void
     {
-        $content = 'pem-content';
+        $content = '-----BEGIN CERTIFICATE-----\npem-content\n-----END CERTIFICATE-----';
         $path = $this->tempDir . '/ca.pem';
         file_put_contents($path, $content);
 
@@ -347,7 +347,7 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithCaCertFromKeyFile(): void
     {
-        $content = 'key-content';
+        $content = '-----BEGIN PRIVATE KEY-----\nkey-content\n-----END PRIVATE KEY-----';
         $path = $this->tempDir . '/ca.key';
         file_put_contents($path, $content);
 
@@ -362,9 +362,9 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testMethodChaining(): void
     {
-        $caContent = 'ca-content';
-        $certContent = 'cert-content';
-        $keyContent = 'key-content';
+        $caContent = '-----BEGIN CERTIFICATE-----\nca-content\n-----END CERTIFICATE-----';
+        $certContent = '-----BEGIN CERTIFICATE-----\ncert-content\n-----END CERTIFICATE-----';
+        $keyContent = '-----BEGIN PRIVATE KEY-----\nkey-content\n-----END PRIVATE KEY-----';
         $caPath = $this->tempDir . '/ca.crt';
         $certPath = $this->tempDir . '/client.crt';
         $keyPath = $this->tempDir . '/client.key';
@@ -384,7 +384,7 @@ class TlsConfigBuilderTest extends TestCase
 
     public function testWithCaCertFileWithBaseDir(): void
     {
-        $content = 'cert-content';
+        $content = '-----BEGIN CERTIFICATE-----\ncert-content\n-----END CERTIFICATE-----';
         $path = $this->tempDir . '/sub/ca.crt';
         mkdir($this->tempDir . '/sub', 0777, true);
         file_put_contents($path, $content);
@@ -394,5 +394,61 @@ class TlsConfigBuilderTest extends TestCase
             ->build();
 
         $this->assertSame($content, $config->caCert);
+    }
+
+    // ========================================================================
+    // SEC-02 regression: guessing must fail loudly, PEM validation
+    // ========================================================================
+
+    public function testWithCaCertNonExistentPathThrowsInsteadOfTreatingAsPem(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('looks like a file path but the file does not exist or is not readable');
+
+        (new TlsConfigBuilder())->withCaCert($this->tempDir . '/nonexistent-ca.crt');
+    }
+
+    public function testWithCaCertUnreadablePathThrowsInsteadOfTreatingAsPem(): void
+    {
+        $path = $this->tempDir . '/unreadable-ca.crt';
+        file_put_contents($path, "-----BEGIN CERTIFICATE-----\ncontent\n-----END CERTIFICATE-----");
+        chmod($path, 0000);
+
+        if (@file_get_contents($path) !== false) {
+            chmod($path, 0644);
+            $this->markTestSkipped('Running as root — chmod 0000 has no effect');
+        }
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('looks like a file path but the file does not exist or is not readable');
+
+        (new TlsConfigBuilder())->withCaCert($path);
+    }
+
+    public function testWithCaCertNonPemStringThrows(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('does not contain PEM data');
+
+        // Explicit PEM path bypasses the path-guessing, so a non-PEM body is
+        // validated by TlsConfig at build() time.
+        (new TlsConfigBuilder())->withCaCertPem('not-a-pem-string')->build();
+    }
+
+    public function testWithClientCertNonPemStringThrows(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('does not contain PEM data');
+
+        (new TlsConfigBuilder())->withClientCertPem('not-a-cert', 'not-a-key')->build();
+    }
+
+    public function testWithCaCertPemStringContainingPemHeaderPasses(): void
+    {
+        $pem = "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END CERTIFICATE-----";
+
+        $config = (new TlsConfigBuilder())->withCaCert($pem)->build();
+
+        $this->assertSame($pem, $config->caCert);
     }
 }

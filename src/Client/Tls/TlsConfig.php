@@ -31,6 +31,13 @@ final class TlsConfig
             );
         }
 
+        // Reject non-PEM material (e.g. a path string that was misinterpreted)
+        foreach (['caCert' => $caCert, 'clientCert' => $clientCert, 'clientKey' => $clientKey] as $name => $pem) {
+            if ($pem !== null && !str_contains($pem, '-----BEGIN')) {
+                throw new InvalidArgumentException(sprintf('%s does not contain PEM data', $name));
+            }
+        }
+
         // If client cert/key are provided without CA, the configuration is incomplete
         // and would silently downgrade to plaintext — reject it.
         if ($this->clientCert !== null && $this->clientKey !== null && $this->caCert === null) {

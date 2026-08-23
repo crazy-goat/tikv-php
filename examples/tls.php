@@ -22,14 +22,15 @@ echo "-----------------------------------------------------------\n";
 
 $options1 = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',  // Path to CA certificate file
+        'caCertFile' => '/path/to/ca.crt',
+        'caCertBaseDir' => '/path/to', // optional: restrict to base directory
     ],
 ];
 
 echo "Options:\n";
-echo "  caCert: /path/to/ca.crt\n";
+echo "  caCertFile: /path/to/ca.crt\n";
 echo "\nCode:\n";
-echo "  \$options = ['tls' => ['caCert' => '/path/to/ca.crt']];\n";
+echo "  \$options = ['tls' => ['caCertFile' => '/path/to/ca.crt']];\n";
 echo "  \$client = RawKvClient::create(['tikv.example.com:2379'], options: \$options);\n\n";
 
 // Example 2: Mutual TLS (mTLS) with client certificate
@@ -38,40 +39,40 @@ echo "----------------------------------------------------------\n";
 
 $options2 = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',
-        'clientCert' => '/path/to/client.crt',
-        'clientKey' => '/path/to/client.key',
+        'caCertFile' => '/path/to/ca.crt',
+        'clientCertFile' => '/path/to/client.crt',
+        'clientKeyFile' => '/path/to/client.key',
     ],
 ];
 
 echo "Options:\n";
-echo "  caCert: /path/to/ca.crt\n";
-echo "  clientCert: /path/to/client.crt\n";
-echo "  clientKey: /path/to/client.key\n";
+echo "  caCertFile: /path/to/ca.crt\n";
+echo "  clientCertFile: /path/to/client.crt\n";
+echo "  clientKeyFile: /path/to/client.key\n";
 echo "\nCode:\n";
 echo "  \$options = [\n";
 echo "      'tls' => [\n";
-echo "          'caCert' => '/path/to/ca.crt',\n";
-echo "          'clientCert' => '/path/to/client.crt',\n";
-echo "          'clientKey' => '/path/to/client.key',\n";
+echo "          'caCertFile' => '/path/to/ca.crt',\n";
+echo "          'clientCertFile' => '/path/to/client.crt',\n";
+echo "          'clientKeyFile' => '/path/to/client.key',\n";
 echo "      ],\n";
 echo "  ];\n";
 echo "  \$client = RawKvClient::create(['tikv.example.com:2379'], options: \$options);\n\n";
 
-// Example 3: Using certificate content directly (instead of file paths)
-echo "Example 3: Using Certificate Content Directly\n";
-echo "---------------------------------------------\n";
+// Example 3: Using certificate content directly (inline PEM)
+echo "Example 3: Using Certificate Content Directly (Inline PEM)\n";
+echo "----------------------------------------------------------\n";
 
-echo "You can also pass certificate content as strings:\n\n";
+echo "You can also pass certificate content as strings via the *Pem variants:\n\n";
 echo "  \$caCert = file_get_contents('/path/to/ca.crt');\n";
 echo "  \$clientCert = file_get_contents('/path/to/client.crt');\n";
 echo "  \$clientKey = file_get_contents('/path/to/client.key');\n";
 echo "  \n";
 echo "  \$options = [\n";
 echo "      'tls' => [\n";
-echo "          'caCert' => \$caCert,\n";
-echo "          'clientCert' => \$clientCert,\n";
-echo "          'clientKey' => \$clientKey,\n";
+echo "          'caCertPem' => \$caCert,\n";
+echo "          'clientCertPem' => \$clientCert,\n";
+echo "          'clientKeyPem' => \$clientKey,\n";
 echo "      ],\n";
 echo "  ];\n\n";
 
@@ -89,14 +90,14 @@ if (file_exists($caCertPath)) {
     try {
         $options = [
             'tls' => [
-                'caCert' => $caCertPath,
+                'caCertFile' => $caCertPath,
             ],
         ];
-        
+
         // Add client cert if available
         if (file_exists($clientCertPath) && file_exists($clientKeyPath)) {
-            $options['tls']['clientCert'] = $clientCertPath;
-            $options['tls']['clientKey'] = $clientKeyPath;
+            $options['tls']['clientCertFile'] = $clientCertPath;
+            $options['tls']['clientKeyFile'] = $clientKeyPath;
             echo "Using mutual TLS (mTLS)\n";
         } else {
             echo "Using server verification only\n";

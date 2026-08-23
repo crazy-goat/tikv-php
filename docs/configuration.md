@@ -217,7 +217,8 @@ Verify the server's certificate:
 ```php
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',  // CA certificate file path or content
+        'caCertFile' => '/path/to/ca.crt',
+        'caCertBaseDir' => '/path/to', // optional: restrict to base directory
     ],
 ];
 
@@ -231,9 +232,9 @@ Client certificate authentication:
 ```php
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',
-        'clientCert' => '/path/to/client.crt',
-        'clientKey' => '/path/to/client.key',
+        'caCertFile' => '/path/to/ca.crt',
+        'clientCertFile' => '/path/to/client.crt',
+        'clientKeyFile' => '/path/to/client.key',
     ],
 ];
 
@@ -245,9 +246,9 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 > clientCert/clientKey are provided without caCert — this prevents accidental
 > downgrade to plaintext.
 
-### Using Certificate Content
+### Using Certificate Content (Inline PEM)
 
-You can pass certificate content directly instead of file paths:
+You can pass certificate content directly instead of file paths — use the `*Pem` variants:
 
 ```php
 $caCert = file_get_contents('/path/to/ca.crt');
@@ -256,9 +257,9 @@ $clientKey = file_get_contents('/path/to/client.key');
 
 $options = [
     'tls' => [
-        'caCert' => $caCert,
-        'clientCert' => $clientCert,
-        'clientKey' => $clientKey,
+        'caCertPem' => $caCert,
+        'clientCertPem' => $clientCert,
+        'clientKeyPem' => $clientKey,
     ],
 ];
 ```
@@ -271,8 +272,8 @@ For advanced TLS configuration:
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 
 $builder = new TlsConfigBuilder();
-$builder->withCaCert('/path/to/ca.crt')
-    ->withClientCert('/path/to/client.crt', '/path/to/client.key');
+$builder->withCaCertFile('/path/to/ca.crt')
+    ->withClientCertFile('/path/to/client.crt', '/path/to/client.key');
 
 $tlsConfig = $builder->build();
 

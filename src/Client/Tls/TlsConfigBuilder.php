@@ -110,13 +110,21 @@ final class TlsConfigBuilder
     }
 
     /**
-     * Check whether a string looks like a file path (exists, readable).
+     * Check whether a string looks like a file path or inline PEM.
      * This is used for backward compatibility with the deprecated guessing methods.
      * Extension validation is done later in readFile().
      */
     private function resolveWithGuess(string $value): bool
     {
-        return file_exists($value) && is_readable($value);
+        $looksLikePath = !str_contains($value, '-----BEGIN');
+
+        if ($looksLikePath && !(file_exists($value) && is_readable($value))) {
+            throw new InvalidArgumentException(
+                'TLS value looks like a file path but the file does not exist or is not readable',
+            );
+        }
+
+        return $looksLikePath;
     }
 
     /**
