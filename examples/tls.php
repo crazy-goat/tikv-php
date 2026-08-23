@@ -40,8 +40,11 @@ echo "----------------------------------------------------------\n";
 $options2 = [
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
+        // Each *BaseDir applies only to its matching file reads:
+        // caCertBaseDir → caCertFile, clientCertBaseDir → clientCertFile + clientKeyFile
         'clientCertFile' => '/path/to/client.crt',
         'clientKeyFile' => '/path/to/client.key',
+        'clientCertBaseDir' => '/path/to',
     ],
 ];
 
@@ -49,12 +52,14 @@ echo "Options:\n";
 echo "  caCertFile: /path/to/ca.crt\n";
 echo "  clientCertFile: /path/to/client.crt\n";
 echo "  clientKeyFile: /path/to/client.key\n";
+echo "  clientCertBaseDir: /path/to\n";
 echo "\nCode:\n";
 echo "  \$options = [\n";
 echo "      'tls' => [\n";
 echo "          'caCertFile' => '/path/to/ca.crt',\n";
 echo "          'clientCertFile' => '/path/to/client.crt',\n";
 echo "          'clientKeyFile' => '/path/to/client.key',\n";
+echo "          'clientCertBaseDir' => '/path/to',\n";
 echo "      ],\n";
 echo "  ];\n";
 echo "  \$client = RawKvClient::create(['tikv.example.com:2379'], options: \$options);\n\n";
