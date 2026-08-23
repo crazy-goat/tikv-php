@@ -23,6 +23,10 @@ use PHPUnit\Framework\TestCase;
  */
 class RetryDeadlineTest extends TestCase
 {
+    /** Tolerance for wall-clock assertions: covers usleep overshoot, mock
+     * overhead and millisecond rounding of the elapsed-time measurement. */
+    private const ELAPSED_TOLERANCE_MS = 2500;
+
     private PdClientInterface&MockObject $pdClient;
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
@@ -70,31 +74,35 @@ class RetryDeadlineTest extends TestCase
 
     public function testGetFailsWithinConfiguredDeadlineWhenServerAlwaysBusy(): void
     {
-        // ServerBusy sleeps ~1000-2000ms per attempt; with the budget disabled
-        // (0) only the wall-clock deadline can stop the loop.
+        // ServerBusy sleeps ~1000-2000ms per attempt. Keep the DEFAULT
+        // ServerBusy budget (60s): it cannot bind within a few attempts, so
+        // the tiny wall-clock deadline below is what actually ends the loop.
+        // A budget of 0 would NOT do — budgets have no "disabled" semantics,
+        // 0 exhausts on the first charge and would bypass the deadline.
         $deadlineMs = 50;
-        $toleranceMs = 2000;
         $client = new RawKvClient(
             $this->pdClient,
             $this->grpc,
             $this->regionCache,
-            maxBackoffMs: 0,           // disable the non-ServerBusy budget
-            serverBusyBudgetMs: 0,     // disable the ServerBusy backoff budget…
-            retryDeadlineMs: $deadlineMs, // …so ONLY the deadline can end the loop
+            maxBackoffMs: 0,              // disable the non-ServerBusy budget
+            retryDeadlineMs: $deadlineMs, // the binding bound under test
         );
         $this->alwaysServerBusy();
 
         $startMs = (int) (microtime(true) * 1000);
 
+        $this->expectException(RetryBudgetExhaustedException::class);
+        $this->expectExceptionMessage('Retry deadline');
+
         try {
             $client->get('key');
-            $this->fail('Expected the retry deadline to end the ServerBusy retry loop');
-        } catch (TiKvException) {
-            // Both exits carry the last ServerIsBusy error here; either is fine.
+        } finally {
+            // Deadline is checked before each attempt; the last sleep can
+            // overshoot by up to one ServerBusy sleep (~2s at these attempt
+            // counts), hence the tolerance.
+            $elapsedMs = (int) (microtime(true) * 1000) - $startMs;
+            $this->assertLessThanOrEqual($deadlineMs + self::ELAPSED_TOLERANCE_MS, $elapsedMs);
         }
-
-        $elapsedMs = (int) (microtime(true) * 1000) - $startMs;
-        $this->assertLessThanOrEqual($deadlineMs + $toleranceMs, $elapsedMs);
     }
 
     public function testGetThrowsRetryBudgetExhaustedUnderSustainedServerBusy(): void
@@ -126,11 +134,13 @@ class RetryDeadlineTest extends TestCase
         try {
             $client->get('key');
         } finally {
-            // First attempt + deadline check happen before any sleep, so the
-            // loop must end promptly even though the ServerBusy budget (60 s)
-            // is nowhere near exhausted.
+            // The deadline is checked BEFORE each attempt, so the first
+            // ServerBusy backoff (equal-jitter 1000-2000ms) sleeps before
+            // the deadline check that ends the loop — elapsed is ~1-2s.
+            // Bound = deadline + one ServerBusy sleep cap + tolerance for
+            // usleep overshoot and ms rounding (flake-proof).
             $elapsedMs = (int) (microtime(true) * 1000) - $startMs;
-            $this->assertLessThan(2000, $elapsedMs);
+            $this->assertLessThan(30 + self::ELAPSED_TOLERANCE_MS, $elapsedMs);
         }
     }
 

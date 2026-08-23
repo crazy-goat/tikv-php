@@ -63,10 +63,10 @@ final class Transaction
     /**
      * Default wall-clock deadline for the transaction retry loop (issue #294).
      * Bounds the blocking usleep() backoff so a sustained error episode cannot
-     * pin a PHP-FPM worker for minutes inside one commit/scan; matches the
-     * RawKvClient default (RawKvClient::DEFAULT_RETRY_DEADLINE_MS).
+     * pin a PHP-FPM worker for minutes inside one commit/scan. Alias of the
+     * canonical RetryExecutor constant; do not introduce further copies.
      */
-    public const DEFAULT_RETRY_DEADLINE_MS = 30000;
+    public const DEFAULT_RETRY_DEADLINE_MS = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS;
 
     public function __construct(
         private readonly string $txnId,
@@ -85,7 +85,7 @@ final class Transaction
         int $retryDeadlineMs = self::DEFAULT_RETRY_DEADLINE_MS,
     ) {
         if ($retryDeadlineMs < 0) {
-            throw new \InvalidArgumentException('retryDeadlineMs must be >= 0');
+            throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->state = new TransactionState();

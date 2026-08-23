@@ -394,7 +394,7 @@ enum BackoffType
 **Retry Budgets**:
 - **General**: 20 seconds total backoff
 - **ServerBusy**: 60 seconds separate budget
-- **Wall-clock deadline**: 30 seconds hard bound per operation (configurable via `options['retryDeadlineMs']`; issue #294)
+- **Wall-clock deadline**: 30 seconds per operation (configurable via `options['retryDeadlineMs']`; issue #294). Checked before each attempt — the final backoff sleep may overshoot it by up to one sleep interval (ServerBusy caps at 10 s), so worst case is ≈ deadline + one sleep.
 
 ## Data Flow
 

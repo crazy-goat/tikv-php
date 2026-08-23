@@ -64,8 +64,11 @@ final class RawKvClient
      * single request; the previous unbounded worst case was ~10 minutes
      * (serverBusyBudgetMs = 600000, since reduced — see
      * DEFAULT_SERVER_BUSY_BUDGET_MS).
+     *
+     * Kept as an alias of the canonical RetryExecutor constant so existing
+     * references do not break; do not introduce further copies.
      */
-    public const DEFAULT_RETRY_DEADLINE_MS = 30000;
+    public const DEFAULT_RETRY_DEADLINE_MS = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS;
 
     /**
      * Default ServerBusy backoff budget (issue #294). Reduced from the

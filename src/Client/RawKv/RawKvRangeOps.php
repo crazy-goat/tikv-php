@@ -36,7 +36,7 @@ final readonly class RawKvRangeOps
         private int $serverBusyBudgetMs,
         private LoggerInterface $logger,
         private ?SlowLogConfig $slowLogConfig = null,
-        private int $retryDeadlineMs = 0,
+        private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
     ) {
     }
 
