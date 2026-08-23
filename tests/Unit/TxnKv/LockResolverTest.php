@@ -443,4 +443,81 @@ class LockResolverTest extends TestCase
 
         $this->assertSame(2, $pdRegionCallCount, 'PD should be queried once per unique key');
     }
+
+    // ========================================================================
+    // resolveLock() — lock-TTL wait capped by remaining retry deadline (#470)
+    // ========================================================================
+
+    public function testResolveLockCapsTtlWaitByRemainingDeadline(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // A 20 s TTL (== the default maxBackoffMs cap) with only 100 ms of
+        // remaining operation budget: the wait must be capped at ~100 ms.
+        $this->grpc->expects($this->exactly(3))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 20000),
+                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
+                new ResolveLockResponse(),
+            );
+
+        $resolver = $this->createResolver();
+
+        $startMs = microtime(true) * 1000;
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 100);
+        $elapsedMs = (microtime(true) * 1000) - $startMs;
+
+        // Well below even one ServerBusy backoff jitter step (~1-2 s), so a
+        // regression to the uncapped 20 s sleep fails this loudly.
+        $this->assertLessThan(2500, $elapsedMs, 'Lock TTL wait must be capped by the remaining deadline');
+    }
+
+    public function testResolveLockWithZeroRemainingDeadlineKeepsLegacyWait(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->exactly(3))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 60),
+                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
+                new ResolveLockResponse(),
+            );
+
+        $resolver = $this->createResolver();
+
+        $startMs = microtime(true) * 1000;
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+        $elapsedMs = (microtime(true) * 1000) - $startMs;
+
+        // usleep guarantees at least the requested time; allow scheduler slack.
+        $this->assertGreaterThanOrEqual(40, $elapsedMs, 'Default (0) must keep the full TTL wait');
+        $this->assertLessThan(2000, $elapsedMs, 'Sanity: one short bounded sleep');
+    }
+
+    public function testResolveLockWithRemainingAboveTtlWaitsFullTtl(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->exactly(3))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 60),
+                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
+                new ResolveLockResponse(),
+            );
+
+        $resolver = $this->createResolver();
+
+        $startMs = microtime(true) * 1000;
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 5000);
+        $elapsedMs = (microtime(true) * 1000) - $startMs;
+
+        $this->assertGreaterThanOrEqual(40, $elapsedMs, 'A deadline above the TTL must not shorten the wait');
+        $this->assertLessThan(2000, $elapsedMs);
+    }
 }
