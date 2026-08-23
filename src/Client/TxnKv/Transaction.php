@@ -45,8 +45,28 @@ final class Transaction
     private readonly TwoPhaseCommitter $committer;
     private ?RetryExecutor $retryExecutor = null;
 
+    /** Wall-clock deadline (ms) applied to this transaction's RetryExecutor. */
+    private readonly int $retryDeadlineMs;
+
     /** Maximum scan limit to prevent unbounded memory usage */
     private const MAX_SCAN_LIMIT = 10240;
+
+    /**
+     * ServerBusy backoff budget for the transaction retry loop, kept as an
+     * explicit constant because Transaction has no client options array
+     * (issue #294). Matches RawKvClient::DEFAULT_SERVER_BUSY_BUDGET_MS
+     * (reduced from 600000 ms — see there for rationale). The wall-clock
+     * bound on the loop is retryDeadlineMs.
+     */
+    private const DEFAULT_SERVER_BUSY_BUDGET_MS = 60000;
+
+    /**
+     * Default wall-clock deadline for the transaction retry loop (issue #294).
+     * Bounds the blocking usleep() backoff so a sustained error episode cannot
+     * pin a PHP-FPM worker for minutes inside one commit/scan. Alias of the
+     * canonical RetryExecutor constant; do not introduce further copies.
+     */
+    public const DEFAULT_RETRY_DEADLINE_MS = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS;
 
     public function __construct(
         private readonly string $txnId,
@@ -62,7 +82,12 @@ final class Transaction
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
         private readonly MetricsInterface $metrics = new NoOpMetrics(),
+        int $retryDeadlineMs = self::DEFAULT_RETRY_DEADLINE_MS,
     ) {
+        if ($retryDeadlineMs < 0) {
+            throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
+        }
+        $this->retryDeadlineMs = $retryDeadlineMs;
         $this->state = new TransactionState();
 
         $this->reader = new TxnReader(
@@ -345,11 +370,12 @@ final class Transaction
     {
         $this->retryExecutor ??= new RetryExecutor(
             $this->maxBackoffMs,
-            600000,
+            self::DEFAULT_SERVER_BUSY_BUDGET_MS,
             $this->regionCache,
             $this->grpc,
             $this->regionResolver,
             $this->logger,
+            deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
         );
 

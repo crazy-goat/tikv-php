@@ -28,6 +28,15 @@ final readonly class RetryExecutor
      */
     public const DEFAULT_MAX_ATTEMPTS = 30;
 
+    /**
+     * Canonical default wall-clock deadline (ms) for one operation's retry
+     * loop — the bound that keeps the blocking usleep() backoff from pinning
+     * a PHP-FPM worker for minutes (issue #294). Client classes
+     * (RawKvClient, Transaction, TxnKvClient, RawKvScanner, RawKvRangeOps)
+     * reference this single constant so the default cannot drift.
+     */
+    public const DEFAULT_RETRY_DEADLINE_MS = 30000;
+
     public function __construct(
         private int $maxBackoffMs,
         private int $serverBusyBudgetMs,

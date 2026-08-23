@@ -380,9 +380,25 @@ The client automatically retries failed operations:
 ```php
 // Default retry configuration (built-in)
 $client = RawKvClient::create(['127.0.0.1:2379']);
-// - Max backoff: 20 seconds
-// - Server busy budget: 10 minutes
+// - Max backoff: 20 seconds (non-ServerBusy errors, cumulative)
+// - Server busy budget: 60 seconds (cumulative ServerBusy sleep)
+// - Retry deadline: 30 seconds (checked before each retry attempt; the
+//   final backoff sleep may overshoot it by up to one sleep interval)
+
+// Custom retry deadline (issue #294) — bounds the blocking backoff loop so a
+// sustained ServerIsBusy episode cannot pin a PHP-FPM worker for minutes:
+$client = RawKvClient::create(['127.0.0.1:2379'], [
+    'retryDeadlineMs' => 5000, // 5 s wall-clock bound per operation; 0 disables
+]);
 ```
+
+> **Worker occupancy note:** `serverBusyBudgetMs` is effectively a
+> worker-occupancy setting — it caps how long ONE operation may block a PHP
+> process in `usleep()` while TiKV reports `ServerIsBusy`. The default of
+> 60 seconds suits request-driven runtimes such as PHP-FPM. Long-running CLI
+> workers that prefer to wait out long overload episodes can raise the budget
+> (and/or disable the retry deadline with `'retryDeadlineMs' => 0`) via the
+> `RawKvClient` constructor arguments.
 
 ### Retry Behavior
 

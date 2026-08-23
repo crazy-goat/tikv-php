@@ -393,7 +393,8 @@ enum BackoffType
 
 **Retry Budgets**:
 - **General**: 20 seconds total backoff
-- **ServerBusy**: 10 minutes separate budget
+- **ServerBusy**: 60 seconds separate budget
+- **Wall-clock deadline**: 30 seconds per operation (configurable via `options['retryDeadlineMs']`; issue #294). Checked before each attempt — the final backoff sleep may overshoot it by up to one sleep interval (ServerBusy caps at 10 s), so worst case is ≈ deadline + one sleep.
 
 ## Data Flow
 
@@ -793,9 +794,9 @@ $regionCache->switchLeader($regionId, $newLeaderId);
 
 **ServerIsBusy** (TiKV overloaded):
 ```php
-// 1. Use separate budget (10 minutes)
+// 1. Use separate budget (60 seconds) within the 30s wall-clock deadline
 // 2. Progressive backoff (100ms, 200ms, 400ms...)
-// 3. Continue until budget exhausted
+// 3. Continue until budget or deadline exhausted
 ```
 
 ## Security Architecture

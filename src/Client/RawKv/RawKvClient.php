@@ -57,6 +57,38 @@ final class RawKvClient
     public const OPT_SLOW_LOG = 'slowLog';
     public const OPT_METRICS = 'metrics';
 
+    /**
+     * Default wall-clock deadline for one client operation's retry loop
+     * (issue #294). Bounds the blocking usleep() backoff so a sustained
+     * ServerIsBusy episode cannot pin a PHP-FPM worker for minutes inside a
+     * single request; the previous unbounded worst case was ~10 minutes
+     * (serverBusyBudgetMs = 600000, since reduced — see
+     * DEFAULT_SERVER_BUSY_BUDGET_MS).
+     *
+     * Kept as an alias of the canonical RetryExecutor constant so existing
+     * references do not break; do not introduce further copies.
+     */
+    public const DEFAULT_RETRY_DEADLINE_MS = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS;
+
+    /**
+     * Default ServerBusy backoff budget (issue #294). Reduced from the
+     * previous 600000 ms: the budget caps cumulative blocking sleep charged
+     * to ServerBusy backoff inside ONE operation, i.e. it is effectively a
+     * worker-occupancy setting. Ten minutes pinned PHP-FPM workers for the
+     * whole duration of a cluster-wide overload; one minute, combined with
+     * the DEFAULT_RETRY_DEADLINE_MS wall-clock bound, still rides out short
+     * load spikes while shedding sustained ones in seconds. Long-running CLI
+     * workers that prefer to wait out long ServerBusy episodes can raise it
+     * via the constructor argument.
+     */
+    public const DEFAULT_SERVER_BUSY_BUDGET_MS = 60000;
+
+    /**
+     * options[] key for the per-operation retry deadline in milliseconds
+     * (see OPT_TIMEOUT / TimeoutConfig for the gRPC deadlines).
+     */
+    public const OPT_RETRY_DEADLINE = 'retryDeadlineMs';
+
     private bool $closed = false;
 
     private bool $atomicForCAS = false;
@@ -69,6 +101,8 @@ final class RawKvClient
     private readonly RawKvScanner $scanner;
     private readonly RawKvRangeOps $rangeOps;
     private readonly SstIngestor $ingestor;
+    /** Wall-clock deadline (ms) applied to every RetryExecutor this client builds. */
+    private readonly int $retryDeadlineMs;
 
     /**
      * @param string[] $pdEndpoints
@@ -94,6 +128,7 @@ final class RawKvClient
             storeHostPolicy: $bundle->storeHostPolicy,
             pdEndpoints: $bundle->pdEndpoints,
             allowedStorePorts: $bundle->allowedStorePorts,
+            retryDeadlineMs: self::resolveRetryDeadline($options),
         );
     }
 
@@ -103,7 +138,7 @@ final class RawKvClient
         private readonly RegionCacheInterface $regionCache = new RegionCache(),
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
-        private readonly int $serverBusyBudgetMs = 600000,
+        private readonly int $serverBusyBudgetMs = self::DEFAULT_SERVER_BUSY_BUDGET_MS,
         TimeoutConfig $timeoutConfig = new TimeoutConfig(),
         ?RegionResolver $regionResolver = null,
         ?RawKvCrud $crud = null,
@@ -121,7 +156,12 @@ final class RawKvClient
         private readonly array $pdEndpoints = [],
         /** @var list<int>|null */
         private readonly ?array $allowedStorePorts = null,
+        int $retryDeadlineMs = self::DEFAULT_RETRY_DEADLINE_MS,
     ) {
+        if ($retryDeadlineMs < 0) {
+            throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
+        }
+        $this->retryDeadlineMs = $retryDeadlineMs;
         $regionResolver ??= new RegionResolver(
             $pdClient,
             $regionCache,
@@ -163,6 +203,7 @@ final class RawKvClient
             $regionCache,
             $this->logger,
             $this->slowLogConfig,
+            $this->retryDeadlineMs,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -174,6 +215,7 @@ final class RawKvClient
             $serverBusyBudgetMs,
             $this->logger,
             $this->slowLogConfig,
+            $this->retryDeadlineMs,
         );
         $this->ingestor = new SstIngestor(
             $grpc,
@@ -290,6 +332,33 @@ final class RawKvClient
         }
     }
 
+    /**
+     * Resolve options['retryDeadlineMs'] (see OPT_RETRY_DEADLINE) for
+     * create(): wall-clock bound on one operation's retry loop. 0 disables
+     * the deadline; a negative value is rejected.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRetryDeadline(array $options): int
+    {
+        if (!array_key_exists(self::OPT_RETRY_DEADLINE, $options)) {
+            return self::DEFAULT_RETRY_DEADLINE_MS;
+        }
+
+        $deadlineMs = $options[self::OPT_RETRY_DEADLINE];
+        if (!is_int($deadlineMs)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['retryDeadlineMs'] must be an int (milliseconds), %s given",
+                get_debug_type($deadlineMs),
+            ));
+        }
+        if ($deadlineMs < 0) {
+            throw new InvalidArgumentException("options['retryDeadlineMs'] must be >= 0");
+        }
+
+        return $deadlineMs;
+    }
+
     private function createRetryExecutor(): RetryExecutor
     {
         $regionResolver = new RegionResolver(
@@ -310,6 +379,7 @@ final class RawKvClient
             $this->grpc,
             $regionResolver,
             $this->logger,
+            deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
         );
     }

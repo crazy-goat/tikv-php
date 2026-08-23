@@ -11,6 +11,7 @@ use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
@@ -24,9 +25,18 @@ final class TxnKvClient
     public const OPT_TIMEOUT = 'timeout';
     public const OPT_METRICS = 'metrics';
 
+    /**
+     * options[] key for the per-operation retry deadline in milliseconds —
+     * the wall-clock bound on the retry executor's blocking backoff loop
+     * (issue #294). 0 disables the deadline (not recommended under PHP-FPM).
+     */
+    public const OPT_RETRY_DEADLINE = 'retryDeadlineMs';
+
     private bool $closed = false;
     private readonly RegionResolver $regionResolver;
     private readonly MetricsInterface $metrics;
+    /** Wall-clock deadline (ms) handed to every Transaction this client begins. */
+    private readonly int $retryDeadlineMs;
 
     /**
      * @param string[] $pdEndpoints PD addresses (currently only the first is used)
@@ -47,6 +57,7 @@ final class TxnKvClient
             storeHostPolicy: $bundle->storeHostPolicy,
             pdEndpoints: $bundle->pdEndpoints,
             allowedStorePorts: $bundle->allowedStorePorts,
+            retryDeadlineMs: self::resolveRetryDeadline($options),
         );
     }
 
@@ -66,7 +77,12 @@ final class TxnKvClient
         private readonly array $pdEndpoints = [],
         /** @var list<int>|null */
         private readonly ?array $allowedStorePorts = null,
+        int $retryDeadlineMs = Transaction::DEFAULT_RETRY_DEADLINE_MS,
     ) {
+        if ($retryDeadlineMs < 0) {
+            throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
+        }
+        $this->retryDeadlineMs = $retryDeadlineMs;
         $this->metrics = new NoOpMetrics();
         $this->regionResolver = $regionResolver
             ?? new RegionResolver(
@@ -79,6 +95,33 @@ final class TxnKvClient
                 $this->pdEndpoints,
                 $this->allowedStorePorts,
             );
+    }
+
+    /**
+     * Resolve options['retryDeadlineMs'] (see OPT_RETRY_DEADLINE) for
+     * create(): wall-clock bound on one operation's retry loop. 0 disables
+     * the deadline; a negative value is rejected.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRetryDeadline(array $options): int
+    {
+        if (!array_key_exists(self::OPT_RETRY_DEADLINE, $options)) {
+            return Transaction::DEFAULT_RETRY_DEADLINE_MS;
+        }
+
+        $deadlineMs = $options[self::OPT_RETRY_DEADLINE];
+        if (!is_int($deadlineMs)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['retryDeadlineMs'] must be an int (milliseconds), %s given",
+                get_debug_type($deadlineMs),
+            ));
+        }
+        if ($deadlineMs < 0) {
+            throw new InvalidArgumentException("options['retryDeadlineMs'] must be >= 0");
+        }
+
+        return $deadlineMs;
     }
 
     /**
@@ -126,6 +169,7 @@ final class TxnKvClient
             logger: $this->logger,
             timeoutConfig: $this->timeoutConfig,
             metrics: $this->metrics,
+            retryDeadlineMs: $this->retryDeadlineMs,
         );
     }
 

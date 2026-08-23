@@ -36,6 +36,7 @@ final readonly class RawKvRangeOps
         private int $serverBusyBudgetMs,
         private LoggerInterface $logger,
         private ?SlowLogConfig $slowLogConfig = null,
+        private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
     ) {
     }
 
@@ -182,6 +183,7 @@ final readonly class RawKvRangeOps
             $this->grpc,
             $this->regionResolver,
             $this->logger,
+            deadlineMs: $this->retryDeadlineMs,
         );
     }
 
