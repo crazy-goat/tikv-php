@@ -167,7 +167,7 @@ GrpcException: Handshake failed
    // Check if paths are correct
    $options = [
        'tls' => [
-           'caCert' => '/absolute/path/to/ca.crt',
+           'caCertFile' => '/absolute/path/to/ca.crt',
        ],
    ];
    ```

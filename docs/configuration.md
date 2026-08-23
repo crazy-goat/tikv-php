@@ -39,9 +39,9 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::INFO));
 // Client options
 $options = [
     'tls' => [
-        'caCert' => '/path/to/ca.crt',
-        'clientCert' => '/path/to/client.crt',
-        'clientKey' => '/path/to/client.key',
+        'caCertFile' => '/path/to/ca.crt',
+        'clientCertFile' => '/path/to/client.crt',
+        'clientKeyFile' => '/path/to/client.key',
     ],
 ];
 
@@ -550,9 +550,9 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::ERROR));
 // TLS configuration (recommended for production)
 $options = [
     'tls' => [
-        'caCert' => '/etc/ssl/certs/tikv-ca.crt',
-        'clientCert' => '/etc/ssl/certs/tikv-client.crt',
-        'clientKey' => '/etc/ssl/private/tikv-client.key',
+        'caCertFile' => '/etc/ssl/certs/tikv-ca.crt',
+        'clientCertFile' => '/etc/ssl/certs/tikv-client.crt',
+        'clientKeyFile' => '/etc/ssl/private/tikv-client.key',
     ],
 ];
 
@@ -572,9 +572,9 @@ return [
     'endpoints' => explode(',', getenv('TIKV_PD_ENDPOINTS') ?: '127.0.0.1:2379'),
     'tls' => [
         'enabled' => getenv('TIKV_TLS_ENABLED') === 'true',
-        'caCert' => getenv('TIKV_TLS_CA_CERT'),
-        'clientCert' => getenv('TIKV_TLS_CLIENT_CERT'),
-        'clientKey' => getenv('TIKV_TLS_CLIENT_KEY'),
+        'caCertFile' => getenv('TIKV_TLS_CA_CERT'),
+        'clientCertFile' => getenv('TIKV_TLS_CLIENT_CERT'),
+        'clientKeyFile' => getenv('TIKV_TLS_CLIENT_KEY'),
     ],
     'logging' => [
         'level' => getenv('TIKV_LOG_LEVEL') ?: 'warning',
