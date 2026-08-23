@@ -188,29 +188,21 @@ final class GrpcClient implements GrpcClientInterface
 
     public function close(): void
     {
-        if ($this->closed) {
-            return;
-        }
-
         $this->closed = true;
 
-        $channels = $this->channels;
-        $this->channels = [];
-
-        foreach ($channels as $address => $entry) {
-            try {
-                $entry['channel']->close();
-            } catch (\Throwable $e) {
-                $this->logger->error('Failed to close gRPC channel', [
-                    'address' => $address,
-                    'exception' => $e,
-                ]);
-            }
+        while ($this->channels !== []) {
+            $address = array_key_first($this->channels);
+            $this->closeChannelEntry($address);
+            unset($this->channels[$address]);
         }
     }
 
     public function closeChannel(string $address): void
     {
+        if ($this->closed) {
+            return;
+        }
+
         if (isset($this->channels[$address])) {
             $this->logger->debug('Channel closed', ['address' => $address]);
             try {
@@ -227,6 +219,10 @@ final class GrpcClient implements GrpcClientInterface
 
     public function getChannel(string $address): Channel
     {
+        if ($this->closed) {
+            throw new InvalidStateException('gRPC client is closed');
+        }
+
         $now = $this->now();
 
         // Check existing channel

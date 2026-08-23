@@ -182,6 +182,35 @@ class GrpcClientTest extends TestCase
         $client->close();
     }
 
+    public function testGetChannelAfterCloseThrowsInvalidStateException(): void
+    {
+        $this->client->close();
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('gRPC client is closed');
+
+        $this->client->getChannel('127.0.0.1:20160');
+    }
+
+    public function testGetChannelAfterCloseDoesNotReopen(): void
+    {
+        $this->client->getChannel('127.0.0.1:20160');
+        $this->assertSame(1, $this->client->getChannelCount());
+
+        $this->client->close();
+        $this->assertSame(0, $this->client->getChannelCount());
+
+        try {
+            $this->client->getChannel('127.0.0.1:20160');
+        } catch (InvalidStateException) {
+            // expected
+        }
+
+        $this->client->close();
+
+        $this->assertSame(0, $this->client->getChannelCount());
+    }
+
     public function testGetChannelWithAllowInsecureFalseThrowsWithoutTls(): void
     {
         $client = new GrpcClient(allowInsecure: false);
