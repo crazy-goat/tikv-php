@@ -266,8 +266,9 @@ class LoggingIntegrationTest extends TestCase
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $response = new RawGetResponse();
-        $response->setValue('ok');
+        // Second call must return a RawPutResponse — RawKvCrud::put()'s typed
+        // closure expects one; a RawGetResponse here throws a TypeError.
+        $response = new RawPutResponse();
 
         $this->grpc->expects($this->exactly(2))
             ->method('call')
@@ -278,9 +279,6 @@ class LoggingIntegrationTest extends TestCase
 
         $client->put('regionkey', 'value');
 
-        $response2 = new RawPutResponse();
-        $this->grpc->method('call')->willReturn($response2);
-
         $infoRecords = array_filter(
             $this->testHandler->getRecords(),
             fn (\Monolog\LogRecord $record): bool => $record->level === Level::Info
@@ -290,6 +288,9 @@ class LoggingIntegrationTest extends TestCase
         $this->assertNotEmpty($infoRecords);
         $record = reset($infoRecords);
         $this->assertInstanceOf(\Monolog\LogRecord::class, $record);
+        // Structured log must carry the invalidated region id…
         $this->assertSame(1, $record->context['regionId']);
+        // …and the message must identify the invalidation reason (the retry path).
+        $this->assertSame('Invalidated region on retry', $record->message);
     }
 }
