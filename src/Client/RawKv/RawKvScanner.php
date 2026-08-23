@@ -33,6 +33,7 @@ final readonly class RawKvScanner
         private RegionCacheInterface $regionCache,
         private LoggerInterface $logger,
         private ?SlowLogConfig $slowLogConfig = null,
+        private int $retryDeadlineMs = 0,
     ) {
     }
 
@@ -452,6 +453,7 @@ final readonly class RawKvScanner
             $this->grpc,
             $this->regionResolver,
             $this->logger,
+            deadlineMs: $this->retryDeadlineMs,
         );
     }
 
