@@ -424,6 +424,10 @@ final readonly class RawKvScanner
 
     private function validateScanLimit(int $limit): int
     {
+        if ($limit < 0) {
+            throw new InvalidArgumentException('Scan limit must be 0 or greater');
+        }
+
         if ($limit === 0) {
             return self::MAX_SCAN_LIMIT;
         }

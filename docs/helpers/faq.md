@@ -272,3 +272,21 @@ reference implementation of each workaround.
   newline-joining idiom — park newlines on a control char with `tr`
   first; `date -d <ts>` is GNU, `date -j -f '%Y-%m-%dT%H:%M:%SZ' <ts>` is
   BSD — detect the implementation at runtime.
+
+## A negative scan limit is a uint32 overflow, not a no-op — reject it before the wire
+
+`RawKvScanner::validateScanLimit(int $limit)` handled `0` (→ `MAX_SCAN_LIMIT`)
+and `> MAX_SCAN_LIMIT` (→ throw) but passed any negative value straight
+through to `RawScanRequest::setLimit()`. That protobuf field is `uint32`,
+so `setLimit(-1)` serialises to `4294967295` and TiKV runs an effectively
+unbounded scan (OOM in the PHP worker, sustained load on the cluster) —
+`MAX_SCAN_LIMIT` exists precisely to prevent this and was bypassed. The
+fix (issue #332) rejects negatives with
+`InvalidArgumentException('Scan limit must be 0 or greater')` placed
+*before* the `=== 0` check, using the exact message `TxnReader::normalizeScanLimit()`
+already used so the RawKV and TxnKV paths agree. Lesson: any signed PHP int
+that feeds a `uint*` protobuf field must be range-checked at the entry
+point, not just for the obvious upper bound — a negative wraps to a huge
+unsigned value. `batchScan`/`scanIterator` use a `<= 0` guard with their
+own ('eachLimit'/'batchSize' must be greater than 0) messages; the scan
+limit itself uses the 'Scan limit must be 0 or greater' message.

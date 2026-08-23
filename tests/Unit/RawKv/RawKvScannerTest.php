@@ -13,14 +13,20 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
+use CrazyGoat\TiKV\Client\TxnKv\TxnReader;
 use Google\Protobuf\Internal\Message;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -426,10 +432,235 @@ class RawKvScannerTest extends TestCase
 
     public function testScanLimitExceedingMaxThrows(): void
     {
-        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit (10241) exceeds maximum allowed scan limit of 10240');
 
         $this->scanner->scan('a', 'z', RawKvScanner::MAX_SCAN_LIMIT + 1, false);
+    }
+
+    // ========================================================================
+    // scanLimit validation – negative limits (issue #332)
+    //
+    // validateScanLimit() previously passed any negative value straight
+    // through to RawScanRequest::setLimit(), a uint32 protobuf field.
+    // setLimit(-1) serialises to 4294967295, so TiKV received an
+    // effectively unbounded scan. TxnReader::normalizeScanLimit() already
+    // rejected negatives — the two paths disagreed and no test covered it.
+    // ========================================================================
+
+    /**
+     * @param int $limit a negative limit (the scanner signature is typed
+     *                   int, so the negative value arrives via the provider)
+     */
+    #[DataProvider('negativeLimitProvider')]
+    public function testNegativeScanLimitThrows(int $limit): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $this->scanner->scan('a', 'z', $limit, false);
+    }
+
+    /** @return iterable<string, array{int}> */
+    public static function negativeLimitProvider(): iterable
+    {
+        yield 'minus one' => [-1];
+        yield 'minus large' => [-10240];
+        yield 'int min' => [PHP_INT_MIN];
+    }
+
+    public function testReverseScanNegativeLimitThrows(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $this->scanner->reverseScan('z', 'a', -1, false);
+    }
+
+    public function testScanPrefixNegativeLimitThrows(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $this->scanner->scanPrefix('prefix', -1, false);
+    }
+
+    public function testBatchScanNegativeEachLimitThrows(): void
+    {
+        // batchScan() uses a `<= 0` guard and a distinct message; assert
+        // THAT existing contract rather than the scan() message.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('eachLimit must be greater than 0');
+
+        $this->scanner->batchScan([['a', 'z']], -1, false);
+    }
+
+    public function testScanIteratorNegativeBatchSizeThrows(): void
+    {
+        // ScanIterator's constructor uses a `<= 0` guard with its own
+        // message; assert that existing contract.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchSize must be greater than 0');
+
+        $this->scanner->scanIterator('a', 'z', -1, false);
+    }
+
+    public function testScanPrefixIteratorNegativeBatchSizeThrows(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchSize must be greater than 0');
+
+        $this->scanner->scanPrefixIterator('prefix', -1, false);
+    }
+
+    // ========================================================================
+    // scanLimit validation – boundary values (issue #332)
+    // ========================================================================
+
+    public function testScanLimitOneSucceeds(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        /** @var list<RawScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $a, string $s, string $m, Message $request) use ($response, &$capturedRequests): Message {
+                $capturedRequests[] = $request;
+
+                return $response;
+            },
+        );
+
+        $result = $this->scanner->scan('a', 'z', 1, false);
+
+        // limit 1 must reach the wire as setLimit(1), not be capped or dropped.
+        $this->assertCount(1, $result);
+        $this->assertCount(1, $capturedRequests);
+        $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[0]);
+        $this->assertSame(1, $capturedRequests[0]->getLimit());
+    }
+
+    public function testScanLimitAtMaxSucceeds(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // Mock returns one pair; MAX_SCAN_LIMIT is not exceeded, so the
+        // request completes and setLimit() carries MAX_SCAN_LIMIT.
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        /** @var list<RawScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $a, string $s, string $m, Message $request) use ($response, &$capturedRequests): Message {
+                $capturedRequests[] = $request;
+
+                return $response;
+            },
+        );
+
+        $result = $this->scanner->scan('a', 'z', RawKvScanner::MAX_SCAN_LIMIT, false);
+
+        $this->assertCount(1, $result);
+        $this->assertCount(1, $capturedRequests);
+        $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[0]);
+        $this->assertSame(RawKvScanner::MAX_SCAN_LIMIT, $capturedRequests[0]->getLimit());
+    }
+
+    // ========================================================================
+    // scanLimit validation – RawKvScanner and TxnReader agree (issue #332)
+    //
+    // TxnReader::normalizeScanLimit() already rejected negatives with the
+    // exact message now used by RawKvScanner::validateScanLimit(). Assert
+    // the two code paths throw the identical message string for -1 so a
+    // future drift is caught.
+    // ========================================================================
+
+    public function testScannerAndTxnReaderUseSameNegativeLimitMessage(): void
+    {
+        $scannerMessage = $this->captureNegativeLimitMessage(
+            fn(): array => $this->scanner->scan('a', 'z', -1, false),
+        );
+
+        // TxnReader::normalizeScanLimit() already rejected negatives with
+        // this exact message; build a real reader. The negative-limit
+        // guard fires before any gRPC call, so the lock resolver is never
+        // exercised and the mocks are unused for this assertion.
+        $lockResolver = new LockResolver(
+            grpc: $this->grpc,
+            regionResolver: $this->regionResolver,
+            regionCache: $this->regionCache,
+            pdClient: $this->pdClient,
+            callerStartTs: 1000,
+        );
+        $txnReader = new TxnReader(
+            startTs: 1000,
+            grpc: $this->grpc,
+            pdClient: $this->pdClient,
+            regionResolver: $this->regionResolver,
+            timeoutConfig: new TimeoutConfig(),
+            lockResolver: $lockResolver,
+            regionCache: $this->regionCache,
+        );
+
+        $state = new TransactionState();
+        $retryExecutor = new RetryExecutor(
+            20000,
+            600000,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            new NullLogger(),
+        );
+        $classifier = static fn(): ?BackoffType => null;
+
+        $txnReaderMessage = $this->captureNegativeLimitMessage(
+            fn(): array => $txnReader->scan(
+                'a',
+                'z',
+                -1,
+                $state,
+                $retryExecutor,
+                $classifier,
+            ),
+        );
+
+        $this->assertSame(
+            $scannerMessage,
+            $txnReaderMessage,
+            'RawKvScanner and TxnReader must use the same error message for a negative scan limit',
+        );
+        $this->assertSame('Scan limit must be 0 or greater', $txnReaderMessage);
+    }
+
+    private function captureNegativeLimitMessage(callable $fn): string
+    {
+        try {
+            $fn();
+        } catch (InvalidArgumentException $e) {
+            return $e->getMessage();
+        }
+
+        $this->fail('Expected InvalidArgumentException was not thrown');
     }
 
     // ========================================================================

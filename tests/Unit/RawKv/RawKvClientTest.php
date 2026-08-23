@@ -714,6 +714,79 @@ class RawKvClientTest extends TestCase
         $this->client->reverseScan('k', 'l', 99999);
     }
 
+    // ========================================================================
+    // scan() – negative limit validation (issue #332)
+    //
+    // A negative limit previously passed through to RawScanRequest::setLimit(),
+    // a uint32 protobuf field, so setLimit(-1) serialised to 4294967295 and
+    // TiKV ran an effectively unbounded scan. Every public scan entry point
+    // must reject negatives with 'Scan limit must be 0 or greater'.
+    // ========================================================================
+
+    /**
+     * @param int $limit a negative limit arriving from user input
+     */
+    #[DataProvider('negativeScanLimitProvider')]
+    public function testScanNegativeLimitThrows(int $limit): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $this->client->scan('a', 'z', $limit);
+    }
+
+    public function testReverseScanNegativeLimitThrows(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $this->client->reverseScan('z', 'a', -1);
+    }
+
+    public function testScanPrefixNegativeLimitThrows(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $this->client->scanPrefix('prefix', -1);
+    }
+
+    public function testBatchScanNegativeEachLimitThrows(): void
+    {
+        // batchScan() uses a `<= 0` guard with its own message; assert
+        // THAT existing contract rather than the scan() message.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('eachLimit must be greater than 0');
+
+        $this->client->batchScan([['a', 'z']], -1);
+    }
+
+    public function testScanIteratorNegativeBatchSizeThrows(): void
+    {
+        // ScanIterator's constructor uses a `<= 0` guard with its own
+        // message; assert that existing contract.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchSize must be greater than 0');
+
+        $this->client->scanIterator('a', 'z', -1);
+    }
+
+    public function testScanPrefixIteratorNegativeBatchSizeThrows(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchSize must be greater than 0');
+
+        $this->client->scanPrefixIterator('prefix', -1);
+    }
+
+    /** @return iterable<string, array{int}> */
+    public static function negativeScanLimitProvider(): iterable
+    {
+        yield 'minus one' => [-1];
+        yield 'minus large' => [-10240];
+        yield 'int min' => [PHP_INT_MIN];
+    }
+
     public function testScanReturnsResults(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());

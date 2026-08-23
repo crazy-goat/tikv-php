@@ -520,6 +520,16 @@ class TransactionTest extends TestCase
         $txn->scan('', '', 99999);
     }
 
+    public function testScanNegativeLimitThrowsInvalidArgument(): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $txn->scan('a', 'z', -1);
+    }
+
     public function testScanLimitAppliedAfterWriteSetMerge(): void
     {
         $region = $this->makeRegion(1, '', '');
