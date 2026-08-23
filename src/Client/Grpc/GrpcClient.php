@@ -64,34 +64,33 @@ final class GrpcClient implements GrpcClientInterface
 
         $operation = $service . '/' . $method;
         $this->metrics->rpcStarted($operation);
-
-        $channel = $this->getChannel($address);
-
-        $deadline = $timeoutMs !== null && $timeoutMs > 0
-            ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
-            : Timeval::infFuture();
-
-        $call = new Call(
-            $channel,
-            "/{$service}/{$method}",
-            $deadline,
-        );
-
-        $call->startBatch([
-            \Grpc\OP_SEND_INITIAL_METADATA => [],
-            \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
-            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
-        ]);
-
-        $event = $call->startBatch([
-            \Grpc\OP_RECV_INITIAL_METADATA => true,
-            \Grpc\OP_RECV_MESSAGE => true,
-            \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
-        ]);
-
-        $startMs = microtime(true);
+        $start = hrtime(true);
         $success = false;
         try {
+            $channel = $this->getChannel($address);
+
+            $deadline = $timeoutMs !== null && $timeoutMs > 0
+                ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
+                : Timeval::infFuture();
+
+            $call = new Call(
+                $channel,
+                "/{$service}/{$method}",
+                $deadline,
+            );
+
+            $call->startBatch([
+                \Grpc\OP_SEND_INITIAL_METADATA => [],
+                \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
+                \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
+            ]);
+
+            $event = $call->startBatch([
+                \Grpc\OP_RECV_INITIAL_METADATA => true,
+                \Grpc\OP_RECV_MESSAGE => true,
+                \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+            ]);
+
             $status = GrpcResponseParser::extractStatus($event);
 
             if ($status['code'] !== \Grpc\STATUS_OK) {
@@ -105,7 +104,7 @@ final class GrpcClient implements GrpcClientInterface
 
             return GrpcResponseParser::deserialize($event, $responseClass);
         } finally {
-            $durationMs = (microtime(true) - $startMs) * 1000.0;
+            $durationMs = (hrtime(true) - $start) / 1_000_000;
             $this->metrics->rpcCompleted($operation, $durationMs, $success);
         }
     }
@@ -124,47 +123,46 @@ final class GrpcClient implements GrpcClientInterface
 
         $operation = $service . '/' . $method;
         $this->metrics->rpcStarted($operation);
-        $startMs = microtime(true);
-
-        $channel = $this->getChannel($address);
-
-        $deadline = $timeoutMs !== null && $timeoutMs > 0
-            ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
-            : Timeval::infFuture();
-
-        $call = new Call(
-            $channel,
-            "/{$service}/{$method}",
-            $deadline,
-        );
-
-        // Send initial metadata first.
-        $call->startBatch([
-            \Grpc\OP_SEND_INITIAL_METADATA => [],
-        ]);
-
-        // Send each request message in its own batch (gRPC PHP extension
-        // limitation: one OP_SEND_MESSAGE per batch).
-        foreach ($requests as $request) {
-            $call->startBatch([
-                \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
-            ]);
-        }
-
-        // Close the client side of the stream.
-        $call->startBatch([
-            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
-        ]);
-
-        // Receive the response.
-        $event = $call->startBatch([
-            \Grpc\OP_RECV_INITIAL_METADATA => true,
-            \Grpc\OP_RECV_MESSAGE => true,
-            \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
-        ]);
-
+        $start = hrtime(true);
         $success = false;
         try {
+            $channel = $this->getChannel($address);
+
+            $deadline = $timeoutMs !== null && $timeoutMs > 0
+                ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
+                : Timeval::infFuture();
+
+            $call = new Call(
+                $channel,
+                "/{$service}/{$method}",
+                $deadline,
+            );
+
+            // Send initial metadata first.
+            $call->startBatch([
+                \Grpc\OP_SEND_INITIAL_METADATA => [],
+            ]);
+
+            // Send each request message in its own batch (gRPC PHP extension
+            // limitation: one OP_SEND_MESSAGE per batch).
+            foreach ($requests as $request) {
+                $call->startBatch([
+                    \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
+                ]);
+            }
+
+            // Close the client side of the stream.
+            $call->startBatch([
+                \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
+            ]);
+
+            // Receive the response.
+            $event = $call->startBatch([
+                \Grpc\OP_RECV_INITIAL_METADATA => true,
+                \Grpc\OP_RECV_MESSAGE => true,
+                \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+            ]);
+
             $status = GrpcResponseParser::extractStatus($event);
 
             if ($status['code'] !== \Grpc\STATUS_OK) {
@@ -178,7 +176,7 @@ final class GrpcClient implements GrpcClientInterface
 
             return GrpcResponseParser::deserialize($event, $responseClass);
         } finally {
-            $durationMs = (microtime(true) - $startMs) * 1000.0;
+            $durationMs = (hrtime(true) - $start) / 1_000_000;
             $this->metrics->rpcCompleted($operation, $durationMs, $success);
         }
     }
