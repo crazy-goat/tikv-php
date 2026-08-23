@@ -146,7 +146,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
      * StaleCmd backoff 2,4,8,...; with maxBackoffMs=10 a single region
      * exhausts after 2+4+8=14 > 10, i.e. on its third retryable failure.
      */
-    public function testDeleteRangeSharesBackoffBudgetAcrossRegions(): void
+    public function testDeleteRangeExhaustsBudgetInFirstRegion(): void
     {
         $region1 = $this->defaultRegion('a', 'm', regionId: 1);
         $region2 = $this->defaultRegion('m', 'z', regionId: 2);
@@ -188,7 +188,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
      * region exhausts its own maxBackoffMs and the operation aborts before
      * a later region is scanned (per-region semantics, issue #271).
      */
-    public function testChecksumSharesBackoffBudgetAcrossRegions(): void
+    public function testChecksumExhaustsBudgetInFirstRegion(): void
     {
         $region1 = $this->defaultRegion('a', 'm', regionId: 1);
         $region2 = $this->defaultRegion('m', 'z', regionId: 2);
@@ -230,7 +230,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
      * first region exhausts its own maxBackoffMs and the scan aborts before
      * a later region is scanned (per-region semantics, issue #271).
      */
-    public function testReverseScanSharesBackoffBudgetAcrossRegions(): void
+    public function testReverseScanExhaustsBudgetInFirstRegion(): void
     {
         $region1 = $this->defaultRegion('a', 'm', regionId: 1);
         $region2 = $this->defaultRegion('m', 'z', regionId: 2);
