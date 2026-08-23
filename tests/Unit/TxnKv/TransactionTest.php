@@ -2622,9 +2622,10 @@ class TransactionTest extends TestCase
         // Without #470 the uncharged sleep alone took ~20 s per encounter.
         $this->assertLessThan(2500, $elapsedMs, 'Lock wait must be capped + charged, not silently stretch the budget');
 
-        // The charged wait must end the loop quickly: at most one extra lock
-        // attempt after the first resolve. Without the #470 charging the loop
-        // kept retrying while the budget silently stretched past maxBackoffMs.
+        // The charged wait ends the loop quickly: at most one extra lock
+        // attempt after the first resolve. Without the #470 cap+charge, this
+        // single encounter slept ~20 s uncharged before the loop exited via
+        // the while condition — caught above by the timing assertion.
         $this->assertLessThanOrEqual(2, $lockAttempts);
     }
 }

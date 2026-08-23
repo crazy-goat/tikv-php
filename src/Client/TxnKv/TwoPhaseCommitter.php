@@ -598,10 +598,13 @@ final readonly class TwoPhaseCommitter
                             // $elapsedMs — the wait used to be invisible to
                             // the budget and could stretch it past maxBackoffMs.
                             $resolveStartMs = (int) (microtime(true) * 1000);
+                            // min 1 ms: 0 would select LockResolver's legacy
+                            // uncapped-by-deadline branch exactly when the
+                            // budget is most exhausted (issue #470).
                             $this->lockResolver->resolveLock(
                                 $lockPrimary,
                                 $locked,
-                                max(0, $this->maxBackoffMs - $elapsedMs),
+                                max(1, $this->maxBackoffMs - $elapsedMs),
                             );
                             $elapsedMs += max(0, (int) (microtime(true) * 1000) - $resolveStartMs);
                             $needRetry = true;
