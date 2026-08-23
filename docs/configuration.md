@@ -233,8 +233,13 @@ Client certificate authentication:
 $options = [
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
+        // Optional base-directory restrictions. Each *BaseDir applies only to
+        // the matching file read (caCertBaseDir → caCertFile/withCaCertFile;
+        // clientCertBaseDir → clientCertFile + clientKeyFile).
+        'caCertBaseDir' => '/path/to',
         'clientCertFile' => '/path/to/client.crt',
         'clientKeyFile' => '/path/to/client.key',
+        'clientCertBaseDir' => '/path/to',
     ],
 ];
 
@@ -243,8 +248,9 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 
 > **Important:** When providing a client certificate and key, a CA certificate is
 > **required**. The configuration will throw `InvalidArgumentException` if
-> clientCert/clientKey are provided without caCert — this prevents accidental
-> downgrade to plaintext.
+> `clientCertFile`/`clientKeyFile` (or `clientCertPem`/`clientKeyPem`) are
+> provided without a CA certificate — this prevents accidental downgrade to
+> plaintext.
 
 ### Using Certificate Content (Inline PEM)
 

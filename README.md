@@ -145,8 +145,13 @@ $options = [
 $options = [
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
+        // Optional base-directory restrictions (*BaseDir apply only to their
+        // matching file reads; caCertBaseDir → caCertFile, clientCertBaseDir →
+        // clientCertFile + clientKeyFile)
+        'caCertBaseDir' => '/path/to',
         'clientCertFile' => '/path/to/client.crt',
         'clientKeyFile' => '/path/to/client.key',
+        'clientCertBaseDir' => '/path/to',
     ],
 ];
 
