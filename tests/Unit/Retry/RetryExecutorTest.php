@@ -395,4 +395,96 @@ class RetryExecutorTest extends TestCase
             'RetryExecutor should have recorded a retry metric for every attempt past the first'
         );
     }
+
+    // ========================================================================
+    // Budget reset across calls (issue #271)
+    //
+    // RetryExecutor is reused across many operations (Transaction,
+    // RawKvScanner, RawKvBatch). maxBackoffMs is a per-operation limit, so
+    // each execute() call must start with a full budget — otherwise the
+    // first operation silently consumes most of it and later operations
+    // fail on their first retryable error.
+    // ========================================================================
+
+    public function testReusedExecutorRetriesNormallyOnSecondCallAfterFirstConsumesBudget(): void
+    {
+        $executor = $this->createExecutor(
+            maxBackoffMs: 63,
+            serverBusyBudgetMs: 10000,
+        );
+
+        // RegionMiss: baseMs=2, capMs=500, equalJitter=false, so the n-th
+        // retry sleeps 2^(n+1) ms and a call's running contribution is
+        // 2+4+...+2^k = 2^(k+1)-2. maxBackoffMs=63 lets the first call
+        // accumulate 2+4+8+16+32 = 62 ms (most of the budget) and still
+        // succeed. The second call's single retry (+2) then crosses 63 only
+        // if the budget were carried over between calls (62+2=64 > 63).
+        $classifier = fn(TiKvException $e): BackoffType => BackoffType::RegionMiss;
+
+        $firstCalls = 0;
+        $firstResult = $executor->execute('first_key', function () use (&$firstCalls): string {
+            $firstCalls++;
+            if ($firstCalls <= 5) {
+                throw new TiKvException('first error');
+            }
+            return 'first-ok';
+        }, $classifier);
+
+        $this->assertSame('first-ok', $firstResult);
+        $this->assertSame(6, $firstCalls, 'First call should have retried 5 times');
+
+        // A reused executor must retry normally on the second call with a
+        // full budget, not carry the first call's spend forward.
+        $secondCalls = 0;
+        $secondResult = $executor->execute('second_key', function () use (&$secondCalls): string {
+            $secondCalls++;
+            if ($secondCalls === 1) {
+                throw new TiKvException('second error');
+            }
+            return 'second-ok';
+        }, $classifier);
+
+        $this->assertSame('second-ok', $secondResult);
+        $this->assertSame(2, $secondCalls, 'Second call should have retried once with a fresh budget');
+    }
+
+    public function testNestedExecuteDoesNotCorruptOuterAttemptCounter(): void
+    {
+        $executor = $this->createExecutor(
+            maxBackoffMs: 10000,
+            serverBusyBudgetMs: 10000,
+            maxAttempts: 5,
+        );
+
+        // execute() must be reentrant: the state (attempt count, budgets) is
+        // per-invocation, so a nested execute() call inside a retried
+        // closure must not reset or corrupt the outer loop's counters.
+        //
+        // The outer operation fails every time and nests a succeeding
+        // execute() on each attempt. EpochNotMatch is classified as
+        // BackoffType::None (sleepMs=0), so the budget never exhausts and
+        // the outer loop is bounded only by the attempt cap (5). Under the
+        // old instance-field implementation the nested call reset
+        // $this->attempt to 0 on every iteration, so the counter never
+        // reached the cap and the loop would never have terminated.
+        $nestedCalls = 0;
+        $outerCalls = 0;
+        try {
+            $executor->execute('outer_key', function () use ($executor, &$nestedCalls, &$outerCalls): string {
+                $outerCalls++;
+                $executor->execute('inner_key', function () use (&$nestedCalls): string {
+                    $nestedCalls++;
+                    return 'inner-ok';
+                });
+                throw new TiKvException('EpochNotMatch something');
+            });
+        } catch (RetryBudgetExhaustedException) {
+            // expected
+        }
+
+        // The nested calls must not have reset the outer attempt counter:
+        // the cap fires after exactly maxAttempts outer attempts.
+        $this->assertSame(5, $outerCalls, 'Outer loop must hit its own attempt cap; nested calls must not reset it');
+        $this->assertSame(5, $nestedCalls, 'Inner execute() should have succeeded once per outer attempt');
+    }
 }
