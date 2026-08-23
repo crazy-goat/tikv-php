@@ -120,7 +120,7 @@ final class TlsConfigBuilder
     {
         $looksLikePath = !str_contains($value, '-----BEGIN');
 
-        if ($looksLikePath && !(file_exists($value) && is_readable($value))) {
+        if ($looksLikePath && (!file_exists($value) || !is_readable($value))) {
             throw new InvalidArgumentException(
                 'TLS value looks like a file path but the file does not exist or is not readable',
             );
