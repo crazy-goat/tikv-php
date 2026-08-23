@@ -19,8 +19,12 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
+use CrazyGoat\TiKV\Client\TxnKv\TxnReader;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -601,14 +605,14 @@ class RawKvScannerTest extends TestCase
         // this exact message; build a real reader. The negative-limit
         // guard fires before any gRPC call, so the lock resolver is never
         // exercised and the mocks are unused for this assertion.
-        $lockResolver = new \CrazyGoat\TiKV\Client\TxnKv\LockResolver(
+        $lockResolver = new LockResolver(
             grpc: $this->grpc,
             regionResolver: $this->regionResolver,
             regionCache: $this->regionCache,
             pdClient: $this->pdClient,
             callerStartTs: 1000,
         );
-        $txnReader = new \CrazyGoat\TiKV\Client\TxnKv\TxnReader(
+        $txnReader = new TxnReader(
             startTs: 1000,
             grpc: $this->grpc,
             pdClient: $this->pdClient,
@@ -618,7 +622,7 @@ class RawKvScannerTest extends TestCase
             regionCache: $this->regionCache,
         );
 
-        $state = new \CrazyGoat\TiKV\Client\TxnKv\TransactionState();
+        $state = new TransactionState();
         $retryExecutor = new RetryExecutor(
             20000,
             600000,
@@ -627,7 +631,7 @@ class RawKvScannerTest extends TestCase
             $this->regionResolver,
             new NullLogger(),
         );
-        $classifier = static fn(): ?\CrazyGoat\TiKV\Client\Retry\BackoffType => null;
+        $classifier = static fn(): ?BackoffType => null;
 
         $txnReaderMessage = $this->captureNegativeLimitMessage(
             fn(): array => $txnReader->scan(
