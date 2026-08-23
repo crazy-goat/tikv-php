@@ -290,8 +290,7 @@ class LoggingIntegrationTest extends TestCase
         $this->assertInstanceOf(\Monolog\LogRecord::class, $record);
         // Structured log must carry the invalidated region id…
         $this->assertSame(1, $record->context['regionId']);
-        // …and the message must identify the invalidation reason.
+        // …and the message must identify the invalidation reason (the retry path).
         $this->assertSame('Invalidated region on retry', $record->message);
-        $this->assertStringContainsString('retry', $record->message);
     }
 }

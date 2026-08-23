@@ -13,3 +13,5 @@ repomix-output.xml
 
 # Local agent tooling scratch dirs
 /.pi-subagents/
+
+/.tyci/
