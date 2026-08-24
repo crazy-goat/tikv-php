@@ -11,6 +11,7 @@ use CrazyGoat\Proto\ImportSstpb\RawWriteResponse;
 use CrazyGoat\Proto\ImportSstpb\SSTMeta;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
@@ -21,6 +22,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\SstIngestor;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -28,6 +30,8 @@ use Psr\Log\NullLogger;
 
 class SstIngestorTest extends TestCase
 {
+    use GrpcExtensionGate;
+
     private PdClientInterface&MockObject $pdClient;
     private GrpcClientInterface&MockObject $grpc;
     private RegionCache $regionCache;
@@ -69,6 +73,23 @@ class SstIngestorTest extends TestCase
     }
 
     /**
+     * Future over a mocked gRPC call resolving with the given response.
+     * Requires the grpc extension (a real \\Grpc\\Call mock drives it).
+     */
+    private function okFuture(Message $response): GrpcFuture
+    {
+        $this->requireGrpcExtension();
+
+        $call = $this->createMock(\Grpc\Call::class);
+        $call->method('startBatch')->willReturn([
+            'status' => ['code' => 0, 'details' => 'OK'],
+            'message' => $response->serializeToString(),
+        ]);
+
+        return new GrpcFuture($call, $response::class);
+    }
+
+    /**
      * Set up PD client mocks for a standard single-store, single-region scenario.
      */
     private function setupStandardPdMocks(RegionInfo $region, Store $store): void
@@ -87,12 +108,16 @@ class SstIngestorTest extends TestCase
     }
 
     /**
-     * Create a gRPC call mock that returns SwitchModeResponse for SwitchMode
-     * calls and IngestResponse for Ingest calls.
+     * Create gRPC mocks: async calls (SwitchMode since issue #295) resolve
+     * immediately with SwitchModeResponse, blocking Ingest calls return the
+     * given response.
      */
     private function setupGrpcCallMock(?IngestResponse $ingestResponse = null): void
     {
         $ingestResponse ??= new IngestResponse();
+
+        $this->grpc->method('callAsync')
+            ->willReturnCallback(fn(): GrpcFuture => $this->okFuture(new SwitchModeResponse()));
 
         $this->grpc->method('call')
             ->willReturnCallback(function (
@@ -164,11 +189,13 @@ class SstIngestorTest extends TestCase
 
         $this->setupStandardPdMocks($region, $store);
 
-        $switchModeCalls = [];
-        $this->grpc->method('call')
-            ->willReturnCallback(function (string $address) use (&$switchModeCalls): Message {
-                $switchModeCalls[] = $address;
-                return new SwitchModeResponse();
+        // SwitchMode goes through callAsync since issue #295.
+        $switchModeAddresses = [];
+        $this->grpc->method('callAsync')
+            ->willReturnCallback(function (string $address) use (&$switchModeAddresses): GrpcFuture {
+                $switchModeAddresses[] = $address;
+
+                return $this->okFuture(new SwitchModeResponse());
             });
 
         // Write fails with gRPC error.
@@ -183,8 +210,8 @@ class SstIngestorTest extends TestCase
         } finally {
             // Verify SwitchMode(Normal) was called after the error.
             // At least 2 calls: import mode + normal mode.
-            $this->assertGreaterThanOrEqual(2, count($switchModeCalls));
-            $this->assertContains('tikv1:20160', $switchModeCalls);
+            $this->assertGreaterThanOrEqual(2, count($switchModeAddresses));
+            $this->assertContains('tikv1:20160', $switchModeAddresses);
         }
     }
 
@@ -241,20 +268,21 @@ class SstIngestorTest extends TestCase
         $writeResponse->setMetas([new SSTMeta()]);
         $this->grpc->method('callStreaming')->willReturn($writeResponse);
 
+        // Ingest RPCs still use the blocking call(); return a bare response.
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
         $switchedAddresses = [];
-        $this->grpc->method('call')
+        $this->grpc->method('callAsync')
             ->willReturnCallback(function (
                 string $address,
                 string $service,
                 string $method,
-            ) use (&$switchedAddresses): Message {
+            ) use (&$switchedAddresses): GrpcFuture {
                 if ($method === 'SwitchMode') {
                     $switchedAddresses[] = $address;
                 }
 
-                return $method === 'SwitchMode'
-                    ? new SwitchModeResponse()
-                    : new IngestResponse();
+                return $this->okFuture(new SwitchModeResponse());
             });
 
         $this->ingestor->ingest(['key1' => 'value1']);
@@ -394,7 +422,9 @@ class SstIngestorTest extends TestCase
 
         $this->pdClient->method('getAllStores')->willReturn([$store]);
 
+        // SwitchMode is dispatched via callAsync since issue #295.
         $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
         $this->grpc->expects($this->never())->method('callStreaming');
 
         $this->expectException(InvalidStoreAddressException::class);
@@ -409,7 +439,9 @@ class SstIngestorTest extends TestCase
 
         $this->pdClient->method('getAllStores')->willReturn([$store]);
 
+        // SwitchMode is dispatched via callAsync since issue #295.
         $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
         $this->grpc->expects($this->never())->method('callStreaming');
 
         $this->expectException(InvalidStoreAddressException::class);
@@ -424,7 +456,9 @@ class SstIngestorTest extends TestCase
 
         $this->pdClient->method('getAllStores')->willReturn([$store]);
 
+        // SwitchMode is dispatched via callAsync since issue #295.
         $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
         $this->grpc->expects($this->never())->method('callStreaming');
 
         $this->regionResolver = new RegionResolver(
@@ -452,7 +486,9 @@ class SstIngestorTest extends TestCase
 
         $this->pdClient->method('getAllStores')->willReturn([$store]);
 
+        // SwitchMode is dispatched via callAsync since issue #295.
         $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
         $this->grpc->expects($this->never())->method('callStreaming');
 
         $this->regionResolver = new RegionResolver(

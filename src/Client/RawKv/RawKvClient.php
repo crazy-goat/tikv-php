@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\RawKv;
 
 use Closure;
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
@@ -89,6 +90,16 @@ final class RawKvClient
      */
     public const OPT_RETRY_DEADLINE = 'retryDeadlineMs';
 
+    /**
+     * options[] key for the maximum number of simultaneously in-flight
+     * requests used by the fanned-out range operations (deleteRange,
+     * checksum, batchScan, SST ingest mode switches) — issue #295.
+     */
+    public const OPT_MAX_CONCURRENCY = 'maxConcurrency';
+
+    /** Default bound on in-flight requests for fanned-out range operations. */
+    public const DEFAULT_MAX_CONCURRENCY = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY;
+
     private bool $closed = false;
 
     private bool $atomicForCAS = false;
@@ -101,8 +112,10 @@ final class RawKvClient
     private readonly RawKvScanner $scanner;
     private readonly RawKvRangeOps $rangeOps;
     private readonly SstIngestor $ingestor;
-    /** Wall-clock deadline (ms) applied to every RetryExecutor this client builds. */
+        /** Wall-clock deadline (ms) applied to every RetryExecutor this client builds. */
     private readonly int $retryDeadlineMs;
+    /** Max in-flight requests for fanned-out range operations (issue #295). */
+    private readonly int $maxConcurrency;
 
     /**
      * @param string[] $pdEndpoints
@@ -129,6 +142,7 @@ final class RawKvClient
             pdEndpoints: $bundle->pdEndpoints,
             allowedStorePorts: $bundle->allowedStorePorts,
             retryDeadlineMs: self::resolveRetryDeadline($options),
+            maxConcurrency: self::resolveMaxConcurrency($options),
         );
     }
 
@@ -157,11 +171,16 @@ final class RawKvClient
         /** @var list<int>|null */
         private readonly ?array $allowedStorePorts = null,
         int $retryDeadlineMs = self::DEFAULT_RETRY_DEADLINE_MS,
+        int $maxConcurrency = self::DEFAULT_MAX_CONCURRENCY,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
+        if ($maxConcurrency < 1) {
+            throw new InvalidArgumentException('maxConcurrency must be >= 1');
+        }
         $this->retryDeadlineMs = $retryDeadlineMs;
+        $this->maxConcurrency = $maxConcurrency;
         $regionResolver ??= new RegionResolver(
             $pdClient,
             $regionCache,
@@ -204,6 +223,7 @@ final class RawKvClient
             $this->logger,
             $this->slowLogConfig,
             $this->retryDeadlineMs,
+            $this->maxConcurrency,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -216,6 +236,7 @@ final class RawKvClient
             $this->logger,
             $this->slowLogConfig,
             $this->retryDeadlineMs,
+            $this->maxConcurrency,
         );
         $this->ingestor = new SstIngestor(
             $grpc,
@@ -223,6 +244,7 @@ final class RawKvClient
             $regionResolver,
             $timeoutConfig,
             $this->logger,
+            $this->maxConcurrency,
         );
     }
 
@@ -357,6 +379,33 @@ final class RawKvClient
         }
 
         return $deadlineMs;
+    }
+
+    /**
+     * Resolve options['maxConcurrency'] (see OPT_MAX_CONCURRENCY) for
+     * create(): the bound on simultaneously in-flight requests used by the
+     * fanned-out range operations. Must be >= 1 (issue #295).
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveMaxConcurrency(array $options): int
+    {
+        if (!array_key_exists(self::OPT_MAX_CONCURRENCY, $options)) {
+            return self::DEFAULT_MAX_CONCURRENCY;
+        }
+
+        $maxConcurrency = $options[self::OPT_MAX_CONCURRENCY];
+        if (!is_int($maxConcurrency)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['maxConcurrency'] must be an int, %s given",
+                get_debug_type($maxConcurrency),
+            ));
+        }
+        if ($maxConcurrency < 1) {
+            throw new InvalidArgumentException("options['maxConcurrency'] must be >= 1");
+        }
+
+        return $maxConcurrency;
     }
 
     private function createRetryExecutor(): RetryExecutor

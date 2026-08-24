@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Grpc;
 
+use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
@@ -179,6 +180,60 @@ final class GrpcClient implements GrpcClientInterface
             $durationMs = (hrtime(true) - $start) / 1_000_000;
             $this->metrics->rpcCompleted($operation, $durationMs, $success);
         }
+    }
+
+    /**
+     * Issue a unary gRPC call without waiting for the response.
+     *
+     * The send phase (initial metadata, request message, close) completes
+     * before this method returns; the response is resolved later by calling
+     * {@see GrpcFuture::wait()} on the returned future. This is the building
+     * block for client-side fan-out: multiple sends can be issued to
+     * different regions/stores first and awaited afterwards, so their
+     * server-side latencies overlap instead of accumulating serially
+     * (issue #295).
+     *
+     * @template T of Message
+     * @param string $address Target address (e.g., "127.0.0.1:2379")
+     * @param string $service Service name (e.g., "tikvpb.Tikv")
+     * @param string $method Method name (e.g., "RawDeleteRange")
+     * @param Message $request Protobuf request message
+     * @param class-string<T> $responseClass Response message class name
+     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @return GrpcFuture Un-waited future resolving to T
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
+     */
+    public function callAsync(
+        string $address,
+        string $service,
+        string $method,
+        Message $request,
+        string $responseClass,
+        ?int $timeoutMs = null,
+    ): GrpcFuture {
+        if ($this->closed) {
+            throw new InvalidStateException('gRPC client is closed');
+        }
+
+        $channel = $this->getChannel($address);
+
+        $deadline = $timeoutMs !== null && $timeoutMs > 0
+            ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
+            : Timeval::infFuture();
+
+        $call = new Call(
+            $channel,
+            "/{$service}/{$method}",
+            $deadline,
+        );
+
+        $call->startBatch([
+            \Grpc\OP_SEND_INITIAL_METADATA => [],
+            \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
+            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
+        ]);
+
+        return new GrpcFuture($call, $responseClass);
     }
 
     public function __destruct()

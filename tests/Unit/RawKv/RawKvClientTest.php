@@ -16,6 +16,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
@@ -79,6 +80,23 @@ class RawKvClientTest extends TestCase
         $this->grpc = $this->createMock(GrpcClientInterface::class);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->client = new RawKvClient($this->pdClient, $this->grpc, $this->regionCache);
+    }
+
+    /**
+     * Future over a mocked gRPC call resolving with the given response.
+     * Requires the grpc extension (a real \Grpc\Call mock drives it).
+     */
+    private function okFuture(Message $response): GrpcFuture
+    {
+        $this->requireGrpcExtension();
+
+        $call = $this->createMock(\Grpc\Call::class);
+        $call->method('startBatch')->willReturn([
+            'status' => ['code' => 0, 'details' => 'OK'],
+            'message' => $response->serializeToString(),
+        ]);
+
+        return new GrpcFuture($call, $response::class);
     }
 
     // ========================================================================
@@ -990,8 +1008,15 @@ class RawKvClientTest extends TestCase
         $response2 = new RawScanResponse();
         $response2->setKvs([$pair2]);
 
-        $this->grpc->method('call')
-            ->willReturnOnConsecutiveCalls($response, $response2);
+        // batchScan fans out per-range sends via callAsync (issue #295);
+        // one future per range, resolved in dispatch order.
+        $responses = [$response, $response2];
+        $this->grpc->method('callAsync')
+            ->willReturnCallback(function () use (&$responses): GrpcFuture {
+                return $this->okFuture(
+                    array_shift($responses) ?? new RawScanResponse(),
+                );
+            });
 
         $result = $this->client->batchScan([['a', 'm'], ['m', 'z']], 10);
 
@@ -1139,7 +1164,9 @@ class RawKvClientTest extends TestCase
         $response->setTotalKvs(3);
         $response->setTotalBytes(100);
 
-        $this->grpc->method('call')->willReturn($response);
+        // checksum() fans out its per-region send via callAsync (issue #295).
+        $this->grpc->method('callAsync')
+            ->willReturnCallback(fn(): GrpcFuture => $this->okFuture($response));
 
         $result = $this->client->checksum('a', 'z');
 
