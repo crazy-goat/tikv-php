@@ -10,12 +10,14 @@ use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use Google\Protobuf\Internal\Message;
 use Monolog\Handler\TestHandler;
 use Monolog\Level;
 use Monolog\Logger;
@@ -167,16 +169,39 @@ class LoggingIntegrationTest extends TestCase
 
         $deleteRangeResponse = new RawDeleteRangeResponse();
 
+        // deleteRange() fans its per-region send out through callAsync()
+        // (issue #295). The first send attempt fails with a retryable
+        // EpochNotMatch from the dispatch closure and is retried by the
+        // RetryExecutor, which logs the "Retrying operation" warning.
+        $attempts = 0;
         $this->grpc->expects($this->exactly(2))
-            ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->throwException(new TiKvException('EpochNotMatch')),
-                $deleteRangeResponse,
-            );
+            ->method('callAsync')
+            ->willReturnCallback(function () use (&$attempts, $deleteRangeResponse): GrpcFuture {
+                $attempts++;
+                if ($attempts === 1) {
+                    throw new TiKvException('EpochNotMatch');
+                }
+
+                return $this->okFuture($deleteRangeResponse);
+            });
 
         $client->deleteRange('a', 'z');
 
         $this->assertTrue($this->testHandler->hasWarningThatContains('Retrying operation'));
+    }
+
+    /**
+     * Future over a mocked gRPC call resolving with the given response.
+     */
+    private function okFuture(Message $response): GrpcFuture
+    {
+        $call = $this->createMock(\Grpc\Call::class);
+        $call->method('startBatch')->willReturn([
+            'status' => ['code' => 0, 'details' => 'OK'],
+            'message' => $response->serializeToString(),
+        ]);
+
+        return new GrpcFuture($call, $response::class);
     }
 
     public function testFatalErrorLogsErrorWithMonolog(): void
