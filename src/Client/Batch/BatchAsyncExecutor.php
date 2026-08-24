@@ -13,6 +13,14 @@ use Psr\Log\NullLogger;
 final readonly class BatchAsyncExecutor
 {
     /**
+     * Default upper bound on simultaneously in-flight requests for the
+     * windowed executor ({@see self::executeParallelCapped()}): large enough
+     * to saturate a cluster on a LAN, small enough to avoid a thundering
+     * herd against a single TiKV store (issue #295).
+     */
+    public const DEFAULT_MAX_CONCURRENCY = 16;
+
+    /**
      * @param LoggerInterface $logger PSR-3 logger
      */
     public function __construct(
@@ -146,6 +154,66 @@ final readonly class BatchAsyncExecutor
             'totalRegions' => $totalRegions,
             'deadlineMs' => $deadlineMs,
         ]);
+
+        return $results;
+    }
+
+    /**
+     * Execute multiple callables with a bounded number of simultaneously
+     * in-flight requests.
+     *
+     * The callables are chunked into windows of at most $maxConcurrency
+     * entries and each window is executed sequentially through
+     * {@see self::executeParallel()}: within a window every request is sent
+     * before any wait begins, so up to $maxConcurrency RPCs are in flight
+     * simultaneously; the next window is dispatched only after the current
+     * one has been fully awaited. This bounds the fan-out of a single
+     * operation (e.g. a deleteRange spanning hundreds of regions) instead
+     * of opening an unbounded thundering herd against the cluster.
+     *
+     * On the first failure inside a window the underlying executor cancels
+     * that window's in-flight futures and reports
+     * {@see BatchPartialFailureException}; later windows are never
+     * dispatched.
+     *
+     * @param array<int, callable(): mixed> $regionCalls regionId => callable
+     *                                                   returning GrpcFuture,
+     *                                                   CheckedGrpcFuture, or
+     *                                                   a direct value
+     * @param int                           $maxConcurrency maximum number of
+     *                                                      in-flight requests;
+     *                                                      must be >= 1
+     * @param int                           $deadlineMs     wall-clock deadline
+     *                                                      for dispatch+wait
+     *                                                      across ALL windows;
+     *                                                      0 disables it
+     * @return array<int, mixed> results keyed by the original regionId
+     * @throws BatchPartialFailureException   If any region fails
+     * @throws BatchDeadlineExceededException If $deadlineMs > 0 and dispatch+wait exceeds it
+     * @throws \InvalidArgumentException      If $maxConcurrency < 1
+     */
+    public function executeParallelCapped(
+        array $regionCalls,
+        int $maxConcurrency = self::DEFAULT_MAX_CONCURRENCY,
+        int $deadlineMs = 0,
+    ): array {
+        if ($maxConcurrency < 1) {
+            throw new \InvalidArgumentException(sprintf(
+                'maxConcurrency must be 1 or greater, %d given',
+                $maxConcurrency,
+            ));
+        }
+
+        if ($regionCalls === []) {
+            return [];
+        }
+
+        $results = [];
+        foreach (array_chunk($regionCalls, $maxConcurrency, true) as $window) {
+            foreach ($this->executeParallel($window, $deadlineMs) as $regionId => $result) {
+                $results[$regionId] = $result;
+            }
+        }
 
         return $results;
     }

@@ -15,7 +15,10 @@ use CrazyGoat\Proto\ImportSstpb\SSTMeta;
 use CrazyGoat\Proto\ImportSstpb\SwitchMode;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeRequest;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
@@ -42,6 +45,7 @@ final readonly class SstIngestor
         private RegionResolver $regionResolver,
         private TimeoutConfig $timeoutConfig,
         private LoggerInterface $logger,
+        private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
     ) {
     }
 
@@ -96,12 +100,27 @@ final readonly class SstIngestor
     /**
      * Switch all stores to the given mode.
      *
+     * Every store's SwitchMode request is dispatched before any response is
+     * awaited (at most $maxConcurrency requests in flight), so the pure
+     * overhead of an ingest on a many-store cluster no longer scales
+     * linearly with the store count (issue #295).
+     *
+     * Failure semantics match the previous sequential loop: a failure while
+     * switching to import mode aborts on the first failing store (the
+     * original exception type is preserved), while failures while restoring
+     * normal mode are logged and never mask the outcome of the ingest.
+     *
      * @param \CrazyGoat\Proto\Metapb\Store[] $stores
+     * @throws \Throwable The first underlying failure when importing; the
+     *                    exception type matches what the sequential loop
+     *                    used to surface (GrpcException, InvalidStoreAddressException, ...)
      */
     private function switchStoresMode(array $stores, int $mode): void
     {
         $modeName = $mode === SwitchMode::Import ? 'import' : 'normal';
+        $isImport = $mode === SwitchMode::Import;
 
+        $calls = [];
         foreach ($stores as $store) {
             $address = $store->getAddress();
             if ($address === '') {
@@ -114,23 +133,6 @@ final readonly class SstIngestor
 
             try {
                 $this->regionResolver->validateStoreAddress($address, (int) $store->getId());
-
-                $request = new SwitchModeRequest();
-                $request->setMode($mode);
-
-                $this->grpc->call(
-                    $address,
-                    self::IMPORT_SST_SERVICE,
-                    'SwitchMode',
-                    $request,
-                    SwitchModeResponse::class,
-                    $this->timeoutConfig->ingestTimeoutMs,
-                );
-
-                $this->logger->debug('Switched store to ' . $modeName . ' mode', [
-                    'storeId' => $store->getId(),
-                    'address' => $address,
-                ]);
             } catch (\Throwable $e) {
                 $this->logger->error('Failed to switch store to ' . $modeName . ' mode', [
                     'storeId' => $store->getId(),
@@ -138,14 +140,74 @@ final readonly class SstIngestor
                     'exception' => $e,
                 ]);
 
-                // If we fail to switch back to normal, we should still continue
-                // trying other stores. The failure to switch to import mode is
-                // more critical.
-                if ($mode === SwitchMode::Import) {
+                if ($isImport) {
+                    // Import mode: abort before any RPC leaves the client,
+                    // exactly like the sequential loop did.
                     throw $e;
                 }
+
+                continue;
+            }
+
+            $storeId = (int) $store->getId();
+            $calls[$storeId] = fn(): GrpcFuture => $this->grpc->callAsync(
+                $address,
+                self::IMPORT_SST_SERVICE,
+                'SwitchMode',
+                $this->buildSwitchModeRequest($mode),
+                SwitchModeResponse::class,
+                $this->timeoutConfig->ingestTimeoutMs,
+            );
+        }
+
+        if ($calls === []) {
+            return;
+        }
+
+        try {
+            $this->createBatchExecutor()->executeParallelCapped($calls, $this->maxConcurrency);
+        } catch (BatchPartialFailureException $e) {
+            foreach ($e->getRegionErrors() as $storeId => $error) {
+                $this->logger->error('Failed to switch store to ' . $modeName . ' mode', [
+                    'storeId' => $storeId,
+                    'exception' => $error,
+                ]);
+            }
+
+            if ($isImport) {
+                // Preserve the original exception type for import mode:
+                // rethrow the first underlying error instead of the wrapper.
+                // The executor only throws with a non-empty error map.
+                $regionErrors = $e->getRegionErrors();
+                $firstKey = array_key_first($regionErrors);
+                if ($firstKey === null) {
+                    return;
+                }
+                /** @var \CrazyGoat\TiKV\Client\Exception\TiKvException $firstError */
+                $firstError = $regionErrors[$firstKey];
+
+                throw $firstError;
             }
         }
+
+        foreach (array_keys($calls) as $storeId) {
+            $this->logger->debug('Switched store to ' . $modeName . ' mode', [
+                'storeId' => $storeId,
+            ]);
+        }
+    }
+
+    private function buildSwitchModeRequest(int $mode): SwitchModeRequest
+    {
+        $request = new SwitchModeRequest();
+        $request->setMode($mode);
+
+        return $request;
+    }
+
+    private function createBatchExecutor(): BatchAsyncExecutor
+    {
+        return new BatchAsyncExecutor($this->logger);
     }
 
     /**

@@ -640,7 +640,7 @@ final readonly class RawKvBatch
             ]);
         };
         return CheckedGrpcFuture::fromCallable(
-            function () use ($inner, $threshold, $logCallback): Message {
+            function () use ($inner, $threshold, $logCallback): mixed {
                 $start = hrtime(true);
                 try {
                     return $inner->waitForExecutor();

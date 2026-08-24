@@ -35,7 +35,10 @@ use Google\Protobuf\Internal\Message;
 final readonly class CheckedGrpcFuture
 {
     /**
-     * @param Closure(): Message $waiter        Resolves the future to a protobuf message
+     * @param callable(): mixed $waiter         Resolves the future to its
+     *                                          result (a protobuf message,
+     *                                          or an aggregated value for
+     *                                          the batchScan fan-out)
      * @param bool               $hasInnerFuture True if there is a single
      *                                          underlying {@see GrpcFuture}
      *                                          that exposes cancel/isCompleted
@@ -45,7 +48,7 @@ final readonly class CheckedGrpcFuture
     private function __construct(
         private mixed $inner,
         private bool $hasInnerFuture,
-        private Closure $waiter,
+        private mixed $waiter,
     ) {
     }
 
@@ -68,10 +71,12 @@ final readonly class CheckedGrpcFuture
 
     /**
      * Wrap a callable that, on first invocation, returns the resolved
-     * protobuf message. Useful when the wait phase must aggregate
-     * multiple sub-futures (multi-region split/merge case).
+     * result. Most often this is a protobuf Message; the batchScan fan-out
+     * (issue #295) instead aggregates several sub-futures into the final
+     * plain-PHP row array during the wait, so any fully-resolved value is
+     * accepted — the executor passes it through untouched.
      *
-     * @param callable(): Message $waiter
+     * @param callable(): mixed $waiter
      */
     public static function fromCallable(callable $waiter): self
     {
@@ -95,10 +100,15 @@ final readonly class CheckedGrpcFuture
     }
 
     /**
+     * Resolve the future. Returns the underlying protobuf message for real
+     * RPCs, or whatever aggregated result the waiter produced for synthetic
+     * futures (the batchScan fan-out aggregates its segments into a plain
+     * row array, see RawKvScanner::scanRangeAsync()).
+     *
      * @throws TiKvException If either the underlying RPC fails or the
      *                       resolved response carries a region/key error.
      */
-    public function waitForExecutor(): Message
+    public function waitForExecutor(): mixed
     {
         return ($this->waiter)();
     }

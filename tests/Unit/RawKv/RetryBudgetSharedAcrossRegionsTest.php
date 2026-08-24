@@ -5,12 +5,12 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
-use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -139,12 +139,11 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
     }
 
     /**
-     * A multi-region deleteRange with each region on its own budget: the
-     * first region exhausts its own maxBackoffMs and the operation aborts
-     * before a later region is scanned (per-region semantics, issue #271).
-     *
-     * StaleCmd backoff 2,4,8,...; with maxBackoffMs=10 a single region
-     * exhausts after 2+4+8=14 > 10, i.e. on its third retryable failure.
+     * A multi-region deleteRange where every region's send fails: since the
+     * parallelised fan-out (issue #295) dispatches both regions before any
+     * wait, the failures surface together as a BatchPartialFailureException
+     * instead of aborting at the first failing region. deleteRange is
+     * idempotent so retrying the whole operation stays safe.
      */
     public function testDeleteRangeExhaustsBudgetInFirstRegion(): void
     {
@@ -161,10 +160,14 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $retryCount = 0;
-        $this->grpc->method('call')->willReturnCallback(function () use (&$retryCount): RawDeleteRangeResponse {
-            $retryCount++;
-            throw new TiKvException('StaleCommand');
-        });
+        // Dispatch-phase failure (address resolution / budget exhaustion in
+        // the retried send path) — one attempt per region.
+        $this->grpc->method('callAsync')->willReturnCallback(
+            function () use (&$retryCount): never {
+                $retryCount++;
+                throw new TiKvException('StaleCommand');
+            },
+        );
 
         $rangeOps = new RawKvRangeOps(
             $this->pdClient,
@@ -177,16 +180,24 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
             logger: new NullLogger(),
         );
 
-        $this->expectException(TiKvException::class);
-        $rangeOps->deleteRange('a', 'z');
-
-        $this->assertLessThanOrEqual(4, $retryCount, 'First region exhausts its own per-region budget');
+        try {
+            $rangeOps->deleteRange('a', 'z');
+            $this->fail('Expected BatchPartialFailureException');
+        } catch (BatchPartialFailureException $e) {
+            // Both regions fail together as a partial failure, but each one
+            // still burns its OWN retry budget first: with maxBackoffMs=10
+            // StaleCmd backoff 2+4+8=14 > 10 exhausts a region after exactly
+            // 3 attempts (issue #271 semantics preserved per region).
+            $this->assertCount(2, $e->getRegionErrors());
+            $this->assertSame(6, $retryCount, 'Each region exhausts its own 3-attempt budget');
+        }
     }
 
     /**
-     * A multi-region checksum with each region on its own budget: the first
-     * region exhausts its own maxBackoffMs and the operation aborts before
-     * a later region is scanned (per-region semantics, issue #271).
+     * A multi-region checksum where every region's send fails: since the
+     * parallelised fan-out (issue #295) dispatches both regions before any
+     * wait, the failures surface together as a BatchPartialFailureException
+     * instead of aborting at the first failing region.
      */
     public function testChecksumExhaustsBudgetInFirstRegion(): void
     {
@@ -203,10 +214,12 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $retryCount = 0;
-        $this->grpc->method('call')->willReturnCallback(function () use (&$retryCount): void {
-            $retryCount++;
-            throw new TiKvException('StaleCommand');
-        });
+        $this->grpc->method('callAsync')->willReturnCallback(
+            function () use (&$retryCount): never {
+                $retryCount++;
+                throw new TiKvException('StaleCommand');
+            },
+        );
 
         $rangeOps = new RawKvRangeOps(
             $this->pdClient,
@@ -219,10 +232,14 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
             logger: new NullLogger(),
         );
 
-        $this->expectException(TiKvException::class);
-        $rangeOps->checksum('a', 'z');
-
-        $this->assertLessThanOrEqual(4, $retryCount, 'First region exhausts its own per-region budget');
+        try {
+            $rangeOps->checksum('a', 'z');
+            $this->fail('Expected BatchPartialFailureException');
+        } catch (BatchPartialFailureException $e) {
+            // Same per-region budget semantics: 3 attempts x 2 regions.
+            $this->assertCount(2, $e->getRegionErrors());
+            $this->assertSame(6, $retryCount, 'Each region exhausts its own 3-attempt budget');
+        }
     }
 
     /**
