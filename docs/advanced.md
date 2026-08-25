@@ -712,68 +712,115 @@ class ResilientCache
 
 ### Metrics Collection
 
+The client ships a built-in, opt-in metrics hook: implement
+[`MetricsInterface`](../src/Client/Observability/MetricsInterface.php) and
+pass it via the `metrics` option. There is no need to wrap client methods in
+a decorator to time operations — the library already reports RPC counts,
+per-RPC latency, retries and region-cache behaviour from inside the client,
+which an external wrapper cannot see.
+
+The interface has six methods (full reference with emitted tag examples:
+[Configuration → Metrics and Observability](configuration.md#metrics-and-observability)):
+
+| Method                 | Reported when                                            |
+|------------------------|----------------------------------------------------------|
+| `rpcStarted()`         | An outbound gRPC call is dispatched                       |
+| `rpcCompleted()`       | The call returns — carries duration in ms + success flag  |
+| `retryAttempted()`     | A retryable error triggers another attempt                |
+| `regionCacheHit()`     | A region was served from the client's region cache        |
+| `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
+| `regionInvalidated()`  | A region was dropped from the cache (e.g. `NotLeader`)    |
+
+Implementations must never throw; the default is a zero-cost no-op
+(`NoOpMetrics`). A ready-made in-memory recorder for tests and benchmarks
+ships as [`InMemoryMetrics`](../src/Client/Observability/InMemoryMetrics.php)
+with `getRpcStarted(string $operation)`, `getRpcSucceeded()`,
+`getRetries()`, `getCacheHits()`, `getInvalidations()`,
+`getMeanLatencyMs()` and `reset()` (all getters take the operation tag).
+
+Production-shaped example — exporting the built-in counters to Prometheus:
+
 ```php
-class TiKvMetrics
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+
+final class PrometheusMetrics implements MetricsInterface
 {
-    private array $metrics = [
-        'operations' => [],
-        'errors' => [],
-        'latencies' => [],
-    ];
-    
-    public function recordOperation(string $operation, float $latencyMs, ?string $error = null): void
-    {
-        $this->metrics['operations'][$operation] = 
-            ($this->metrics['operations'][$operation] ?? 0) + 1;
-        
-        if ($error) {
-            $this->metrics['errors'][$operation][$error] = 
-                ($this->metrics['errors'][$operation][$error] ?? 0) + 1;
-        }
-        
-        $this->metrics['latencies'][$operation][] = $latencyMs;
+    public function __construct(
+        private readonly \Prometheus\CollectorRegistry $registry,
+        private readonly string $namespace = 'tikv_client',
+    ) {
     }
-    
-    public function getSummary(): array
+
+    public function rpcStarted(string $operation): void
     {
-        $summary = [];
-        
-        foreach ($this->metrics['operations'] as $op => $count) {
-            $latencies = $this->metrics['latencies'][$op] ?? [];
-            $summary[$op] = [
-                'count' => $count,
-                'errors' => array_sum($this->metrics['errors'][$op] ?? []),
-                'avg_latency_ms' => $latencies ? array_sum($latencies) / count($latencies) : 0,
-                'max_latency_ms' => $latencies ? max($latencies) : 0,
-            ];
-        }
-        
-        return $summary;
+        $this->counter('rpc_started_total', 'Outbound gRPC calls')
+            ->inc(['operation' => $operation]);
+    }
+
+    public function rpcCompleted(string $operation, float $durationMs, bool $success): void
+    {
+        // Histograms give latency distribution, not just averages.
+        $this->histogram('rpc_duration_ms', 'gRPC call duration', [1, 5, 10, 50, 100, 500, 1000, 5000])
+            ->observe($durationMs, ['operation' => $operation, 'success' => $success ? '1' : '0']);
+    }
+
+    public function retryAttempted(string $operation): void
+    {
+        $this->counter('retries_total', 'Retryable errors retried')
+            ->inc(['operation' => $operation]);
+    }
+
+    public function regionCacheHit(string $operation): void
+    {
+        $this->counter('region_cache_hits_total', 'Region cache hits')
+            ->inc(['operation' => $operation]);
+    }
+
+    public function regionCacheMiss(string $operation): void
+    {
+        $this->counter('region_cache_misses_total', 'Region cache misses')
+            ->inc(['operation' => $operation]);
+    }
+
+    public function regionInvalidated(string $reason): void
+    {
+        $this->counter('region_invalidations_total', 'Regions dropped from cache')
+            ->inc(['reason' => $reason]);
+    }
+
+    private function counter(string $name, string $help): \Prometheus\Counter
+    {
+        return $this->registry->getOrRegisterCounter($this->namespace, $name, $help);
+    }
+
+    private function histogram(string $name, string $help, array $buckets): \Prometheus\Histogram
+    {
+        return $this->registry->getOrRegisterHistogram($this->namespace, $name, $help, $buckets);
     }
 }
 
-// Usage with decorator
-class MetricsClient
-{
-    private RawKvClient $client;
-    private TiKvMetrics $metrics;
-    
-    public function get(string $key): ?string
-    {
-        $start = microtime(true);
-        $error = null;
-        
-        try {
-            return $this->client->get($key);
-        } catch (TiKvException $e) {
-            $error = get_class($e);
-            throw $e;
-        } finally {
-            $latency = (microtime(true) - $start) * 1000;
-            $this->metrics->recordOperation('get', $latency, $error);
-        }
-    }
-}
+// Wire it up:
+$metrics = new PrometheusMetrics(new \Prometheus\CollectorRegistry(new \Prometheus\Storage\InMemory()));
+$client = RawKvClient::create(
+    pdEndpoints: ['127.0.0.1:2379'],
+    options: ['metrics' => $metrics],
+);
+
+// Counters are also reachable afterwards:
+$injected = $client->getMetrics();   // returns whatever was passed via 'metrics'
+```
+
+For tests and quick diagnostics, skip the adapter entirely:
+
+```php
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
+
+$metrics = new InMemoryMetrics();
+$client = RawKvClient::create(pdEndpoints: ['127.0.0.1:2379'], options: ['metrics' => $metrics]);
+// ... run operations ...
+
+echo $metrics->getMeanLatencyMs();   // mean completed-RPC latency
+echo $metrics->getRetries();         // total retries observed
 ```
 
 ### Health Checks
