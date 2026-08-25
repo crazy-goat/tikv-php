@@ -729,14 +729,16 @@ The interface has six methods (full reference with emitted tag examples:
 | `retryAttempted()`     | A retryable error triggers another attempt                |
 | `regionCacheHit()`     | A region was served from the client's region cache        |
 | `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
-| `regionInvalidated()`  | A region was dropped from the cache (e.g. `NotLeader`)    |
+| `regionInvalidated()`  | A region was dropped from the cache (e.g. `retry_region_error`) |
 
 Implementations must never throw; the default is a zero-cost no-op
 (`NoOpMetrics`). A ready-made in-memory recorder for tests and benchmarks
 ships as [`InMemoryMetrics`](../src/Client/Observability/InMemoryMetrics.php)
-with `getRpcStarted(string $operation)`, `getRpcSucceeded()`,
-`getRetries()`, `getCacheHits()`, `getInvalidations()`,
-`getMeanLatencyMs()` and `reset()` (all getters take the operation tag).
+with `getRpcStarted(string $operation)`, `getRpcSucceeded(string $operation)`,
+`getRetries(string $operation)`, `getCacheHits(string $operation)`,
+`getMeanLatencyMs(string $operation)`, `getInvalidations(string $reason)`
+(this one keys on the invalidation *reason*, not an operation tag) and
+`reset()`.
 
 Production-shaped example — exporting the built-in counters to Prometheus:
 
@@ -753,7 +755,7 @@ final class PrometheusMetrics implements MetricsInterface
 
     public function rpcStarted(string $operation): void
     {
-        $this->counter('rpc_started_total', 'Outbound gRPC calls')
+        $this->counter('rpc_started_total', 'Outbound gRPC calls', ['operation'])
             ->inc(['operation' => $operation]);
     }
 
@@ -766,36 +768,37 @@ final class PrometheusMetrics implements MetricsInterface
 
     public function retryAttempted(string $operation): void
     {
-        $this->counter('retries_total', 'Retryable errors retried')
+        $this->counter('retries_total', 'Retryable errors retried', ['operation'])
             ->inc(['operation' => $operation]);
     }
 
     public function regionCacheHit(string $operation): void
     {
-        $this->counter('region_cache_hits_total', 'Region cache hits')
+        $this->counter('region_cache_hits_total', 'Region cache hits', ['operation'])
             ->inc(['operation' => $operation]);
     }
 
     public function regionCacheMiss(string $operation): void
     {
-        $this->counter('region_cache_misses_total', 'Region cache misses')
+        $this->counter('region_cache_misses_total', 'Region cache misses', ['operation'])
             ->inc(['operation' => $operation]);
     }
 
     public function regionInvalidated(string $reason): void
     {
-        $this->counter('region_invalidations_total', 'Regions dropped from cache')
+        $this->counter('region_invalidations_total', 'Regions dropped from cache', ['reason'])
             ->inc(['reason' => $reason]);
     }
 
-    private function counter(string $name, string $help): \Prometheus\Counter
+    private function counter(string $name, string $help, array $labels): \Prometheus\Counter
     {
-        return $this->registry->getOrRegisterCounter($this->namespace, $name, $help);
+        return $this->registry->getOrRegisterCounter($this->namespace, $name, $help, $labels);
     }
 
     private function histogram(string $name, string $help, array $buckets): \Prometheus\Histogram
     {
-        return $this->registry->getOrRegisterHistogram($this->namespace, $name, $help, $buckets);
+        // Label names must be declared at registration time or ->observe() throws.
+        return $this->registry->getOrRegisterHistogram($this->namespace, $name, $help, ['operation', 'success'], $buckets);
     }
 }
 
@@ -819,8 +822,8 @@ $metrics = new InMemoryMetrics();
 $client = RawKvClient::create(pdEndpoints: ['127.0.0.1:2379'], options: ['metrics' => $metrics]);
 // ... run operations ...
 
-echo $metrics->getMeanLatencyMs();   // mean completed-RPC latency
-echo $metrics->getRetries();         // total retries observed
+echo $metrics->getMeanLatencyMs('get');   // mean latency of completed get() RPCs
+echo $metrics->getRetries('scan');        // retries observed for scan operations
 ```
 
 ### Health Checks
