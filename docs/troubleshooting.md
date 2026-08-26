@@ -435,8 +435,9 @@ expire" instead of an exception.
 
 These are raised by the transactional (`TxnKv`) API during prewrite, commit
 and pessimistic locking — the errors a transactional workload hits first and
-most often. All of them mean **the transaction did not apply its writes**;
-retry with a *new* transaction (fresh begin, re-read all values) rather than
+most often. All of them mean **the operation did not complete** — on write
+paths nothing was applied (reads may simply need re-running); retry with a
+*new* transaction (fresh begin, re-read all values) rather than
 replaying into the stale snapshot. See
 [Transaction Operations](error-handling.md#transaction-operations) and
 [Retrying transactions safely](error-handling.md#retrying-transactions-safely).
@@ -610,18 +611,21 @@ cluster failures.
 BatchDeadlineExceededException: Batch operation exceeded its <deadlineMs> ms deadline (elapsed <elapsedMs> ms)
 ```
 
-**What it means:** A fanned-out batch operation (batchScan/deleteRange/
-checksum/batchGet/batchPut/batchDelete) hit its wall-clock deadline before
-all regions answered; some regions were never dispatched or their results
-were cancelled.
+**What it means:** `BatchAsyncExecutor` aborted a fanned-out batch because an
+explicit wall-clock deadline expired before all regions answered; some
+regions were never dispatched or their results were cancelled.
 
-**Likely cause:** Deadline too small for region count, or slow/unreachable
-TiKV nodes.
+**Likely cause:** The executor was invoked with an explicit deadline too small
+for the region count, or slow/unreachable TiKV nodes. Note: no shipped client
+option currently wires a batch deadline — every built-in operation runs the
+executor without one, so this exception is reachable only by calling
+`BatchAsyncExecutor` directly with `deadlineMs > 0`. For deadlines you can
+configure from the public API, see RetryBudgetExhaustedException below.
 
 **Solution:** Do not retry blindly — the batch is **partially applied**.
 Inspect `getContext()['pendingRegions']` / `['dispatchedRegions']`, re-drive
-only the affected keys/ranges, or raise the deadline
-(`options['retryDeadlineMs']`). See
+only the affected keys/ranges, or raise the explicit deadline passed to
+`executeParallel()`. See
 [BatchDeadlineExceededException](error-handling.md#exception-hierarchy).
 
 #### Batch Partial Failure
@@ -659,7 +663,7 @@ cluster while the region cache still points at it.
 
 **Solution:** Check cluster health (`docker-compose ps`, TiKV metrics).
 Do not retry blindly: transient only after PD restores the store or the
-stale cache entry expires — inspect `getStoreId()` first. See
+stale cache entry expires — inspect the public `$e->storeId` property first. See
 [Caller Retryability](error-handling.md#caller-retryability).
 
 #### Health Check Failed
