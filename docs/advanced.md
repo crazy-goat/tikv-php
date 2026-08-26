@@ -546,24 +546,27 @@ function parallelScan(
 > `ServerIsBusy`, `StaleCommand`, `RegionNotFound`, gRPC transport errors)
 > through a bounded `RetryExecutor`. Wrapping client calls in another
 > user-level loop **multiplies** the total wait — the inner executor can
-> already spend up to 30 attempts / 30 s wall-clock on one operation — and
-> can pin PHP-FPM workers far longer than either layer intends.
+> already spend up to 30 attempts / 30 s wall-clock on one operation
+> (overshooting by at most one final backoff sleep) — and can pin PHP-FPM
+> workers far longer than either layer intends.
 >
-> When the built-in budget is exhausted the operation throws
-> `CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException` (extends
-> `TiKvException`). Treat it as a **hard failure**, not as a signal to retry
-> again; it exposes `attempts()` and `elapsedOrBackoffMs()` for diagnostics,
-> and `getPrevious()` for the original TiKV error.
+> When the attempt cap or the wall-clock deadline is reached, the operation
+> throws `CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException`
+> (extends `TiKvException`). Treat it as a **hard failure**, not as a signal
+> to retry again; it exposes `attempts()` and `elapsedOrBackoffMs()` for
+> diagnostics, and `getPrevious()` for the original TiKV error. The two
+> sleep budgets behave differently: exhausting them **rethrows the original
+> TiKV error** instead.
 
 Built-in retry budgets (full reference incl. per-error backoff strategies:
 [docs/configuration.md — Retry and Backoff](configuration.md#retry-and-backoff)):
 
-| Budget | Default | Tunable via |
-|--------|---------|-------------|
-| Max attempts | 30 | `RetryExecutor` constructor (no client option) |
-| Cumulative backoff budget (`maxBackoffMs`) | 20 000 ms | client constructor argument |
-| ServerBusy sleep budget (`serverBusyBudgetMs`) | 60 000 ms | client constructor argument |
-| Wall-clock deadline (`retryDeadlineMs`) | 30 000 ms (`0` disables) | `options['retryDeadlineMs']` on `RawKvClient::create()` / `TxnKvClient::create()` |
+| Budget | Default | Exhaustion surfaces as | Tunable via |
+|--------|---------|------------------------|-------------|
+| Max attempts | 30 (`RetryExecutor::DEFAULT_MAX_ATTEMPTS`) | `RetryBudgetExhaustedException` | `RetryExecutor` constructor (no client option) |
+| Cumulative backoff budget (`maxBackoffMs`) | 20 000 ms | the original `TiKvException` | client constructor argument |
+| ServerBusy sleep budget (`serverBusyBudgetMs`) | 60 000 ms (`RawKvClient::DEFAULT_SERVER_BUSY_BUDGET_MS`) | the original `TiKvException` | `RawKvClient` constructor argument (fixed at 60 s on the transactional API) |
+| Wall-clock deadline (`retryDeadlineMs`) | 30 000 ms, `0` disables (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`) | `RetryBudgetExhaustedException` | `options['retryDeadlineMs']` on `RawKvClient::create()` / `TxnKvClient::create()` |
 
 What you should handle at the application level instead:
 
@@ -573,11 +576,11 @@ use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 try {
     $value = $client->get($key);
 } catch (RetryBudgetExhaustedException $e) {
-    // The client gave up after exhausting its retry budget (all internal
-    // retries spent). Log/alert with $e->attempts() and
-    // $e->elapsedOrBackoffMs(); inspect $e->getPrevious() for the original
-    // TiKV error. Surface the failure to your caller or queue the work for
-    // later — do NOT immediately retry in a tight loop.
+    // The client gave up after exhausting its attempt cap or wall-clock
+    // deadline. Log/alert with $e->attempts() and $e->elapsedOrBackoffMs();
+    // inspect $e->getPrevious() for the original TiKV error. Surface the
+    // failure to your caller or queue the work for later — do NOT
+    // immediately retry in a tight loop.
     throw $e;
 }
 ```
