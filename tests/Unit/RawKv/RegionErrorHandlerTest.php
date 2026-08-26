@@ -110,9 +110,12 @@ class RegionErrorHandlerTest extends TestCase
 
     // ========================================================================
     // Invalidation ownership (issue #474): the cache emits the
-    // regionInvalidated() metric itself. NotLeader oneofs are left cached
-    // for RetryExecutor::handleNotLeader() — the sole owner of NotLeader
-    // drops; every other region error invalidates here as 'region_error'.
+    // regionInvalidated() metric itself. At executor-owned call sites
+    // (default) NotLeader oneofs are left cached for
+    // RetryExecutor::handleNotLeader() — its drops alone; every other
+    // region error invalidates here as 'region_error'. Un-owned sites pass
+    // notLeaderOwnedByRetryExecutor: false so a NotLeader error still
+    // self-invalidates ('not_leader') instead of stranding a stale entry.
     // ========================================================================
 
     public function testNotLeaderRegionErrorLeavesRegionCachedForHandleNotLeader(): void
@@ -135,6 +138,31 @@ class RegionErrorHandlerTest extends TestCase
             $this->fail('Expected RegionException');
         } catch (RegionException) {
             // expected — but the region must stay cached
+        }
+    }
+
+    public function testNotLeaderInvalidatesWhenNotOwnedByRetryExecutor(): void
+    {
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(42);
+
+        $error = new Error();
+        $error->setMessage('not leader');
+        $error->setNotLeader($notLeader);
+
+        $response = new RawGetResponse();
+        $response->setRegionError($error);
+
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->once())
+            ->method('invalidate')
+            ->with(42, 'not_leader');
+
+        try {
+            RegionErrorHandler::check($response, $cache, 42, notLeaderOwnedByRetryExecutor: false);
+            $this->fail('Expected RegionException');
+        } catch (RegionException) {
+            // expected — invalidation happens before the throw
         }
     }
 

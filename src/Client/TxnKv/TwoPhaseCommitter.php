@@ -258,7 +258,16 @@ final readonly class TwoPhaseCommitter
             PrewriteResponse::class,
             $this->timeoutMs('write'),
         );
-        RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+        // commit()'s prewrite loop runs OUTSIDE any RetryExecutor, so no
+        // handleNotLeader() would ever drop a NotLeader-carrying region here
+        // — check() must self-invalidate or the stale entry survives up to
+        // TTL and keeps resolving to the moved leader (issue #474 review).
+        RegionErrorHandler::check(
+            $response,
+            $this->regionCache,
+            $region->regionId,
+            notLeaderOwnedByRetryExecutor: false,
+        );
 
         $errors = $response->getErrors();
         if (count($errors) > 0) {
@@ -570,7 +579,16 @@ final readonly class TwoPhaseCommitter
                     $this->timeoutMs('write'),
                 );
 
-                RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+                // pessimisticLockBatch()'s do-while retries only KeyError
+                // cases — a RegionException escapes uncaught, so no
+                // handleNotLeader() would drop a NotLeader-carrying region.
+                // check() must self-invalidate (issue #474 review).
+                RegionErrorHandler::check(
+                    $response,
+                    $this->regionCache,
+                    $region->regionId,
+                    notLeaderOwnedByRetryExecutor: false,
+                );
 
                 $errors = $response->getErrors();
                 $needRetry = false;
