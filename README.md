@@ -370,6 +370,15 @@ make up  # Start TiKV cluster first
 php examples/basic.php
 ```
 
+## Documentation
+
+- **[Getting Started](docs/getting-started.md)** — Installation, setup, and your first TiKV operations
+- **[Configuration](docs/configuration.md)** — Client options, TLS, timeouts, retry budgets, logging
+- **[Operations](docs/operations.md)** — Complete guide to all RawKV operations
+- **[Advanced Features](docs/advanced.md)** — Production-ready patterns and optimization
+- **[Error Handling](docs/error-handling.md)** — Exception hierarchy, per-operation exceptions and retryability
+- **[Troubleshooting](docs/troubleshooting.md)** — Common issues and solutions
+
 ## Configuration
 
 ### Client Options

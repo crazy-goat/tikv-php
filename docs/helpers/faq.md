@@ -315,3 +315,13 @@ Issue #474 (regionInvalidated()) settled three rules worth reusing:
    code path that invalidates with 'not_leader'. Gate any choke-point emission
    on an actual state change (`removeById(): bool`) so retry storms count one
    real drop instead of one per attempt.
+
+## Error-handling docs must be derived from source, not from the issue text
+
+Issue #394 [DOC-28] (docs/error-handling.md) said "fifteen exception classes";
+the real count was **sixteen** — PR #472 had added
+`BatchPartialFailureException` after the issue was written. When a docs task
+involves enumerating classes/methods/exceptions, grep the source tree at
+implementation time and treat the issue's numbers as stale-by-default. Same
+class of trap as #376: an audit issue's premise can silently expire when a
+later PR changes the code it describes.

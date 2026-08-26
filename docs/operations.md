@@ -668,28 +668,30 @@ if ($before->checksum === $after->checksum &&
 
 ## Error Handling
 
-All operations throw exceptions on failure:
+All operations throw exceptions derived from `TiKvException` (plus the
+standalone `InvalidArgumentException`, which is outside that hierarchy).
+The full class hierarchy, a per-operation exception table for every
+`RawKvClient` and `Transaction` method, caller-retryability guidance and a
+recommended catch order live in the dedicated
+**[Error Handling Reference](error-handling.md)**.
+
+Quick sketch:
 
 ```php
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
-use CrazyGoat\TiKV\Client\Exception\RegionException;
-use CrazyGoat\TiKV\Client\Exception\GrpcException;
 
 try {
     $value = $client->get('key');
-} catch (RegionException $e) {
-    // Region-related errors (epoch mismatch, not leader, etc.)
-    echo "Region error: {$e->getMessage()}\n";
-} catch (GrpcException $e) {
-    // gRPC communication errors
-    echo "Connection error: {$e->getMessage()}\n";
 } catch (TiKvException $e) {
-    // General TiKV errors
+    // Transport, region or retry-budget failure — see the reference for
+    // which subclass it is and whether your operation may be retried.
     echo "TiKV error: {$e->getMessage()}\n";
 }
 ```
 
-See [Troubleshooting](troubleshooting.md) for common errors and solutions.
+Note that `InvalidArgumentException` is *not* caught by the arm above — it
+does not extend `TiKvException`. See
+[Troubleshooting](troubleshooting.md) for common errors and solutions.
 
 ## Best Practices
 
