@@ -13,11 +13,13 @@ use PHPUnit\Framework\TestCase;
 /**
  * Issue #474: RegionCache::invalidate() is the single emission point for the
  * regionInvalidated() metric — callers pass their reason tag in, the cache
- * emits exactly once per drop call.
+ * emits exactly once per ACTUAL drop (an unknown region ID emits nothing).
+ * Metrics are attached in place via attachMetricsIfAbsent(); a cache shared
+ * between client components is never cloned or rebound.
  */
 class RegionCacheMetricsTest extends TestCase
 {
-    private function makeRegion(int $id, string $startKey, string $endKey = ''): RegionInfo
+    private function makeRegion(int $id, string $startKey = 'a', string $endKey = 'z'): RegionInfo
     {
         return new RegionInfo(
             regionId: $id,
@@ -46,29 +48,28 @@ class RegionCacheMetricsTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
-    public function testInvalidateEmitsReasonExactlyOncePerCall(): void
+    public function testInvalidateEmitsReasonExactlyOncePerActualDrop(): void
     {
         $metrics = new InMemoryMetrics();
         $cache = new RegionCache(metrics: $metrics);
-        $cache->put($this->makeRegion(1, 'a', 'z'));
+        $cache->put($this->makeRegion(1));
 
         $cache->invalidate(1, 'region_error');
+        // Second call finds nothing to remove — no second emission.
         $cache->invalidate(1, 'region_error');
 
-        $this->assertSame(2, $metrics->getInvalidations('region_error'));
+        $this->assertSame(1, $metrics->getInvalidations('region_error'));
         $this->assertSame(0, $metrics->getInvalidations('not_leader'));
     }
 
-    public function testInvalidateOfUnknownRegionStillEmits(): void
+    public function testInvalidateOfUnknownRegionEmitsNothing(): void
     {
-        // Choke-point contract: the caller asked for an invalidation, so the
-        // metric counts it even when nothing was cached under that ID.
         $metrics = new InMemoryMetrics();
         $cache = new RegionCache(metrics: $metrics);
 
         $cache->invalidate(999, 'not_leader');
 
-        $this->assertSame(1, $metrics->getInvalidations('not_leader'));
+        $this->assertSame(0, $metrics->getInvalidations('not_leader'));
         $this->assertSame(0, $metrics->getInvalidations('region_error'));
     }
 
@@ -83,19 +84,38 @@ class RegionCacheMetricsTest extends TestCase
         $this->assertSame(1, $metrics->getInvalidations('region_error'));
     }
 
-    public function testWithMetricsReturnsNewInstanceLeavingOriginalUntouched(): void
+    public function testAttachMetricsIfAbsentAttachesWhenNull(): void
     {
-        $original = new RegionCache();
+        $cache = new RegionCache();
         $metrics = new InMemoryMetrics();
 
-        $wired = $original->withMetrics($metrics);
+        $cache->attachMetricsIfAbsent($metrics);
 
-        $this->assertNull($original->metrics(), 'Receiver must stay un-wired');
-        $this->assertNotNull($wired->metrics());
-        $this->assertNotSame($original, $wired);
+        $this->assertSame($metrics, $cache->metrics());
+    }
 
-        $wired->put($this->makeRegion(3, 'c', 'z'));
-        $wired->invalidate(3, 'retry_region_error');
+    public function testAttachMetricsIfAbsentKeepsExistingBackend(): void
+    {
+        $existing = new InMemoryMetrics();
+        $cache = new RegionCache(metrics: $existing);
+
+        $cache->attachMetricsIfAbsent(new InMemoryMetrics());
+
+        $this->assertSame($existing, $cache->metrics(), 'An explicitly attached backend must win');
+    }
+
+    public function testAttachMetricsIfAbsentMutatesSameInstance(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $shared = new RegionCache();
+
+        $shared->attachMetricsIfAbsent($metrics);
+
+        // Same object mutated — a copy handed to another component earlier
+        // would never see the wiring (that is why withMetrics() was dropped).
+        $shared->put($this->makeRegion(3));
+        $shared->invalidate(3, 'retry_region_error');
+        $this->assertSame($shared, $shared, 'No clone returned — mutation is in place');
         $this->assertSame(1, $metrics->getInvalidations('retry_region_error'));
     }
 }

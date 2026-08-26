@@ -38,17 +38,14 @@ class RegionCache implements RegionCacheInterface
     }
 
     /**
-     * Return a copy of this cache that emits regionInvalidated() to the
-     * given metrics backend. The receiver is left unchanged (caches are
-     * frequently shared between client components), so callers must use the
-     * return value.
+     * Attach the given metrics backend if this cache does not carry one yet
+     * (null); an explicitly attached backend always wins. Mutates THIS
+     * instance in place — caches are shared between client components and
+     * cloning a user-supplied cache would leave their wiring behind.
      */
-    public function withMetrics(MetricsInterface $metrics): static
+    public function attachMetricsIfAbsent(MetricsInterface $metrics): void
     {
-        $clone = clone $this;
-        $clone->metrics = $metrics;
-
-        return $clone;
+        $this->metrics ??= $metrics;
     }
 
     public function getByKey(string $key): ?RegionInfo
@@ -117,16 +114,18 @@ class RegionCache implements RegionCacheInterface
     }
 
     /**
-     * Drop a region from the cache and emit the regionInvalidated() metric
-     * with the caller-supplied reason. This is the single emission point for
+     * Drop a region from the cache and, when a removal actually happened,
+     * emit the regionInvalidated() metric with the caller-supplied reason —
+     * exactly once per ACTUAL drop. This is the single emission point for
      * every invalidation path (issue #474) — callers must not emit the
      * metric themselves, or drops are double-counted.
      */
     public function invalidate(int $regionId, string $reason = 'region_error'): void
     {
         $this->logger->info('Region invalidated', ['regionId' => $regionId]);
-        $this->removeById($regionId);
-        $this->metrics?->regionInvalidated($reason);
+        if ($this->removeById($regionId)) {
+            $this->metrics?->regionInvalidated($reason);
+        }
     }
 
     public function switchLeader(int $regionId, int $leaderStoreId): bool
@@ -277,12 +276,15 @@ class RegionCache implements RegionCacheInterface
         return $left;
     }
 
-    private function removeById(int $regionId): void
+    private function removeById(int $regionId): bool
     {
         $index = $this->idToIndex[$regionId] ?? null;
-        if ($index !== null) {
-            $this->removeByIndex($index);
+        if ($index === null) {
+            return false;
         }
+        $this->removeByIndex($index);
+
+        return true;
     }
 
     private function removeByIndex(int $index): void

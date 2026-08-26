@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -187,6 +188,151 @@ class RetryExecutorInvalidationMetricsTest extends TestCase
         }
 
         $this->assertSame(0, $metrics->getInvalidations('retry_region_error'));
+        $this->assertSame(0, $metrics->getInvalidations('not_leader'));
+    }
+
+    // ========================================================================
+    // Composed paths (issue #474 review fixes)
+    //
+    // The operation closures below mirror real call sites: they run
+    // RegionErrorHandler::check() on a response-shaped object and let the
+    // RegionException propagate into the retry loop.
+    // ========================================================================
+
+    private function makeNotLeaderResponse(int $regionId, ?Peer $hint): object
+    {
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId($regionId);
+        if ($hint instanceof Peer) {
+            $notLeader->setLeader($hint);
+        }
+        $error = new \CrazyGoat\Proto\Errorpb\Error();
+        $error->setMessage('not leader');
+        $error->setNotLeader($notLeader);
+
+        return new class ($error) {
+            public function __construct(private readonly \CrazyGoat\Proto\Errorpb\Error $error)
+            {
+            }
+
+            public function getRegionError(): \CrazyGoat\Proto\Errorpb\Error
+            {
+                return $this->error;
+            }
+        };
+    }
+
+    /**
+     * Regression for the reviewer-confirmed double emission: a NotLeader
+     * region error flowing through RegionErrorHandler::check() inside the
+     * retried closure used to invalidate once from check() AND once more
+     * from handleNotLeader() (region already dropped → switchLeader false →
+     * invalidate) on EVERY attempt — 54 emissions for this scenario. Now
+     * check() skips NotLeader oneofs entirely and handleNotLeader is the
+     * sole owner, so the whole storm counts exactly ONE actual drop.
+     */
+    public function testNotLeaderThroughCheckEmitsOnceTotalAcrossAllAttempts(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $cache = new RegionCache(metrics: $metrics);
+        $cache->put($this->makeRegion(42));
+        $executor = $this->createExecutor($cache);
+
+        $response = $this->makeNotLeaderResponse(42, null);
+        $calls = 0;
+        try {
+            $executor->execute('some_key', function () use (&$calls, $cache, $response): string {
+                $calls++;
+                // Mirrors TxnReader/LockResolver/TwoPhaseCommitter call
+                // sites: check() throws the RegionException itself.
+                RegionErrorHandler::check($response, $cache, 42);
+
+                return 'ok';
+            });
+            $this->fail('Expected the retry budget to exhaust');
+        } catch (RegionException) {
+            // expected — original error rethrown when maxBackoffMs crosses
+        }
+
+        $this->assertGreaterThan(2, $calls, 'NotLeader must be retried multiple times');
+        $this->assertSame(
+            1,
+            $metrics->getInvalidations('not_leader'),
+            'Sole-owner rule: one storm = one actual drop, regardless of attempts',
+        );
+        $this->assertSame(0, $metrics->getInvalidations('retry_region_error'));
+    }
+
+    /**
+     * Valid-hint composition: check() must leave the region cached so
+     * handleNotLeader can switch to the hinted peer — zero emissions, and
+     * the cached leader actually moves to the hint store.
+     */
+    public function testValidHintThroughCheckSwitchesLeaderWithoutEmittingAcrossAttempts(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $cache = new RegionCache(metrics: $metrics);
+        $cache->put($this->makeRegion(42, peers: [new PeerInfo(peerId: 20, storeId: 3)]));
+        $executor = $this->createExecutor($cache);
+
+        $protoLeader = new Peer();
+        $protoLeader->setId(20);
+        $protoLeader->setStoreId(3);
+        $response = $this->makeNotLeaderResponse(42, $protoLeader);
+
+        $calls = 0;
+        try {
+            $executor->execute('some_key', function () use (&$calls, $cache, $response): string {
+                $calls++;
+                RegionErrorHandler::check($response, $cache, 42);
+
+                return 'ok';
+            });
+            $this->fail('Expected the retry budget to exhaust');
+        } catch (RegionException) {
+            // expected
+        }
+
+        $this->assertGreaterThan(2, $calls);
+        $this->assertSame(
+            0,
+            $metrics->getInvalidations('not_leader'),
+            'Leader switching must not count as invalidation',
+        );
+        $this->assertSame(0, $metrics->getInvalidations('retry_region_error'));
+        $switched = $cache->getByKey('some_key');
+        $this->assertInstanceOf(RegionInfo::class, $switched, 'Region stays cached across the whole storm');
+        $this->assertSame(3, $switched->leaderStoreId, 'Cached leader points at the hinted peer');
+    }
+
+    /**
+     * Retry storm on a non-NotLeader region error: only the FIRST attempt
+     * finds the cached region and drops it (one 'retry_region_error');
+     * later attempts find nothing to remove and emit nothing.
+     */
+    public function testRetryStormCountsSingleRetryRegionErrorEmission(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $cache = new RegionCache(metrics: $metrics);
+        $cache->put($this->makeRegion(7));
+        $executor = $this->createExecutor($cache);
+
+        $calls = 0;
+        try {
+            $executor->execute('some_key', function () use (&$calls): string {
+                $calls++;
+                throw new TiKvException('EpochNotMatch something');
+            });
+        } catch (TiKvException) {
+            // expected — attempt cap exhausts while the error repeats
+        }
+
+        $this->assertGreaterThan(2, $calls, 'EpochNotMatch retries until the attempt cap');
+        $this->assertSame(
+            1,
+            $metrics->getInvalidations('retry_region_error'),
+            'Only the first drop removes a region; the rest of the storm emits nothing',
+        );
         $this->assertSame(0, $metrics->getInvalidations('not_leader'));
     }
 }

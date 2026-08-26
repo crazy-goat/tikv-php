@@ -109,11 +109,13 @@ class RegionErrorHandlerTest extends TestCase
     }
 
     // ========================================================================
-    // Invalidation reason tags (issue #474) — the cache emits the
-    // regionInvalidated() metric itself; check() only picks the reason.
+    // Invalidation ownership (issue #474): the cache emits the
+    // regionInvalidated() metric itself. NotLeader oneofs are left cached
+    // for RetryExecutor::handleNotLeader() — the sole owner of NotLeader
+    // drops; every other region error invalidates here as 'region_error'.
     // ========================================================================
 
-    public function testRegionErrorInvalidatesWithNotLeaderReasonWhenOneofIsSet(): void
+    public function testNotLeaderRegionErrorLeavesRegionCachedForHandleNotLeader(): void
     {
         $notLeader = new NotLeader();
         $notLeader->setRegionId(42);
@@ -126,15 +128,13 @@ class RegionErrorHandlerTest extends TestCase
         $response->setRegionError($error);
 
         $cache = $this->createMock(RegionCacheInterface::class);
-        $cache->expects($this->once())
-            ->method('invalidate')
-            ->with(42, 'not_leader');
+        $cache->expects($this->never())->method('invalidate');
 
         try {
             RegionErrorHandler::check($response, $cache, 42);
             $this->fail('Expected RegionException');
         } catch (RegionException) {
-            // expected — invalidation happens before the throw
+            // expected — but the region must stay cached
         }
     }
 

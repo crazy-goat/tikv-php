@@ -291,17 +291,27 @@ unsigned value. `batchScan`/`scanIterator` use a `<= 0` guard with their
 own ('eachLimit'/'batchSize' must be greater than 0) messages; the scan
 limit itself uses the 'Scan limit must be 0 or greater' message.
 
-## A defaulted constructor param cannot distinguish "user gave me one" from "default" — use nullable + accessor for attach-if-absent wiring
+## Metrics on a shared collaborator: nullable + accessor + in-place attach, and one sole owner per emission reason
 
-When a collaborator object (e.g. `RegionCache` and its metrics backend, issue
-#474) needs a dependency *attached only if the user did not supply one*, do not
-default the constructor param to a live instance (`NoOpMetrics`) — every cache
-then looks "already wired" and `TxnKvClient`'s
-`$cache->metrics() === null ? $cache->withMetrics(...) : $cache` check can
-never fire. Declare the property/param `?MetricsInterface = null`, expose a
-`metrics(): ?MetricsInterface` accessor, emit via `$this->metrics?->...`, and
-let clients attach with a clone-returning `withMetrics()` (the receiver stays
-unchanged; caches are shared). Also: reassigning a promoted readonly ctor param
-before first use is legal PHP (`RegionCacheInterface $regionCache = ...` in the
-body of a `private readonly RegionCacheInterface $regionCache` promoted
-property), which is how both client constructors swap in the wired clone.
+Issue #474 (regionInvalidated()) settled three rules worth reusing:
+
+1. **Attach-if-absent wiring needs a nullable collaborator.** Do not default
+   the constructor param to a live instance (`NoOpMetrics`) — every cache then
+   looks "already wired" and the client-side check can never fire. Declare the
+   property/param `?MetricsInterface = null`, expose a
+   `metrics(): ?MetricsInterface` accessor, emit via `$this->metrics?->...`.
+2. **Never clone or rebind a user-supplied shared object.** The first cut used
+   a clone-returning `withMetrics()`, which silently dropped the wiring for
+   every component holding the original cache (the clone went into one client,
+   the rest kept the un-wired original). The final shape is an in-place
+   mutator: `attachMetricsIfAbsent()` assigns only when the backend is null;
+   client constructors call it on the promoted readonly property — mutation,
+   not rebinding.
+3. **One sole owner per metric reason.** NotLeader region errors flow through
+   BOTH RegionErrorHandler::check() and RetryExecutor::handleNotLeader(); if
+   both invalidate, each attempt double-counts and — worse — check() drops the
+   region before handleNotLeader can switchLeader() to a still-valid hint.
+   check() now skips NotLeader oneofs entirely; handleNotLeader is the only
+   code path that invalidates with 'not_leader'. Gate any choke-point emission
+   on an actual state change (`removeById(): bool`) so retry storms count one
+   real drop instead of one per attempt.

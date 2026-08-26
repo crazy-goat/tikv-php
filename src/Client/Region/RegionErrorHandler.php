@@ -11,13 +11,6 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 final class RegionErrorHandler
 {
     /**
-     * Reason tag passed to RegionCache::invalidate() for NotLeader-driven
-     * drops (hint peer unknown / no hint); every other region error
-     * invalidates as 'region_error'. See MetricsInterface::regionInvalidated().
-     */
-    private const NOT_LEADER_INVALIDATION_REASON = 'not_leader';
-
-    /**
      * Check a response for region errors and throw if any are found.
      *
      * Inspects:
@@ -26,25 +19,34 @@ final class RegionErrorHandler
      * 3. Per-pair KeyError in pairs (RawBatchGetResponse)
      *
      * When a $cache and $regionId are provided, the region is invalidated
-     * from the cache before the exception is thrown. This is the consistent
-     * behaviour expected by Transaction and LockResolver callers. The cache
-     * emits the regionInvalidated() metric itself ('not_leader' when the
-     * error carries a NotLeader oneof, 'region_error' otherwise).
+     * from the cache before the exception is thrown (reason 'region_error').
+     * This is the consistent behaviour expected by Transaction and
+     * LockResolver callers.
+     *
+     * NotLeader errors are deliberately NOT invalidated here: every
+     * production call site runs inside a RetryExecutor::execute() closure,
+     * whose handleNotLeader() is the sole owner of NotLeader drops — it
+     * switches to the hinted leader when that peer is still cached and only
+     * invalidates otherwise. Invalidating here too would double-count the
+     * metric and break valid-hint leader switching. See
+     * MetricsInterface::regionInvalidated().
      */
     public static function check(
         object $response,
         ?RegionCacheInterface $cache = null,
         ?int $regionId = null,
     ): void {
-        // 1. Top-level region error (all response types)
+        // 1. Top-level region error (all response types). NotLeader oneofs
+        // are left for RetryExecutor::handleNotLeader() — see docblock.
         if (method_exists($response, 'getRegionError')) {
             $regionError = $response->getRegionError();
             if ($regionError !== null) {
-                if ($cache instanceof \CrazyGoat\TiKV\Client\Cache\RegionCacheInterface && $regionId !== null) {
-                    $reason = $regionError->getNotLeader() !== null
-                        ? self::NOT_LEADER_INVALIDATION_REASON
-                        : 'region_error';
-                    $cache->invalidate($regionId, $reason);
+                if (
+                    $regionError->getNotLeader() === null
+                    && $cache instanceof \CrazyGoat\TiKV\Client\Cache\RegionCacheInterface
+                    && $regionId !== null
+                ) {
+                    $cache->invalidate($regionId);
                 }
                 throw RegionException::fromRegionError($regionError);
             }
