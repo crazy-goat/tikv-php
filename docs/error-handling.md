@@ -109,7 +109,7 @@ Verdict legend:
 | `RetryBudgetExhaustedException` | **Retry if idempotent** — the client already retried internally until its budget ran out (attempt cap or deadline); check `getPrevious()` for the root cause |
 | `RegionException` | **Retry if idempotent** — same reasoning; the client already invalidated the region cache and retried |
 | `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff |
-| `StoreNotFoundException` | **Do not retry blindly** — usually transient once the client invalidates its region cache; a short caller-side delay-then-retry is reasonable for idempotent ops, but inspect `getStoreId()` first |
+| `StoreNotFoundException` | **Do not retry blindly** — transient only after the stale cache entry expires (TTL/LRU sweep) or PD restores the store; the retry executor does *not* invalidate the region cache for it (it is not classified as a region error). A short caller-side delay-then-retry is reasonable for idempotent ops, but inspect `getStoreId()` first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some regions succeeded, others failed. Inspect `getRegionErrors()` and re-drive only the affected keys/ranges |
 | `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()` for pending regions |
 
@@ -155,11 +155,14 @@ re-applying.
 One row per public method. "Throws" lists every exception class the method
 can raise, verified against both the `@throws` annotations and the method
 bodies (several scan methods validate limits even where no annotation says
-so).
+so). Two routing exceptions are deliberately *not* repeated in every row:
+`StoreNotFoundException` and `InvalidStoreAddressException` can escape any
+operation that resolves a store address on the RPC path — treat them as an
+additional possibility for every row that includes `RegionException`.
 
 | Method | Throws | Notes |
 |---|---|---|
-| `__construct` | `InvalidArgumentException` | Bad option values (`maxAttempts < 1`, `deadlineMs < 0`) |
+| `__construct` | `InvalidArgumentException` | Bad option values (`retryDeadlineMs < 0`, `maxConcurrency < 1`) |
 | `create()` | `InvalidArgumentException` | Empty PD endpoints array; invalid `options['tls']` material, `options['timeout']`, `options['slowLog']`, `options['metrics']`, `options['allowedStoreHosts']`, `options['storeHostPolicy']`, `options['allowedStorePorts']`, `options['retryDeadlineMs']`, `options['maxConcurrency']` |
 | `setAtomicForCAS(bool)` / `isAtomicForCAS()` | — | Plain setters/getters, nothing thrown |
 | `setColumnFamily(string)` / `getColumnFamily()` | — | Plain setters/getters, nothing thrown |
@@ -172,22 +175,27 @@ so).
 | `batchGet(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Empty input returns `[]` without RPC |
 | `batchPut(array, int|array $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Per-key validation happens before any send |
 | `batchDelete(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | As above |
-| `scanIterator(...)` | `ClientClosedException`, `InvalidArgumentException`* | *Thrown lazily from iteration, not from the factory call — `ScanIterator` validates `batchSize` on first use |
-| `scanPrefixIterator(string, int $batchSize = 256, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`* | Same lazy validation as `scanIterator()` |
+| `scanIterator(...)` | `ClientClosedException`, `InvalidArgumentException` | `batchSize` validated synchronously in the factory call (`ScanIterator::__construct`, bounds 1..10240); the underlying scan RPCs happen during iteration |
+| `scanPrefixIterator(string, int $batchSize = 256, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException` | Same synchronous validation as `scanIterator()` |
 | `scan(string, string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Limit validated (`'Scan limit must be 0 or greater'`, max 10240) even though the annotation omits it |
 | `scanPrefix(string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Delegates to `scan()`; limit validated |
 | `reverseScan(...)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Limit validated |
 | `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved |
-| `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole |
+| `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole |
 | `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics |
-| `checksum(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException` | Concurrent per-region checksums; idempotent |
-| `ingest(array, ?int $ttl = null)` | `ClientClosedException`, `GrpcException`, `RegionException` | SST import path; store mode switches fan out concurrently |
+| `checksum(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Concurrent per-region checksums; idempotent |
+| `ingest(array, ?int $ttl = null)` | `ClientClosedException`, `GrpcException`, `RegionException`, `InvalidStoreAddressException` | SST import path; store mode switches fan out concurrently |
 | `getClusterId(): ?int` | — | Returns `null` when unknown; no exceptions documented |
 | `healthCheck(): ?int` | `ClientClosedException`, `HealthCheckException` | Wraps any PD failure into `HealthCheckException` |
 | `getMetrics(): MetricsInterface` | — | Pure accessor |
 | `close(): void` | — | Swallows and logs shutdown errors |
 
 ## Transaction Operations
+
+The same routing exceptions noted in the RawKvClient section
+(`StoreNotFoundException`, `InvalidStoreAddressException`) can escape any
+method below whose row includes `RegionException` — they resolve store
+addresses on the RPC path just the same.
 
 | Method | Throws | Notes |
 |---|---|---|
