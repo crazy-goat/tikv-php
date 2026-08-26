@@ -48,16 +48,32 @@ final readonly class LockResolver
      *                                 wait is capped by it so a single lock encounter
      *                                 cannot push the operation past its deadline
      *                                 (issue #470); 0 keeps the legacy maxBackoffMs-only cap.
+     * @param bool $notLeaderOwnedByRetryExecutor Whether a RetryExecutor owns NotLeader
+     *                                            handling around this resolveLock() call
+     *                                            (see RegionErrorHandler::check()). Call
+     *                                            sites with no enclosing execute() — e.g.
+     *                                            handlePrewriteErrors() reached from
+     *                                            commit()'s plain foreach and
+     *                                            pessimisticLockBatch()'s do-while — must
+     *                                            pass false so a NotLeader-carrying region
+     *                                            error still invalidates instead of
+     *                                            stranding a stale cache entry up to TTL.
+     *                                            Kept last so the #470 positional
+     *                                            signature stays stable.
      */
-    public function resolveLock(string $primaryLock, LockInfo $lock, int $remainingDeadlineMs = 0): void
-    {
+    public function resolveLock(
+        string $primaryLock,
+        LockInfo $lock,
+        int $remainingDeadlineMs = 0,
+        bool $notLeaderOwnedByRetryExecutor = true,
+    ): void {
         $lockTs = (int) $lock->getLockVersion();
         $this->logger->debug('Resolving lock', [
             'key' => KeyRedactor::redact((string) $lock->getKey()),
             'lockTs' => $lockTs,
         ]);
 
-        $status = $this->checkTxnStatus($primaryLock, $lockTs);
+        $status = $this->checkTxnStatus($primaryLock, $lockTs, $notLeaderOwnedByRetryExecutor);
 
         $commitTs = $status['commitTs'] ?? null;
 
@@ -79,7 +95,7 @@ final readonly class LockResolver
                 usleep($sleepMs * 1000);
             }
 
-            $status = $this->checkTxnStatus($primaryLock, $lockTs);
+            $status = $this->checkTxnStatus($primaryLock, $lockTs, $notLeaderOwnedByRetryExecutor);
             $commitTs = $status['commitTs'] ?? null;
 
             if ($commitTs !== null && $commitTs > 0) {
@@ -102,8 +118,11 @@ final readonly class LockResolver
     /**
      * @return array{commitTs: ?int, lockTtl: ?int}
      */
-    private function checkTxnStatus(string $primaryKey, int $lockTs): array
-    {
+    private function checkTxnStatus(
+        string $primaryKey,
+        int $lockTs,
+        bool $notLeaderOwnedByRetryExecutor = true,
+    ): array {
         $region = $this->regionResolver->getRegionInfo($primaryKey);
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
@@ -131,7 +150,12 @@ final readonly class LockResolver
             CheckTxnStatusResponse::class,
         );
 
-        RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+        RegionErrorHandler::check(
+            $response,
+            $this->regionCache,
+            $region->regionId,
+            notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+        );
 
         $error = $response->getError();
         if ($error !== null) {
@@ -200,7 +224,8 @@ final readonly class LockResolver
     {
         $region = $this->regionCache->getByKey($key);
         if ($region instanceof RegionInfo) {
-            $this->regionCache->invalidate($region->regionId);
+            // The cache emits regionInvalidated('lock_resolve') itself.
+            $this->regionCache->invalidate($region->regionId, 'lock_resolve');
         }
     }
 }

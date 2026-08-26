@@ -258,7 +258,16 @@ final readonly class TwoPhaseCommitter
             PrewriteResponse::class,
             $this->timeoutMs('write'),
         );
-        RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+        // commit()'s prewrite loop runs OUTSIDE any RetryExecutor, so no
+        // handleNotLeader() would ever drop a NotLeader-carrying region here
+        // — check() must self-invalidate or the stale entry survives up to
+        // TTL and keeps resolving to the moved leader (issue #474 review).
+        RegionErrorHandler::check(
+            $response,
+            $this->regionCache,
+            $region->regionId,
+            notLeaderOwnedByRetryExecutor: false,
+        );
 
         $errors = $response->getErrors();
         if (count($errors) > 0) {
@@ -276,7 +285,10 @@ final readonly class TwoPhaseCommitter
             if ($locked !== null) {
                 $rawPrimary = $locked->getPrimaryLock();
                 $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                $this->lockResolver->resolveLock($lockPrimary, $locked);
+                // Reached from commit()'s plain foreach — no RetryExecutor
+                // wraps this, so the resolve must drop NotLeader regions
+                // itself (issue #474 review round 3).
+                $this->lockResolver->resolveLock($lockPrimary, $locked, notLeaderOwnedByRetryExecutor: false);
                 throw new TxnRetryableException(
                     'Lock conflict during prewrite, resolved - retry',
                     BackoffType::TxnLock,
@@ -345,8 +357,15 @@ final readonly class TwoPhaseCommitter
         }
 
         // Commit the primary first. Failures here are fatal: do not retry.
+        // No RetryExecutor wraps this call, so commitForRegion must handle
+        // NotLeader drops itself (issue #474 review round 3).
         $primaryRegionData = $keysByRegion[$primaryRegionId];
-        $this->commitForRegion($primaryRegionData['region'], $primaryRegionData['keys'], $state);
+        $this->commitForRegion(
+            $primaryRegionData['region'],
+            $primaryRegionData['keys'],
+            $state,
+            notLeaderOwnedByRetryExecutor: false,
+        );
 
         // Remove the primary region from outstanding work; commit remaining
         // secondary regions under the retry executor.
@@ -366,11 +385,23 @@ final readonly class TwoPhaseCommitter
 
     /**
      * @param string[] $keys
+     * @param bool $notLeaderOwnedByRetryExecutor Whether a RetryExecutor owns
+     *                                            NotLeader handling for this call
+     *                                            (see RegionErrorHandler::check()).
+     *                                            The PRIMARY-region commit site
+     *                                            passes false — failures there are
+     *                                            fatal and never retried, so no
+     *                                            handleNotLeader() would ever drop
+     *                                            the stale entry.
      *
      * @throws InvalidStateException if commitTs is null
      */
-    private function commitForRegion(RegionInfo $region, array $keys, TransactionState $state): void
-    {
+    private function commitForRegion(
+        RegionInfo $region,
+        array $keys,
+        TransactionState $state,
+        bool $notLeaderOwnedByRetryExecutor = true,
+    ): void {
         $commitTs = $state->getCommitTs();
         if ($commitTs === null) {
             throw new InvalidStateException(
@@ -401,7 +432,12 @@ final readonly class TwoPhaseCommitter
             CommitResponse::class,
             $this->timeoutMs('write'),
         );
-        RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+        RegionErrorHandler::check(
+            $response,
+            $this->regionCache,
+            $region->regionId,
+            notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+        );
 
         $error = $response->getError();
         if ($error !== null) {
@@ -570,7 +606,16 @@ final readonly class TwoPhaseCommitter
                     $this->timeoutMs('write'),
                 );
 
-                RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+                // pessimisticLockBatch()'s do-while retries only KeyError
+                // cases — a RegionException escapes uncaught, so no
+                // handleNotLeader() would drop a NotLeader-carrying region.
+                // check() must self-invalidate (issue #474 review).
+                RegionErrorHandler::check(
+                    $response,
+                    $this->regionCache,
+                    $region->regionId,
+                    notLeaderOwnedByRetryExecutor: false,
+                );
 
                 $errors = $response->getErrors();
                 $needRetry = false;
@@ -601,10 +646,15 @@ final readonly class TwoPhaseCommitter
                             // min 1 ms: 0 would select LockResolver's legacy
                             // uncapped-by-deadline branch exactly when the
                             // budget is most exhausted (issue #470).
+                            // This do-while retries only KeyError cases — a
+                            // NotLeader RegionException escapes uncaught, so
+                            // the resolve must drop the region itself
+                            // (issue #474 review round 3).
                             $this->lockResolver->resolveLock(
                                 $lockPrimary,
                                 $locked,
                                 max(1, $this->maxBackoffMs - $elapsedMs),
+                                notLeaderOwnedByRetryExecutor: false,
                             );
                             $elapsedMs += max(0, (int) (microtime(true) * 1000) - $resolveStartMs);
                             $needRetry = true;

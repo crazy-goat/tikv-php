@@ -142,8 +142,9 @@ final readonly class RetryExecutor
 
                     $cached = $this->regionCache->getByKey($key);
                     if ($cached instanceof RegionInfo) {
-                        $this->regionCache->invalidate($cached->regionId);
-                        $this->metrics->regionInvalidated('retry_region_error');
+                        // The cache itself emits regionInvalidated() with
+                        // reason 'retry_region_error' — do not emit here too.
+                        $this->regionCache->invalidate($cached->regionId, 'retry_region_error');
                         $this->logger->info('Invalidated region on retry', [
                             'key' => KeyRedactor::redact($key),
                             'regionId' => $cached->regionId,
@@ -217,7 +218,8 @@ final readonly class RetryExecutor
             $leaderStoreId = (int) $leader->getStoreId();
             $switched = $this->regionCache->switchLeader($regionId, $leaderStoreId);
             if (!$switched) {
-                $this->regionCache->invalidate($regionId);
+                // The cache emits regionInvalidated('not_leader') itself.
+                $this->regionCache->invalidate($regionId, 'not_leader');
                 $this->logger->info('NotLeader hint peer unknown, invalidated region', [
                     'key' => KeyRedactor::redact($key),
                     'regionId' => $regionId,
@@ -225,7 +227,8 @@ final readonly class RetryExecutor
                 ]);
             }
         } else {
-            $this->regionCache->invalidate($regionId);
+            // The cache emits regionInvalidated('not_leader') itself.
+            $this->regionCache->invalidate($regionId, 'not_leader');
             $this->logger->info('NotLeader without hint, invalidated region', [
                 'key' => KeyRedactor::redact($key),
                 'regionId' => $regionId,

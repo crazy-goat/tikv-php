@@ -255,7 +255,16 @@ final readonly class TxnReader
                 BatchGetResponse::class,
                 $this->timeoutMs('batch_read'),
             );
-            RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+            // batchGetFromTiKV() is reached from Transaction::batchGet()
+            // with no RetryExecutor owner, so no handleNotLeader() would
+            // drop a NotLeader-carrying region — check() must
+            // self-invalidate (issue #474 review).
+            RegionErrorHandler::check(
+                $response,
+                $this->regionCache,
+                $region->regionId,
+                notLeaderOwnedByRetryExecutor: false,
+            );
 
             foreach ($response->getPairs() as $pair) {
                 $results[$pair->getKey()] = $pair->getValue();

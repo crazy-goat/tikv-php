@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
+use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
+use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -442,6 +444,91 @@ class LockResolverTest extends TestCase
         $resolver->resolveLock('key-b', $this->makeLockInfo(key: 'key-b'));
 
         $this->assertSame(2, $pdRegionCallCount, 'PD should be queried once per unique key');
+    }
+
+    // ========================================================================
+    // resolveLock() — invalidation reason tag (#474)
+    //
+    // LockResolver::invalidateRegionFor() drops the region through
+    // RegionCache::invalidate(), which emits the metric itself; the resolver
+    // only supplies the 'lock_resolve' reason.
+    // ========================================================================
+
+    public function testResolveLockInvalidatesWithLockResolveReason(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(commitVersion: 1),
+                new ResolveLockResponse(),
+            );
+
+        $this->regionCache->expects($this->once())
+            ->method('invalidate')
+            ->with(self::REGION_ID, 'lock_resolve');
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+    }
+
+    public function testResolveLockNotLeaderInvalidatesWhenNotOwnedByRetryExecutor(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // CheckTxnStatus answers with a NotLeader-carrying region error; the
+        // resolveLock() caller has NO enclosing execute(), so check() must
+        // self-invalidate with 'not_leader' before throwing.
+        $protoLeader = new Peer();
+        $protoLeader->setId(20);
+        $protoLeader->setStoreId(3);
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(self::REGION_ID);
+        $notLeader->setLeader($protoLeader);
+        $regionError = new Error();
+        $regionError->setMessage('not leader');
+        $regionError->setNotLeader($notLeader);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturn($this->makeCheckTxnStatusResponse(regionError: $regionError));
+
+        $this->regionCache->expects($this->once())
+            ->method('invalidate')
+            ->with(self::REGION_ID, 'not_leader');
+
+        $this->expectException(RegionException::class);
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), notLeaderOwnedByRetryExecutor: false);
+    }
+
+    public function testResolveLockNotLeaderLeavesRegionCachedWhenExecutorOwned(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // Default ownership (executor-owned): check() must NOT invalidate —
+        // the enclosing handleNotLeader() owns NotLeader drops.
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(self::REGION_ID);
+        $regionError = new Error();
+        $regionError->setMessage('not leader');
+        $regionError->setNotLeader($notLeader);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturn($this->makeCheckTxnStatusResponse(regionError: $regionError));
+
+        $this->regionCache->expects($this->never())->method('invalidate');
+
+        $this->expectException(RegionException::class);
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
     }
 
     // ========================================================================

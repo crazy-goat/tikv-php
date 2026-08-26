@@ -63,8 +63,35 @@ interface MetricsInterface
     /**
      * Increment the region-invalidation counter.
      *
-     * Called by RegionCache::invalidate() and from RetryExecutor on
-     * NotLeader / region-error paths.
+     * Called exactly once per ACTUAL region drop from the cache, from
+     * {@see \CrazyGoat\TiKV\Client\Cache\RegionCache::invalidate()} — the
+     * single emission point for every drop path; invalidating an ID that is
+     * not cached emits nothing. $reason names the caller:
+     *
+     * - 'region_error':       a top-level region error other than NotLeader
+     *                           (EpochNotMatch etc.) was handled via
+     *                           RegionErrorHandler::check()
+     * - 'not_leader':         a NotLeader response forced an invalidation in
+     *                           RetryExecutor::handleNotLeader() (hint peer
+     *                           unknown or no hint) — the sole owner of
+     *                           NotLeader drops at executor-owned call sites;
+     *                           there RegionErrorHandler::check() deliberately
+     *                           leaves NotLeader regions cached so
+     *                           handleNotLeader can switch-or-drop. At txn call
+     *                           sites with NO enclosing retry executor,
+     *                           check($…, notLeaderOwnedByRetryExecutor: false)
+     *                           DOES invalidate with reason 'not_leader'
+     *                           (prewrite loop, pessimistic lock batch,
+     *                           primary-region commit, batchGetFromTiKV),
+     *                           mirroring the CHANGELOG wording.
+     * - 'retry_region_error': RetryExecutor invalidated before scheduling the
+     *                           next attempt on a retryable error
+     * - 'lock_resolve':       LockResolver dropped the region after resolving
+     *                           a lock
+     *
+     * Note: NotLeader responses whose hint peer is still valid only switch
+     * the cached leader (switchLeader()) and do NOT invalidate, so they emit
+     * nothing.
      */
     public function regionInvalidated(string $reason): void;
 }

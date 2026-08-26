@@ -133,7 +133,7 @@ final class RawKvClient
         return new self(
             $bundle->pdClient,
             $bundle->grpc,
-            new RegionCache(logger: $bundle->logger),
+            new RegionCache(logger: $bundle->logger, metrics: $bundle->metrics),
             logger: $bundle->logger,
             timeoutConfig: $bundle->timeoutConfig,
             slowLogConfig: $bundle->slowLogConfig,
@@ -181,6 +181,15 @@ final class RawKvClient
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->maxConcurrency = $maxConcurrency;
+        if ($regionCache instanceof RegionCache) {
+            // Issue #474: regionInvalidated() is emitted from inside
+            // RegionCache::invalidate() — give a user-supplied RegionCache
+            // this client's metrics backend unless it already carries one.
+            // A custom RegionCacheInterface implementation owns its own
+            // metric behaviour and is left untouched. Mutates the shared
+            // cache in place — never rebind or clone it.
+            $regionCache->attachMetricsIfAbsent($metrics);
+        }
         $regionResolver ??= new RegionResolver(
             $pdClient,
             $regionCache,

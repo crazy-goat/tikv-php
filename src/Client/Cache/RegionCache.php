@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Cache;
 
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
@@ -24,13 +25,27 @@ class RegionCache implements RegionCacheInterface
 
     private int $putCountSinceSweep = 0;
 
-    public function __construct(
-        private readonly int $ttlSeconds = 600,
-        private readonly int $jitterSeconds = 60,
-        private readonly int $maxEntries = 10000,
-        private readonly int $sweepInterval = 100,
-        private readonly LoggerInterface $logger = new NullLogger(),
-    ) {
+    public function __construct(private readonly int $ttlSeconds = 600, private readonly int $jitterSeconds = 60, private readonly int $maxEntries = 10000, private readonly int $sweepInterval = 100, private readonly LoggerInterface $logger = new NullLogger(), private ?MetricsInterface $metrics = null)
+    {
+    }
+
+    /**
+     * The attached metrics backend, or null when none was provided.
+     */
+    public function metrics(): ?MetricsInterface
+    {
+        return $this->metrics;
+    }
+
+    /**
+     * Attach the given metrics backend if this cache does not carry one yet
+     * (null); an explicitly attached backend always wins. Mutates THIS
+     * instance in place — caches are shared between client components and
+     * cloning a user-supplied cache would leave their wiring behind.
+     */
+    public function attachMetricsIfAbsent(MetricsInterface $metrics): void
+    {
+        $this->metrics ??= $metrics;
     }
 
     public function getByKey(string $key): ?RegionInfo
@@ -98,10 +113,19 @@ class RegionCache implements RegionCacheInterface
         ]);
     }
 
-    public function invalidate(int $regionId): void
+    /**
+     * Drop a region from the cache and, when a removal actually happened,
+     * emit the regionInvalidated() metric with the caller-supplied reason —
+     * exactly once per ACTUAL drop. This is the single emission point for
+     * every invalidation path (issue #474) — callers must not emit the
+     * metric themselves, or drops are double-counted.
+     */
+    public function invalidate(int $regionId, string $reason = 'region_error'): void
     {
         $this->logger->info('Region invalidated', ['regionId' => $regionId]);
-        $this->removeById($regionId);
+        if ($this->removeById($regionId)) {
+            $this->metrics?->regionInvalidated($reason);
+        }
     }
 
     public function switchLeader(int $regionId, int $leaderStoreId): bool
@@ -252,12 +276,15 @@ class RegionCache implements RegionCacheInterface
         return $left;
     }
 
-    private function removeById(int $regionId): void
+    private function removeById(int $regionId): bool
     {
         $index = $this->idToIndex[$regionId] ?? null;
-        if ($index !== null) {
-            $this->removeByIndex($index);
+        if ($index === null) {
+            return false;
         }
+        $this->removeByIndex($index);
+
+        return true;
     }
 
     private function removeByIndex(int $index): void

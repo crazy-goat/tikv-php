@@ -84,6 +84,15 @@ final class TxnKvClient
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->metrics = new NoOpMetrics();
+        if ($this->regionCache instanceof RegionCache) {
+            // Issue #474: regionInvalidated() is emitted from inside
+            // RegionCache::invalidate() — give a user-supplied RegionCache
+            // this client's metrics backend unless it already carries one.
+            // A custom RegionCacheInterface implementation owns its own
+            // metric behaviour and is left untouched. Mutates the shared
+            // cache in place — never rebind or clone it.
+            $this->regionCache->attachMetricsIfAbsent($this->metrics);
+        }
         $this->regionResolver = $regionResolver
             ?? new RegionResolver(
                 $this->pdClient,
