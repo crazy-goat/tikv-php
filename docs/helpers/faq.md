@@ -290,3 +290,18 @@ point, not just for the obvious upper bound — a negative wraps to a huge
 unsigned value. `batchScan`/`scanIterator` use a `<= 0` guard with their
 own ('eachLimit'/'batchSize' must be greater than 0) messages; the scan
 limit itself uses the 'Scan limit must be 0 or greater' message.
+
+## A defaulted constructor param cannot distinguish "user gave me one" from "default" — use nullable + accessor for attach-if-absent wiring
+
+When a collaborator object (e.g. `RegionCache` and its metrics backend, issue
+#474) needs a dependency *attached only if the user did not supply one*, do not
+default the constructor param to a live instance (`NoOpMetrics`) — every cache
+then looks "already wired" and `TxnKvClient`'s
+`$cache->metrics() === null ? $cache->withMetrics(...) : $cache` check can
+never fire. Declare the property/param `?MetricsInterface = null`, expose a
+`metrics(): ?MetricsInterface` accessor, emit via `$this->metrics?->...`, and
+let clients attach with a clone-returning `withMetrics()` (the receiver stays
+unchanged; caches are shared). Also: reassigning a promoted readonly ctor param
+before first use is legal PHP (`RegionCacheInterface $regionCache = ...` in the
+body of a `private readonly RegionCacheInterface $regionCache` promoted
+property), which is how both client constructors swap in the wired clone.
