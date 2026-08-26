@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Cache;
 
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
@@ -24,13 +25,30 @@ class RegionCache implements RegionCacheInterface
 
     private int $putCountSinceSweep = 0;
 
-    public function __construct(
-        private readonly int $ttlSeconds = 600,
-        private readonly int $jitterSeconds = 60,
-        private readonly int $maxEntries = 10000,
-        private readonly int $sweepInterval = 100,
-        private readonly LoggerInterface $logger = new NullLogger(),
-    ) {
+    public function __construct(private readonly int $ttlSeconds = 600, private readonly int $jitterSeconds = 60, private readonly int $maxEntries = 10000, private readonly int $sweepInterval = 100, private readonly LoggerInterface $logger = new NullLogger(), private ?MetricsInterface $metrics = null)
+    {
+    }
+
+    /**
+     * The attached metrics backend, or null when none was provided.
+     */
+    public function metrics(): ?MetricsInterface
+    {
+        return $this->metrics;
+    }
+
+    /**
+     * Return a copy of this cache that emits regionInvalidated() to the
+     * given metrics backend. The receiver is left unchanged (caches are
+     * frequently shared between client components), so callers must use the
+     * return value.
+     */
+    public function withMetrics(MetricsInterface $metrics): static
+    {
+        $clone = clone $this;
+        $clone->metrics = $metrics;
+
+        return $clone;
     }
 
     public function getByKey(string $key): ?RegionInfo
@@ -98,10 +116,17 @@ class RegionCache implements RegionCacheInterface
         ]);
     }
 
-    public function invalidate(int $regionId): void
+    /**
+     * Drop a region from the cache and emit the regionInvalidated() metric
+     * with the caller-supplied reason. This is the single emission point for
+     * every invalidation path (issue #474) — callers must not emit the
+     * metric themselves, or drops are double-counted.
+     */
+    public function invalidate(int $regionId, string $reason = 'region_error'): void
     {
         $this->logger->info('Region invalidated', ['regionId' => $regionId]);
         $this->removeById($regionId);
+        $this->metrics?->regionInvalidated($reason);
     }
 
     public function switchLeader(int $regionId, int $leaderStoreId): bool

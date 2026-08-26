@@ -445,6 +445,34 @@ class LockResolverTest extends TestCase
     }
 
     // ========================================================================
+    // resolveLock() — invalidation reason tag (#474)
+    //
+    // LockResolver::invalidateRegionFor() drops the region through
+    // RegionCache::invalidate(), which emits the metric itself; the resolver
+    // only supplies the 'lock_resolve' reason.
+    // ========================================================================
+
+    public function testResolveLockInvalidatesWithLockResolveReason(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeCheckTxnStatusResponse(commitVersion: 1),
+                new ResolveLockResponse(),
+            );
+
+        $this->regionCache->expects($this->once())
+            ->method('invalidate')
+            ->with(self::REGION_ID, 'lock_resolve');
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+    }
+
+    // ========================================================================
     // resolveLock() — lock-TTL wait capped by remaining retry deadline (#470)
     // ========================================================================
 

@@ -661,7 +661,10 @@ The library emits the following counter tags:
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
 | `regionCacheHit()`             | `'region_resolution'`      | Region was found in the cache                     |
 | `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
-| `regionInvalidated()`          | `'not_leader'`, `'retry_region_error'` | A region was dropped from the cache |
+| `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error'`, `'lock_resolve'` | A region was dropped from the cache — exactly once per drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level region error (`RegionErrorHandler`), NotLeader handling (hint peer unknown / no hint), pre-retry invalidation in the retry loop, or post-resolve cleanup in `LockResolver`. |
+
+Reasons are mutually exclusive per drop; a NotLeader response whose hinted
+peer is still valid only switches the cached leader and emits nothing.
 
 `InMemoryMetrics` ships the same counters in-process, suitable for tests
 and benchmarks — see `getRpcStarted()`, `getRpcSucceeded()`, `getRetries()`,

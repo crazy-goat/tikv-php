@@ -11,6 +11,13 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 final class RegionErrorHandler
 {
     /**
+     * Reason tag passed to RegionCache::invalidate() for NotLeader-driven
+     * drops (hint peer unknown / no hint); every other region error
+     * invalidates as 'region_error'. See MetricsInterface::regionInvalidated().
+     */
+    private const NOT_LEADER_INVALIDATION_REASON = 'not_leader';
+
+    /**
      * Check a response for region errors and throw if any are found.
      *
      * Inspects:
@@ -20,7 +27,9 @@ final class RegionErrorHandler
      *
      * When a $cache and $regionId are provided, the region is invalidated
      * from the cache before the exception is thrown. This is the consistent
-     * behaviour expected by Transaction and LockResolver callers.
+     * behaviour expected by Transaction and LockResolver callers. The cache
+     * emits the regionInvalidated() metric itself ('not_leader' when the
+     * error carries a NotLeader oneof, 'region_error' otherwise).
      */
     public static function check(
         object $response,
@@ -32,7 +41,10 @@ final class RegionErrorHandler
             $regionError = $response->getRegionError();
             if ($regionError !== null) {
                 if ($cache instanceof \CrazyGoat\TiKV\Client\Cache\RegionCacheInterface && $regionId !== null) {
-                    $cache->invalidate($regionId);
+                    $reason = $regionError->getNotLeader() !== null
+                        ? self::NOT_LEADER_INVALIDATION_REASON
+                        : 'region_error';
+                    $cache->invalidate($regionId, $reason);
                 }
                 throw RegionException::fromRegionError($regionError);
             }

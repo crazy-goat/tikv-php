@@ -200,7 +200,8 @@ final readonly class LockResolver
     {
         $region = $this->regionCache->getByKey($key);
         if ($region instanceof RegionInfo) {
-            $this->regionCache->invalidate($region->regionId);
+            // The cache emits regionInvalidated('lock_resolve') itself.
+            $this->regionCache->invalidate($region->regionId, 'lock_resolve');
         }
     }
 }

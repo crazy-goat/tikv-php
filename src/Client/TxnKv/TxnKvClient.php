@@ -22,6 +22,10 @@ use Psr\Log\NullLogger;
 
 final class TxnKvClient
 {
+    /**
+     * @var \CrazyGoat\TiKV\Client\Cache\RegionCacheInterface
+     */
+    public $regionCache;
     public const OPT_TIMEOUT = 'timeout';
     public const OPT_METRICS = 'metrics';
 
@@ -64,7 +68,7 @@ final class TxnKvClient
     public function __construct(
         private readonly PdClientInterface $pdClient,
         private readonly GrpcClientInterface $grpc,
-        private readonly RegionCacheInterface $regionCache = new RegionCache(),
+        RegionCacheInterface $regionCache = new RegionCache(),
         ?RegionResolver $regionResolver = null,
         private readonly int $maxBackoffMs = 20000,
         private readonly LoggerInterface $logger = new NullLogger(),
@@ -84,6 +88,17 @@ final class TxnKvClient
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->metrics = new NoOpMetrics();
+        if ($regionCache instanceof RegionCache) {
+            // Issue #474: regionInvalidated() is emitted from inside
+            // RegionCache::invalidate() — give a user-supplied RegionCache
+            // this client's metrics backend unless it already carries one.
+            // A custom RegionCacheInterface implementation owns its own
+            // metric behaviour and is left untouched.
+            $regionCache = $regionCache->metrics() instanceof \CrazyGoat\TiKV\Client\Observability\MetricsInterface
+                ? $regionCache
+                : $regionCache->withMetrics($this->metrics);
+        }
+        $this->regionCache = $regionCache;
         $this->regionResolver = $regionResolver
             ?? new RegionResolver(
                 $this->pdClient,

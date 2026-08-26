@@ -20,8 +20,12 @@ interface RegionCacheInterface
 
     /**
      * Remove a region from the cache by its ID.
+     *
+     * $reason names the caller for the regionInvalidated() metric
+     * (MetricsInterface); it is forwarded to the metrics backend when this
+     * cache was constructed with one. Defaults to 'region_error'.
      */
-    public function invalidate(int $regionId): void;
+    public function invalidate(int $regionId, string $reason = 'region_error'): void;
 
     /**
      * Switch the leader of a cached region to the peer with the given store ID.

@@ -10,6 +10,7 @@ use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\Proto\Metapb\Peer;
+use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use PHPUnit\Framework\TestCase;
@@ -105,5 +106,57 @@ class RegionErrorHandlerTest extends TestCase
         RegionErrorHandler::check($response);
 
         $this->expectNotToPerformAssertions();
+    }
+
+    // ========================================================================
+    // Invalidation reason tags (issue #474) — the cache emits the
+    // regionInvalidated() metric itself; check() only picks the reason.
+    // ========================================================================
+
+    public function testRegionErrorInvalidatesWithNotLeaderReasonWhenOneofIsSet(): void
+    {
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(42);
+
+        $error = new Error();
+        $error->setMessage('not leader');
+        $error->setNotLeader($notLeader);
+
+        $response = new RawGetResponse();
+        $response->setRegionError($error);
+
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->once())
+            ->method('invalidate')
+            ->with(42, 'not_leader');
+
+        try {
+            RegionErrorHandler::check($response, $cache, 42);
+            $this->fail('Expected RegionException');
+        } catch (RegionException) {
+            // expected — invalidation happens before the throw
+        }
+    }
+
+    public function testRegionErrorInvalidatesWithPlainRegionErrorReasonOtherwise(): void
+    {
+        $error = new Error();
+        $error->setMessage('epoch not match');
+        $error->setEpochNotMatch(new EpochNotMatch());
+
+        $response = new RawGetResponse();
+        $response->setRegionError($error);
+
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->once())
+            ->method('invalidate')
+            ->with(7, 'region_error');
+
+        try {
+            RegionErrorHandler::check($response, $cache, 7);
+            $this->fail('Expected RegionException');
+        } catch (RegionException) {
+            // expected
+        }
     }
 }
