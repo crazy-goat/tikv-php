@@ -74,9 +74,16 @@ interface MetricsInterface
      * - 'not_leader':         a NotLeader response forced an invalidation in
      *                           RetryExecutor::handleNotLeader() (hint peer
      *                           unknown or no hint) — the sole owner of
-     *                           NotLeader drops; RegionErrorHandler::check()
-     *                           deliberately leaves NotLeader regions cached
-     *                           so handleNotLeader can switch-or-drop
+     *                           NotLeader drops at executor-owned call sites;
+     *                           there RegionErrorHandler::check() deliberately
+     *                           leaves NotLeader regions cached so
+     *                           handleNotLeader can switch-or-drop. At txn call
+     *                           sites with NO enclosing retry executor,
+     *                           check($…, notLeaderOwnedByRetryExecutor: false)
+     *                           DOES invalidate with reason 'not_leader'
+     *                           (prewrite loop, pessimistic lock batch,
+     *                           primary-region commit, batchGetFromTiKV),
+     *                           mirroring the CHANGELOG wording.
      * - 'retry_region_error': RetryExecutor invalidated before scheduling the
      *                           next attempt on a retryable error
      * - 'lock_resolve':       LockResolver dropped the region after resolving

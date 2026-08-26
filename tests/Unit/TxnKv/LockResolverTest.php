@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
+use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
+use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -467,6 +469,63 @@ class LockResolverTest extends TestCase
         $this->regionCache->expects($this->once())
             ->method('invalidate')
             ->with(self::REGION_ID, 'lock_resolve');
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+    }
+
+    public function testResolveLockNotLeaderInvalidatesWhenNotOwnedByRetryExecutor(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // CheckTxnStatus answers with a NotLeader-carrying region error; the
+        // resolveLock() caller has NO enclosing execute(), so check() must
+        // self-invalidate with 'not_leader' before throwing.
+        $protoLeader = new Peer();
+        $protoLeader->setId(20);
+        $protoLeader->setStoreId(3);
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(self::REGION_ID);
+        $notLeader->setLeader($protoLeader);
+        $regionError = new Error();
+        $regionError->setMessage('not leader');
+        $regionError->setNotLeader($notLeader);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturn($this->makeCheckTxnStatusResponse(regionError: $regionError));
+
+        $this->regionCache->expects($this->once())
+            ->method('invalidate')
+            ->with(self::REGION_ID, 'not_leader');
+
+        $this->expectException(RegionException::class);
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), notLeaderOwnedByRetryExecutor: false);
+    }
+
+    public function testResolveLockNotLeaderLeavesRegionCachedWhenExecutorOwned(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        // Default ownership (executor-owned): check() must NOT invalidate —
+        // the enclosing handleNotLeader() owns NotLeader drops.
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(self::REGION_ID);
+        $regionError = new Error();
+        $regionError->setMessage('not leader');
+        $regionError->setNotLeader($notLeader);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturn($this->makeCheckTxnStatusResponse(regionError: $regionError));
+
+        $this->regionCache->expects($this->never())->method('invalidate');
+
+        $this->expectException(RegionException::class);
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
