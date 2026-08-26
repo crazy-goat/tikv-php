@@ -541,59 +541,50 @@ function parallelScan(
 
 ### Retry Strategies
 
-#### Exponential Backoff
+> **You do not need your own retry loop.** The client already retries all
+> transient TiKV errors internally (`NotLeader`, `EpochNotMatch`,
+> `ServerIsBusy`, `StaleCommand`, `RegionNotFound`, gRPC transport errors)
+> through a bounded `RetryExecutor`. Wrapping client calls in another
+> user-level loop **multiplies** the total wait — the inner executor can
+> already spend up to 30 attempts / 30 s wall-clock on one operation — and
+> can pin PHP-FPM workers far longer than either layer intends.
+>
+> When the built-in budget is exhausted the operation throws
+> `CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException` (extends
+> `TiKvException`). Treat it as a **hard failure**, not as a signal to retry
+> again; it exposes `attempts()` and `elapsedOrBackoffMs()` for diagnostics,
+> and `getPrevious()` for the original TiKV error.
+
+Built-in retry budgets (full reference incl. per-error backoff strategies:
+[docs/configuration.md — Retry and Backoff](configuration.md#retry-and-backoff)):
+
+| Budget | Default | Tunable via |
+|--------|---------|-------------|
+| Max attempts | 30 | `RetryExecutor` constructor (no client option) |
+| Cumulative backoff budget (`maxBackoffMs`) | 20 000 ms | client constructor argument |
+| ServerBusy sleep budget (`serverBusyBudgetMs`) | 60 000 ms | client constructor argument |
+| Wall-clock deadline (`retryDeadlineMs`) | 30 000 ms (`0` disables) | `options['retryDeadlineMs']` on `RawKvClient::create()` / `TxnKvClient::create()` |
+
+What you should handle at the application level instead:
 
 ```php
-function withRetry(callable $operation, int $maxRetries = 3): mixed
-{
-    $lastException = null;
-    
-    for ($i = 0; $i < $maxRetries; $i++) {
-        try {
-            return $operation();
-        } catch (TiKvException $e) {
-            $lastException = $e;
-            
-            // Don't retry non-retryable errors
-            if (!isRetryable($e)) {
-                throw $e;
-            }
-            
-            // Exponential backoff with jitter
-            $delay = min(1000 * (2 ** $i), 30000);  // Max 30s
-            $jitter = random_int(0, 100);
-            usleep(($delay + $jitter) * 1000);
-        }
-    }
-    
-    throw $lastException;
-}
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 
-function isRetryable(TiKvException $e): bool
-{
-    $message = $e->getMessage();
-    $retryable = [
-        'EpochNotMatch',
-        'NotLeader',
-        'ServerIsBusy',
-        'StaleCommand',
-        'RegionNotFound',
-    ];
-    
-    foreach ($retryable as $pattern) {
-        if (str_contains($message, $pattern)) {
-            return true;
-        }
-    }
-    
-    return false;
+try {
+    $value = $client->get($key);
+} catch (RetryBudgetExhaustedException $e) {
+    // The client gave up after exhausting its retry budget (all internal
+    // retries spent). Log/alert with $e->attempts() and
+    // $e->elapsedOrBackoffMs(); inspect $e->getPrevious() for the original
+    // TiKV error. Surface the failure to your caller or queue the work for
+    // later — do NOT immediately retry in a tight loop.
+    throw $e;
 }
-
-// Usage
-$value = withRetry(function() use ($client, $key) {
-    return $client->get($key);
-});
 ```
+
+For cross-request availability patterns (failing fast after repeated
+consecutive failures, serving stale data while TiKV recovers), see the
+circuit-breaker and graceful-degradation examples below.
 
 #### Circuit Breaker
 
