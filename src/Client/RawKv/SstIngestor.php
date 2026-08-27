@@ -258,9 +258,7 @@ final readonly class SstIngestor
             }
 
             $regionId = $region->regionId;
-            if (!isset($grouped[$regionId])) {
-                $grouped[$regionId] = ['region' => $region, 'pairs' => []];
-            }
+            $grouped[$regionId] ??= ['region' => $region, 'pairs' => []];
             $grouped[$regionId]['pairs'][] = $pair;
         }
 

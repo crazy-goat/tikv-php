@@ -19,4 +19,15 @@ return RectorConfig::configure()
         SetList::TYPE_DECLARATION,
         SetList::PRIVATIZATION,
         SetList::EARLY_RETURN,
+    ])
+    // Rector 2.6 has no safe transform for these two test classes: every
+    // rule chain it proposes for their setUp()-initialised properties breaks
+    // them — ReadOnlyPropertyRector + RemoveUnusedPrivateMethodRector leaves
+    // the props uninitialised ("must not be accessed before initialization"),
+    // and PrivatizeFinalClassMethodRector makes setUp() private, which
+    // PHPUnit rejects with a fatal "must be protected" error. Skip wholesale
+    // rather than adopt a broken transform (see issue #485).
+    ->withSkip([
+        __DIR__ . '/tests/Unit/RawKv/RegionResolverBinaryKeyTest.php',
+        __DIR__ . '/tests/Unit/Region/RegionRangeClipperTest.php',
     ]);

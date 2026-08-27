@@ -230,9 +230,7 @@ final readonly class TxnReader
                 continue;
             }
             $regionId = $region->regionId;
-            if (!isset($grouped[$regionId])) {
-                $grouped[$regionId] = ['region' => $region, 'keys' => []];
-            }
+            $grouped[$regionId] ??= ['region' => $region, 'keys' => []];
             $grouped[$regionId]['keys'][] = $key;
         }
 
