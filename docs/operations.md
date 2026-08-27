@@ -333,6 +333,13 @@ $results = $client->batchScan($ranges, eachLimit: 50, keyOnly: false);
 
 **Returns:** `array<array<array{key: string, value: ?string}>>`
 
+> **Performance Note:** `batchScan` fans out the ranges **concurrently** —
+> per-region scan RPCs are issued in parallel, so server-side latencies
+> overlap. The number of in-flight requests is capped by
+> `options['maxConcurrency']` (default **16**; must be `>= 1`); when a range
+> spans multiple regions, per-region requests for it are also fanned out.
+> Results are returned in input range order.
+
 **Example:**
 
 ```php
