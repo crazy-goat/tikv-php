@@ -442,6 +442,27 @@ replaying into the stale snapshot. See
 [Transaction Operations](error-handling.md#transaction-operations) and
 [Retrying transactions safely](error-handling.md#retrying-transactions-safely).
 
+#### TxnKV Fails on a TTL-Enabled Cluster
+
+**Error:**
+```
+Transaction operations fail with region or server errors on a cluster that
+has `enable-ttl = true`.
+```
+
+**What it means:** The cluster runs in TiKV's V1TTL storage mode
+(`[storage] enable-ttl = true`), which serves RawKV with TTL but **not**
+transactional requests. TTL mode and TxnKV are mutually exclusive on a
+single cluster (TiKV's `APIVersion.V1TTL` accepts only raw requests).
+
+**Solution:** Use a separate cluster for TxnKV — a TiKV in default V1 mode
+with `enable-ttl` unset (see `tikv-v1.toml`). A single cluster cannot serve
+both RawKV-with-TTL and TxnKV.
+
+> See [Cluster mode is exclusive](#ttl-not-enabled) for the interplay with
+> TTL, and the compose override
+> `docker-compose.txnkv.yml` (V1 mode) used by the TxnKV E2E suite.
+
 #### Write Conflict
 
 **Error:**
@@ -1135,6 +1156,7 @@ If issues persist:
 | Slow operations | Enable logging, check retries |
 | Memory issues | Paginate scans, reduce batch size |
 | TTL not working | Enable `enable-ttl` in TiKV config |
+| TxnKV fails on TTL cluster | Use a V1-mode cluster (no `enable-ttl`) for TxnKV — see "TxnKV Fails on a TTL-Enabled Cluster" |
 | Data not found | Check key format, TTL, cluster |
 | Write conflict / deadlock | New transaction, jittered backoff ([Transaction Failures](#transaction-failures)) |
 | Batch partial failure | Re-drive only failed regions ([Batch Partial Failure](#batch-partial-failure)) |

@@ -78,6 +78,21 @@ $client->deletePrefix('cache:');
 
 Requires `enable-ttl=true` in tikv.toml configuration.
 
+> **Cluster mode is exclusive.** `enable-ttl = true` puts TiKV into V1TTL
+> storage mode, which serves RawKV with TTL but **not** transactional
+> (TxnKV) requests. A single cluster cannot serve both RawKV-with-TTL and
+> TxnKV.
+>
+> - RawKV **with** TTL → `[storage] enable-ttl = true` (see `tikv.toml`)
+> - RawKV without TTL, or TxnKV → leave `enable-ttl` unset (see `tikv-v1.toml`)
+>
+> This project's own E2E suites reflect the split: RawKV tests run against
+> `docker-compose.yml`, TxnKV tests against
+> `docker-compose.yml + docker-compose.txnkv.yml`.
+>
+> Changing this setting on a live cluster is an operational migration —
+> plan it before adopting either feature.
+
 ```php
 // Store with expiration (TTL in seconds)
 $client->put('session', 'data', ttl: 3600);        // expires in 1 hour
@@ -408,6 +423,9 @@ For TTL support, enable it in tikv.toml:
 [storage]
 enable-ttl = true
 ```
+
+> **Note:** TTL mode is exclusive with TxnKV — see
+> [TTL (Time-To-Live)](#ttl-time-to-live).
 
 ## Roadmap
 

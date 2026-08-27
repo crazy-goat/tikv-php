@@ -231,6 +231,13 @@ This closes gRPC connections and releases resources.
 
 The client also supports ACID transactions via the TxnKV API. This is useful when you need strong consistency guarantees.
 
+> **Prerequisite cluster mode.** TxnKV requires a TiKV cluster in default
+> (V1) mode — `enable-ttl` must **not** be set (see `tikv-v1.toml`). A
+> cluster with `enable-ttl = true` runs in V1TTL mode, which serves RawKV
+> with TTL but **not** transactional requests. See
+> [TTL (Time-To-Live)](../README.md#ttl-time-to-live) for the full
+> exclusivity note.
+
 ### Creating a Transaction
 
 ```php
@@ -376,6 +383,11 @@ If TTL operations fail:
 2. Restart TiKV after configuration change
 
 See [Troubleshooting](troubleshooting.md) for more solutions.
+
+> **Caution:** enabling `enable-ttl` switches the cluster to V1TTL mode,
+> which makes TxnKV transactions unusable on that cluster. TTL and
+> transactions are mutually exclusive — see
+> [Cluster mode is exclusive](../README.md#ttl-time-to-live).
 
 ## Examples
 
