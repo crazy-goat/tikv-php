@@ -27,18 +27,6 @@ final class ParallelRangeOpsCapTest extends TestCase
 
     private int $inFlight = 0;
 
-    private function requireGrpcExtensionForFutures(): void
-    {
-        // GrpcFuture's constructor type-hints \Grpc\Call; building mocked
-        // calls needs the extension, same gate as BatchAsyncExecutorTest.
-        if (!class_exists(\Grpc\Timeval::class) && getenv('REQUIRE_GRPC_EXTENSION') === '1') {
-            self::fail('gRPC extension is required');
-        }
-        if (!class_exists(\Grpc\Timeval::class)) {
-            self::markTestSkipped('gRPC extension not available');
-        }
-    }
-
     /**
      * A callable modelling one RPC: the send registers in-flight and starts
      * the server-side processing clock ($latencyUs from NOW); the wait
@@ -70,8 +58,6 @@ final class ParallelRangeOpsCapTest extends TestCase
 
     public function testCappedExecutionNeverExceedsMaxConcurrency(): void
     {
-        $this->requireGrpcExtensionForFutures();
-
         $executor = new BatchAsyncExecutor();
         $total = 50;
         $cap = 16;
@@ -89,8 +75,6 @@ final class ParallelRangeOpsCapTest extends TestCase
 
     public function testCappedExecutionWithFewerCallsThanCap(): void
     {
-        $this->requireGrpcExtensionForFutures();
-
         $executor = new BatchAsyncExecutor();
         $calls = [];
         for ($i = 0; $i < 5; $i++) {
@@ -120,8 +104,6 @@ final class ParallelRangeOpsCapTest extends TestCase
 
     public function testResultsKeepOriginalKeysAcrossWindows(): void
     {
-        $this->requireGrpcExtensionForFutures();
-
         $executor = new BatchAsyncExecutor();
         $calls = [];
         for ($i = 0; $i < 40; $i++) {
@@ -136,8 +118,6 @@ final class ParallelRangeOpsCapTest extends TestCase
 
     public function testWindowedFanOutIsFasterThanSerial(): void
     {
-        $this->requireGrpcExtensionForFutures();
-
         $total = 50;
         $latencyUs = 5000; // 5 ms simulated server latency per call
 
@@ -173,8 +153,6 @@ final class ParallelRangeOpsCapTest extends TestCase
 
     public function testCheckedFuturesResolveResponsesThroughTheExecutor(): void
     {
-        $this->requireGrpcExtensionForFutures();
-
         $scanResponse = new RawScanResponse();
         $checksumResponse = new RawChecksumResponse();
         $scanFuture = $this->futureResolving($scanResponse);

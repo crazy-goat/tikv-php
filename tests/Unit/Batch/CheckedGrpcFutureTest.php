@@ -16,13 +16,9 @@ class CheckedGrpcFutureTest extends TestCase
 {
     use GrpcExtensionGate;
 
-    protected function setUp(): void
-    {
-        $this->requireGrpcExtension();
-    }
-
     public function testFromGrpcFutureReturnsInnerOnAccess(): void
     {
+        $this->requireGrpcExtension();
         $call = $this->createMock(Call::class);
         $future = new GrpcFuture($call, RawGetResponse::class);
         $checked = CheckedGrpcFuture::fromGrpcFuture($future);
@@ -43,6 +39,7 @@ class CheckedGrpcFutureTest extends TestCase
 
     public function testWaitForExecutorRunsUnderlyingWaitAndCheck(): void
     {
+        $this->requireGrpcExtension();
         $response = new RawGetResponse();
         $response->setValue('hello');
 
@@ -65,6 +62,7 @@ class CheckedGrpcFutureTest extends TestCase
 
     public function testWaitForExecutorSurfacesRegionErrorsAsExceptions(): void
     {
+        $this->requireGrpcExtension();
         $response = new RawGetResponse();
         // RegionErrorHandler::check() inspects the top-level region_error;
         // set one to exercise the path.
@@ -90,6 +88,7 @@ class CheckedGrpcFutureTest extends TestCase
     public function testCancelDoesNotThrowOrThrow(): void
     {
         // fromGrpcFuture: cancel reaches the underlying GrpcFuture.
+        $this->requireGrpcExtension();
         $call = $this->createMock(Call::class);
 
         $future = new GrpcFuture($call, RawGetResponse::class);

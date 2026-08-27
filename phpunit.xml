@@ -12,12 +12,26 @@
             <exclude>tests/Unit/Batch/GrpcFutureTest.php</exclude>
             <exclude>tests/Unit/RawKv/RawKvBatchTest.php</exclude>
             <exclude>tests/Unit/RawKv/RawKvClientTest.php</exclude>
+            <exclude>tests/Unit/Batch/BatchAsyncExecutorTest.php</exclude>
+            <exclude>tests/Unit/Batch/CheckedGrpcFutureTest.php</exclude>
+            <exclude>tests/Unit/RawKv/SstIngestorTest.php</exclude>
         </testsuite>
         <testsuite name="Grpc">
+            <!-- The gRPC-dependent classes live here (they mock \Grpc\Call and
+                 need ext-grpc, which the unit-tests CI job does not install).
+                 ParallelRangeOpsCapTest is pure PHP and intentionally runs in
+                 BOTH suites: fast in Unit (no ext) and under the Grpc job's
+                 coverage run (exercises BatchAsyncExecutor::executeParallelCapped).
+                 CI always invokes a single testsuite selector, so nothing runs
+                 twice in any job. -->
             <file>tests/Unit/Grpc/GrpcClientTest.php</file>
             <file>tests/Unit/Batch/GrpcFutureTest.php</file>
             <file>tests/Unit/RawKv/RawKvBatchTest.php</file>
             <file>tests/Unit/RawKv/RawKvClientTest.php</file>
+            <file>tests/Unit/Batch/BatchAsyncExecutorTest.php</file>
+            <file>tests/Unit/Batch/CheckedGrpcFutureTest.php</file>
+            <file>tests/Unit/Batch/ParallelRangeOpsCapTest.php</file>
+            <file>tests/Unit/RawKv/SstIngestorTest.php</file>
         </testsuite>
         <testsuite name="Integration">
             <directory>tests/Integration</directory>
