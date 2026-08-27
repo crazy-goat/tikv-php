@@ -20,9 +20,7 @@ final class RegionGrouper
         foreach ($keys as $key) {
             $region = $regionResolver($key);
             $regionId = $region->regionId;
-            if (!isset($grouped[$regionId])) {
-                $grouped[$regionId] = ['region' => $region, 'keys' => []];
-            }
+            $grouped[$regionId] ??= ['region' => $region, 'keys' => []];
             $grouped[$regionId]['keys'][] = $key;
         }
 
@@ -50,9 +48,7 @@ final class RegionGrouper
                 continue;
             }
             $regionId = $region->regionId;
-            if (!isset($grouped[$regionId])) {
-                $grouped[$regionId] = ['region' => $region, 'keys' => []];
-            }
+            $grouped[$regionId] ??= ['region' => $region, 'keys' => []];
             $grouped[$regionId]['keys'][] = $key;
         }
 
@@ -101,9 +97,7 @@ final class RegionGrouper
                 continue;
             }
             $regionId = $region->regionId;
-            if (!isset($grouped[$regionId])) {
-                $grouped[$regionId] = ['region' => $region, 'items' => []];
-            }
+            $grouped[$regionId] ??= ['region' => $region, 'items' => []];
             $grouped[$regionId]['items'][] = $item;
         }
 

@@ -410,9 +410,7 @@ final readonly class RawKvBatch
                     continue;
                 }
                 $gid = $r->regionId;
-                if (!isset($groups[$gid])) {
-                    $groups[$gid] = ['region' => $r, 'keys' => []];
-                }
+                $groups[$gid] ??= ['region' => $r, 'keys' => []];
                 $groups[$gid]['keys'][] = $k;
             }
 
@@ -494,9 +492,7 @@ final readonly class RawKvBatch
                     continue;
                 }
                 $gid = $r->regionId;
-                if (!isset($groups[$gid])) {
-                    $groups[$gid] = ['region' => $r, 'pairs' => [], 'ttls' => []];
-                }
+                $groups[$gid] ??= ['region' => $r, 'pairs' => [], 'ttls' => []];
                 $groups[$gid]['pairs'][] = $pair;
                 if ($hasPerKeyTtl) {
                     $groups[$gid]['ttls'][] = $ttl[$i];
@@ -577,9 +573,7 @@ final readonly class RawKvBatch
                     continue;
                 }
                 $gid = $r->regionId;
-                if (!isset($groups[$gid])) {
-                    $groups[$gid] = ['region' => $r, 'keys' => []];
-                }
+                $groups[$gid] ??= ['region' => $r, 'keys' => []];
                 $groups[$gid]['keys'][] = $k;
             }
 

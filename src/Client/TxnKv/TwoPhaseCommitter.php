@@ -352,9 +352,7 @@ final readonly class TwoPhaseCommitter
             }
         }
 
-        if ($primaryRegionId === null) {
-            $primaryRegionId = array_key_first($keysByRegion);
-        }
+        $primaryRegionId ??= array_key_first($keysByRegion);
 
         // Commit the primary first. Failures here are fatal: do not retry.
         // No RetryExecutor wraps this call, so commitForRegion must handle

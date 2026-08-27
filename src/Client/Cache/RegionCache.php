@@ -217,10 +217,8 @@ class RegionCache implements RegionCacheInterface
             }
         }
 
-        if ($lruId === null) {
-            // Fallback: evict the first entry
-            $lruId = $this->entries[0]->region->regionId;
-        }
+        // Fallback: evict the first entry
+        $lruId ??= $this->entries[0]->region->regionId;
 
         $this->logger->debug('Evicting LRU region from cache', ['regionId' => $lruId]);
         $this->removeById($lruId);
