@@ -367,3 +367,30 @@ Facts verified empirically (PHPUnit 11.5.55, PR #484 for #323/#358/#359):
 5. XML comment gotcha hit while documenting this: XML comments cannot
    contain `--` — the phrase `--testsuite` inside an XML comment breaks
    parsing with "Double hyphen within comment". Use "testsuite selector".
+
+## Rector version drift: local rector ≠ CI rector (no committed composer.lock)
+
+The repo has **no committed `composer.lock`**, so CI's `composer install`
+resolves the latest rector within `^2.3` every run, while local devs use
+whatever `vendor/` happens to hold (this repo historically pinned 2.4.3).
+When rector 2.6.x shipped (2026-08), CI's Lint job started flagging 8 files
+that local rector didn't, failing **every** PR — filed as #485, fixed in
+PR #486. Lessons:
+
+1. `composer rector` local green does NOT mean CI lint green. Reproduce CI
+   with a scratch rector: `cd /tmp && composer require rector/rector:^2.6`
+   then `/tmp/rector26/vendor/bin/rector process --dry-run`.
+2. Rector 2.6's `ReadOnlyPropertyRector` + `RemoveUnusedPrivateMethodRector`
+   chain can **delete `setUp()`** that initialises the now-readonly props,
+   leaving them uninitialised → every test in the class errors "must not be
+   accessed before initialization". And `PrivatizeFinalClassMethodRector`
+   making `setUp()` private is a PHPUnit **fatal error** ("must be protected
+   or weaker") — PHPUnit requires ≥ protected. Neither transform is safe for
+   PHPUnit lifecycle methods: skip such files wholesale in `rector.php`
+   (`->withSkip([__DIR__ . '/tests/…'])`) rather than adopt a broken
+   transform.
+3. The safe part of the 2.6 drift is `IfToNullCoalescingAssignRector`
+   (`if (isset($x[$k])) { $x[$k] = init; }` → `$x[$k] ??= init;`) — apply it
+   to src files freely; it is semantics-preserving.
+
+Also: XML comments must not contain `--` (see above).
