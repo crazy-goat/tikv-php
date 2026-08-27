@@ -548,9 +548,12 @@ function parallelScan(
 > `ServerIsBusy`, `StaleCommand`, `RegionNotFound`, gRPC transport errors)
 > through a bounded `RetryExecutor`. Wrapping client calls in another
 > user-level loop **multiplies** the total wait — the inner executor can
-> already spend up to 30 attempts / 30 s wall-clock on one operation
-> (overshooting by at most one final backoff sleep) — and can pin PHP-FPM
-> workers far longer than either layer intends.
+> already spend up to 30 attempts / 30 s wall-clock on one operation — the
+> deadline is checked before each attempt, so occupancy can exceed it by one
+> final backoff sleep (up to ~10 s under ServerIsBusy) plus the duration of
+> the last in-flight RPC (bounded by the gRPC timeout option, not by the
+> retry deadline) — and can pin PHP-FPM workers far longer than either layer
+> intends.
 >
 > When the attempt cap or the wall-clock deadline is reached, the operation
 > throws `CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException`
