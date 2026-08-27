@@ -389,20 +389,21 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 // - Server busy budget: 60 seconds (cumulative ServerBusy sleep)
 // - Retry deadline: 30 seconds (checked before each retry attempt; occupancy
 //   can exceed it by one final backoff sleep plus the duration of the last
-//   in-flight RPC, which is bounded only by the gRPC timeout)
+//   in-flight RPC, which is bounded only by the gRPC timeout option
+//   (options['timeout']), not by the retry deadline)
 
 // Custom retry deadline (issue #294) — bounds the blocking backoff loop so a
 // sustained ServerIsBusy episode cannot pin a PHP-FPM worker for minutes:
 $client = RawKvClient::create(['127.0.0.1:2379'], [
     'retryDeadlineMs' => 5000, // 5 s wall-clock bound per operation; 0 disables
 ]);
+```
 
 > **Occupancy note:** the deadline is a per-attempt check, not a hard cutoff —
 > an operation may occupy the worker for the deadline plus one final backoff
 > sleep (up to ~10 s under ServerIsBusy) plus the full wall time of the last
 > in-flight RPC. Example: `retryDeadlineMs => 1000` with a gRPC call that
 > runs 5 s ⇒ real occupancy ≈ 6 s + sleep, despite the 1 s deadline.
-```
 
 > **Worker occupancy note:** `serverBusyBudgetMs` is effectively a
 > worker-occupancy setting — it caps how long ONE operation may block a PHP
