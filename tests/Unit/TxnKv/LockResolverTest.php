@@ -10,6 +10,7 @@ use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
+use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
@@ -251,15 +252,41 @@ class LockResolverTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->region);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $this->grpc->expects($this->exactly(2))
-            ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->makeCheckTxnStatusResponse(commitVersion: 1),
-                new ResolveLockResponse(),
-            );
+        /** @var string[] $methods */
+        $methods = [];
+        /** @var ResolveLockRequest[] $resolveRequests */
+        $resolveRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+                string $responseClass,
+            ) use (
+                &$methods,
+                &$resolveRequests
+): object {
+                $methods[] = $method;
+                if ($method === 'KvResolveLock' && $request instanceof ResolveLockRequest) {
+                    $resolveRequests[] = $request;
+                }
+                if ($method === 'KvCheckTxnStatus') {
+                    return $this->makeCheckTxnStatusResponse(commitVersion: 1);
+                }
+                if ($method === 'KvResolveLock') {
+                    return new ResolveLockResponse();
+                }
+                throw new \RuntimeException('Unexpected method: ' . $method);
+            });
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvResolveLock'], $methods);
+        $this->assertCount(1, $resolveRequests);
+        $this->assertSame(self::LOCK_TS, (int) $resolveRequests[0]->getStartVersion());
+        $this->assertSame(1, (int) $resolveRequests[0]->getCommitVersion());
     }
 
     public function testResolveLockWithZeroCommitTsRollsBack(): void
@@ -267,16 +294,48 @@ class LockResolverTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->region);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $this->grpc->expects($this->exactly(3))
-            ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->makeCheckTxnStatusResponse(commitVersion: 0),
-                $this->makeCheckTxnStatusResponse(commitVersion: 0),
-                new ResolveLockResponse(),
-            );
+        /** @var string[] $methods */
+        $methods = [];
+        /** @var ResolveLockRequest[] $resolveRequests */
+        $resolveRequests = [];
+        $checkIndex = 0;
+        $checkResponses = [
+            $this->makeCheckTxnStatusResponse(commitVersion: 0),
+            $this->makeCheckTxnStatusResponse(commitVersion: 0),
+        ];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+                string $responseClass,
+            ) use (
+                &$methods,
+                &$resolveRequests,
+                &$checkIndex,
+                $checkResponses
+): object {
+                $methods[] = $method;
+                if ($method === 'KvResolveLock' && $request instanceof ResolveLockRequest) {
+                    $resolveRequests[] = $request;
+                }
+                if ($method === 'KvCheckTxnStatus') {
+                    return $checkResponses[$checkIndex++];
+                }
+                if ($method === 'KvResolveLock') {
+                    return new ResolveLockResponse();
+                }
+                throw new \RuntimeException('Unexpected method: ' . $method);
+            });
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvCheckTxnStatus', 'KvResolveLock'], $methods);
+        $this->assertCount(1, $resolveRequests);
+        $this->assertSame(self::LOCK_TS, (int) $resolveRequests[0]->getStartVersion());
+        $this->assertSame(0, (int) $resolveRequests[0]->getCommitVersion());
     }
 
     public function testResolveLockWithActiveLockWaitsThenRollsBack(): void
@@ -284,16 +343,48 @@ class LockResolverTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->region);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $this->grpc->expects($this->exactly(3))
-            ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 50),
-                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
-                new ResolveLockResponse(),
-            );
+        /** @var string[] $methods */
+        $methods = [];
+        /** @var ResolveLockRequest[] $resolveRequests */
+        $resolveRequests = [];
+        $checkIndex = 0;
+        $checkResponses = [
+            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 50),
+            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
+        ];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+                string $responseClass,
+            ) use (
+                &$methods,
+                &$resolveRequests,
+                &$checkIndex,
+                $checkResponses
+): object {
+                $methods[] = $method;
+                if ($method === 'KvResolveLock' && $request instanceof ResolveLockRequest) {
+                    $resolveRequests[] = $request;
+                }
+                if ($method === 'KvCheckTxnStatus') {
+                    return $checkResponses[$checkIndex++];
+                }
+                if ($method === 'KvResolveLock') {
+                    return new ResolveLockResponse();
+                }
+                throw new \RuntimeException('Unexpected method: ' . $method);
+            });
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvCheckTxnStatus', 'KvResolveLock'], $methods);
+        $this->assertCount(1, $resolveRequests);
+        $this->assertSame(self::LOCK_TS, (int) $resolveRequests[0]->getStartVersion());
+        $this->assertSame(0, (int) $resolveRequests[0]->getCommitVersion());
     }
 
     public function testResolveLockWithLockActionImmediatelyRollsBack(): void
@@ -301,16 +392,48 @@ class LockResolverTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->region);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $this->grpc->expects($this->exactly(3))
-            ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
-                $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
-                new ResolveLockResponse(),
-            );
+        /** @var string[] $methods */
+        $methods = [];
+        /** @var ResolveLockRequest[] $resolveRequests */
+        $resolveRequests = [];
+        $checkIndex = 0;
+        $checkResponses = [
+            $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
+            $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
+        ];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+                string $responseClass,
+            ) use (
+                &$methods,
+                &$resolveRequests,
+                &$checkIndex,
+                $checkResponses
+): object {
+                $methods[] = $method;
+                if ($method === 'KvResolveLock' && $request instanceof ResolveLockRequest) {
+                    $resolveRequests[] = $request;
+                }
+                if ($method === 'KvCheckTxnStatus') {
+                    return $checkResponses[$checkIndex++];
+                }
+                if ($method === 'KvResolveLock') {
+                    return new ResolveLockResponse();
+                }
+                throw new \RuntimeException('Unexpected method: ' . $method);
+            });
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvCheckTxnStatus', 'KvResolveLock'], $methods);
+        $this->assertCount(1, $resolveRequests);
+        $this->assertSame(self::LOCK_TS, (int) $resolveRequests[0]->getStartVersion());
+        $this->assertSame(0, (int) $resolveRequests[0]->getCommitVersion());
     }
 
     public function testResolveLockWithRegionErrorThrows(): void
