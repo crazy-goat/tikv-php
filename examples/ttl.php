@@ -4,7 +4,9 @@
  * 
  * Demonstrates storing data with expiration.
  * 
- * NOTE: Requires TiKV to be configured with enable-ttl=true
+ * NOTE: Requires TiKV to be configured with enable-ttl=true.
+ * TTL mode is exclusive with TxnKV — a TTL-enabled cluster cannot serve
+ * transactional requests. See README "TTL (Time-To-Live)".
  */
 
 require __DIR__ . '/../vendor/autoload.php';

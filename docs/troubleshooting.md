@@ -429,7 +429,9 @@ expire" instead of an exception.
 > **Note:** The repo ships both configs: `tikv.toml` (with
 > `enable-ttl = true`) and `tikv-v1.toml` (V1 mode, no TTL — used for TxnKV
 > E2E tests via the `docker-compose.txnkv.yml` override). If you booted the
-> V1 override, TTL operations behave exactly as described above.
+> V1 override, TTL operations behave exactly as described above. A
+> TTL-enabled cluster cannot serve TxnKV — see
+> [TxnKV Fails on a TTL-Enabled Cluster](#txnkv-fails-on-a-ttl-enabled-cluster).
 
 ### Transaction Failures
 
@@ -444,11 +446,8 @@ replaying into the stale snapshot. See
 
 #### TxnKV Fails on a TTL-Enabled Cluster
 
-**Error:**
-```
 Transaction operations fail with region or server errors on a cluster that
 has `enable-ttl = true`.
-```
 
 **What it means:** The cluster runs in TiKV's V1TTL storage mode
 (`[storage] enable-ttl = true`), which serves RawKV with TTL but **not**
@@ -459,9 +458,9 @@ single cluster (TiKV's `APIVersion.V1TTL` accepts only raw requests).
 with `enable-ttl` unset (see `tikv-v1.toml`). A single cluster cannot serve
 both RawKV-with-TTL and TxnKV.
 
-> See [Cluster mode is exclusive](#ttl-not-enabled) for the interplay with
-> TTL, and the compose override
-> `docker-compose.txnkv.yml` (V1 mode) used by the TxnKV E2E suite.
+> See [TTL Not Enabled](#ttl-not-enabled) for the interplay with TTL, and
+> the compose override `docker-compose.txnkv.yml` (V1 mode) used by the
+> TxnKV E2E suite.
 
 #### Write Conflict
 
@@ -1156,7 +1155,7 @@ If issues persist:
 | Slow operations | Enable logging, check retries |
 | Memory issues | Paginate scans, reduce batch size |
 | TTL not working | Enable `enable-ttl` in TiKV config |
-| TxnKV fails on TTL cluster | Use a V1-mode cluster (no `enable-ttl`) for TxnKV — see "TxnKV Fails on a TTL-Enabled Cluster" |
+| TxnKV fails on TTL cluster | Use a V1-mode cluster (no `enable-ttl`) for TxnKV — see [TxnKV Fails on a TTL-Enabled Cluster](#txnkv-fails-on-a-ttl-enabled-cluster) |
 | Data not found | Check key format, TTL, cluster |
 | Write conflict / deadlock | New transaction, jittered backoff ([Transaction Failures](#transaction-failures)) |
 | Batch partial failure | Re-drive only failed regions ([Batch Partial Failure](#batch-partial-failure)) |
