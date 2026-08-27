@@ -130,7 +130,7 @@ jobs:
         run: composer install --no-interaction --prefer-dist --no-progress
 
       - name: Run unit tests
-        run: ./vendor/bin/phpunit --testsuite Unit --testdox --no-coverage
+        run: ./vendor/bin/phpunit --testsuite Unit --testdox --fail-on-skipped --no-coverage
         timeout-minutes: 5
 
   grpc-unit-tests:

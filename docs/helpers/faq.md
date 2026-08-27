@@ -341,3 +341,56 @@ TTL-enabled cluster" — a troubleshooting entry for it must use prose
 diagnosis, not a fake `**Error:**` code block (the file's convention is
 that quoted strings are verifiable verbatim). Switching `enable-ttl` on a
 live cluster requires wiping data — an operational migration.
+
+## PHPUnit `--fail-on-skipped`: any skip fails, and mocking `\Grpc\Call` without ext-grpc ERRORs (not skips)
+
+Facts verified empirically (PHPUnit 11.5.55, PR #484 for #323/#358/#359):
+
+1. `--fail-on-skipped` / `failOnSkipped="true"` makes **any** skipped test
+   (runtime `markTestSkipped()` AND `@requires`-based skips) exit 1. There is
+   no "only runtime skips" escape hatch.
+2. `createMock(\Grpc\Call::class)` with **no** `grpc` extension is a hard
+   `UnknownTypeException` **error**, not a skip — so a per-method
+   `@requires extension grpc` cannot keep a `Call`-mocking test in a job
+   without ext: the test skips (fails under `--fail-on-skipped`) if the
+   annotation fires, or errors if it doesn't.
+3. Consequence: in a suite that runs without ext (the `unit-tests` CI job),
+   **any** test that mocks `\Grpc\Call` must live in a different suite, not be
+   gated. The pattern used in PR #484: whole classes that mock `Call` move to
+   the `Grpc` testsuite (`phpunit.xml` `<file>` entries + `<exclude>` from
+   `Unit`); tests that are pure PHP (drive the executor with
+   `CheckedGrpcFuture::fromCallable`, no `Call`) stay in `Unit` ungated and
+   also join the Grpc suite as `<file>` entries so the Grpc coverage run
+   (PCOV) exercises the code paths they cover.
+4. `php -n vendor/bin/phpunit --testsuite Unit --fail-on-skipped` is the
+   faithful local simulation of CI's unit job (php -n = no extensions).
+5. XML comment gotcha hit while documenting this: XML comments cannot
+   contain `--` — the phrase `--testsuite` inside an XML comment breaks
+   parsing with "Double hyphen within comment". Use "testsuite selector".
+
+## Rector version drift: local rector ≠ CI rector (no committed composer.lock)
+
+The repo has **no committed `composer.lock`**, so CI's `composer install`
+resolves the latest rector within `^2.3` every run, while local devs use
+whatever `vendor/` happens to hold (this repo historically pinned 2.4.3).
+When rector 2.6.x shipped (2026-08), CI's Lint job started flagging 8 files
+that local rector didn't, failing **every** PR — filed as #485, fixed in
+PR #486. Lessons:
+
+1. `composer rector` local green does NOT mean CI lint green. Reproduce CI
+   with a scratch rector: `cd /tmp && composer require rector/rector:^2.6`
+   then `/tmp/rector26/vendor/bin/rector process --dry-run`.
+2. Rector 2.6's `ReadOnlyPropertyRector` + `RemoveUnusedPrivateMethodRector`
+   chain can **delete `setUp()`** that initialises the now-readonly props,
+   leaving them uninitialised → every test in the class errors "must not be
+   accessed before initialization". And `PrivatizeFinalClassMethodRector`
+   making `setUp()` private is a PHPUnit **fatal error** ("must be protected
+   or weaker") — PHPUnit requires ≥ protected. Neither transform is safe for
+   PHPUnit lifecycle methods: skip such files wholesale in `rector.php`
+   (`->withSkip([__DIR__ . '/tests/…'])`) rather than adopt a broken
+   transform.
+3. The safe part of the 2.6 drift is `IfToNullCoalescingAssignRector`
+   (`if (isset($x[$k])) { $x[$k] = init; }` → `$x[$k] ??= init;`) — apply it
+   to src files freely; it is semantics-preserving.
+
+Also: XML comments must not contain `--` (see above).

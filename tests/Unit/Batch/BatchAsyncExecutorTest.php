@@ -20,11 +20,6 @@ class BatchAsyncExecutorTest extends TestCase
 {
     use GrpcExtensionGate;
 
-    protected function setUp(): void
-    {
-        $this->requireGrpcExtension();
-    }
-
     public function testExecuteParallelWithSuccessfulCalls(): void
     {
         $executor = new BatchAsyncExecutor(new NullLogger());
@@ -74,6 +69,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testExecuteParallelCancelsRemainingFuturesOnFailure(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         $okCall = $this->createMock(Call::class);
@@ -117,6 +113,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testExecuteParallelDoesNotCancelOnHappyPath(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         $okCall = $this->createMock(Call::class);
@@ -147,6 +144,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testExecuteParallelWithMixedDispatchAndWaitFailures(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         // Region 1: dispatch-phase failure (callable throws)
@@ -189,6 +187,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testExecuteParallelWithAllWaitPhaseFailures(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         $failingCall1 = $this->createMock(Call::class);
@@ -264,6 +263,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testAwaitValueFlatForGrpcFuture(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         $response = new RawGetResponse();
@@ -290,6 +290,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testAwaitValueFlatForCheckedGrpcFuture(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         $response = new RawGetResponse();
@@ -318,6 +319,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testCheckedGrpcFutureRegionErrorSurfacesAsPartialFailure(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         // Build a response that carries a region error. CheckedGrpcFuture
@@ -366,6 +368,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testDeadlineExceededDuringDispatchCancelsDispatchedFutures(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         $call = $this->createMock(Call::class);
@@ -402,6 +405,7 @@ class BatchAsyncExecutorTest extends TestCase
 
     public function testDeadlineExceededDuringWaitCancelsRemainingFutures(): void
     {
+        $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
 
         $slowCall = $this->createMock(Call::class);
