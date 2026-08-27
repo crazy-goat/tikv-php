@@ -38,10 +38,10 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::INFO));
 
 // Client options
 $options = [
-    // Concurrency cap for range/batch operations that fan out per-region
-    // RPCs (batchScan, deleteRange/deletePrefix/checksum, SST store-mode
-    // switches): at most this many ranges/regions are in flight at once.
-    // Default: 16. Must be >= 1.
+    // Concurrency cap for operations that fan out per-region/per-store RPCs
+    // (batchScan, deleteRange/deletePrefix/checksum, SST store-mode
+    // switches): at most this many units (ranges, regions or stores) are in
+    // flight at once. Default: 16. Must be >= 1.
     'maxConcurrency' => 16,
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
