@@ -530,7 +530,7 @@ function parallelScan(
     }
     
     // Scan ranges in parallel (using batchScan).
-    // Per-region scan RPCs fan out concurrently, capped by
+    // The ranges are fanned out concurrently, capped by
     // options['maxConcurrency'] (default 16, must be >= 1).
     $results = $client->batchScan($ranges, eachLimit: 10000);
     

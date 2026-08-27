@@ -38,9 +38,9 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::INFO));
 
 // Client options
 $options = [
-    // Concurrency cap for batch operations (batchGet/batchPut/batchDelete,
-    // batchScan, deleteRange/deletePrefix/checksum, SST store-mode switches):
-    // at most this many per-region/per-store RPCs are in flight at once.
+    // Concurrency cap for range/batch operations that fan out per-region
+    // RPCs (batchScan, deleteRange/deletePrefix/checksum, SST store-mode
+    // switches): at most this many ranges/regions are in flight at once.
     // Default: 16. Must be >= 1.
     'maxConcurrency' => 16,
     'tls' => [
