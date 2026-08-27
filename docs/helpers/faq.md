@@ -325,3 +325,19 @@ involves enumerating classes/methods/exceptions, grep the source tree at
 implementation time and treat the issue's numbers as stale-by-default. Same
 class of trap as #376: an audit issue's premise can silently expire when a
 later PR changes the code it describes.
+
+## TTL mode and TxnKV are mutually exclusive — say it at every enable-ttl recommendation
+
+TiKV with `[storage] enable-ttl = true` runs in V1TTL storage mode, which
+serves RawKV-with-TTL but **not** transactional requests; a single cluster
+cannot serve both (see `src/Proto/Kvrpcpb/APIVersion.php`: "V1TTL is only
+available to RawKV"). The repo itself splits E2E by mode: `tikv.toml` has
+`enable-ttl = true` (RawKV suite), `tikv-v1.toml` omits it (TxnKV suite via
+the `docker-compose.txnkv.yml` override). Lesson from issue #405 [DOC-39]:
+every doc/example that recommends `enable-ttl` must carry the exclusivity
+note, the TxnKV docs must state the default-V1-mode prerequisite, and there
+is **no verbatim server error string** to quote for "TxnKV fails on a
+TTL-enabled cluster" — a troubleshooting entry for it must use prose
+diagnosis, not a fake `**Error:**` code block (the file's convention is
+that quoted strings are verifiable verbatim). Switching `enable-ttl` on a
+live cluster requires wiping data — an operational migration.

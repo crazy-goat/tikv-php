@@ -414,6 +414,21 @@ $client->deletePrefix('session:user:123:');
 
 **Note:** TTL requires TiKV to be configured with `enable-ttl=true` in tikv.toml.
 
+> **Cluster mode is exclusive.** `enable-ttl = true` puts TiKV into V1TTL
+> storage mode, which serves RawKV with TTL but **not** transactional
+> (TxnKV) requests. A single cluster cannot serve both RawKV-with-TTL and
+> TxnKV.
+>
+> - RawKV **with** TTL → `[storage] enable-ttl = true` (see `tikv.toml`)
+> - RawKV without TTL, or TxnKV → leave `enable-ttl` unset (see `tikv-v1.toml`)
+>
+> This project's own E2E suites reflect the split: RawKV tests run against
+> `docker-compose.yml`, TxnKV tests against
+> `docker-compose.yml + docker-compose.txnkv.yml`.
+>
+> Changing this setting on a live cluster is an operational migration —
+> plan it before adopting either feature.
+
 ### Put with TTL
 
 Store with automatic expiration:

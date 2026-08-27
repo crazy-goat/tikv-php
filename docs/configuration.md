@@ -724,7 +724,7 @@ Before deploying to production:
 - [ ] Health checks are implemented
 - [ ] Error handling is in place
 - [ ] Resource limits are configured
-- [ ] TiKV cluster has `enable-ttl=true` (if using TTL)
+- [ ] TiKV cluster has `enable-ttl=true` (if using TTL) **or** is in default V1 mode (no `enable-ttl`, required for TxnKV) — the two are mutually exclusive
 
 ## See Also
 
