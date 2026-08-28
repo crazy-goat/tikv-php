@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Cache;
 
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -13,9 +14,8 @@ use PHPUnit\Framework\TestCase;
  * numeric-string comparison. A key like '9' must route by byte order
  * ('9' > '100'), and binary boundaries (inclusive start, exclusive end,
  * empty endKey = +infinity) must be respected.
- *
- * @covers \CrazyGoat\TiKV\Client\Cache\RegionCache
  */
+#[CoversClass(RegionCache::class)]
 final class RegionCacheBinaryKeyTest extends TestCase
 {
     private function region(int $id, string $start, string $end): RegionInfo

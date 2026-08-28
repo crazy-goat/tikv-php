@@ -6,11 +6,10 @@ namespace CrazyGoat\TiKV\Tests\Unit\Region;
 
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
-/**
- * @covers \CrazyGoat\TiKV\Client\Region\RegionRangeClipper
- */
+#[CoversClass(RegionRangeClipper::class)]
 final class RegionRangeClipperTest extends TestCase
 {
     private RegionRangeClipper $clipper;

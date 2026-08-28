@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
 use CrazyGoat\TiKV\Client\Grpc\GrpcResponseParser;
 use Google\Protobuf\Internal\Message;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class GrpcResponseParserTest extends TestCase
@@ -67,9 +68,9 @@ class GrpcResponseParserTest extends TestCase
     }
 
     /**
-     * @dataProvider extractStatusDataProvider
      * @param array{code: int, details: string} $expected
      */
+    #[DataProvider('extractStatusDataProvider')]
     public function testExtractStatus(mixed $event, array $expected): void
     {
         $result = GrpcResponseParser::extractStatus($event);
