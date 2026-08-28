@@ -56,7 +56,7 @@ class ErrorClassifierTest extends TestCase
         ];
     }
 
-    /** @dataProvider provideErrorKindMapping */
+    #[DataProvider('provideErrorKindMapping')]
     public function testClassifyByKind(ErrorKind $kind, ?BackoffType $expected): void
     {
         $this->assertSame($expected, ErrorClassifier::classifyByKind($kind));
@@ -66,7 +66,7 @@ class ErrorClassifierTest extends TestCase
     // RegionException with typed ErrorKind (uses typed path in classify())
     // ========================================================================
 
-    /** @dataProvider provideErrorKindMapping */
+    #[DataProvider('provideErrorKindMapping')]
     public function testRegionExceptionWithKind(ErrorKind $kind, ?BackoffType $expected): void
     {
         $error = new Error();

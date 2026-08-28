@@ -8,15 +8,15 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use PHPUnit\Framework\Attributes\CoversMethod;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
 /**
  * batchResolveRegions() must assign numeric-string and binary keys to regions
  * using TiKV byte order, not PHP numeric-string comparison.
- *
- * @covers \CrazyGoat\TiKV\Client\Region\RegionResolver::batchResolveRegions
  */
+#[CoversMethod(RegionResolver::class, 'batchResolveRegions')]
 final class RegionResolverBinaryKeyTest extends TestCase
 {
     private PdClientInterface&MockObject $pdClient;

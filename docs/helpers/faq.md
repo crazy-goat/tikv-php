@@ -394,3 +394,22 @@ PR #486. Lessons:
    to src files freely; it is semantics-preserving.
 
 Also: XML comments must not contain `--` (see above).
+
+## PHPUnit attributes: docblock must IMMEDIATELY precede the declaration (issue #452)
+
+Converting doc-comment metadata to PHPUnit 11 attributes (PR #490, issue #452)
+hit one trap worth remembering:
+
+1. PHPStan L9 associates a `/** @param ... */` docblock with the function only
+   if it IMMEDIATELY precedes it. An attribute placed between the docblock and
+   the function (`#[DataProvider(...)]` above the docblock) silently breaks the
+   association → `missingType.iterableValue`. Canonical order is
+   **docblock → attribute → function** (see tests/Unit/Grpc/GrpcResponseParserTest.php).
+   The remaining docblock is still needed: attributes cannot express
+   `@param array{...}` shapes for PHPStan.
+2. Method-level `@covers \Foo::bar` maps to `#[CoversMethod(Foo::class, 'bar')]`
+   (attribute exists in PHPUnit 11.5; argument order is className, methodName).
+3. After conversion verify with `vendor/bin/phpunit --testsuite Unit
+   --no-coverage --display-phpunit-deprecations` → must print
+   `PHPUnit Deprecations: 0`; baseline comparison counts are Tests: 743,
+   Warnings: 5 (pre-existing; the run still exits 1 because of them).
