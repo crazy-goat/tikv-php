@@ -106,15 +106,44 @@ a higher milestone.
 # When the picker says RELEASE NEEDED:
 git checkout master && git pull origin master
 
-# 1. Tag + publish the release (adapt notes; keep a Changelog entry per step 8)
-gh release create v0.4.0 --title "v0.4.0" --notes "…"
+# 1. Finalize CHANGELOG.md (per step 8, Keep a Changelog):
+#    - every entry under [Unreleased] moves into a new versioned section:
+#      ## [vX.Y.Z] - YYYY-MM-DD   (today's date, ISO 8601)
+#    - [Unreleased] stays at the top, empty, ready for the next cycle
+#    - drop any "### Added/Changed/Fixed/Removed" headings that ended up empty
+#    - keep one section per change type; entries within a section keep
+#      their issue references, e.g. (#105)
+#    - commit this on master: "chore: finalize CHANGELOG for vX.Y.Z"
 
-# 2. Close the finished milestone (no `gh milestone` subcommand — use the API)
+# 2. Tag + publish the release. Notes follow the existing tag structure
+#    (see v0.2.0, which uses "### Added" + "### Removed" + "### Full
+#    Changelog"): a one-line title summarising the theme, then
+#    "### Added" / "### Changed" / "### Fixed" / "### Removed" sections
+#    summarising the CHANGELOG entries for humans (short bullets, not the
+#    full entries), then a compare link:
+#      https://github.com/crazy-goat/tikv-php/compare/v<prev>...v<new>
+#    (e.g. compare/v0.1.0...v0.2.0 — the first release of a line, like
+#    v0.1.0, may instead use free-form "### What's New" sections; match
+#    the dominant convention of the previous tags).
+gh release create vX.Y.Z --title "vX.Y.Z" --notes "…"
+#    (The release for tag vX.Y.Z must not already exist — `gh release
+#    create` fails with 'already_exists' otherwise. An existing git tag
+#    without a release is reused, and the tag is created from the latest
+#    state of the default branch unless --target says otherwise — after
+#    the `git checkout master && git pull` above, that is the local HEAD.)
+
+# 3. Close the finished milestone (no `gh milestone` subcommand — use the API)
 gh api --method PATCH repos/crazy-goat/tikv-php/milestones/<NUMBER> -f state=closed
 
-# 3. Re-run the picker — the next milestone becomes the target
+# 4. Re-run the picker — the next milestone becomes the target
 bin/pick-issue.sh
 ```
+
+> **Note:** the CHANGELOG finalization commit (step 1) must land on master
+> **before** `gh release create` tags it — the release is cut from the tag,
+> so a changelog committed afterwards is not part of the release's source
+> tree. The release notes themselves (`--notes`) live outside the repo, so
+> they can be drafted any time, but are supplied at or before step 2.
 
 ---
 
@@ -313,6 +342,11 @@ git commit -m "style: auto-fix lint issues"
 # - Use appropriate section: Added, Changed, Fixed, Removed, Deprecated
 # - Include issue number, e.g. (#105)
 ```
+
+> **Note:** the `[Unreleased]` section is finalized at release time by the
+> **Release Gate** (before tagging): its entries move into a new
+> `## [vX.Y.Z] - YYYY-MM-DD` section. Until then every merged PR appends
+> under `[Unreleased]` — never under a version heading.
 
 ---
 
@@ -552,7 +586,8 @@ extend `docs/troubleshooting.md` or ask the user before adding a new entry.
 ```bash
 # 1. Pick an issue
 #    bin/pick-issue.sh → ranked top-5 of the LOWEST open milestone
-#    (exit code 3 = RELEASE NEEDED: cut release, close milestone, re-run)
+#    (exit code 3 = RELEASE NEEDED: finalize CHANGELOG [Unreleased] →
+#    [vX.Y.Z], cut release, close milestone, re-run — see Release Gate)
 #    if needed, subagent deep-dives into top candidates' bodies
 #    then: "Implement issue #N..."
 
@@ -635,7 +670,8 @@ with rationale / numbered findings list / coder report with biggest problem
   issues**; a milestone is "done" when it has no open issues left, then the
   next version becomes the working target. Run `bin/pick-issue.sh` to get
   the ranked shortlist automatically; its exit code **3** triggers the
-  Release Gate above (cut the release, close the milestone, re-run).
+  Release Gate above (finalize CHANGELOG, cut the release, close the
+  milestone, re-run).
 - Branch protection on `master` may require:
   - at least 1 approving review before merge
   - All status checks passing (lint, unit tests, grpc unit tests, E2E)
