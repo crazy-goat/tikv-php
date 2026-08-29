@@ -11,9 +11,11 @@ use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatRequest;
 use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
-use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
+use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
@@ -25,37 +27,62 @@ use PHPUnit\Framework\TestCase;
  * Issue #338 (TEST-18) acceptance criteria 2 and 3:
  *
  * - AC-2: a heartbeat whose response carries a top-level region error must
- *   invalidate the cached region and be retried until it succeeds.
+ *   invalidate the cached region (or switch its leader, when the NotLeader
+ *   hint is still valid) and be retried until it succeeds.
  * - AC-3: the advised TTL sent on the wire and the granted TTL returned to
  *   the caller are distinct values — the return value is what the server
  *   granted, never what we asked for.
  *
- * Companion to HeartbeatKeyErrorTest (issue #492), which covers AC-1: the
- * KeyError branch of TwoPhaseCommitter::heartbeat().
+ * The cache is the REAL RegionCache wired to an InMemoryMetrics (issue #474
+ * made invalidate() the single emission point, gated on an actual removal),
+ * so the tests verify the production gating — emissions, not mock call
+ * counts — and a stale-mock harness cannot mask it. Companion to
+ * HeartbeatKeyErrorTest (issue #492), which covers AC-1: the KeyError branch
+ * of TwoPhaseCommitter::heartbeat().
  */
 final class HeartbeatRegionErrorAndTtlTest extends TestCase
 {
-    /** @var list<array{regionId: int, reason: string}> */
-    private array $invalidations = [];
+    private InMemoryMetrics $metrics;
 
-    /** @var list<array{regionId: int, storeId: int}> */
-    private array $switchLeaderCalls = [];
+    private RegionCache $regionCache;
+
+    private PdClientInterface&MockObject $pdClient;
+
+    private GrpcClientInterface&MockObject $grpc;
 
     /** @var list<array{address: string, method: string, request: object}> */
     private array $rpcCalls = [];
 
-    private PdClientInterface&MockObject $pdClient;
-    private GrpcClientInterface&MockObject $grpc;
-    private RegionCacheInterface&MockObject $regionCache;
-    private RegionInfo $testRegion;
+    /** The region PD hands out on cache misses (overridable per test). */
+    private RegionInfo $pdRegion;
 
     protected function setUp(): void
     {
-        $this->invalidations = [];
-        $this->switchLeaderCalls = [];
+        $this->metrics = new InMemoryMetrics();
+        $this->regionCache = new RegionCache(metrics: $this->metrics);
         $this->rpcCalls = [];
 
-        $this->testRegion = new RegionInfo(
+        $this->pdClient = $this->createMock(PdClientInterface::class);
+        $this->grpc = $this->createMock(GrpcClientInterface::class);
+
+        $store1 = new Store();
+        $store1->setId(1);
+        $store1->setAddress('127.0.0.1:20160');
+        $store7 = new Store();
+        $store7->setId(7);
+        $store7->setAddress('127.0.0.1:20167');
+
+        $this->pdClient->method('getStore')->willReturnCallback(
+            static fn (int $storeId): Store => 7 === $storeId ? $store7 : $store1,
+        );
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn(string $key): RegionInfo => $this->pdRegion,
+        );
+    }
+
+    private function makeRegion(bool $withHintedPeer): RegionInfo
+    {
+        return new RegionInfo(
             regionId: 1,
             leaderPeerId: 1,
             leaderStoreId: 1,
@@ -63,36 +90,7 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
             epochVersion: 1,
             startKey: '',
             endKey: '',
-            peers: [],
-        );
-
-        $this->pdClient = $this->createMock(PdClientInterface::class);
-        $this->grpc = $this->createMock(GrpcClientInterface::class);
-        $this->regionCache = $this->createMock(RegionCacheInterface::class);
-
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
-        $this->pdClient->method('getStore')->willReturn($store);
-        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
-        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
-
-        $invalidations = &$this->invalidations;
-        $this->regionCache->method('invalidate')->willReturnCallback(
-            static function (int $regionId, string $reason = 'region_error') use (&$invalidations): void {
-                $invalidations[] = ['regionId' => $regionId, 'reason' => $reason];
-            },
-        );
-
-        $switchLeaderCalls = &$this->switchLeaderCalls;
-        $this->regionCache->method('switchLeader')->willReturnCallback(
-            static function (int $regionId, int $leaderStoreId) use (&$switchLeaderCalls): bool {
-                $switchLeaderCalls[] = ['regionId' => $regionId, 'storeId' => $leaderStoreId];
-
-                // The mocked cache has no peers, so the hinted store can
-                // never be found — the executor then falls back to a drop.
-                return false;
-            },
+            peers: $withHintedPeer ? [new PeerInfo(peerId: 7, storeId: 7)] : [],
         );
     }
 
@@ -100,7 +98,7 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
     {
         $lockResolver = new LockResolver(
             $this->grpc,
-            new RegionResolver($this->pdClient, $this->regionCache),
+            new RegionResolver($this->pdClient, $this->regionCache, $this->metrics),
             $this->regionCache,
             $this->pdClient,
             1000,
@@ -115,7 +113,7 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
             grpc: $this->grpc,
             regionCache: $this->regionCache,
             lockResolver: $lockResolver,
-            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache, $this->metrics),
             maxBackoffMs: 20000,
             retryDeadlineMs: 3000,
         );
@@ -146,8 +144,30 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
         );
     }
 
-    private function regionErrorResponse(Error $regionError): TxnHeartBeatResponse
+    private function notLeaderResponse(int $hintStoreId): TxnHeartBeatResponse
     {
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(1);
+        $hint = new Peer();
+        $hint->setStoreId($hintStoreId);
+        $notLeader->setLeader($hint);
+
+        $regionError = new Error();
+        $regionError->setMessage('not leader');
+        $regionError->setNotLeader($notLeader);
+
+        $response = new TxnHeartBeatResponse();
+        $response->setRegionError($regionError);
+
+        return $response;
+    }
+
+    private function regionNotFoundResponse(): TxnHeartBeatResponse
+    {
+        $regionError = new Error();
+        $regionError->setMessage('region not found');
+        $regionError->setRegionNotFound(new RegionNotFound());
+
         $response = new TxnHeartBeatResponse();
         $response->setRegionError($regionError);
 
@@ -171,95 +191,114 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
     }
 
     /**
-     * AC-2, NotLeader variant. RegionErrorHandler::check() throws before
-     * the KeyError branch is ever consulted, but leaves the NotLeader drop
-     * to RetryExecutor::handleNotLeader() (issue #475 ownership): the
-     * executor consults the leader hint via switchLeader() and — the
-     * hinted store being unknown to the cache — drops the region itself.
-     * The second attempt succeeds; a successful attempt emits nothing.
+     * AC-2, NotLeader with a STILL-VALID hint. RegionErrorHandler::check()
+     * throws before the KeyError branch is consulted but leaves the NotLeader
+     * drop to RetryExecutor::handleNotLeader() (issue #475 ownership); the
+     * executor consults the hint via RegionCache::switchLeader() — store 7 is
+     * among the cached peers, so the leader is switched IN PLACE and nothing
+     * is invalidated (a valid-hint switch emits no regionInvalidated metric).
+     * The retry re-resolves from the cache and lands on the hinted leader's
+     * store address.
      */
-    public function testHeartbeatNotLeaderSwitchesLeaderAndRetries(): void
+    public function testHeartbeatNotLeaderSwitchesToHintedLeaderAndRetries(): void
     {
-        $notLeader = new NotLeader();
-        $notLeader->setRegionId(1);
-        $hint = new Peer();
-        $hint->setStoreId(7);
-        $notLeader->setLeader($hint);
-
-        $regionError = new Error();
-        $regionError->setMessage('not leader');
-        $regionError->setNotLeader($notLeader);
-
+        $this->pdRegion = $this->makeRegion(withHintedPeer: true);
         $this->mockGrpcResponses(
-            $this->regionErrorResponse($regionError),
-            $this->okResponse(9500),
+            $this->notLeaderResponse(hintStoreId: 7),
+            $this->okResponse(grantedTtl: 9500),
         );
 
         self::assertSame(9500, $this->heartbeat());
 
-        // Exactly one RPC per attempt, both heartbeats.
+        // Two heartbeat RPCs: the first to the PD-resolved leader's store,
+        // the retry to the hinted leader's store the cache was switched to.
         self::assertSame(
-            ['KvTxnHeartBeat', 'KvTxnHeartBeat'],
-            array_column($this->rpcCalls, 'method'),
+            [
+                ['address' => '127.0.0.1:20160', 'method' => 'KvTxnHeartBeat'],
+                ['address' => '127.0.0.1:20167', 'method' => 'KvTxnHeartBeat'],
+            ],
+            array_map(
+                static fn (array $call): array => [
+                    'address' => $call['address'],
+                    'method' => $call['method'],
+                ],
+                $this->rpcCalls,
+            ),
         );
 
-        // The executor followed the leader hint from the region error.
-        self::assertSame(
-            [['regionId' => 1, 'storeId' => 7]],
-            $this->switchLeaderCalls,
+        // A valid-hint leader switch is NOT a drop: no invalidation of any
+        // kind was emitted (issue #474 contract).
+        self::assertSame(0, $this->metrics->getInvalidations('not_leader'));
+        self::assertSame(0, $this->metrics->getInvalidations('region_error'));
+        self::assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
+    }
+
+    /**
+     * AC-2, NotLeader with a hint the cache cannot honour. switchLeader()
+     * returns false (region has no peers), so the executor drops the region
+     * itself with reason 'not_leader' — NOT 'region_error', which would mean
+     * RegionErrorHandler::check() had handled the NotLeader oneof and
+     * violated the #475 ownership split — and the retry re-resolves from PD.
+     */
+    public function testHeartbeatNotLeaderWithUnknownHintDropsRegionAndRetries(): void
+    {
+        $this->pdRegion = $this->makeRegion(withHintedPeer: false);
+        $this->mockGrpcResponses(
+            $this->notLeaderResponse(hintStoreId: 7),
+            $this->okResponse(grantedTtl: 9500),
         );
 
-        // Hint store unknown to the cache → executor-owned drop, and no
-        // plain 'region_error' drop from RegionErrorHandler::check().
-        self::assertSame(
-            [['regionId' => 1, 'reason' => 'not_leader']],
-            $this->invalidations,
-        );
+        self::assertSame(9500, $this->heartbeat());
+
+        self::assertCount(2, $this->rpcCalls);
+        self::assertSame('KvTxnHeartBeat', $this->rpcCalls[0]['method']);
+        self::assertSame('KvTxnHeartBeat', $this->rpcCalls[1]['method']);
+        // The dropped region was re-resolved from PD (store 1 again).
+        self::assertSame('127.0.0.1:20160', $this->rpcCalls[1]['address']);
+
+        self::assertSame(1, $this->metrics->getInvalidations('not_leader'));
+        self::assertSame(0, $this->metrics->getInvalidations('region_error'));
+        self::assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
     }
 
     /**
      * AC-2, non-NotLeader variant. RegionErrorHandler::check() owns this
-     * drop (reason 'region_error'); the RegionException then flows to
-     * RetryExecutor, whose classifier maps RegionNotFound to RegionMiss
-     * backoff (2 ms base, 500 ms cap — fast), and the executor drops the
-     * cached region again with its own reason 'retry_region_error'
-     * (issue #475: two distinct owners, two emissions). The second attempt
-     * succeeds.
+     * drop and invalidates with reason 'region_error'; the RegionException
+     * then flows to the RetryExecutor, whose classifier maps RegionNotFound
+     * to RegionMiss backoff (2 ms base, 500 ms cap — fast), and the
+     * executor's pre-retry invalidation is GATED on a cached entry: check()
+     * already removed region 1, so getByKey() misses and no
+     * 'retry_region_error' emission occurs. The second attempt re-resolves
+     * from PD and succeeds.
      */
     public function testHeartbeatRegionErrorInvalidatesRegionAndRetries(): void
     {
-        $regionError = new Error();
-        $regionError->setMessage('region not found');
-        $regionError->setRegionNotFound(new RegionNotFound());
-
+        $this->pdRegion = $this->makeRegion(withHintedPeer: false);
         $this->mockGrpcResponses(
-            $this->regionErrorResponse($regionError),
-            $this->okResponse(9500),
+            $this->regionNotFoundResponse(),
+            $this->okResponse(grantedTtl: 9500),
         );
 
         self::assertSame(9500, $this->heartbeat());
 
-        self::assertSame(
-            ['KvTxnHeartBeat', 'KvTxnHeartBeat'],
-            array_column($this->rpcCalls, 'method'),
-        );
+        self::assertCount(2, $this->rpcCalls);
+        self::assertSame('KvTxnHeartBeat', $this->rpcCalls[0]['method']);
+        self::assertSame('KvTxnHeartBeat', $this->rpcCalls[1]['method']);
 
-        self::assertSame(
-            [
-                ['regionId' => 1, 'reason' => 'region_error'],
-                ['regionId' => 1, 'reason' => 'retry_region_error'],
-            ],
-            $this->invalidations,
-        );
+        self::assertSame(1, $this->metrics->getInvalidations('region_error'));
+        self::assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
+        self::assertSame(0, $this->metrics->getInvalidations('not_leader'));
     }
 
     /**
      * AC-3. The advised TTL goes out on the wire and the granted TTL — a
-     * different value — is what heartbeat() returns.
+     * different value — is what heartbeat() returns. A clean success emits
+     * no invalidation.
      */
     public function testHeartbeatSendsAdvisedTtlAndReturnsGrantedTtl(): void
     {
-        $this->mockGrpcResponses($this->okResponse(12345));
+        $this->pdRegion = $this->makeRegion(withHintedPeer: false);
+        $this->mockGrpcResponses($this->okResponse(grantedTtl: 12345));
 
         $granted = $this->heartbeat();
 
@@ -275,5 +314,9 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
 
         self::assertSame(12345, $granted);
         self::assertNotSame(10000, $granted, 'granted TTL must not echo the advised TTL');
+
+        self::assertSame(0, $this->metrics->getInvalidations('not_leader'));
+        self::assertSame(0, $this->metrics->getInvalidations('region_error'));
+        self::assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
     }
 }
