@@ -1159,7 +1159,7 @@ If issues persist:
 | TLS errors | Check certificate paths |
 | Slow operations | Enable logging, check retries |
 | Memory issues | Paginate scans, reduce batch size |
-| TTL not working | Enable `enable-ttl` in TiKV config |
+| TTL not working | Enable `enable-ttl` in TiKV config (requires wiping existing data) — see [TTL Errors](#ttl-errors) |
 | TxnKV fails on TTL cluster | Use a V1-mode cluster (no `enable-ttl`) for TxnKV — see [TxnKV Fails on a TTL-Enabled Cluster](#txnkv-fails-on-a-ttl-enabled-cluster) |
 | Data not found | Check key format, TTL, cluster |
 | Write conflict / deadlock | New transaction, jittered backoff ([Transaction Failures](#transaction-failures)) |
