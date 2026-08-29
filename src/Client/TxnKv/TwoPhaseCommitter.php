@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
@@ -203,11 +204,48 @@ final readonly class TwoPhaseCommitter
 
             $error = $response->getError();
             if ($error !== null) {
-                throw new TiKvException('Heartbeat failed: key error');
+                $this->handleHeartbeatError($error, $primary);
             }
 
             return (int) $response->getLockTtl();
         }, $classifier);
+    }
+
+    /**
+     * Translates the KvTxnHeartBeat KeyError payload into typed exceptions
+     * instead of discarding it (issue #492).
+     *
+     * A heartbeat can only reach the lock path when the server no longer
+     * recognises the transaction as alive, so `locked` is deliberately NOT
+     * resolved here: the only lock the server can report is (a descendant
+     * of) this transaction's own primary lock, and resolving it would roll
+     * the calling transaction back underneath itself. Rollback/commit
+     * handlers do resolve `locked` — their calls run outside the primary's
+     * liveness window.
+     */
+    private function handleHeartbeatError(KeyError $error, string $primary): never
+    {
+        $retryable = $error->getRetryable();
+        if ($retryable !== '') {
+            throw new TransactionConflictException('Heartbeat failed: retryable: ' . $retryable);
+        }
+
+        $abort = $error->getAbort();
+        if ($abort !== '') {
+            throw new TransactionConflictException('Heartbeat failed: abort: ' . $abort);
+        }
+
+        $locked = $error->getLocked();
+        if ($locked !== null) {
+            throw new TxnRetryableException(
+                sprintf('Heartbeat failed: locked key "%s"', KeyRedactor::redact($primary)),
+                BackoffType::TxnLock,
+            );
+        }
+
+        throw new TiKvException(
+            'Heartbeat failed: ' . KeyErrorDescriber::describe($error),
+        );
     }
 
     // ---------------------------------------------------------------
