@@ -371,6 +371,7 @@ TiKvException: PD GetRegion returned no region for key
 TiKvException: TSO request failed: gRPC error: ...
 TiKvException: TSO response missing timestamp
 TransactionConflictException: Heartbeat failed: retryable: ...
+TxnRetryableException: Heartbeat failed: locked key "6b657931..."
 TiKvException: Heartbeat failed: TxnNotFound
 ```
 
