@@ -25,6 +25,8 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
@@ -90,7 +92,7 @@ final class HeartbeatKeyErrorTest extends TestCase
             lockResolver: $lockResolver,
             regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
             maxBackoffMs: 20000,
-            retryDeadlineMs: 3000,
+            retryDeadlineMs: 1500,
         );
     }
 
@@ -143,6 +145,58 @@ final class HeartbeatKeyErrorTest extends TestCase
 
         self::assertNotInstanceOf(TransactionConflictException::class, $e);
         self::assertSame('Heartbeat failed: TxnLockNotFound', $e->getMessage());
+    }
+
+    public function testLockedVariantThrowsTxnRetryableAndIsNotResolved(): void
+    {
+        $lock = new LockInfo();
+        $lock->setKey('key1');
+        $lock->setPrimaryLock('key1');
+        $lock->setLockVersion(1000);
+
+        $response = new TxnHeartBeatResponse();
+        $response->setError((new KeyError())->setLocked($lock));
+        $calls = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (
+                string $address,
+                string $service,
+                string $method,
+                object $request,
+            ) use (
+                $response,
+                &$calls,
+            ): TxnHeartBeatResponse {
+                $calls[] = $method;
+
+                return $response;
+            },
+        );
+
+        $txn = $this->createTransaction();
+        $txn->set('key1', 'value1');
+
+        // TxnRetryableException is retryable (BackoffType::TxnLock), so the
+        // executor retries the heartbeat until the 1.5 s wall-clock deadline
+        // (set in createTransaction()) expires and surfaces the original
+        // error chained as RetryBudgetExhaustedException::getPrevious().
+        $e = null;
+        try {
+            $txn->heartbeat(10000);
+        } catch (TiKvException $caught) {
+            $e = $caught;
+        }
+
+        self::assertNotNull($e, 'heartbeat must throw on locked KeyError');
+        self::assertInstanceOf(RetryBudgetExhaustedException::class, $e);
+        self::assertInstanceOf(TxnRetryableException::class, $e->getPrevious());
+        self::assertSame(BackoffType::TxnLock, $e->getPrevious()->backoffType);
+        // 'key1' is short, so KeyRedactor hex-encodes it: 6b657931.
+        self::assertStringStartsWith('Heartbeat failed: locked key "', $e->getPrevious()->getMessage());
+        self::assertStringContainsString('6b657931', $e->getPrevious()->getMessage());
+        // The own-primary-lock invariant: heartbeat resolves nothing — the
+        // only RPC the client ever sends here is the heartbeat itself.
+        self::assertSame(['KvTxnHeartBeat'], array_unique($calls));
     }
 
     public function testEmptyKeyErrorStillThrows(): void
