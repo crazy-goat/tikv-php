@@ -424,6 +424,17 @@ gh issue close <NUMBER>
 > blocked. In that case, use the GitHub UI to squash-merge after obtaining
 > approval.
 
+> **Note:** When the default branch (`master`) is checked out in another
+> linked git worktree, `gh pr merge --squash --delete-branch` fails at its
+> local branch-deletion step with
+> `fatal: '<branch>' is already used by worktree at '<path>'` — the merge
+> itself succeeds. Delete the remote branch manually instead:
+>
+> ```bash
+> git push origin --delete <branch>
+> git worktree remove <path>
+> ```
+
 ---
 
 ## 13. Switch Back to master
@@ -576,6 +587,7 @@ gh pr checks --watch
 
 # 9. Merge
 gh pr merge --squash --delete-branch
+#    (merging from a linked worktree? `--delete-branch` fails there — see step 12)
 gh issue close <NUMBER>
 
 # 10. Switch back to master
