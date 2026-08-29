@@ -63,7 +63,7 @@ bare `catch (TiKvException $e)` does:
 | `PdClient::getRegion()` | PD returned no region for the requested key. Fail-closed by design: a fabricated region would be cached and silently misroute requests. Reachable from every region-resolved operation. | `PD GetRegion returned no region for key` |
 | `TimestampOracle::getTimestamp()` | The TSO RPC failed. **Re-wraps a `GrpcException`** (preserved as `getPrevious()`, gRPC status code kept) into the base class, so `catch (GrpcException)` around a transaction begin/commit will **not** match. | `TSO request failed: %s` (sprintf'd with the wrapped message) |
 | `TimestampOracle` response check (private, same call) | The TSO response carried no timestamp. Fail-closed: no local timestamp is fabricated. | `TSO response missing timestamp` |
-| `TwoPhaseCommitter` heartbeat (reachable via `Transaction::heartbeat()`) | `KvTxnHeartBeat` reported a key error. | `Heartbeat failed: key error` |
+| `TwoPhaseCommitter` heartbeat (reachable via `Transaction::heartbeat()`) | `KvTxnHeartBeat` reported a `retryable` or `abort` KeyError payload (thrown as `TransactionConflictException`). All other payload variants (`txn_not_found`, `txn_lock_not_found`, …) throw the base class with the variant named in the message — see [#492](https://github.com/crazy-goat/tikv-php/issues/492). | `Heartbeat failed: retryable: <server text>` / `Heartbeat failed: abort: <server text>` / `Heartbeat failed: <variant>` |
 
 ### What Each Class Means
 

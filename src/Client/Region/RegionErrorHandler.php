@@ -98,39 +98,6 @@ final class RegionErrorHandler
             return sprintf('per-pair error for key "%s": null', $key);
         }
 
-        $parts = [];
-
-        // Check oneof string fields
-        if (method_exists($keyError, 'getRetryable')) {
-            $v = $keyError->getRetryable();
-            if ($v !== '' && $v !== null) {
-                $parts[] = "retryable: {$v}";
-            }
-        }
-        if (method_exists($keyError, 'getAbort')) {
-            $v = $keyError->getAbort();
-            if ($v !== '' && $v !== null) {
-                $parts[] = "abort: {$v}";
-            }
-        }
-
-        // Check oneof message fields for presence
-        $messageFields = ['getLocked', 'getConflict', 'getAlreadyExist', 'getDeadlock',
-            'getCommitTsExpired', 'getTxnNotFound', 'getCommitTsTooLarge',
-            'getAssertionFailed', 'getPrimaryMismatch', 'getTxnLockNotFound'];
-
-        foreach ($messageFields as $method) {
-            if (method_exists($keyError, $method)) {
-                $value = $keyError->$method();
-                if ($value !== null) {
-                    $name = substr($method, 3); // strip 'get'
-                    $parts[] = $name;
-                }
-            }
-        }
-
-        $detail = $parts !== [] ? implode(', ', $parts) : 'unknown error';
-
-        return sprintf('per-pair error for key "%s": %s', $key, $detail);
+        return sprintf('per-pair error for key "%s": %s', $key, KeyErrorDescriber::describe($keyError));
     }
 }

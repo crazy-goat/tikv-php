@@ -370,13 +370,16 @@ succeed without a configuration change. Check what PD is advertising
 TiKvException: PD GetRegion returned no region for key
 TiKvException: TSO request failed: gRPC error: ...
 TiKvException: TSO response missing timestamp
-TiKvException: Heartbeat failed: key error
+TransactionConflictException: Heartbeat failed: retryable: ...
+TiKvException: Heartbeat failed: TxnNotFound
 ```
 
 **What it means:** Failures raised directly as the base class instead of a
 subclass: PD answered a region lookup with no region (fail-closed routing),
 the timestamp oracle could not allocate a PD timestamp, or a transactional
-heartbeat hit a key error.
+heartbeat hit a key error (issue #492: the heartbeat surfaces the server's
+`KeyError` variant — `retryable`/`abort` arrive as `TransactionConflictException`,
+the remaining variants as the base class with the variant named).
 
 **Solution:** For TSO failures check PD health first — nothing in the
 client can proceed without timestamps. These surface only when the specific
