@@ -110,23 +110,27 @@ git checkout master && git pull origin master
 #    - every entry under [Unreleased] moves into a new versioned section:
 #      ## [vX.Y.Z] - YYYY-MM-DD   (today's date, ISO 8601)
 #    - [Unreleased] stays at the top, empty, ready for the next cycle
-#    - drop any "### Added/Changed/Fixed" headings that ended up empty
+#    - drop any "### Added/Changed/Fixed/Removed" headings that ended up empty
 #    - keep one section per change type; entries within a section keep
 #      their issue references, e.g. (#105)
 #    - commit this on master: "chore: finalize CHANGELOG for vX.Y.Z"
 
 # 2. Tag + publish the release. Notes follow the existing tag structure
-#    (see v0.2.0): a one-line title summarising the theme, then
-#    "### Added" / "### Changed" / "### Fixed" sections summarising the
-#    CHANGELOG entries for humans (short bullets, not the full entries),
-#    then a compare link:
-#      https://github.com/crazy-goat/tikv-php/compare/vX.Y.(Z-1)...vX.Y.Z
-#    (the first release of a line, like v0.1.0, may instead use free-form
-#    "### What's New" sections — match the dominant convention of the
-#    previous tags).
+#    (see v0.2.0, which uses "### Added" + "### Removed" + "### Full
+#    Changelog"): a one-line title summarising the theme, then
+#    "### Added" / "### Changed" / "### Fixed" / "### Removed" sections
+#    summarising the CHANGELOG entries for humans (short bullets, not the
+#    full entries), then a compare link:
+#      https://github.com/crazy-goat/tikv-php/compare/v<prev>...v<new>
+#    (e.g. compare/v0.1.0...v0.2.0 — the first release of a line, like
+#    v0.1.0, may instead use free-form "### What's New" sections; match
+#    the dominant convention of the previous tags).
 gh release create vX.Y.Z --title "vX.Y.Z" --notes "…"
-#    (The tag vX.Y.Z must not already exist — `gh release create` fails
-#    otherwise; it tags the current HEAD of master.)
+#    (The release for tag vX.Y.Z must not already exist — `gh release
+#    create` fails with 'already_exists' otherwise. An existing git tag
+#    without a release is reused, and the tag is created from the latest
+#    state of the default branch unless --target says otherwise — after
+#    the `git checkout master && git pull` above, that is the local HEAD.)
 
 # 3. Close the finished milestone (no `gh milestone` subcommand — use the API)
 gh api --method PATCH repos/crazy-goat/tikv-php/milestones/<NUMBER> -f state=closed
@@ -139,7 +143,7 @@ bin/pick-issue.sh
 > **before** `gh release create` tags it — the release is cut from the tag,
 > so a changelog committed afterwards is not part of the release's source
 > tree. The release notes themselves (`--notes`) live outside the repo, so
-> they can be written at any time before step 2.
+> they can be drafted any time, but are supplied at or before step 2.
 
 ---
 
