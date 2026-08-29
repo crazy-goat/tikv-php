@@ -431,7 +431,7 @@ gh issue close <NUMBER>
 > itself succeeds. Delete the remote branch manually instead:
 >
 > ```bash
-> git push origin --delete <NUMBER>-<description>
+> git push origin --delete <branch>
 > git worktree remove <path>
 > ```
 
