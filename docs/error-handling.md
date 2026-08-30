@@ -13,6 +13,7 @@ service.
 4. [Transaction Operations](#transaction-operations)
 5. [Recommended Catch Order](#recommended-catch-order)
 6. [Retry Budgets Behind Every Operation](#retry-budgets-behind-every-operation)
+7. [GC Safe Points and Long-Running Reads](#gc-safe-points-and-long-running-reads)
 
 ## Exception Hierarchy
 
@@ -40,6 +41,7 @@ extends `\InvalidArgumentException` directly — it is **not** a
     ├── DeadlockException                          src/Client/TxnKv/Exception/
     ├── LockWaitTimeoutException                   src/Client/TxnKv/Exception/
     ├── TransactionConflictException               src/Client/TxnKv/Exception/
+    ├── TxnAbortedByGcException                    src/Client/TxnKv/Exception/
     └── TxnRetryableException                      src/Client/TxnKv/Exception/
 
 \InvalidArgumentException  ← outside the TiKvException hierarchy
@@ -83,6 +85,7 @@ bare `catch (TiKvException $e)` does:
 | [`DeadlockException`](../src/Client/TxnKv/Exception/DeadlockException.php) | `TiKvException` | Pessimistic locking detected a deadlock; accessors: `getDeadlockKey()`, `getDeadlockKeyHash()`, `getLockTs()` |
 | [`LockWaitTimeoutException`](../src/Client/TxnKv/Exception/LockWaitTimeoutException.php) | `TiKvException` | A pessimistic lock wait exhausted its budget (`maxBackoffMs`); accessors: `getKey()` (redacted message), `getTimeoutMs()` |
 | [`TransactionConflictException`](../src/Client/TxnKv/Exception/TransactionConflictException.php) | `TiKvException` | Write conflict / abort reported during prewrite, commit or pessimistic lock; accessor: `getConflictingKeys()` |
+| [`TxnAbortedByGcException`](../src/Client/TxnKv/Exception/TxnAbortedByGcException.php) | `TiKvException` | The transaction's start timestamp is below the cluster's GC safe point — the data it would read has been garbage collected. Raised by GC safe-point validation at `begin()` (default-on, `options['gcSafePointValidation'] => false` to disable) or when TiKV rejects a read with the "GC life time is shorter than transaction duration" abort |
 | [`TxnRetryableException`](../src/Client/TxnKv/Exception/TxnRetryableException.php) | `TiKvException` | A lock was encountered and resolved inside a transactional operation — safe to retry with the carried `public readonly BackoffType $backoffType` |
 | `TiKvException` | `\RuntimeException` | Base class of every library exception |
 
@@ -115,6 +118,7 @@ Verdict legend:
 | `HealthCheckException` | Probe result only — no user data was touched. Re-probe after an interval instead of tight-looping |
 | `TransactionConflictException` | **New transaction** — the transaction's writes were not applied |
 | `DeadlockException` | **New transaction** |
+| `TxnAbortedByGcException` | **New transaction** — the start timestamp is permanently behind GC; retrying the same transaction cannot succeed. For reads that must outlive `gc_life_time`, register a service safe point first (`TxnKvClient::holdGcSafePoint()`) |
 | `LockWaitTimeoutException` | **New transaction** — the pessimistic locks were not acquired, the transaction cannot proceed |
 | `TxnRetryableException` | Escapes only when the surrounding executor gives up; treat like other txn errors: **new transaction** unless the op is idempotent |
 | `RetryBudgetExhaustedException` | **Retry if idempotent** — the client already retried internally until its budget ran out (attempt cap or deadline); check `getPrevious()` for the root cause |
@@ -345,3 +349,67 @@ See also:
   `serverBusyBudgetMs`, `maxBackoffMs`, `maxConcurrency` options
 - [Troubleshooting](troubleshooting.md) — symptom-first problem solving
 - [Advanced features](advanced.md) — retry-strategy chapter
+
+## GC Safe Points and Long-Running Reads
+
+TiKV's GC periodically removes old versions of data. Everything below the
+cluster's **GC safe point** is unreachable for reads: a transaction whose
+`startTs` is older than the safe point cannot read any more and is rejected
+by TiKV with the abort text `GC life time is shorter than transaction
+duration`.
+
+### Read-side validation (on by default)
+
+`TxnKvClient` validates every fresh start timestamp against the cluster's
+GC safe point at `begin()`:
+
+- The safe point is fetched from PD (`GetGCSafePoint`) and cached for **30 s**
+  by default (configurable via `options['gcSafePointRefreshMs']`, must be
+  `>= 1`), so validation adds no PD round trip per transaction.
+- When the timestamp is already behind the safe point, `begin()` throws
+  [`TxnAbortedByGcException`](../src/Client/TxnKv/Exception/TxnAbortedByGcException.php)
+  immediately instead of letting the transaction fail later, mid-read.
+- A PD failure while refreshing the safe point **degrades to a warning**
+  (fail-open): begin() proceeds, the transaction simply runs unvalidated.
+  Validation is a fast-fail optimization, never a new failure mode.
+- Disable entirely with `options['gcSafePointValidation'] => false` (e.g.
+  for tooling that must construct transactions against a PD subset).
+
+The same failure is also caught at the read itself: `get()` and `scan()`
+map TiKV's GC abort to the same `TxnAbortedByGcException` (previously the
+abort fell through silently and the read returned as if the key did not
+exist).
+
+### Holding GC back for a long-running job
+
+A scan, report job or batch export that may legitimately run longer than
+the cluster's `gc_life_time` should register a **service safe point** with
+a TTL before it starts, and refresh it periodically:
+
+```php
+$txn = $client->begin();
+$client->holdGcSafePoint($txn->getStartTs(), ttlSeconds: 120);
+
+try {
+    foreach ($txn->scan($start, $end) as $row) {
+        // ... long-running processing ...
+        $client->holdGcSafePoint($txn->getStartTs(), ttlSeconds: 120); // refresh before expiry
+    }
+    $txn->commit();
+} finally {
+    $client->releaseGcSafePoint(); // orderly shutdown: let GC advance again
+}
+```
+
+- While the registration is fresh, GC will not advance past the safe point
+  you registered, and reads at that timestamp keep working.
+- `holdGcSafePoint()` returns the resulting min safe point across all
+  services (the value GC is actually held at), or `null` when the cluster's
+  PD does not support service safe points (older PD / GC v1) — treat `null`
+  as "GC is not held", and keep jobs under `gc_life_time`.
+- Choose a TTL comfortably longer than your refresh period so a crashed
+  worker cannot block cluster GC forever; a lapsed TTL releases the hold
+  automatically.
+- The default service ID is per client instance (`tikv-php-txnkv-<random>`),
+  so two clients never overwrite each other's registration; pass an explicit
+  `$serviceId` to share a hold between cooperating processes.
