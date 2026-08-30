@@ -43,6 +43,17 @@ $options = [
     // switches): at most this many units (ranges, regions or stores) are in
     // flight at once. Default: 16. Must be >= 1.
     'maxConcurrency' => 16,
+    // GC safe-point validation at TxnKvClient::begin() (issue #422): when
+    // true (default), a fresh start timestamp below the cluster's GC safe
+    // point throws TxnAbortedByGcException immediately instead of failing
+    // mid-read. A PD fetch failure degrades to a warning (fail-open).
+    // TxnKvClient only — RawKvClient has no transaction timestamp.
+    'gcSafePointValidation' => true,
+    // How long the cached GC safe point stays fresh, in milliseconds.
+    // Default: 30000 (30 s). Must be >= 1. Larger values reduce PD traffic
+    // but let begin() accept timestamps up to this much staler; the read
+    // itself still fails typed (TxnAbortedByGcException) when GC has passed.
+    'gcSafePointRefreshMs' => 30000,
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
         'clientCertFile' => '/path/to/client.crt',
@@ -412,6 +423,30 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > workers that prefer to wait out long overload episodes can raise the budget
 > (and/or disable the retry deadline with `'retryDeadlineMs' => 0`) via the
 > `RawKvClient` constructor arguments.
+
+### GC Safe Points (TxnKV)
+
+`TxnKvClient::begin()` validates the fresh start timestamp against the
+cluster's GC safe point (on by default; see [GC Safe Points and Long-Running
+Reads](error-handling.md#gc-safe-points-and-long-running-reads) for the full
+behaviour):
+
+```php
+// Default: validation on, 30 s cache refresh
+$client = TxnKvClient::create(['127.0.0.1:2379']);
+
+// Explicit: disable validation or retune the refresh interval
+$client = TxnKvClient::create(['127.0.0.1:2379'], [
+    'gcSafePointValidation' => true,
+    'gcSafePointRefreshMs' => 30000, // ms; must be >= 1
+]);
+```
+
+A start timestamp already behind the safe point throws
+`TxnAbortedByGcException` at `begin()`. For jobs that must outlive
+`gc_life_time`, hold GC back with `TxnKvClient::holdGcSafePoint()` /
+`releaseGcSafePoint()` (service safe point with TTL) instead of raising the
+cluster-wide `gc_life_time`.
 
 ### Retry Behavior
 

@@ -7,6 +7,8 @@ namespace CrazyGoat\TiKV\Client\Connection;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\Proto\Pdpb\GetAllStoresRequest;
 use CrazyGoat\Proto\Pdpb\GetAllStoresResponse;
+use CrazyGoat\Proto\Pdpb\GetGCSafePointRequest;
+use CrazyGoat\Proto\Pdpb\GetGCSafePointResponse;
 use CrazyGoat\Proto\Pdpb\GetMembersRequest;
 use CrazyGoat\Proto\Pdpb\GetMembersResponse;
 use CrazyGoat\Proto\Pdpb\GetRegionRequest;
@@ -16,6 +18,8 @@ use CrazyGoat\Proto\Pdpb\GetStoreResponse;
 use CrazyGoat\Proto\Pdpb\RequestHeader;
 use CrazyGoat\Proto\Pdpb\ScanRegionsRequest;
 use CrazyGoat\Proto\Pdpb\ScanRegionsResponse;
+use CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointRequest;
+use CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointResponse;
 use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
@@ -196,6 +200,121 @@ final class PdClient implements PdClientInterface
         return $this->clusterId;
     }
 
+    /**
+     * Fetch the cluster's current GC safe point from PD.
+     *
+     * {@inheritdoc} The full contract (including the fail-closed error
+     * handling) is documented on PdClientInterface.
+     */
+    public function getGCSafePoint(): int
+    {
+        $request = new GetGCSafePointRequest();
+        $request->setHeader($this->createHeader());
+
+        /** @var GetGCSafePointResponse $response */
+        $response = $this->callWithClusterIdRetry(
+            'GetGCSafePoint',
+            $request,
+            GetGCSafePointResponse::class,
+        );
+
+        $headerError = $this->headerErrorMessage($response);
+        if ($headerError !== null) {
+            throw new TiKvException(sprintf('PD GetGCSafePoint failed: %s', $headerError));
+        }
+
+        return $this->uint64ToInt($response->getSafePoint(), 'GC safe point');
+    }
+
+    /**
+     * Register or refresh a service GC safe point with PD.
+     *
+     * {@inheritdoc}
+     */
+    public function updateServiceGCSafePoint(string $serviceId, int $safePoint, int $ttlSeconds): ?int
+    {
+        if ($serviceId === '') {
+            throw new \InvalidArgumentException('serviceId must be a non-empty string');
+        }
+        if ($ttlSeconds <= 0 && $safePoint !== 0) {
+            // Removal (ttl <= 0 — PD removes the service safe point for any
+            // non-positive TTL) is defined against the existing
+            // registration, not a new hold: PD ignores the safe point for
+            // ttl <= 0, but a caller passing both a removal and a positive
+            // hold is almost certainly confusing two operations.
+            throw new \InvalidArgumentException(
+                'safePoint must be 0 when ttlSeconds is <= 0 (removal)',
+            );
+        }
+
+        $request = new UpdateServiceGCSafePointRequest();
+        $request->setHeader($this->createHeader());
+        $request->setServiceId($serviceId);
+        $request->setSafePoint((string) $safePoint);
+        $request->setTtl((string) $ttlSeconds);
+
+        try {
+            /** @var UpdateServiceGCSafePointResponse $response */
+            $response = $this->callWithClusterIdRetry(
+                'UpdateServiceGCSafePoint',
+                $request,
+                UpdateServiceGCSafePointResponse::class,
+            );
+        } catch (GrpcException $e) {
+            if ($this->isUnsupportedFeatureError($e->getMessage())) {
+                $this->logger->warning(
+                    'PD does not support service GC safe points; GC will not be held back',
+                    ['serviceId' => $serviceId, 'error' => $e->getMessage()],
+                );
+
+                return null;
+            }
+
+            throw $e;
+        }
+
+        $headerError = $this->headerErrorMessage($response);
+        if ($headerError !== null) {
+            if ($this->isUnsupportedFeatureError($headerError)) {
+                $this->logger->warning(
+                    'PD does not support service GC safe points; GC will not be held back',
+                    ['serviceId' => $serviceId, 'error' => $headerError],
+                );
+
+                return null;
+            }
+
+            throw new TiKvException(sprintf('PD UpdateServiceGCSafePoint failed: %s', $headerError));
+        }
+
+        return $this->uint64ToInt($response->getMinSafePoint(), 'min GC safe point');
+    }
+
+    /**
+     * Convert a uint64 proto scalar to a PHP int, rejecting values above
+     * PHP_INT_MAX.
+     *
+     * Real TSO-derived safe points (~1e17) sit far below 2^63, so the cast
+     * is safe in practice — but the generated gencode intval()s an
+     * out-of-range uint64 into a *negative* PHP int, and silently returning
+     * a negative safe point would be worse than failing loudly.
+     */
+    private function uint64ToInt(int|string $raw, string $what): int
+    {
+        if (is_string($raw) && !preg_match('/^-?\d+$/', $raw)) {
+            throw new TiKvException(sprintf('PD returned a non-numeric %s: %s', $what, $raw));
+        }
+
+        $value = (int) $raw;
+        if ($value < 0) {
+            // Either an out-of-range uint64 wrapped negative, or PD sent
+            // nonsense; both are protocol violations, not safe points.
+            throw new TiKvException(sprintf('PD returned an invalid %s: %s', $what, (string) $raw));
+        }
+
+        return $value;
+    }
+
     public function setClusterId(int $clusterId): void
     {
         $this->clusterId = $clusterId;
@@ -216,6 +335,50 @@ final class PdClient implements PdClientInterface
         $header = new RequestHeader();
         $header->setClusterId($this->clusterId ?? 0);
         return $header;
+    }
+
+    /**
+     * Extract a PD-level error message from a response header, if present.
+     *
+     * PD reports request failures inside the response header (pdpb.Error)
+     * rather than as gRPC status errors. A header carrying a pdpb.Error is
+     * an error even when its message text is empty (a typed-but-silent
+     * error is still an error — treating it as success would turn a
+     * documented fail-closed method into a source of fabricated defaults).
+     */
+    private function headerErrorMessage(Message $response): ?string
+    {
+        if (!method_exists($response, 'getHeader')) {
+            return null;
+        }
+
+        $header = $response->getHeader();
+        if (!$header instanceof \CrazyGoat\Proto\Pdpb\ResponseHeader) {
+            return null;
+        }
+
+        $error = $header->getError();
+        if (!$error instanceof \CrazyGoat\Proto\Pdpb\Error) {
+            return null;
+        }
+
+        $message = $error->getMessage();
+
+        return $message !== '' ? $message : 'unknown PD error (header error with empty message)';
+    }
+
+    /**
+     * True when an error text means "this PD does not implement the
+     * requested feature" (old PD versions / GC v1 clusters).
+     */
+    private function isUnsupportedFeatureError(string $message): bool
+    {
+        return str_contains($message, 'Unknown method')
+            || str_contains($message, 'unknown method')
+            || str_contains($message, 'Unimplemented')
+            || str_contains($message, 'unimplemented')
+            || str_contains($message, 'not supported')
+            || str_contains($message, 'Not Supported');
     }
 
     /**
