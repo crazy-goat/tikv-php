@@ -325,8 +325,9 @@ final class TxnKvClient
      * Remove this client's service GC safe point registration, letting GC
      * advance again (orderly shutdown of a long-running job).
      *
-     * Returns null (nothing to act on) when PD does not support service
-     * safe points.
+     * Sends a TTL of -1, which PD treats as a removal of the service safe
+     * point (any non-positive TTL removes it). Returns null (nothing to
+     * act on) when PD does not support service safe points.
      *
      * @throws ClientClosedException When the client has been closed
      * @throws GrpcException On transport error

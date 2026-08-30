@@ -119,14 +119,74 @@ final class PdClientGcSafePointTest extends TestCase
         $this->assertSame('600', (string) $captured->getTtl());
     }
 
+    public function testUpdateServiceGcSafePointRejectsOutOfRangeUint64(): void
+    {
+        // A uint64 above PHP_INT_MAX cannot exist as a PHP int: the gencode
+        // rejects the out-of-range string at the setter, and a value that
+        // arrives already-cast is guarded by PdClient::uint64ToInt() —
+        // either way the caller never sees a wrapped negative safe point.
+        $response = new \CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointResponse();
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response->setHeader($header);
+
+        $this->expectException(\Exception::class);
+        $this->expectExceptionMessage('Cannot convert');
+        $response->setMinSafePoint('18446744073709551616'); // 2^64: unrepresentable
+    }
+
+    public function testUint64GuardRejectsNegativeSafePointValue(): void
+    {
+        // Defence in depth for the int path: if a value ever arrives as a
+        // negative PHP int (gencode intval() of an out-of-range uint64 on
+        // some platforms), uint64ToInt() fails closed instead of returning
+        // a nonsense safe point. Driven through the public getGCSafePoint()
+        // with a stubbed response.
+        $response = new GetGCSafePointResponse();
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response->setHeader($header);
+        $response->setSafePoint('-5');
+
+        $grpc = $this->mockGrpcCalls(['GetGCSafePoint' => $response]);
+        $client = new PdClient($grpc, 'pd:2379');
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('invalid GC safe point');
+        $client->getGCSafePoint();
+    }
+
+    public function testUpdateServiceGcSafePointFailsClosedOnEmptyMessageHeaderError(): void
+    {
+        // A header error with an empty message is still an error: treating
+        // it as success would fabricate a min safe point (default 0).
+        $response = new \CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointResponse();
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $error = new \CrazyGoat\Proto\Pdpb\Error();
+        $error->setMessage('');
+        $header->setError($error);
+        $response->setHeader($header);
+
+        $grpc = $this->mockGrpcCalls(['UpdateServiceGCSafePoint' => $response]);
+        $client = new PdClient($grpc, 'pd:2379');
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('unknown PD error');
+        $client->updateServiceGCSafePoint('worker-1', 1, 600);
+    }
+
     public function testUpdateServiceGcSafePointRemovalRequiresZeroSafePoint(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
         $grpc->expects($this->never())->method('call');
         $client = new PdClient($grpc, 'pd:2379');
 
+        // ttl <= 0 is a removal (PD's UpdateServiceGCSafePoint removes the
+        // registration for any non-positive TTL) — pairing it with a
+        // positive safe point is a caller error we reject.
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('safePoint must be 0 when ttlSeconds is negative');
+        $this->expectExceptionMessage('safePoint must be 0 when ttlSeconds is <= 0');
         $client->updateServiceGCSafePoint('worker-1', 123456, -1);
     }
 

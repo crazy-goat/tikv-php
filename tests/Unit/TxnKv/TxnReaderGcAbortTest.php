@@ -217,4 +217,27 @@ final class TxnReaderGcAbortTest extends TestCase
         $this->assertSame($capturedIds[0], $capturedIds[1]);
         $this->assertStringStartsWith('tikv-php-txnkv-', $capturedIds[0]);
     }
+
+    public function testBatchGetThrowsTypedGcExceptionOnAbort(): void
+    {
+        // batchGet() is reached without a RetryExecutor owner, so the GC
+        // abort must be thrown from TxnReader itself. Without handling, an
+        // aborted region's keys silently resolved to null AND were cached
+        // into the transaction's read set.
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $response = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $keyError = new KeyError();
+        $keyError->setAbort('GC life time is shorter than transaction duration, start ts: 1000');
+        $response->setError($keyError);
+
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction();
+
+        $this->expectException(TxnAbortedByGcException::class);
+        $this->expectExceptionMessage('GC life time is shorter than transaction duration');
+        $txn->batchGet(['key1', 'key2']);
+    }
 }

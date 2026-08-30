@@ -8,6 +8,7 @@ use CrazyGoat\Proto\Kvrpcpb\BatchGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\GetRequest;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -275,6 +276,16 @@ final readonly class TxnReader
                 $region->regionId,
                 notLeaderOwnedByRetryExecutor: false,
             );
+
+            // GC abort handling (issue #422): without this, a start
+            // timestamp GC has passed yields an empty pair list and every
+            // key of the region silently resolves to null below — and is
+            // cached into the read set, so even a caller-level retry within
+            // the same transaction keeps reading null.
+            $error = $response->getError();
+            if ($error instanceof KeyError) {
+                throw self::gcExceptionFromAbort($error->getAbort());
+            }
 
             foreach ($response->getPairs() as $pair) {
                 $results[$pair->getKey()] = $pair->getValue();

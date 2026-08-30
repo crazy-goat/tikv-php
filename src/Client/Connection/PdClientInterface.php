@@ -83,9 +83,11 @@ interface PdClientInterface
      * GC back for its duration by registering a service safe point with a
      * bounded TTL: GC will not advance past the returned min safe point
      * while the registration is refreshed before expiry. Pass
-     * $ttlSeconds < 0 to remove the registration (PD removes a service
-     * safe point when its TTL lapses anyway — the explicit removal is for
-     * orderly shutdown).
+     * $ttlSeconds <= 0 to REMOVE the registration for this $serviceId (PD's
+     * UpdateServiceGCSafePoint deletes the service's safe point whenever
+     * the TTL is zero or negative) — for a removal the $safePoint value is
+     * ignored by PD, so callers should pass 0. A lapsed TTL also releases
+     * the hold automatically; the explicit removal is for orderly shutdown.
      *
      * Returns the resulting min safe point across all registered services
      * (the value GC is actually held at), or null when the cluster's PD

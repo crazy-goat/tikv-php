@@ -223,7 +223,7 @@ final class PdClient implements PdClientInterface
             throw new TiKvException(sprintf('PD GetGCSafePoint failed: %s', $headerError));
         }
 
-        return (int) $response->getSafePoint();
+        return $this->uint64ToInt($response->getSafePoint(), 'GC safe point');
     }
 
     /**
@@ -236,13 +236,14 @@ final class PdClient implements PdClientInterface
         if ($serviceId === '') {
             throw new \InvalidArgumentException('serviceId must be a non-empty string');
         }
-        if ($ttlSeconds < 0 && $safePoint !== 0) {
-            // Removal (ttl < 0) is defined against the registration, not a
-            // new hold: PD ignores the safe point for ttl < 0, but a caller
-            // passing both a removal and a positive hold is almost certainly
-            // confusing two operations.
+        if ($ttlSeconds <= 0 && $safePoint !== 0) {
+            // Removal (ttl <= 0 — PD removes the service safe point for any
+            // non-positive TTL) is defined against the existing
+            // registration, not a new hold: PD ignores the safe point for
+            // ttl <= 0, but a caller passing both a removal and a positive
+            // hold is almost certainly confusing two operations.
             throw new \InvalidArgumentException(
-                'safePoint must be 0 when ttlSeconds is negative (removal)',
+                'safePoint must be 0 when ttlSeconds is <= 0 (removal)',
             );
         }
 
@@ -286,7 +287,32 @@ final class PdClient implements PdClientInterface
             throw new TiKvException(sprintf('PD UpdateServiceGCSafePoint failed: %s', $headerError));
         }
 
-        return (int) $response->getMinSafePoint();
+        return $this->uint64ToInt($response->getMinSafePoint(), 'min GC safe point');
+    }
+
+    /**
+     * Convert a uint64 proto scalar to a PHP int, rejecting values above
+     * PHP_INT_MAX.
+     *
+     * Real TSO-derived safe points (~1e17) sit far below 2^63, so the cast
+     * is safe in practice — but the generated gencode intval()s an
+     * out-of-range uint64 into a *negative* PHP int, and silently returning
+     * a negative safe point would be worse than failing loudly.
+     */
+    private function uint64ToInt(int|string $raw, string $what): int
+    {
+        if (is_string($raw) && !preg_match('/^-?\d+$/', $raw)) {
+            throw new TiKvException(sprintf('PD returned a non-numeric %s: %s', $what, $raw));
+        }
+
+        $value = (int) $raw;
+        if ($value < 0) {
+            // Either an out-of-range uint64 wrapped negative, or PD sent
+            // nonsense; both are protocol violations, not safe points.
+            throw new TiKvException(sprintf('PD returned an invalid %s: %s', $what, (string) $raw));
+        }
+
+        return $value;
     }
 
     public function setClusterId(int $clusterId): void
@@ -315,8 +341,10 @@ final class PdClient implements PdClientInterface
      * Extract a PD-level error message from a response header, if present.
      *
      * PD reports request failures inside the response header (pdpb.Error)
-     * rather than as gRPC status errors. A header with no error message is
-     * a successful response.
+     * rather than as gRPC status errors. A header carrying a pdpb.Error is
+     * an error even when its message text is empty (a typed-but-silent
+     * error is still an error — treating it as success would turn a
+     * documented fail-closed method into a source of fabricated defaults).
      */
     private function headerErrorMessage(Message $response): ?string
     {
@@ -335,14 +363,8 @@ final class PdClient implements PdClientInterface
         }
 
         $message = $error->getMessage();
-        if ($message === '') {
-            // An error entry with no message carries no information — a
-            // type without text is treated as no error, matching how the
-            // other header-carrying PD responses in this client behave.
-            return null;
-        }
 
-        return $message;
+        return $message !== '' ? $message : 'unknown PD error (header error with empty message)';
     }
 
     /**
