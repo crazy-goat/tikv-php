@@ -22,6 +22,7 @@ use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 
 /**
@@ -102,6 +103,17 @@ final readonly class TxnReader
                 $retryable = $error->getRetryable();
                 if ($retryable !== '') {
                     throw new \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException($retryable);
+                }
+
+                // GC has passed this transaction's start timestamp — the
+                // server names it in the abort field ("GC life time is
+                // shorter than transaction duration"). Throw the typed,
+                // non-retryable GC exception; the previous fall-through
+                // here returned the response as-if-successful and the
+                // caller read an empty value (issue #422).
+                $abort = $error->getAbort();
+                if ($abort !== '') {
+                    throw $this->gcExceptionFromAbort($abort);
                 }
             }
 
@@ -356,6 +368,14 @@ final readonly class TxnReader
                             BackoffType::TxnLock,
                         );
                     }
+
+                    // Same GC abort mapping as get(): a scan crossing many
+                    // regions is the most likely long-running read to have
+                    // its start timestamp passed by GC mid-scan.
+                    $abort = $error->getAbort();
+                    if ($abort !== '') {
+                        throw $this->gcExceptionFromAbort($abort);
+                    }
                 }
 
                 $subResults = [];
@@ -392,6 +412,29 @@ final readonly class TxnReader
         }
 
         return $results;
+    }
+
+    /**
+     * Build the typed exception for a KeyError abort message.
+     *
+     * TiKV names the GC case in the abort field ("GC life time is shorter
+     * than transaction duration") when a read or commit targets a start
+     * timestamp GC has already passed — map that to the dedicated,
+     * non-retryable TxnAbortedByGcException (issue #422).
+     *
+     * Other abort texts (transaction aborts, flashbacks) have no dedicated
+     * exception; they surface as a base TiKvException carrying the server
+     * text. That is still strictly better than the previous behaviour, where
+     * a non-GC abort fell through silently and the read returned an empty
+     * value as if the key simply did not exist.
+     */
+    private function gcExceptionFromAbort(string $abort): TiKvException
+    {
+        if (str_contains($abort, 'GC life time is shorter')) {
+            return new TxnAbortedByGcException($abort);
+        }
+
+        return new TiKvException($abort);
     }
 
     /**

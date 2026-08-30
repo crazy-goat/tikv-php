@@ -9,6 +9,7 @@ use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 
 final class ErrorClassifier
 {
@@ -35,6 +36,14 @@ final class ErrorClassifier
         // === Primary path: typed error kind on RegionException ===
         if ($e instanceof RegionException && $e->errorKind instanceof ErrorKind) {
             return self::classifyByKind($e->errorKind);
+        }
+
+        // === GC aborted: a transaction whose start timestamp GC has passed
+        // is fatal — retrying the same startTs can only produce the same
+        // server error. Checked before the message fallback so the GC
+        // message can never be misread as retryable (issue #422).
+        if ($e instanceof TxnAbortedByGcException) {
+            return null;
         }
 
         // === Fallback: message-text matching for exceptions without a typed kind ===

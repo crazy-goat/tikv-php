@@ -9,14 +9,18 @@ use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Connection\SafePointCache;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -32,11 +36,34 @@ final class TxnKvClient
      */
     public const OPT_RETRY_DEADLINE = 'retryDeadlineMs';
 
+    /**
+     * options[] key for per-client GC safe-point validation (issue #422).
+     * true (default): every begin() validates the fresh start timestamp
+     * against a cached GC safe point and throws TxnAbortedByGcException
+     * when PD's safe point has already passed it. false: no validation.
+     */
+    public const OPT_GC_SAFE_POINT_VALIDATION = 'gcSafePointValidation';
+
+    /**
+     * options[] key for the GC safe-point cache refresh interval in
+     * milliseconds (issue #422). Default 30000 (30s). Must be >= 1.
+     */
+    public const OPT_GC_SAFE_POINT_REFRESH_MS = 'gcSafePointRefreshMs';
+
+    /**
+     * Default service ID used by {@see TxnKvClient::holdGcSafePoint()} and
+     * {@see TxnKvClient::releaseGcSafePoint()}. Distinct per client instance
+     * so two clients never overwrite each other's registration.
+     */
+    private const SERVICE_ID_PREFIX = 'tikv-php-txnkv';
+
     private bool $closed = false;
     private readonly RegionResolver $regionResolver;
     private readonly MetricsInterface $metrics;
     /** Wall-clock deadline (ms) handed to every Transaction this client begins. */
     private readonly int $retryDeadlineMs;
+    /** Per-instance default service ID for service safe-point registrations. */
+    private readonly string $serviceId;
 
     /**
      * @param string[] $pdEndpoints PD addresses (currently only the first is used)
@@ -48,6 +75,14 @@ final class TxnKvClient
     {
         $bundle = ConnectionFactory::create($pdEndpoints, $logger, $options);
 
+        $safePointCache = self::resolveSafePointValidation($options)
+            ? new SafePointCache(
+                static fn (): int => $bundle->pdClient->getGCSafePoint(),
+                self::resolveGcSafePointRefreshMs($options),
+                $bundle->logger,
+            )
+            : null;
+
         return new self(
             $bundle->pdClient,
             $bundle->grpc,
@@ -58,6 +93,7 @@ final class TxnKvClient
             pdEndpoints: $bundle->pdEndpoints,
             allowedStorePorts: $bundle->allowedStorePorts,
             retryDeadlineMs: self::resolveRetryDeadline($options),
+            safePointCache: $safePointCache,
         );
     }
 
@@ -78,11 +114,14 @@ final class TxnKvClient
         /** @var list<int>|null */
         private readonly ?array $allowedStorePorts = null,
         int $retryDeadlineMs = Transaction::DEFAULT_RETRY_DEADLINE_MS,
+        /** GC safe-point cache for begin() validation; null = validation disabled. */
+        private readonly ?SafePointCache $safePointCache = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
+        $this->serviceId = self::SERVICE_ID_PREFIX . '-' . substr(md5(uniqid('svc', true)), 0, 8);
         $this->metrics = new NoOpMetrics();
         if ($this->regionCache instanceof RegionCache) {
             // Issue #474: regionInvalidated() is emitted from inside
@@ -134,6 +173,56 @@ final class TxnKvClient
     }
 
     /**
+     * Resolve options['gcSafePointValidation'] (see OPT_GC_SAFE_POINT_VALIDATION)
+     * for create(): whether begin() validates the start timestamp against the
+     * cluster's GC safe point. Defaults to true.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveSafePointValidation(array $options): bool
+    {
+        if (!array_key_exists(self::OPT_GC_SAFE_POINT_VALIDATION, $options)) {
+            return true;
+        }
+
+        $enabled = $options[self::OPT_GC_SAFE_POINT_VALIDATION];
+        if (!is_bool($enabled)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['gcSafePointValidation'] must be a bool, %s given",
+                get_debug_type($enabled),
+            ));
+        }
+
+        return $enabled;
+    }
+
+    /**
+     * Resolve options['gcSafePointRefreshMs'] (see OPT_GC_SAFE_POINT_REFRESH_MS)
+     * for create(): how long the cached GC safe point stays fresh. Must be >= 1.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveGcSafePointRefreshMs(array $options): int
+    {
+        if (!array_key_exists(self::OPT_GC_SAFE_POINT_REFRESH_MS, $options)) {
+            return SafePointCache::DEFAULT_REFRESH_INTERVAL_MS;
+        }
+
+        $refreshMs = $options[self::OPT_GC_SAFE_POINT_REFRESH_MS];
+        if (!is_int($refreshMs)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['gcSafePointRefreshMs'] must be an int (milliseconds), %s given",
+                get_debug_type($refreshMs),
+            ));
+        }
+        if ($refreshMs < 1) {
+            throw new InvalidArgumentException("options['gcSafePointRefreshMs'] must be >= 1");
+        }
+
+        return $refreshMs;
+    }
+
+    /**
      * @param array{pessimistic?: bool, priority?: int} $options
      */
     public function begin(array $options = []): Transaction
@@ -144,6 +233,8 @@ final class TxnKvClient
         $priority = (int) ($options['priority'] ?? 0);
 
         $startTs = $this->pdClient->getTimestamp();
+
+        $this->validateStartTsAgainstGcSafePoint($startTs);
 
         $txnId = uniqid('txn-', true);
 
@@ -188,6 +279,68 @@ final class TxnKvClient
     public function getClusterId(): ?int
     {
         return $this->pdClient->getClusterId();
+    }
+
+    /**
+     * Register a service GC safe point so GC holds back past $safePoint for
+     * the given TTL (issue #422).
+     *
+     * A long-running read (large scan, report job, batch export) whose
+     * duration may exceed the cluster's gc_life_time should call this
+     * before starting, and refresh it periodically before the TTL lapses
+     * (or call {@see releaseGcSafePoint()} on orderly shutdown). While a
+     * service safe point is active and fresh, GC will not advance past it
+     * and reads at startTs >= safePoint keep working; without it, such a
+     * read fails partway with TxnAbortedByGcException once GC catches up.
+     *
+     * @param int $safePoint The timestamp to hold GC at (typically the
+     *                       transaction's startTs — see
+     *                       Transaction::getStartTs()).
+     * @param int $ttlSeconds How long PD should honour the hold. Use a TTL
+     *                        comfortably longer than the refresh period so
+     *                        a crashed worker cannot block GC forever.
+     * @param string|null $serviceId Override the default per-instance
+     *                               service ID.
+     *
+     * @return int|null The resulting min safe point across all registered
+     *                  services (the value GC is actually held at), or null
+     *                  when this PD does not support service safe points.
+     *
+     * @throws ClientClosedException When the client has been closed
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD error
+     */
+    public function holdGcSafePoint(int $safePoint, int $ttlSeconds, ?string $serviceId = null): ?int
+    {
+        $this->ensureOpen();
+
+        return $this->pdClient->updateServiceGCSafePoint(
+            $serviceId ?? $this->serviceId,
+            $safePoint,
+            $ttlSeconds,
+        );
+    }
+
+    /**
+     * Remove this client's service GC safe point registration, letting GC
+     * advance again (orderly shutdown of a long-running job).
+     *
+     * Returns null (nothing to act on) when PD does not support service
+     * safe points.
+     *
+     * @throws ClientClosedException When the client has been closed
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD error
+     */
+    public function releaseGcSafePoint(?string $serviceId = null): ?int
+    {
+        $this->ensureOpen();
+
+        return $this->pdClient->updateServiceGCSafePoint(
+            $serviceId ?? $this->serviceId,
+            0,
+            -1,
+        );
     }
 
     /**
@@ -260,6 +413,49 @@ final class TxnKvClient
     {
         if ($this->closed) {
             throw new ClientClosedException();
+        }
+    }
+
+    /**
+     * Validate a freshly fetched start timestamp against the cluster's GC
+     * safe point (issue #422).
+     *
+     * Throws TxnAbortedByGcException when the safe point has already
+     * passed the timestamp — such a transaction would fail on its first
+     * read with "GC life time is shorter than transaction duration", so
+     * failing here is earlier, typed, and loses nothing.
+     *
+     * A PD fetch failure degrades to a warning log (fail-open): validation
+     * must not invent a new hard failure mode for clients on clusters
+     * where the safe-point RPC is unavailable.
+     */
+    private function validateStartTsAgainstGcSafePoint(int $startTs): void
+    {
+        $cache = $this->safePointCache;
+        if (!$cache instanceof SafePointCache) {
+            return;
+        }
+
+        try {
+            $safePoint = $cache->get();
+        } catch (TiKvException $e) {
+            $this->logger->warning('GC safe-point check skipped: PD fetch failed', [
+                'startTs' => $startTs,
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        if ($startTs < $safePoint) {
+            throw new TxnAbortedByGcException(sprintf(
+                'Transaction start timestamp %d is below the GC safe point %d '
+                . '(data at this timestamp has been garbage collected). '
+                . 'Start a new transaction, or hold GC back with '
+                . 'TxnKvClient::holdGcSafePoint() for long-running reads.',
+                $startTs,
+                $safePoint,
+            ));
         }
     }
 }
