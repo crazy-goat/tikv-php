@@ -21,6 +21,8 @@ use CrazyGoat\Proto\Pdpb\ScanRegionsResponse;
 use CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointRequest;
 use CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointResponse;
 use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
@@ -43,6 +45,14 @@ final class PdClient implements PdClientInterface
         private readonly ?StoreCacheInterface $storeCache = null,
         private readonly ?int $lowResMaxStalenessMs = null,
         private readonly ?int $tsoPoolSize = null,
+        /**
+         * Key codec for PD region lookups.
+         *
+         * TxnKV clients inject a codec with Mode::Txn so region-lookup keys are
+         * memory-comparable encoded (matching the encoded space TiKV reports
+         * region boundaries in); RawKV uses the default passthrough codec.
+         */
+        private readonly CodecInterface $codec = new CodecV1(),
     ) {
     }
 
@@ -82,7 +92,7 @@ final class PdClient implements PdClientInterface
     {
         $request = new GetRegionRequest();
         $request->setHeader($this->createHeader());
-        $request->setRegionKey($key);
+        $request->setRegionKey($this->codec->encodeRegionKey($key));
 
         /** @var GetRegionResponse $response */
         $response = $this->callWithClusterIdRetry(
@@ -99,7 +109,7 @@ final class PdClient implements PdClientInterface
             throw new TiKvException('PD GetRegion returned no region for key');
         }
 
-        return RegionInfoMapper::fromProto($region, $response->getLeader());
+        return RegionInfoMapper::fromProto($region, $response->getLeader(), $this->codec);
     }
 
     public function getStore(int $storeId): ?Store
@@ -158,10 +168,12 @@ final class PdClient implements PdClientInterface
      */
     public function scanRegions(string $startKey, string $endKey, int $limit = 0): array
     {
+        [$encodedStart, $encodedEnd] = $this->codec->encodeRange($startKey, $endKey);
+
         $request = new ScanRegionsRequest();
         $request->setHeader($this->createHeader());
-        $request->setStartKey($startKey);
-        $request->setEndKey($endKey);
+        $request->setStartKey($encodedStart);
+        $request->setEndKey($encodedEnd);
         $request->setLimit($limit);
 
         /** @var ScanRegionsResponse $response */
@@ -178,7 +190,7 @@ final class PdClient implements PdClientInterface
         foreach ($regionMetas as $index => $region) {
             /** @var \CrazyGoat\Proto\Metapb\Peer|null $leader */
             $leader = $leaders[$index] ?? null;
-            $regions[] = RegionInfoMapper::fromProto($region, $leader);
+            $regions[] = RegionInfoMapper::fromProto($region, $leader, $this->codec);
         }
 
         return $regions;

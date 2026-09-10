@@ -7,6 +7,8 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Connection\SafePointCache;
@@ -126,7 +128,12 @@ final class TxnKvClient
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
-        $bundle = ConnectionFactory::create($pdEndpoints, $logger, $options);
+        // TxnKV resolves regions in the memory-comparable-encoded key space:
+        // PD reports transactional region boundaries MCE-encoded, so lookup
+        // keys are encoded before GetRegion/ScanRegions and returned
+        // boundaries are decoded back into user-key space before caching
+        // (issue #415, GAP-01).
+        $bundle = ConnectionFactory::create($pdEndpoints, $logger, $options, new CodecV1(Mode::Txn));
 
         $safePointCache = self::resolveSafePointValidation($options)
             ? new SafePointCache(

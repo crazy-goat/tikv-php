@@ -1142,3 +1142,38 @@ through `executeScanForRegion()` (the concurrent send is awaited outside the
 per-range retry loop, so a region error there is neither retried nor
 invalidated otherwise).
 
+## TxnKV region lookups must be MCE-encoded — and a MCE-decoded boundary is not a valid txn scan start key (GAP-01)
+
+Validated empirically against TiKV v8.5.5 / PD v8.5.5 (V1 txn cluster) while
+implementing issue #415:
+
+1. **PD reports transactional region boundaries in an encoded form**
+   (`split_key` + ts-suffix-ish bytes, e.g. splitting at `\x01\x00` yields a
+   boundary that hex-decodes to `0100000000000000f9`; PD v8.5.5 also
+   pre-creates keyspace-namespace regions at `72 00 … fb` / `78 00 … fb` even
+   under API V1). Querying `GetRegion(enc(user_key))` with the
+   memory-comparable encoding separates keys correctly across a split, while
+   raw user keys misroute: the A/B test wrote binary + boundary keys across
+   three regions — the MCE client committed/read everything, the raw client
+   failed with `Key … is out of [region …]` (KeyNotInRegion-class).
+2. **`MemComparableCodec::decode` is lossy on these boundaries.** It stops at
+   the first `0x00 0x00` pair inside the ts-suffix, so `0100…f9` decodes to
+   `\x01` instead of the true split key `\x01\x00`. The lossy order-preserving
+   decode is fine for `RegionCache` lookups (binary search in user space still
+   lands on the right region) but **not** as a txn `KvScan` start key: TiKV
+   validates the range start against the region's physical lower bound and
+   rejects `\x01` (`InvalidReqRange`, start one byte below the bound), while
+   the true key `\x01\x00` or the raw encoded boundary bytes are accepted.
+   Consequence: `TxnReader::scan()` starting a sub-range at a decoded region
+   boundary fails on a multi-region cluster (latent since any split makes
+   region starts reachable). GAP-01's E2E test therefore drives the workload
+   with writes/reads/batchGet across the split regions, not `scan()`.
+3. Manual region pre-split for E2E is reliable on v8.5.5 via the raw gRPC
+   call `tikvpb.Tikv/SplitRegion` (service string `tikvpb.Tikv`, method
+   `SplitRegion`) with a `kvrpcpb.SplitRegionRequest` carrying
+   `region_context` (region id + epoch + leader peer), a raw `split_key`
+   (`is_raw_kv` defaults to false) and the store address from
+   `PdClient::getStore()`. A fresh (empty-volume) V1 cluster reports 5
+   pre-created namespace regions (raw keyspace 0 / 1, txn keyspace 0 / 1),
+   so "region count" must be counted over the workload key range
+   (`scanRegions("\x00", "\x72")`), not over the whole keyspace.

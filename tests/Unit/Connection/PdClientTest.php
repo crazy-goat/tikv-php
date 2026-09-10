@@ -8,9 +8,12 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\Proto\Pdpb\GetRegionRequest;
 use CrazyGoat\Proto\Pdpb\GetRegionResponse;
 use CrazyGoat\Proto\Pdpb\GetStoreResponse;
 use CrazyGoat\Proto\Pdpb\ResponseHeader;
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
@@ -372,6 +375,30 @@ class PdClientTest extends TestCase
         return $response;
     }
 
+    private function makeRegion(string $startKey, string $endKey): Region
+    {
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $region = new Region();
+        $region->setId(42);
+        $region->setStartKey($startKey);
+        $region->setEndKey($endKey);
+        $region->setRegionEpoch($epoch);
+
+        return $region;
+    }
+
+    private function makePeer(int $id, int $storeId): Peer
+    {
+        $peer = new Peer();
+        $peer->setId($id);
+        $peer->setStoreId($storeId);
+
+        return $peer;
+    }
+
     // ========================================================================
     //  scanRegions tests
     // ========================================================================
@@ -641,6 +668,170 @@ class PdClientTest extends TestCase
 
         $client = new PdClient($grpc, 'pd:2379');
         $client->scanRegions('start-key', 'end-key', 10);
+    }
+
+    // ========================================================================
+    //  codec (memory-comparable encoding for TxnKV region lookups, GAP-01)
+    // ========================================================================
+
+    public function testGetRegionSendsMceEncodedKeyInTxnMode(): void
+    {
+        $codec = new CodecV1(Mode::Txn);
+        $region = $this->makeRegion('', '');
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response = new GetRegionResponse();
+        $response->setHeader($header);
+        $response->setRegion($region);
+        $response->setLeader($this->makePeer(1, 1));
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                'GetRegion',
+                $this->callback(function (GetRegionRequest $req) use ($codec): bool {
+                    // TxnKV region lookups must query PD in the MCE-encoded
+                    // key space (issue #415) — the raw user key would compare
+                    // against encoded boundaries inconsistently after a split.
+                    $this->assertSame(
+                        "my-key\x00\x00",
+                        $req->getRegionKey(),
+                    );
+                    $this->assertSame($codec->encodeRegionKey('my-key'), $req->getRegionKey());
+                    return true;
+                }),
+                $this->anything(),
+            )
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', codec: $codec);
+        $client->getRegion('my-key');
+    }
+
+    public function testGetRegionDecodesBoundariesInTxnMode(): void
+    {
+        // PD reports region boundaries in the MCE-encoded space; the mapped
+        // RegionInfo must carry the decoded user keys so RegionCache compares
+        // in user-key space (issue #415).
+        $output = new \CrazyGoat\TiKV\Client\Codec\MemComparableCodec();
+        $region = $this->makeRegion($output->encode('m'), $output->encode('z'));
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response = new GetRegionResponse();
+        $response->setHeader($header);
+        $response->setRegion($region);
+        $response->setLeader($this->makePeer(1, 1));
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
+        $result = $client->getRegion('my-key');
+
+        $this->assertSame('m', $result->startKey);
+        $this->assertSame('z', $result->endKey);
+    }
+
+    public function testGetRegionKeepsUnboundedBoundariesInTxnMode(): void
+    {
+        // Empty boundary keys mean "unbounded" and are never MCE-encoded —
+        // they must survive the round trip unchanged (decoding '' would throw).
+        $region = $this->makeRegion('', '');
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response = new GetRegionResponse();
+        $response->setHeader($header);
+        $response->setRegion($region);
+        $response->setLeader($this->makePeer(1, 1));
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
+        $result = $client->getRegion('my-key');
+
+        $this->assertSame('', $result->startKey);
+        $this->assertSame('', $result->endKey);
+    }
+
+    public function testGetRegionSendsRawKeyInRawMode(): void
+    {
+        // RawKV must stay byte-for-byte passthrough (issue #415 AC): raw mode
+        // never encodes region-lookup keys.
+        $response = $this->makeGetRegionResponse();
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                'GetRegion',
+                $this->callback(function (GetRegionRequest $req): bool {
+                    $this->assertSame('my-key', $req->getRegionKey());
+                    return true;
+                }),
+                $this->anything(),
+            )
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $client->getRegion('my-key');
+    }
+
+    public function testScanRegionsEncodesRangeInTxnMode(): void
+    {
+        $codec = new CodecV1(Mode::Txn);
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response = new \CrazyGoat\Proto\Pdpb\ScanRegionsResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                'ScanRegions',
+                $this->callback(function (\CrazyGoat\Proto\Pdpb\ScanRegionsRequest $req) use ($codec): bool {
+                    [$encodedStart, $encodedEnd] = $codec->encodeRange('start', 'end');
+                    $this->assertSame($encodedStart, $req->getStartKey());
+                    $this->assertSame($encodedEnd, $req->getEndKey());
+                    return true;
+                }),
+                $this->anything(),
+            )
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', codec: $codec);
+        $client->scanRegions('start', 'end');
+    }
+
+    public function testScanRegionsDecodesBoundariesInTxnMode(): void
+    {
+        $output = new \CrazyGoat\TiKV\Client\Codec\MemComparableCodec();
+        $region = $this->makeRegion($output->encode('m'), '');
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response = new \CrazyGoat\Proto\Pdpb\ScanRegionsResponse();
+        $response->setHeader($header);
+        $response->setRegionMetas([$region]);
+        $response->setLeaders([$this->makePeer(1, 1)]);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
+        $result = $client->scanRegions('', '');
+
+        $this->assertCount(1, $result);
+        $this->assertSame('m', $result[0]->startKey);
+        // Unbounded end survives unchanged.
+        $this->assertSame('', $result[0]->endKey);
     }
 
     // ========================================================================

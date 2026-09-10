@@ -6,6 +6,8 @@ namespace CrazyGoat\TiKV\Client\Connection;
 
 use Closure;
 use CrazyGoat\TiKV\Client\Cache\StoreCache;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
@@ -59,7 +61,12 @@ final class ConnectionFactory
      * @param string[] $pdEndpoints  PD cluster addresses
      * @param array<string, mixed> $options  Client options (see OPT_ constants
      *                                       on RawKvClient / TxnKvClient)
-     *
+     * @param CodecInterface|null $codec  Key codec applied to PD region
+     *        lookups. null builds the default V1 passthrough codec (RawKV
+     *        behaviour — region keys sent to PD and region boundaries cached
+     *        byte-for-byte unchanged). TxnKV callers pass CodecV1(Mode::Txn)
+     *        so lookup keys are memory-comparable encoded and boundaries are
+     *        decoded back to user-key space (issue #415, GAP-01).
      *
      * @throws InvalidArgumentException if PD endpoints array is empty
      */
@@ -67,6 +74,7 @@ final class ConnectionFactory
         array $pdEndpoints,
         ?LoggerInterface $logger = null,
         array $options = [],
+        ?CodecInterface $codec = null,
     ): ConnectionBundle {
         if ($pdEndpoints === []) {
             throw new InvalidArgumentException('PD endpoints array must not be empty');
@@ -99,6 +107,7 @@ final class ConnectionFactory
             $storeCache,
             self::resolveLowResMaxStalenessMs($options),
             self::resolveTsoPoolSize($options),
+            $codec ?? new CodecV1(),
         );
 
         $timeoutConfig = self::buildTimeoutConfig($options);

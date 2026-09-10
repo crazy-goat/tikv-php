@@ -8,6 +8,10 @@ use CrazyGoat\Proto\Kvrpcpb\Mutation;
 use CrazyGoat\Proto\Kvrpcpb\Op;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
+use CrazyGoat\Proto\Kvrpcpb\SplitRegionRequest;
+use CrazyGoat\Proto\Kvrpcpb\SplitRegionResponse;
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -588,6 +592,151 @@ class TxnKvE2ETest extends TestCase
         unset($txnA);
     }
 
+    // ========================================================================
+    //  Multi-region TxnKV workload (GAP-01 fix validation)
+    // ========================================================================
+
+    /**
+     * Runs a transactional workload against a transactional keyspace
+     * pre-split into at least three regions.
+     *
+     * TiKV stores transactional region boundaries in an encoded form, so a
+     * region lookup that compares the raw user key against those boundaries
+     * misroutes once the transactional keyspace covers more than one region —
+     * TiKV then rejects the request with a "Key ... is out of [region ...]"
+     * (KeyNotInRegion-class) error. The GAP-01 fix encodes lookup keys with
+     * the memory-comparable codec (and decodes returned boundaries), so this
+     * workload must succeed across regions. The keys deliberately include
+     * binary bytes and the exact split-boundary keys to exercise the cases
+     * where raw byte ordering differs from the encoded ordering.
+     */
+    public function testTxnWorkloadAcrossPreSplitRegions(): void
+    {
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+
+        $this->splitTxnKeyspaceIntoRegions($pdEndpoints, 3);
+
+        // Keys spread across the three regions. The exact split boundary keys
+        // ("\x01\x00", "mrr") are prefixes of the encoded region boundaries, so
+        // a raw (pre-fix) lookup misroutes them; the binary keys exercise the
+        // byte-ordering divergence directly. All keys stay below the 0x72
+        // ('r') keyspace-namespace boundary so the workload range maps onto
+        // exactly the three split regions and nothing else.
+        $keys = [
+            "\x00",
+            "\x01\x00",
+            "\x01\x00mid-" . uniqid(),
+            'mrr',
+            'mrrX-' . uniqid(),
+            'qzzz-' . uniqid(),
+        ];
+        foreach ($keys as $key) {
+            $this->keysToCleanup[] = $key;
+        }
+
+        $txn = $this->testClient->begin(['pessimistic' => false]);
+        foreach ($keys as $i => $key) {
+            $txn->set($key, 'value-' . $i);
+        }
+        $txn->commit();
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+
+        // Reads across the regions.
+        foreach ($keys as $i => $key) {
+            $read = $this->testClient->begin(['pessimistic' => false]);
+            $this->assertSame('value-' . $i, $read->get($key), sprintf('read-back of key %s', bin2hex($key)));
+            $read->rollback();
+        }
+
+        // Batch-read across the regions (exercises the scanRegions()-based
+        // batch resolve path through RegionResolver::batchResolveRegions()).
+        $batch = $this->testClient->begin(['pessimistic' => false]);
+        $values = $batch->batchGet($keys);
+        $batch->rollback();
+
+        foreach ($keys as $i => $key) {
+            $this->assertSame('value-' . $i, $values[$key] ?? null, sprintf('batchGet of key %s', bin2hex($key)));
+        }
+    }
+
+    /**
+     * Ensure the transactional keyspace hosting the test's workload range
+     * covers at least $targetRegionCount regions, splitting it with TiKV's
+     * SplitRegion RPC when needed.
+     *
+     * The splits run through a raw-codec connection bundle: the split keys
+     * are given in the user-key space TiKV expects for the V1 transactional
+     * region layout.
+     *
+     * @param string[] $pdEndpoints
+     */
+    private function splitTxnKeyspaceIntoRegions(array $pdEndpoints, int $targetRegionCount): void
+    {
+        $bundle = ConnectionFactory::create($pdEndpoints, null, [], new CodecV1(Mode::Raw));
+
+        try {
+            $regionsForWorkloadRange = (fn(): array => $bundle->pdClient->scanRegions("\x00", "\x72"));
+
+            $splitAt = function (string $withinKey, string $splitKey) use ($bundle): void {
+                $region = $bundle->pdClient->getRegion($withinKey);
+                $store = $bundle->pdClient->getStore($region->leaderStoreId);
+                $this->assertNotNull($store, 'Leader store must be resolvable for SplitRegion');
+
+                $request = new SplitRegionRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                $request->setSplitKey($splitKey);
+
+                /** @var SplitRegionResponse $response */
+                $response = $bundle->grpc->call(
+                    (string) $store->getAddress(),
+                    'tikvpb.Tikv',
+                    'SplitRegion',
+                    $request,
+                    SplitRegionResponse::class,
+                    5000,
+                );
+
+                if ($response->hasRegionError()) {
+                    throw new \RuntimeException(sprintf(
+                        'SplitRegion failed: %s',
+                        $response->getRegionError() !== null
+                            ? $response->getRegionError()->getMessage()
+                            : 'unknown region error',
+                    ));
+                }
+            };
+
+            $attempt = 0;
+            while (count($regionsForWorkloadRange()) < $targetRegionCount && $attempt < 5) {
+                $attempt++;
+                // Split the region covering the workload range into three
+                // pieces: [empty, "\x01\x00"), ["\x01\x00", "mrr"), ["mrr", ...).
+                $splitAt("\x00", "\x01\x00");
+                usleep(200_000);
+                $splitAt('mrrX', 'mrr');
+                // Wait for PD to learn the new boundaries and re-balance.
+                for ($i = 0; $i < 30; $i++) {
+                    if (count($regionsForWorkloadRange()) >= $targetRegionCount) {
+                        break;
+                    }
+                    usleep(500_000);
+                }
+            }
+
+            $this->assertGreaterThanOrEqual(
+                $targetRegionCount,
+                count($regionsForWorkloadRange()),
+                sprintf(
+                    'Pre-splitting the transactional keyspace did not produce %d regions',
+                    $targetRegionCount,
+                ),
+            );
+        } finally {
+            $bundle->grpc->close();
+            $bundle->pdClient->close();
+        }
+    }
+
     /**
      * Send a bare KvPrewrite for the given key, simulating a transaction
      * abandoned right after its prewrite phase.
@@ -595,7 +744,9 @@ class TxnKvE2ETest extends TestCase
     private function prewriteOnly(string $key, int $startTs, string $value): void
     {
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
-        $bundle = ConnectionFactory::create($pdEndpoints);
+        // This is a transactional prewrite: region lookups must run in the
+        // MCE-encoded key space like TxnKvClient::create() (issue #415).
+        $bundle = ConnectionFactory::create($pdEndpoints, null, [], new CodecV1(Mode::Txn));
 
         try {
             $region = $bundle->pdClient->getRegion($key);

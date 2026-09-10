@@ -8,6 +8,8 @@ use Closure;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
@@ -139,7 +141,9 @@ final class RawKvClient
         ?LoggerInterface $logger = null,
         array $options = []
     ): self {
-        $bundle = ConnectionFactory::create($pdEndpoints, $logger, $options);
+        // RawKV passes keys through byte-for-byte (Mode::Raw, no MCE) — PD
+        // region lookups are raw, matching how the raw keyspace is laid out.
+        $bundle = ConnectionFactory::create($pdEndpoints, $logger, $options, new CodecV1(Mode::Raw));
 
         return new self(
             $bundle->pdClient,
