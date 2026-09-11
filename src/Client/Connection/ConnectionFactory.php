@@ -98,6 +98,7 @@ final class ConnectionFactory
             $resolvedLogger,
             $storeCache,
             self::resolveLowResMaxStalenessMs($options),
+            self::resolveTsoPoolSize($options),
         );
 
         $timeoutConfig = self::buildTimeoutConfig($options);
@@ -255,6 +256,33 @@ final class ConnectionFactory
         }
 
         return $stalenessMs;
+    }
+
+    /**
+     * Resolve options['tsoPoolSize'] (issue #292): the number of timestamps
+     * requested per pooled `Tso` RPC. null (absent) = TimestampOracle's
+     * default; 1 disables pooling. Must be an int >= 1.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveTsoPoolSize(array $options): ?int
+    {
+        if (!array_key_exists('tsoPoolSize', $options)) {
+            return null;
+        }
+
+        $poolSize = $options['tsoPoolSize'];
+        if (!is_int($poolSize)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['tsoPoolSize'] must be an int (timestamp count), %s given",
+                get_debug_type($poolSize),
+            ));
+        }
+        if ($poolSize < 1) {
+            throw new InvalidArgumentException("options['tsoPoolSize'] must be >= 1");
+        }
+
+        return $poolSize;
     }
 
     /**

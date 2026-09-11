@@ -68,6 +68,13 @@ $options = [
     // bounds staleness but never returns a timestamp cached from an
     // earlier millisecond.
     'lowResTimestampMaxStalenessMs' => 200,
+    // PD TSO timestamp pool (issue #292): the number of consecutive
+    // timestamps requested per pooled Tso RPC. getTimestamp() serves from
+    // the pool and refills when exhausted; N calls cost roughly
+    // N / tsoPoolSize round trips. Default: 64. 1 disables pooling
+    // (one Tso RPC per call). Must be >= 1. See "Timestamp Batching and
+    // Pooling" below.
+    'tsoPoolSize' => 64,
     // Replica read preference (issue #421): an instance of
     // ReplicaReadPolicy controlling which peer serves read requests.
     // Default: leader-only (unchanged behaviour). See "Replica Reads".
@@ -106,22 +113,33 @@ $client = RawKvClient::create([
 
 **Note**: Currently only the first endpoint is used. Future versions will support failover.
 
-### Timestamp Batching and the Low-Resolution Cache (issue #420)
+### Timestamp Batching and Pooling (issues #420, #292)
 
-`PdClientInterface::getTimestamp()` performs one PD `Tso` RPC per call,
-exactly as before — transaction start/commit timestamps are never cached
-or reused. Two additive APIs reduce PD traffic where that is safe:
+`PdClientInterface::getTimestamp()` hands out timestamps from a small
+per-client pool: it requests `count = tsoPoolSize` (default 64)
+consecutive timestamps in one `Tso` RPC and serves subsequent calls from
+that range, refilling when it is exhausted (issue #292). N calls therefore
+cost roughly N / `tsoPoolSize` round trips instead of N. The pool is
+discarded — and a fresh grant requested — whenever it is exhausted, ages
+past its physical window (1 s), the process forks, or the cluster ID
+changes; a PD error is never papered over and no timestamp is ever
+fabricated locally. Set `tsoPoolSize` to 1 to restore one `Tso` RPC per
+call.
+
+Two additional APIs reduce PD traffic where that is safe and explicit:
 
 - `getTimestampBatch(int $count)` requests up to `$count` timestamps in
   a single `Tso` RPC (`TsoRequest.count`) and hands them out in order
   (consecutive values; the 18-bit logical counter wraps into the next
   physical millisecond correctly). PD may grant fewer timestamps than
-  requested; the returned list never exceeds the grant.
+  requested; the returned list never exceeds the grant. An explicit batch
+  discards the pool (it advances PD beyond the pooled range).
 - `getLowResolutionTimestamp()` returns a timestamp that is at most
   `lowResTimestampMaxStalenessMs` old (option below; default unset =
   fresh fetch, i.e. unchanged behaviour). It is used internally by lock
   resolution (`CheckTxnStatus.current_ts`) and is safe only for
-  staleness-tolerant consumers — never for start/commit timestamps.
+  staleness-tolerant consumers — never for start/commit timestamps. It
+  always takes a fresh (non-pooled) timestamp.
 
 Additionally, the pessimistic-lock path in `TwoPhaseCommitter` acquires
 one `for_update_ts` per locking pass instead of one per region, cutting

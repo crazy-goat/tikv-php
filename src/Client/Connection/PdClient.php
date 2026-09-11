@@ -42,6 +42,7 @@ final class PdClient implements PdClientInterface
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly ?StoreCacheInterface $storeCache = null,
         private readonly ?int $lowResMaxStalenessMs = null,
+        private readonly ?int $tsoPoolSize = null,
     ) {
     }
 
@@ -70,6 +71,7 @@ final class PdClient implements PdClientInterface
                 $this->setClusterId(...),
                 $this->logger,
                 $this->lowResMaxStalenessMs,
+                poolSize: $this->tsoPoolSize,
             );
         }
 

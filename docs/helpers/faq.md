@@ -1025,3 +1025,43 @@ private static methods in final classes as removable indirection. Match the
 existing test-helper style (instance methods) instead of fighting rector.
 Also remember `composer lint` = phpcs + phpstan + rector dry-run: a lint
 failure in a test file can come from rector, not phpcs/phpstan.
+
+## Pooling TSO timestamps: keep the low-res path off the pool, and bound the pool by our own clock (#292)
+
+Issue #292 added a per-client timestamp pool to `TimestampOracle::getTimestamp()`
+(one `Tso` request with `count = poolSize`, default 64, served consecutively).
+Design points that are easy to get wrong on a later refactor:
+
+- **Separate the raw request from the pool.** `getTimestampBatch()` (public)
+  and `getLowResolutionTimestamp()` must not share the pooled stream: an
+  explicit batch advances PD *beyond* the pooled range, so a later pooled
+  value could be lower than one already returned (ordering break), and the
+  low-res contract is a *fresh* fetch. The implementation therefore has a
+  private pool-unaware `requestTimestampRange()`; `getTimestampBatch()`
+  resets the pool then calls it, `getLowResolutionTimestamp()` calls it
+  directly (so its existing "fresh fetch" tests still pass), and only
+  `refillPool()` stores into the pool.
+- **Bound the pool by the injected wall clock, not by the TSO physical.**
+  A `now - poolFetchedAtMs > poolMaxAgeMs` (default 1 s) check discards a
+  pool that outlived its physical window; a *negative* age (clock jump
+  backwards) is treated as uncertain and refills. Comparing the pooled
+  `physical` against local `microtime()` instead would make pooling
+  unusable under PD/local clock skew (PD is routinely ahead), so the age
+  is measured locally from fetch time.
+- **Fork guard = PID.** PHP-FPM is process-per-request, but a `pcntl_fork`
+  child would otherwise inherit the pool and hand out timestamps the parent
+  already used; the pool records `getmypid()` and is dropped when it changes.
+- **Monotonic across refills is PD's job, not ours.** Each refill asks PD
+  for a fresh grant at the front of the physical window; PD never
+  re-allocates a value, so the new range starts above the last handed-out
+  timestamp. Do not "fix" the sequence locally (e.g. `max(ts, last+1)`) —
+  that would fabricate a timestamp outside PD's grant, exactly what the
+  fail-closed rule forbids.
+
+Test seam: `TimestampOracle`'s constructor takes optional `$poolSize`,
+`$poolMaxAgeMs`, `$clock` and `$pid` closures; unit tests inject a mutable
+`$pid`/`$clock` to prove the pool is discarded on fork/age change without
+`pcntl_fork` or real sleeping. The `TransactionTest` spy for the `#292`
+acceptance criterion counts `PdClientInterface::getTimestamp()` calls (not
+`Tso` RPCs) so it pins the caller contract independently of the pool.
+

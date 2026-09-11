@@ -55,6 +55,13 @@ interface PdClientInterface
     /**
      * Get a monotonically increasing timestamp from PD.
      *
+     * Since issue #292 the implementation serves timestamps from a small
+     * per-client pool (one `Tso` RPC grants `tsoPoolSize` consecutive
+     * values), so consecutive calls usually do not each perform a round
+     * trip. Returned values remain strictly increasing. The pool is
+     * discarded on a PD error, a cluster-ID change, after a fork, or when
+     * it outlives its physical window; a TSO failure still fails closed.
+     *
      * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
      *
      * @throws GrpcException On transport error
@@ -80,11 +87,11 @@ interface PdClientInterface
      * Get a timestamp that is at most the configured
      * lowResTimestampMaxStalenessMs old (issue #420).
      *
-     * With no staleness bound configured this is equivalent to
-     * {@see getTimestamp()} (a fresh TSO RPC per call), so the default
-     * behavior of existing callers is unchanged. Intended for
-     * staleness-tolerant consumers such as lock resolution — never for
-     * start/commit timestamps.
+     * With no staleness bound configured this performs a fresh TSO RPC per
+     * call (it intentionally bypasses the pooled {@see getTimestamp()});
+     * with a bound set, repeated calls within the bound reuse the cached
+     * timestamp. Intended for staleness-tolerant consumers such as lock
+     * resolution — never for start/commit timestamps.
      *
      * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
      *

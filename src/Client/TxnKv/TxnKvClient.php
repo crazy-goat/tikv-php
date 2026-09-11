@@ -87,6 +87,17 @@ final class TxnKvClient
     public const OPT_LOW_RES_TIMESTAMP_MAX_STALENESS_MS = 'lowResTimestampMaxStalenessMs';
 
     /**
+     * options[] key for the PD TSO timestamp pool size (issue #292): the
+     * number of consecutive timestamps requested per pooled `Tso` RPC.
+     * `getTimestamp()` hands out pooled values and refills when the pool is
+     * exhausted, so N calls cost roughly N / poolSize round trips instead
+     * of N. Default: 64 (see Connection\TimestampOracle); 1 disables
+     * pooling (one `Tso` RPC per call). Must be >= 1. TxnKvClient
+     * only — RawKvClient has no transaction timestamp.
+     */
+    public const OPT_TSO_POOL_SIZE = 'tsoPoolSize';
+
+    /**
      * Default service ID used by {@see TxnKvClient::holdGcSafePoint()} and
      * {@see TxnKvClient::releaseGcSafePoint()}. Distinct per client instance
      * so two clients never overwrite each other's registration.
