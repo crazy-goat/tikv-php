@@ -1100,3 +1100,45 @@ retry loop), so the implementation inspects `getRegionError()` and falls
 back to the sequential retrying loop on any error — reads are idempotent, so
 discarding the partial page is safe.
 
+## `executeScanForRegion()`'s `$limit <= 0` sentinel means "unbounded" — continuation callers must pass the real budget (#293)
+
+`RawKvScanner::executeScanForRegion()` only calls
+`RawScanRequest::setLimit()` when `$pending > 0`; a `0`/negative `$limit`
+therefore omits the field and TiKV runs an *unbounded* scan of the whole
+region. The fan-out's split-after-enumeration continuation used to call it
+with `0`, so a bounded page could read the entire remainder over the wire
+before `array_slice()` trimmed it. Any internal caller that already knows
+the remaining page budget must pass it (and skip the call entirely when it
+is `<= 0`); reserve `0` for a genuinely unbounded request. The same applies
+to the batchScan waiter, which passes `$remaining` into the region-error
+fallback.
+
+## PHP arrow functions capture by value once — a `fn() => array_shift($seq)` stub replays the first element
+
+An arrow function (`fn () => ...`) captures surrounding variables **by
+value at definition time**, and mutations to those captured copies do not
+persist between invocations. A sequence-mock such as
+`$grpc->method('callAsync')->willReturnCallback(fn () => $this->okFuture(array_shift($responses)))`
+therefore shifts the *same* original array on every call and returns the
+first response every time — the test silently mis-modelled the sequence
+(observed as `['k1','k1']` instead of `['k1','k2']` in the #293 continuation
+test). Use a full closure with `use (&$responses)` for per-call mutable
+state, exactly like the pre-existing fan-out tests. (PHPStan then types
+`array_shift()` as nullable, so keep a `?? new RawScanResponse()` default.)
+
+## The unbounded scan fan-out is windowed, and the batchScan sub-response region error is now guarded (#293)
+
+`scanSegmentsInParallel()` processes regions in windows of at most
+`options['maxConcurrency']` (default 16), dispatching each window with the
+*remaining* page budget, trimming in region order, and stopping as soon as
+the budget is spent. This bounds peak memory at `maxConcurrency × limit`
+rows instead of the region count × limit; the previous implementation built
+one callable per region (each with the full limit) and only trimmed after
+`BatchAsyncExecutor` had awaited every window. Any non-final region that
+shrinks after enumeration now falls back to the sequential retrying path
+instead of dropping `[freshEnd, segmentEnd)`, and the `batchScan()` waiter
+inspects `getRegionError()` on each sub-response and re-runs that sub-range
+through `executeScanForRegion()` (the concurrent send is awaited outside the
+per-range retry loop, so a region error there is neither retried nor
+invalidated otherwise).
+
