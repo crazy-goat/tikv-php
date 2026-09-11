@@ -1068,3 +1068,35 @@ Test seam: `TimestampOracle`'s constructor takes optional `$poolSize`,
 acceptance criterion counts `PdClientInterface::getTimestamp()` calls (not
 `Tso` RPCs) so it pins the caller contract independently of the pool.
 
+## Adding a method to `RegionCacheInterface` is how you keep old scan tests passing (#293)
+
+The #293 fix makes `RawKvScanner` resolve a scan's region chain from the
+region cache instead of calling `pdClient->scanRegions()` per page. The
+tempting implementation — walk the chain with the existing
+`RegionCacheInterface::getByKey()` — breaks the retry tests in
+`RawKvScannerTest`, which pin exact `getByKey` call sequences with
+`willReturnOnConsecutiveCalls($pre, $pre, null, null)`: an extra cache lookup
+during enumeration shifts the sequence and the test fails. Adding
+`getRegionsInRange(string $startKey, string $endKey): array` to the
+interface solves both problems at once: PHPUnit's auto-generated mock
+returns `[]` for an array-returning method, so every existing test's
+`resolveScanRegions()` takes the PD fallback and behaves exactly as before,
+while a real `RegionCache` (used by the new spy test) serves the chain
+locally. The trade-off is a BC break for third-party cache implementations
+(pre-1.0, noted in the CHANGELOG); the alternative was an
+`instanceof`-checked sub-interface, rejected as more machinery for the same
+effect.
+
+`RegionCache::getRegionsInRange()` must return `[]` — not a partial prefix —
+the moment the chain does not reach `$endKey` (gap, expired entry, or a
+non-advancing end key), otherwise a caller would silently scan only part of
+the requested range. Consequently the *first* page of a cold scan still
+costs one `ScanRegions` (which caches every region in the range), and only
+later pages are free. The unbounded fan-out (`scan(..., limit: 0)` over
+multiple regions) routes through `BatchAsyncExecutor` with
+`sendSubRangeScanAsync()`; that path does **not** run
+`RegionErrorHandler::check()` (the send is awaited outside the per-region
+retry loop), so the implementation inspects `getRegionError()` and falls
+back to the sequential retrying loop on any error — reads are idempotent, so
+discarding the partial page is safe.
+

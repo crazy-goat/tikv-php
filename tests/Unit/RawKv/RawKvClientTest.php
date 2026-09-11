@@ -13,6 +13,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
@@ -85,16 +86,27 @@ class RawKvClientTest extends TestCase
     /**
      * Future over a mocked gRPC call resolving with the given response.
      * Requires the grpc extension (a real \Grpc\Call mock drives it).
+     *
+     * @param list<string>|null $events When given, records a 'wait' entry each
+     *                                  time the future is awaited.
      */
-    private function okFuture(Message $response): GrpcFuture
+    private function okFuture(Message $response, ?array &$events = null): GrpcFuture
     {
         $this->requireGrpcExtension();
 
         $call = $this->createMock(\Grpc\Call::class);
-        $call->method('startBatch')->willReturn([
-            'status' => ['code' => 0, 'details' => 'OK'],
-            'message' => $response->serializeToString(),
-        ]);
+        $call->method('startBatch')->willReturnCallback(
+            function () use ($response, &$events): array {
+                if (is_array($events)) {
+                    $events[] = 'wait';
+                }
+
+                return [
+                    'status' => ['code' => 0, 'details' => 'OK'],
+                    'message' => $response->serializeToString(),
+                ];
+            },
+        );
 
         return new GrpcFuture($call, $response::class);
     }
@@ -1056,6 +1068,134 @@ class RawKvClientTest extends TestCase
     public function testBatchScanEmptyReturnsEmpty(): void
     {
         $this->assertSame([], $this->client->batchScan([], 10));
+    }
+
+    // ========================================================================
+    // scan() – unbounded multi-region fan-out (issue #293)
+    // ========================================================================
+
+    public function testUnboundedMultiRegionScanDispatchesEverySendBeforeAwaiting(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2]);
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        // The warm cache covers the whole range: no PD scanRegions() at all.
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair1 = new KvPair();
+        $pair1->setKey('k1');
+        $pair1->setValue('v1');
+        $pair2 = new KvPair();
+        $pair2->setKey('k2');
+        $pair2->setValue('v2');
+
+        $response1 = new RawScanResponse();
+        $response1->setKvs([$pair1]);
+        $response2 = new RawScanResponse();
+        $response2->setKvs([$pair2]);
+
+        /** @var list<string> $events */
+        $events = [];
+        $responses = [$response1, $response2];
+        $this->grpc->expects($this->exactly(2))->method('callAsync')->willReturnCallback(
+            function () use (&$responses, &$events): GrpcFuture {
+                $events[] = 'dispatch';
+
+                return $this->okFuture(array_shift($responses) ?? new RawScanResponse(), $events);
+            },
+        );
+
+        $result = $this->client->scan('a', 'z', 0, false);
+
+        $this->assertSame(['k1', 'k2'], array_column($result, 'key'));
+        // Both RawScan sends are issued (dispatch) before either response is
+        // awaited, and the results are concatenated in region order.
+        $this->assertSame(['dispatch', 'dispatch', 'wait', 'wait'], $events);
+    }
+
+    public function testUnboundedScanFallsBackToSequentialOnRegionError(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2]);
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+        $clean = new RawScanResponse();
+        $clean->setKvs([$pair]);
+
+        $error = new Error();
+        $error->setMessage('not leader');
+        $regionError = new RawScanResponse();
+        $regionError->setRegionError($error);
+
+        // The concurrent fan-out receives a region error; scan() must
+        // discard that page and re-run it through the sequential retrying
+        // path (which receives the clean response).
+        $asyncResponses = [$regionError, $clean];
+        $this->grpc->method('callAsync')->willReturnCallback(
+            fn(): GrpcFuture => $this->okFuture(array_shift($asyncResponses)),
+        );
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $address, string $service, string $method, Message $request) use ($pair): Message {
+                $response = new RawScanResponse();
+                /** @var RawScanRequest $request */
+                if ($request->getStartKey() === 'a') {
+                    $response->setKvs([$pair]);
+                }
+
+                return $response;
+            },
+        );
+
+        $result = $this->client->scan('a', 'z', 0, false);
+
+        $this->assertSame(['k1'], array_column($result, 'key'));
     }
 
     // ========================================================================

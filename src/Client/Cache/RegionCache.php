@@ -77,6 +77,40 @@ class RegionCache implements RegionCacheInterface
         return $this->resolveRegionInfo($entry);
     }
 
+    public function getRegionsInRange(string $startKey, string $endKey): array
+    {
+        $regions = [];
+        $cursor = $startKey;
+
+        while (true) {
+            $region = $this->getByKey($cursor);
+            if (!$region instanceof RegionInfo) {
+                // A gap (or an expired/cold start region): let the caller
+                // fall back to a single PD scanRegions() call.
+                return [];
+            }
+
+            $regions[] = $region;
+
+            if ($region->endKey === '') {
+                // Unbounded region covers any requested end key.
+                return $regions;
+            }
+
+            if ($endKey !== '' && strcmp($region->endKey, $endKey) >= 0) {
+                return $regions;
+            }
+
+            // Require strictly forward progress: a non-advancing end key
+            // means the cached layout is inconsistent, so defer to PD.
+            if (strcmp($region->endKey, $cursor) <= 0) {
+                return [];
+            }
+
+            $cursor = $region->endKey;
+        }
+    }
+
     public function put(RegionInfo $region): void
     {
         $this->removeById($region->regionId);

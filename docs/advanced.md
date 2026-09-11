@@ -466,7 +466,7 @@ foreach ($client->scanPrefixIterator('log:2024-01-', batchSize: 1000, keyOnly: t
 }
 ```
 
-The iterator fetches a page of up to `batchSize` rows (default `256`, bounds
+The iterator fetches a page of up to `batchSize` rows (default `1024`, bounds
 `1 <= batchSize <= 10240`) per underlying `scan()` call and continues from
 after the page's last key until the range is exhausted. `batchSize` is
 validated immediately; scan RPCs (and their `RegionException` / `GrpcException`

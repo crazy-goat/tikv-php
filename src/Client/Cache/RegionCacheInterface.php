@@ -14,6 +14,23 @@ interface RegionCacheInterface
     public function getByKey(string $key): ?RegionInfo;
 
     /**
+     * Return the contiguous chain of cached regions covering the half-open
+     * key range [startKey, endKey), in ascending startKey order.
+     *
+     * The chain starts at the region containing $startKey and is followed
+     * through each region's end key until a region covers $endKey (an empty
+     * end key means +infinity, matching {@see PdClientInterface::scanRegions()}).
+     *
+     * Returns an empty array when the cache does not hold the complete chain
+     * (a cold or partially warm cache, or a gap), so the caller falls back to
+     * PD. Scans use this to serve an entire page from the region cache
+     * without a PD scanRegions() round trip per page (issue #293).
+     *
+     * @return list<RegionInfo>
+     */
+    public function getRegionsInRange(string $startKey, string $endKey): array;
+
+    /**
      * Store a region in the cache.
      */
     public function put(RegionInfo $region): void;

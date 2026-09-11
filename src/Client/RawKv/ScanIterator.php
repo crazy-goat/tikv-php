@@ -40,7 +40,7 @@ final class ScanIterator implements Iterator
         callable $scanFn,
         private readonly string $startKey,
         private readonly string $endKey,
-        private readonly int $batchSize = 256,
+        private readonly int $batchSize = 1024,
         private readonly bool $keyOnly = false,
         private readonly string $columnFamily = '',
     ) {

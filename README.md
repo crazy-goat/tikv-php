@@ -57,7 +57,7 @@ $results = $client->scan('start', 'end', limit: 100);
 $results = $client->scanPrefix('user:');
 
 // Lazy scan iterators — constant memory, auto-paginating (page of
-// $batchSize rows at a time; batchSize must be 1..10240, default 256)
+// $batchSize rows at a time; batchSize must be 1..10240, default 1024)
 foreach ($client->scanPrefixIterator('user:', batchSize: 500) as $key => $value) {
     process($key, $value);
 }
