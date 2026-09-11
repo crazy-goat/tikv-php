@@ -8,7 +8,6 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
-use CrazyGoat\TiKV\Client\Codec\MemComparableCodec;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
@@ -112,16 +111,16 @@ class RegionInfoMapperTest extends TestCase
 
     public function testTxnCodecDecodesBoundariesIntoUserKeySpace(): void
     {
-        $mce = new MemComparableCodec();
-
         $epoch = new RegionEpoch();
         $epoch->setConfVer(1);
         $epoch->setVersion(1);
 
         $region = new Region();
         $region->setId(5);
-        $region->setStartKey($mce->encode('m'));
-        $region->setEndKey($mce->encode('z'));
+        // EncodeBytes("m") = 6d00000000000000f8,
+        // EncodeBytes("z") = 7a00000000000000f8.
+        $region->setStartKey((string) hex2bin('6d00000000000000f8'));
+        $region->setEndKey((string) hex2bin('7a00000000000000f8'));
         $region->setRegionEpoch($epoch);
 
         $info = RegionInfoMapper::fromProto($region, null, new CodecV1(Mode::Txn));

@@ -692,15 +692,12 @@ class PdClientTest extends TestCase
                 $this->anything(),
                 $this->anything(),
                 'GetRegion',
-                $this->callback(function (GetRegionRequest $req) use ($codec): bool {
+                $this->callback(function (GetRegionRequest $req): bool {
                     // TxnKV region lookups must query PD in the MCE-encoded
                     // key space (issue #415) — the raw user key would compare
                     // against encoded boundaries inconsistently after a split.
-                    $this->assertSame(
-                        "my-key\x00\x00",
-                        $req->getRegionKey(),
-                    );
-                    $this->assertSame($codec->encodeRegionKey('my-key'), $req->getRegionKey());
+                    // EncodeBytes("my-key") = 6d 79 2d 6b 65 79 00 00 fd.
+                    $this->assertSame('6d792d6b65790000fd', bin2hex($req->getRegionKey()));
                     return true;
                 }),
                 $this->anything(),
@@ -715,9 +712,12 @@ class PdClientTest extends TestCase
     {
         // PD reports region boundaries in the MCE-encoded space; the mapped
         // RegionInfo must carry the decoded user keys so RegionCache compares
-        // in user-key space (issue #415).
-        $output = new \CrazyGoat\TiKV\Client\Codec\MemComparableCodec();
-        $region = $this->makeRegion($output->encode('m'), $output->encode('z'));
+        // in user-key space (issue #415). EncodeBytes("m")/EncodeBytes("z")
+        // are 6d00000000000000f8 / 7a00000000000000f8.
+        $region = $this->makeRegion(
+            (string) hex2bin('6d00000000000000f8'),
+            (string) hex2bin('7a00000000000000f8'),
+        );
         $header = new ResponseHeader();
         $header->setClusterId(100);
         $response = new GetRegionResponse();
@@ -797,10 +797,11 @@ class PdClientTest extends TestCase
                 $this->anything(),
                 $this->anything(),
                 'ScanRegions',
-                $this->callback(function (\CrazyGoat\Proto\Pdpb\ScanRegionsRequest $req) use ($codec): bool {
-                    [$encodedStart, $encodedEnd] = $codec->encodeRange('start', 'end');
-                    $this->assertSame($encodedStart, $req->getStartKey());
-                    $this->assertSame($encodedEnd, $req->getEndKey());
+                $this->callback(function (\CrazyGoat\Proto\Pdpb\ScanRegionsRequest $req): bool {
+                    // EncodeBytes("start") = 7374617274000000fc,
+                    // EncodeBytes("end")   = 656e640000000000fa.
+                    $this->assertSame('7374617274000000fc', bin2hex($req->getStartKey()));
+                    $this->assertSame('656e640000000000fa', bin2hex($req->getEndKey()));
                     return true;
                 }),
                 $this->anything(),
@@ -813,8 +814,8 @@ class PdClientTest extends TestCase
 
     public function testScanRegionsDecodesBoundariesInTxnMode(): void
     {
-        $output = new \CrazyGoat\TiKV\Client\Codec\MemComparableCodec();
-        $region = $this->makeRegion($output->encode('m'), '');
+        // EncodeBytes("m") = 6d00000000000000f8.
+        $region = $this->makeRegion((string) hex2bin('6d00000000000000f8'), '');
         $header = new ResponseHeader();
         $header->setClusterId(100);
         $response = new \CrazyGoat\Proto\Pdpb\ScanRegionsResponse();
