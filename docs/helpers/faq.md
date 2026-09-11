@@ -1241,9 +1241,9 @@ Two lessons from the #269 (GRPC-10) review:
 
 1. **Doubled quotes in exception messages.** `KeyRedactor::redact()` already
    starts with `"` and, for short keys (up to 8 bytes), also ends with `"`:
-   `"6b6579" (5 bytes)` vs `"757365725f656d61... (28 bytes)`. A template that also
+   `"6b65795f61" (5 bytes)` vs `"757365725f656d61... (28 bytes)`. A template that also
    quotes the placeholder (`for key "%s"`) renders
-   `... for key ""757365725f656d61... (28 bytes)`. Pass the redacted value to an
+   `... for key ""757365725f656d61... (28 bytes)"`. Pass the redacted value to an
    *unquoted* `%s` (`for key %s`). Do not change `KeyRedactor`'s own output —
    log contexts store the value unwrapped and depend on the current shape.
 2. **Guard tests must scan the `sprintf()` argument list, not raw text.** The
