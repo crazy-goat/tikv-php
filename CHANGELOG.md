@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **[TXN-09]**: prewrite now fails closed on every `KeyError` variant. `TwoPhaseCommitter::handlePrewriteErrors()` previously handled only `locked`/`conflict`/`retryable`/`abort` and silently treated any other variant — notably `deadlock`, `already_exist`, `assertion_failed`, `primary_mismatch`, `txn_not_found` and `commit_ts_too_large` — as a successful prewrite, so `commit()` proceeded to `KvCommit` even though the prewrite had failed. A `deadlock` now raises `DeadlockException` carrying the deadlock key, key hash and lock timestamp (mirroring the pessimistic-lock path, now shared through `throwDeadlock()`), the remaining named variants raise `TransactionConflictException`, and any unrecognised variant raises a base `TiKvException` described via `KeyErrorDescriber`, so no response can be mistaken for success. (#214)
+
 ## [v0.5.0] - 2026-09-11
 
 ### Added

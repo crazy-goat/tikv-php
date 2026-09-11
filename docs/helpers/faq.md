@@ -1189,3 +1189,30 @@ implementing issue #415:
    (`scanRegions("\x00", "\x72")`), not over the whole keyspace. Region
    discovery and `SplitRegion` targeting go through the same `Mode::Txn`
    codec as the production client; the `split_key` stays a raw user key.
+
+## Prewrite `KeyError` handling must be exhaustive and fail-closed (TXN-09, issue #214)
+
+`KeyError` is a flat protobuf message whose variant fields are independently
+nullable (no `oneof` is involved); TiKV sets at most one variant field per
+response. The optional `debug_info` field (100) is a `kvrpcpb.DebugInfo`
+message that may accompany it. `getX() !== null` / `getX() !== ''` is how the
+variant is identified. (In `kvrpcpb.proto` the only `oneof` is
+`CompactError.error`; `CheckTxnStatusResponse.error` is a plain `KeyError`
+field.) The
+original `TwoPhaseCommitter::handlePrewriteErrors()` checked only `locked`,
+`conflict`, `retryable` and `abort`, so a `deadlock` (reachable on pessimistic
+prewrite) or `primary_mismatch`/`txn_not_found` payload fell off the end of the
+loop and prewrite was treated as successful — `commit()` then ran `KvCommit`
+against keys that held no lock. The handler now checks `deadlock` first (→
+`DeadlockException` carrying key/hash/lockTs, mirroring the pessimistic-lock
+path), maps `already_exist`/`assertion_failed`/`primary_mismatch`/
+`txn_not_found`/`commit_ts_too_large` to `TransactionConflictException`, and
+**ends each iteration with an unconditional `throw new TiKvException(...)`** —
+so a future/unknown variant can never be treated as success. Reuse
+`KeyErrorDescriber::describe()` for the fallback message, not
+`serializeToJsonString()`: the describer names the variant without emitting the
+raw lock key (redaction convention). Variants deliberately left to the
+fail-closed fallback today: `commit_ts_expired`, `txn_lock_not_found`. Add a
+regression test in `TransactionTest` that records the gRPC method sequence and
+asserts `['KvPrewrite']` — no `KvCommit` — for both the deadlock and the
+unrecognised-variant cases.

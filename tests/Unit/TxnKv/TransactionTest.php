@@ -1664,6 +1664,169 @@ class TransactionTest extends TestCase
         $this->assertSame(['KvPrewrite', 'KvCommit'], $methodSequence);
     }
 
+    /**
+     * Stub the region/PD dependencies and make KvPrewrite answer with a
+     * response containing the given failing KeyErrors, in order. KvCommit is
+     * stubbed so a test can prove it is never reached via the recorded method
+     * sequence.
+     *
+     * @param list<string> $methodSequence Collected RPC method names, by ref.
+     */
+    private function stubPrewriteError(array &$methodSequence, KeyError ...$keyErrors): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $prewriteResponse = new PrewriteResponse();
+        $prewriteResponse->setErrors($keyErrors);
+
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$methodSequence,
+                $prewriteResponse,
+            ): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+    }
+
+    /**
+     * Issue #214 (TXN-09): a prewrite KeyError carrying only `deadlock` used
+     * to fall through handlePrewriteErrors() and the transaction proceeded
+     * to KvCommit. It must raise DeadlockException carrying the deadlock
+     * key/hash instead, and no KvCommit may be sent.
+     */
+    public function testCommitPrewriteDeadlockThrowsAndSkipsCommit(): void
+    {
+        $deadlock = new Deadlock();
+        $deadlock->setDeadlockKeyHash(12345);
+        $deadlock->setDeadlockKey('blocking-key');
+        $deadlock->setLockTs(999);
+
+        $keyError = new KeyError();
+        $keyError->setDeadlock($deadlock);
+
+        $methodSequence = [];
+        $this->stubPrewriteError($methodSequence, $keyError);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected DeadlockException was not thrown');
+        } catch (DeadlockException $e) {
+            $this->assertSame('blocking-key', $e->getDeadlockKey());
+            $this->assertSame(12345, $e->getDeadlockKeyHash());
+            $this->assertSame(999, $e->getLockTs());
+            $this->assertSame('Deadlock detected during prewrite', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPrewrite'], $methodSequence);
+    }
+
+    /**
+     * Issue #214 (TXN-09): when a prewrite response carries several KeyErrors
+     * the first one wins — `handlePrewriteErrors()` throws on the first
+     * variant it recognises and never inspects the rest.
+     */
+    public function testCommitPrewriteMultipleErrorsThrowsFirstVariantAndSkipsCommit(): void
+    {
+        $deadlock = new Deadlock();
+        $deadlock->setDeadlockKey('first-key');
+        $deadlock->setDeadlockKeyHash(7);
+        $deadlock->setLockTs(11);
+
+        $first = new KeyError();
+        $first->setDeadlock($deadlock);
+
+        // A later, equally fatal variant that must not be the one reported.
+        $second = new KeyError();
+        $second->setAbort('second variant must not win');
+
+        $methodSequence = [];
+        $this->stubPrewriteError($methodSequence, $first, $second);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected DeadlockException was not thrown');
+        } catch (DeadlockException $e) {
+            $this->assertSame('first-key', $e->getDeadlockKey());
+            $this->assertSame(7, $e->getDeadlockKeyHash());
+            $this->assertSame(11, $e->getLockTs());
+        }
+
+        $this->assertSame(['KvPrewrite'], $methodSequence);
+    }
+
+    /**
+     * Issue #214 (TXN-09): an explicitly named prewrite variant that is not
+     * one of the kill-switch fields (here `already_exist`) must map to a
+     * typed TransactionConflictException, not fall through.
+     */
+    public function testCommitPrewriteAlreadyExistThrowsTransactionConflictAndSkipsCommit(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setAlreadyExist(new \CrazyGoat\Proto\Kvrpcpb\AlreadyExist());
+
+        $methodSequence = [];
+        $this->stubPrewriteError($methodSequence, $keyError);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('Prewrite failed: key already exists', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPrewrite'], $methodSequence);
+    }
+
+    /**
+     * Issue #214 (TXN-09): any KeyError variant not explicitly mapped (here
+     * `commit_ts_expired`) must fail closed with the base TiKvException and
+     * must never be treated as a successful prewrite.
+     */
+    public function testCommitPrewriteUnrecognisedVariantThrowsAndSkipsCommit(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setCommitTsExpired(new \CrazyGoat\Proto\Kvrpcpb\CommitTsExpired());
+
+        $methodSequence = [];
+        $this->stubPrewriteError($methodSequence, $keyError);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame('Prewrite failed: CommitTsExpired', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPrewrite'], $methodSequence);
+    }
+
     public function testSecondaryCommitFailureDoesNotFailCommittedTransaction(): void
     {
         // Issue #215 (TXN-10): once the primary region is committed the

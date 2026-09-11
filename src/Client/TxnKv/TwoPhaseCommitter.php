@@ -8,6 +8,7 @@ use CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
+use CrazyGoat\Proto\Kvrpcpb\Deadlock;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\Mutation;
 use CrazyGoat\Proto\Kvrpcpb\Op;
@@ -482,6 +483,11 @@ final readonly class TwoPhaseCommitter
     private function handlePrewriteErrors(iterable $errors): void
     {
         foreach ($errors as $keyError) {
+            $deadlock = $keyError->getDeadlock();
+            if ($deadlock !== null) {
+                $this->throwDeadlock($deadlock, 'Deadlock detected during prewrite');
+            }
+
             $locked = $keyError->getLocked();
             if ($locked !== null) {
                 $rawPrimary = $locked->getPrimaryLock();
@@ -510,7 +516,58 @@ final readonly class TwoPhaseCommitter
             if ($abort !== '') {
                 throw new TransactionConflictException($abort);
             }
+
+            // Named but previously unhandled variants (issue #214, TXN-09).
+            // Each maps to a definite, typed client outcome; the transaction
+            // must not proceed to commit keys whose prewrite failed.
+            if ($keyError->getAlreadyExist() !== null) {
+                throw new TransactionConflictException('Prewrite failed: key already exists');
+            }
+
+            if ($keyError->getAssertionFailed() !== null) {
+                throw new TransactionConflictException('Prewrite failed: assertion failed');
+            }
+
+            if ($keyError->getPrimaryMismatch() !== null) {
+                throw new TransactionConflictException('Prewrite failed: primary lock mismatch');
+            }
+
+            if ($keyError->getTxnNotFound() !== null) {
+                throw new TransactionConflictException('Prewrite failed: transaction not found');
+            }
+
+            if ($keyError->getCommitTsTooLarge() !== null) {
+                // Fail closed (issue #214): throwing is safer than the old
+                // silent success. A client-go-style max_commit_ts fallback
+                // that retries the 2PC with a bounded commit ts is out of
+                // scope here.
+                throw new TransactionConflictException('Prewrite failed: commit timestamp too large');
+            }
+
+            // Fail closed: an unrecognised variant must never be treated as a
+            // successful prewrite and fall through to the commit phase.
+            throw new TiKvException(
+                'Prewrite failed: ' . KeyErrorDescriber::describe($keyError),
+            );
         }
+    }
+
+    /**
+     * Throw the typed deadlock exception for a `KeyError.deadlock` payload.
+     *
+     * Shared by the prewrite and pessimistic-lock handlers so the deadlock
+     * key/hash/lockTs extraction lives in exactly one place. `$context` is the
+     * full exception message and preserves each call site's wording.
+     */
+    private function throwDeadlock(Deadlock $deadlock, string $context): never
+    {
+        throw new DeadlockException(
+            message: $context,
+            deadlockKey: $deadlock->getDeadlockKey() !== ''
+                ? $deadlock->getDeadlockKey() : null,
+            deadlockKeyHash: (int) $deadlock->getDeadlockKeyHash(),
+            lockTs: (int) $deadlock->getLockTs(),
+        );
     }
 
     // ---------------------------------------------------------------
@@ -994,13 +1051,7 @@ final readonly class TwoPhaseCommitter
                             foreach ($errors as $keyError) {
                                 $deadlock = $keyError->getDeadlock();
                                 if ($deadlock !== null) {
-                                    throw new DeadlockException(
-                                        message: 'Deadlock detected during pessimistic lock',
-                                        deadlockKey: $deadlock->getDeadlockKey() !== ''
-                                            ? $deadlock->getDeadlockKey() : null,
-                                        deadlockKeyHash: (int) $deadlock->getDeadlockKeyHash(),
-                                        lockTs: (int) $deadlock->getLockTs(),
-                                    );
+                                    $this->throwDeadlock($deadlock, 'Deadlock detected during pessimistic lock');
                                 }
 
                                 $locked = $keyError->getLocked();
