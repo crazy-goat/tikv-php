@@ -482,6 +482,17 @@ final readonly class TwoPhaseCommitter
     private function handlePrewriteErrors(iterable $errors): void
     {
         foreach ($errors as $keyError) {
+            $deadlock = $keyError->getDeadlock();
+            if ($deadlock !== null) {
+                throw new DeadlockException(
+                    message: 'Deadlock detected during prewrite',
+                    deadlockKey: $deadlock->getDeadlockKey() !== ''
+                        ? $deadlock->getDeadlockKey() : null,
+                    deadlockKeyHash: (int) $deadlock->getDeadlockKeyHash(),
+                    lockTs: (int) $deadlock->getLockTs(),
+                );
+            }
+
             $locked = $keyError->getLocked();
             if ($locked !== null) {
                 $rawPrimary = $locked->getPrimaryLock();
@@ -510,6 +521,35 @@ final readonly class TwoPhaseCommitter
             if ($abort !== '') {
                 throw new TransactionConflictException($abort);
             }
+
+            // Named but previously unhandled variants (issue #214, TXN-09).
+            // Each maps to a definite, typed client outcome; the transaction
+            // must not proceed to commit keys whose prewrite failed.
+            if ($keyError->getAlreadyExist() !== null) {
+                throw new TransactionConflictException('Prewrite failed: key already exists');
+            }
+
+            if ($keyError->getAssertionFailed() !== null) {
+                throw new TransactionConflictException('Prewrite failed: assertion failed');
+            }
+
+            if ($keyError->getPrimaryMismatch() !== null) {
+                throw new TransactionConflictException('Prewrite failed: primary lock mismatch');
+            }
+
+            if ($keyError->getTxnNotFound() !== null) {
+                throw new TransactionConflictException('Prewrite failed: transaction not found');
+            }
+
+            if ($keyError->getCommitTsTooLarge() !== null) {
+                throw new TransactionConflictException('Prewrite failed: commit timestamp too large');
+            }
+
+            // Fail closed: an unrecognised variant must never be treated as a
+            // successful prewrite and fall through to the commit phase.
+            throw new TiKvException(
+                'Prewrite failed: ' . KeyErrorDescriber::describe($keyError),
+            );
         }
     }
 
