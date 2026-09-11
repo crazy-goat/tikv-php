@@ -466,13 +466,23 @@ foreach ($client->scanPrefixIterator('log:2024-01-', batchSize: 1000, keyOnly: t
 }
 ```
 
-The iterator fetches a page of up to `batchSize` rows (default `256`, bounds
+The iterator fetches a page of up to `batchSize` rows (default `1024`, bounds
 `1 <= batchSize <= 10240`) per underlying `scan()` call and continues from
 after the page's last key until the range is exhausted. `batchSize` is
 validated immediately; scan RPCs (and their `RegionException` / `GrpcException`
 failures) happen lazily during iteration. The iterator is rewindable —
 `rewind()` re-scans from the original start key — and there is no reverse
 variant. Full semantics: [Iterating Large Ranges](operations.md#iterating-large-ranges).
+
+An unbounded `scan($start, $end, limit: 0)` (or `scanPrefix($prefix, limit: 0)`)
+spanning several regions fans its per-region reads out concurrently in windows
+of at most `options['maxConcurrency']` regions (default 16): each window is
+dispatched with the remaining page budget, awaited, trimmed in key order, and
+the next window is only sent while budget remains. Peak memory is therefore
+bounded by `maxConcurrency × limit` rows instead of the number of regions, and a
+region/transport error (or a region that split after enumeration) transparently
+falls back to the sequential retrying path. For very large ranges prefer
+`scanIterator()`, which keeps memory to a single page.
 
 If you need whole pages rather than row-by-row iteration (e.g. for a worker
 queue), iterate and buffer rows yourself instead of computing "next key"

@@ -124,6 +124,37 @@ class RegionCacheTest extends TestCase
         $this->assertSame($region, $cache->getByKey('zzz'));
     }
 
+    public function testGetRegionsInRangeReturnsContiguousChain(): void
+    {
+        $cache = new RegionCache();
+        $region1 = $this->makeRegion(1, 'a', 'm');
+        $region2 = $this->makeRegion(2, 'm', 't');
+        $region3 = $this->makeRegion(3, 't', '');
+        $cache->put($region1);
+        $cache->put($region2);
+        $cache->put($region3);
+
+        $this->assertSame([$region1, $region2], $cache->getRegionsInRange('a', 't'));
+        $this->assertSame([$region2, $region3], $cache->getRegionsInRange('m', 'z'));
+        $this->assertSame([$region3], $cache->getRegionsInRange('t', ''));
+    }
+
+    public function testGetRegionsInRangeReturnsEmptyWhenChainIsIncomplete(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->makeRegion(1, 'a', 'm'));
+
+        // The chain does not reach 'z': only [a, m) is cached.
+        $this->assertSame([], $cache->getRegionsInRange('a', 'z'));
+        // The start key is outside every cached region.
+        $this->assertSame([], $cache->getRegionsInRange('x', 'z'));
+    }
+
+    public function testGetRegionsInRangeReturnsEmptyOnEmptyCache(): void
+    {
+        $this->assertSame([], (new RegionCache())->getRegionsInRange('a', 'z'));
+    }
+
     public function testMultipleRegionsBinarySearch(): void
     {
         $cache = new RegionCache();

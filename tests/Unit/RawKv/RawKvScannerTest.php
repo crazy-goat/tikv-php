@@ -11,6 +11,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
@@ -1488,6 +1489,115 @@ class RawKvScannerTest extends TestCase
         } finally {
             $this->assertSame(RetryExecutor::DEFAULT_MAX_ATTEMPTS, $callCount);
         }
+    }
+
+    // ========================================================================
+    // scanIterator() – region routing (issue #293)
+    //
+    // Paginated scans call scan() once per page. Before this fix every page
+    // began with an unconditional PD scanRegions(); on a warm region cache
+    // the chain can be walked locally, so PD is only consulted when the
+    // cached chain is incomplete.
+    // ========================================================================
+
+    public function testScanIteratorServesPagesFromWarmCacheWithoutPerPageScanRegions(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->defaultRegion('a', ''));
+
+        $scanner = new RawKvScanner(
+            $this->pdClient,
+            $this->grpc,
+            new RegionResolver($this->pdClient, $cache),
+            new TimeoutConfig(),
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $cache,
+            logger: new NullLogger(),
+        );
+
+        // A fully warm cache must never call PD.
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pageSize = 256;
+        $pageCount = 8;
+        $pagesServed = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function () use (&$pagesServed, $pageSize, $pageCount): Message {
+                $response = new RawScanResponse();
+                if ($pagesServed >= $pageCount) {
+                    return $response;
+                }
+
+                $pairs = [];
+                for ($i = 0; $i < $pageSize; $i++) {
+                    $pair = new KvPair();
+                    $pair->setKey(sprintf('key-%05d', $pagesServed * $pageSize + $i));
+                    $pair->setValue('value');
+                    $pairs[] = $pair;
+                }
+                $pagesServed++;
+
+                $response->setKvs($pairs);
+
+                return $response;
+            },
+        );
+
+        $iterator = $scanner->scanIterator('a', 'z', $pageSize, false);
+
+        $seen = 0;
+        foreach ($iterator as $_) {
+            $seen++;
+        }
+
+        $this->assertSame($pageCount * $pageSize, $seen);
+        $this->assertSame($pageCount, $pagesServed);
+    }
+
+    public function testReverseScanServesFromWarmCacheWithoutScanRegions(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->defaultRegion('a', 'm', regionId: 1));
+        $cache->put($this->defaultRegion('m', '', regionId: 2));
+
+        $scanner = new RawKvScanner(
+            $this->pdClient,
+            $this->grpc,
+            new RegionResolver($this->pdClient, $cache),
+            new TimeoutConfig(),
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $cache,
+            logger: new NullLogger(),
+        );
+
+        // reverseScan() routes through the region cache too (issue #293):
+        // a warm chain means no PD ScanRegions call.
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pairY = new KvPair();
+        $pairY->setKey('key_y');
+        $pairY->setValue('val_y');
+
+        $pairL = new KvPair();
+        $pairL->setKey('key_l');
+        $pairL->setValue('val_l');
+
+        // The upper region [m, +inf) is scanned first in reverse order.
+        $upper = new RawScanResponse();
+        $upper->setKvs([$pairY]);
+        $lower = new RawScanResponse();
+        $lower->setKvs([$pairL]);
+
+        $this->grpc->method('call')
+            ->willReturnOnConsecutiveCalls($upper, $lower);
+
+        $result = $scanner->reverseScan('z', 'a', 100, false);
+
+        $this->assertSame(['key_y', 'key_l'], array_column($result, 'key'));
     }
 
     private function responseWithRegionError(Error $error): RawScanResponse

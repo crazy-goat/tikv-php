@@ -373,7 +373,7 @@ array at once. To read a range larger than that — or to keep memory flat at al
 — use the built-in **lazy scan iterator** instead of paging manually:
 
 ```php
-// scanIterator(string $startKey, string $endKey, int $batchSize = 256, bool $keyOnly = false): ScanIterator
+// scanIterator(string $startKey, string $endKey, int $batchSize = 1024, bool $keyOnly = false): ScanIterator
 // Constant memory: one page of $batchSize rows is held at a time.
 foreach ($client->scanPrefixIterator('user:', batchSize: 500) as $key => $value) {
     process($key, $value);
@@ -385,7 +385,7 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 ```
 
 ```php
-// scanPrefixIterator(string $prefix, int $batchSize = 256, bool $keyOnly = false): ScanIterator
+// scanPrefixIterator(string $prefix, int $batchSize = 1024, bool $keyOnly = false): ScanIterator
 // End key computed automatically (same prefix-end logic as scanPrefix()).
 foreach ($client->scanPrefixIterator('session:') as $key => $value) {
     expire($key, $value);
@@ -396,8 +396,8 @@ Both methods return a `CrazyGoat\TiKV\Client\RawKv\ScanIterator` that
 implements PHP's `Iterator` (so it works directly in `foreach`) and behaves as
 follows:
 
-- **Signatures** — `scanIterator($startKey, $endKey, $batchSize = 256, $keyOnly = false)`
-  and `scanPrefixIterator($prefix, $batchSize = 256, $keyOnly = false)`. The
+- **Signatures** — `scanIterator($startKey, $endKey, $batchSize = 1024, $keyOnly = false)`
+  and `scanPrefixIterator($prefix, $batchSize = 1024, $keyOnly = false)`. The
   range is `[startKey, endKey)` (empty `endKey` = unbounded); the prefix
   variant derives the end key via the same prefix-end calculation as
   `scanPrefix()`.
@@ -405,6 +405,9 @@ follows:
   `scan()` call). `batchSize` must satisfy `1 <= batchSize <= 10240`; out of
   range it throws `InvalidArgumentException` immediately when the iterator is
   created. Larger pages mean fewer RPCs; only one page is ever held in memory.
+  Region routing is served from the region cache, so after the first page a
+  page does not issue an extra PD `ScanRegions` request; PD is only consulted
+  when the cached region chain is incomplete.
 - **Continuation** — after consuming a page, the next fetch starts after the
   page's last key (`lastKey . "\x00"`), the same continuation rule as manual
   pagination. The scan is exhausted when a page returns fewer than `batchSize`

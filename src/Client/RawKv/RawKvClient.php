@@ -730,7 +730,7 @@ final class RawKvClient
     public function scanIterator(
         string $startKey,
         string $endKey,
-        int $batchSize = 256,
+        int $batchSize = 1024,
         bool $keyOnly = false,
     ): ScanIterator {
         $this->ensureOpen();
@@ -741,7 +741,7 @@ final class RawKvClient
     /**
      * @throws ClientClosedException
      */
-    public function scanPrefixIterator(string $prefix, int $batchSize = 256, bool $keyOnly = false): ScanIterator
+    public function scanPrefixIterator(string $prefix, int $batchSize = 1024, bool $keyOnly = false): ScanIterator
     {
         $this->ensureOpen();
 

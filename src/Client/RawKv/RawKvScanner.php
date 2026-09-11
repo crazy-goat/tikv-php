@@ -12,9 +12,11 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
@@ -51,39 +53,28 @@ final readonly class RawKvScanner
      */
     public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
     {
+        // The caller asked for an unbounded scan (limit 0) — remember that
+        // before normalisation, because only an unbounded page may fan its
+        // per-region scans out concurrently (issue #293).
+        $unbounded = $limit === 0;
         $limit = $this->validateScanLimit($limit);
         $executor = $this->createRetryExecutor();
 
-        $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
-        foreach ($regions as $region) {
-            $this->regionCache->put($region);
-        }
-        $results = [];
-        $remaining = $limit;
+        $regions = $this->resolveScanRegions($startKey, $endKey);
 
         $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
-            $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
-            $regionResults = $this->executeScanForRegion(
-                $executor,
-                $scanStart,
-                $scanEnd,
-                $regionLimit,
-                $keyOnly,
-                false,
-                $columnFamily,
-            );
-            array_push($results, ...$regionResults);
+        /** @var list<array{RegionInfo, string, string}> $segments */
+        $segments = iterator_to_array($clipper->clipForward($regions, $startKey, $endKey), false);
 
-            if ($remaining > 0) {
-                $remaining -= count($regionResults);
-                if ($remaining <= 0) {
-                    break;
-                }
-            }
+        // Issue #293: an unbounded page spanning several regions fans its
+        // RawScan sends out concurrently in bounded windows (see
+        // scanSegmentsInParallel()). The region ranges are disjoint, so
+        // concatenating the responses in region order restores key order.
+        if ($unbounded && count($segments) > 1) {
+            return $this->scanSegmentsInParallel($executor, $segments, $endKey, $limit, $keyOnly, $columnFamily);
         }
 
-        return $results;
+        return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
     }
 
     /**
@@ -99,11 +90,9 @@ final readonly class RawKvScanner
         $limit = $this->validateScanLimit($limit);
         $executor = $this->createRetryExecutor();
 
-        $regions = $this->pdClient->scanRegions($endKey, $startKey, 0);
-        $regions = array_reverse($regions);
-        foreach ($regions as $region) {
-            $this->regionCache->put($region);
-        }
+        // The wire range is [endKey, startKey); enumerate it through the
+        // region cache like the forward scan, then walk it in reverse.
+        $regions = array_reverse($this->resolveScanRegions($endKey, $startKey));
 
         $results = [];
         $remaining = $limit;
@@ -142,15 +131,231 @@ final readonly class RawKvScanner
     }
 
     /**
+     * Enumerate the regions covering the forward key range [startKey, endKey).
+     *
+     * The region cache is consulted first: when it already holds the complete
+     * chain the range is served locally, so a paginated scan issues no PD RPC
+     * per page (issue #293). Only an incomplete chain — a cold or partially
+     * warm cache, or a gap — falls back to a single PD scanRegions() call
+     * whose result is then cached.
+     *
+     * @return list<RegionInfo>
+     */
+    private function resolveScanRegions(string $startKey, string $endKey): array
+    {
+        $cached = $this->regionCache->getRegionsInRange($startKey, $endKey);
+        if ($cached !== []) {
+            return $cached;
+        }
+
+        $regions = array_values($this->pdClient->scanRegions($startKey, $endKey, 0));
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
+
+        return $regions;
+    }
+
+    /**
+     * Scan the given clipped sub-ranges one after another, subtracting each
+     * region's yield from the remaining limit.
+     *
+     * @param list<array{RegionInfo, string, string}> $segments
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function scanSegmentsSequentially(
+        RetryExecutor $executor,
+        array $segments,
+        int $limit,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
+        $results = [];
+        $remaining = $limit;
+
+        foreach ($segments as [, $scanStart, $scanEnd]) {
+            $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
+            $regionResults = $this->executeScanForRegion(
+                $executor,
+                $scanStart,
+                $scanEnd,
+                $regionLimit,
+                $keyOnly,
+                false,
+                $columnFamily,
+            );
+            array_push($results, ...$regionResults);
+
+            if ($remaining > 0) {
+                $remaining -= count($regionResults);
+                if ($remaining <= 0) {
+                    break;
+                }
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Scan the clipped regions of an unbounded page concurrently, in bounded
+     * windows of at most {@see self::$maxConcurrency} regions (issue #293).
+     *
+     * Within a window every region's RawScan send is issued before any
+     * response is awaited, so the regions' server-side latencies overlap;
+     * the window's responses are concatenated in region order and charged
+     * against the page budget. A further window is never dispatched once the
+     * budget is spent (the loop is gated on the remaining budget) and every
+     * region is given the *remaining* budget, so the fan-out holds at most
+     * `maxConcurrency x limit` rows. Dispatch is still windowed by
+     * {@see BatchAsyncExecutor}, so the previous unbounded "every region
+     * with the full limit" behaviour is gone. Region ranges are disjoint, so
+     * restoring the order after the fact is lossless.
+     *
+     * Region and transport errors are not retried inside a window (the sends
+     * are awaited outside a per-region retry loop): the whole page falls back
+     * to {@see self::scanSegmentsSequentially()} — which re-resolves and
+     * retries properly — on any failure, on a response that is not a
+     * {@see RawScanResponse}, or on a non-final region that shrank after
+     * enumeration (which would leave a hole before the next segment). Reads
+     * are idempotent, so discarding a partial concurrent result is safe.
+     *
+     * @param list<array{RegionInfo, string, string}> $segments
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function scanSegmentsInParallel(
+        RetryExecutor $executor,
+        array $segments,
+        string $endKey,
+        int $limit,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
+        $results = [];
+        $remaining = $limit;
+        $segmentCount = count($segments);
+        $lastIndex = -1;
+        $lastFreshEnd = '';
+
+        for ($offset = 0; $offset < $segmentCount && $remaining > 0; $offset += $this->maxConcurrency) {
+            /** @var array<int, array{RegionInfo, string, string}> $window */
+            $window = array_slice($segments, $offset, $this->maxConcurrency, true);
+
+            /** @var array<int, string> $freshEnds */
+            $freshEnds = [];
+            $calls = [];
+            foreach ($window as $index => [, $scanStart, $scanEnd]) {
+                $freshEnds[$index] = '';
+                $calls[$index] = function () use (
+                    $executor,
+                    $scanStart,
+                    $scanEnd,
+                    $remaining,
+                    $keyOnly,
+                    $columnFamily,
+                    &$freshEnds,
+                    $index,
+                ): CheckedGrpcFuture {
+                    return $this->sendSubRangeScanAsync(
+                        $executor,
+                        $scanStart,
+                        $scanEnd,
+                        $remaining,
+                        $keyOnly,
+                        $columnFamily,
+                        false,
+                        $freshEnds[$index],
+                    );
+                };
+            }
+
+            try {
+                $responses = $this->createBatchExecutor()->executeParallelCapped($calls, $this->maxConcurrency);
+            } catch (TiKvException) {
+                return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+            }
+
+            ksort($responses);
+
+            foreach ($responses as $index => $response) {
+                if (!$response instanceof RawScanResponse || $response->getRegionError() !== null) {
+                    return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+                }
+
+                $freshEnd = $freshEnds[$index] ?? '';
+                $segmentEnd = $segments[$index][2];
+
+                // A non-final region that shrank after enumeration (split)
+                // leaves a hole [freshEnd, segmentEnd): the next dispatched
+                // segment starts at segmentEnd, not at the fresh end key.
+                // Fall back to the sequential path, which re-resolves the
+                // region and continues past the split. The final segment is
+                // handled by the continuation below.
+                if (
+                    $index !== $segmentCount - 1
+                    && $freshEnd !== ''
+                    && strcmp($freshEnd, $segmentEnd) < 0
+                ) {
+                    return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+                }
+
+                $batch = $this->parseScanPairs($response, $keyOnly);
+                array_push($results, ...$batch);
+                $remaining -= count($batch);
+                $lastIndex = $index;
+                $lastFreshEnd = $freshEnd;
+
+                if ($remaining <= 0) {
+                    break 2;
+                }
+            }
+        }
+
+        // Rare split-after-enumeration of the final region: it shrank, so
+        // continue from its fresh end key instead of dropping the remainder.
+        // Only when the final segment was actually consumed and the budget is
+        // not spent; passing the real remaining budget (never 0, which the
+        // downstream executeScanForRegion() would read as "unbounded") bounds
+        // the continuation wire read.
+        if (
+            $lastIndex === $segmentCount - 1
+            && $remaining > 0
+            && $lastFreshEnd !== ''
+            && strcmp($lastFreshEnd, $segments[$lastIndex][1]) > 0
+            && ($endKey === '' || strcmp($lastFreshEnd, $endKey) < 0)
+        ) {
+            array_push(
+                $results,
+                ...$this->executeScanForRegion(
+                    $executor,
+                    $lastFreshEnd,
+                    $endKey,
+                    $remaining,
+                    $keyOnly,
+                    false,
+                    $columnFamily,
+                ),
+            );
+        }
+
+        if (count($results) > $limit) {
+            return array_slice($results, 0, $limit);
+        }
+
+        return $results;
+    }
+
+    /**
      * Scan multiple ranges concurrently.
      *
      * Each range's first RawScan send is issued at the wire layer before any
      * wait begins, so the ranges' server-side latencies overlap instead of
      * accumulating serially (issue #295). Ranges whose region enumeration
-     * yields more than one sub-range fan out all of those sends too; a range
-     * that comes up short after the waits (a region split after enumeration)
-     * falls back to the sequential continuation from scan() so no part of
-     * the range is dropped (issue #267 semantics).
+     * yields more than one sub-range fan out all of those sends too; after
+     * the waits, a sub-range whose region returned a region error or shrank
+     * after enumeration is re-run through the sequential retrying path, and
+     * a split of the final sub-range continues from its fresh end key, so no
+     * part of the range is dropped (issue #267 semantics).
      *
      * At most {@see self::$maxConcurrency} requests are in flight at any
      * moment, and the returned outer array preserves input range order.
@@ -306,7 +511,7 @@ final readonly class RawKvScanner
                 // Re-clip the sub-range against the freshly resolved region:
                 // after a split the fresh region is smaller, and TiKV rejects
                 // ranges that cross region boundaries.
-                $wireEndKey = $freshEndKey !== '' && ($endKey === '' || $freshEndKey < $endKey)
+                $wireEndKey = $freshEndKey !== '' && ($endKey === '' || strcmp($freshEndKey, $endKey) < 0)
                     ? $freshEndKey
                     : $endKey;
 
@@ -371,8 +576,8 @@ final readonly class RawKvScanner
             // advanced; otherwise the whole sub-range was covered.
             if (
                 $freshEndKey === ''
-                || $freshEndKey <= $cursorStart
-                || ($endKey !== '' && $freshEndKey >= $endKey)
+                || strcmp($freshEndKey, $cursorStart) <= 0
+                || ($endKey !== '' && strcmp($freshEndKey, $endKey) >= 0)
             ) {
                 break;
             }
@@ -431,7 +636,7 @@ final readonly class RawKvScanner
             // After a split the fresh region is smaller: clip the wire
             // start (upper) key down to the fresh region's end.
             $wireStartKey = $startKey;
-            if ($freshEndKey !== '' && $freshEndKey < $wireStartKey) {
+            if ($freshEndKey !== '' && strcmp($freshEndKey, $wireStartKey) < 0) {
                 $wireStartKey = $freshEndKey;
             }
 
@@ -483,7 +688,7 @@ final readonly class RawKvScanner
         // remainder [freshEndKey, startKey) belongs BEFORE this batch in the
         // reverse result order: scan it first, then trim the batch to the
         // remaining limit.
-        if ($freshEndKey === '' || $freshEndKey >= $startKey) {
+        if ($freshEndKey === '' || strcmp($freshEndKey, $startKey) >= 0) {
             return $batch;
         }
 
@@ -508,8 +713,10 @@ final readonly class RawKvScanner
      * issue one RawScan send per enumerated sub-range (all before any wait),
      * and return an un-waited future whose waiter concatenates the segment
      * responses in key order, trims to the limit, and falls back to the
-     * sequential continuation when the segments under-deliver (split after
-     * enumeration).
+     * sequential retrying path for any sub-range whose region reported an
+     * error or shrank after enumeration (a non-final shrunken region would
+     * otherwise leave a hole before the next segment), plus a continuation
+     * when the final sub-range under-delivers past its fresh end key.
      *
      * @return CheckedGrpcFuture resolving to array<array{key: string, value: ?string}>
      */
@@ -524,10 +731,7 @@ final readonly class RawKvScanner
     ): CheckedGrpcFuture {
         // Enumerate regions up-front (dispatch phase) so the cache is warm
         // for every sub-range send; this mirrors scan()'s outer loop.
-        $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
-        foreach ($regions as $region) {
-            $this->regionCache->put($region);
-        }
+        $regions = $this->resolveScanRegions($startKey, $endKey);
 
         $segments = [];
         $freshEnds = [];
@@ -557,6 +761,7 @@ final readonly class RawKvScanner
             function () use ($executor, $segments, $freshEnds, $endKey, $limit, $keyOnly, $columnFamily): array {
                 $results = [];
                 $remaining = $limit === 0 ? PHP_INT_MAX : $limit;
+                $segmentCount = count($segments);
 
                 $lastIndex = -1;
                 foreach ($segments as $index => $segment) {
@@ -567,7 +772,41 @@ final readonly class RawKvScanner
                     );
                     assert($response instanceof RawScanResponse);
 
-                    $batch = $this->parseScanPairs($response, $keyOnly);
+                    // A non-final region that shrank after enumeration
+                    // (split) leaves a hole [freshEnd, segmentEnd): the next
+                    // dispatched segment starts at segmentEnd, not at the
+                    // fresh end key, so the keys in between would be dropped.
+                    $freshEnd = $freshEnds[$index] ?? '';
+                    $shrank = $index !== $segmentCount - 1
+                        && $freshEnd !== ''
+                        && strcmp($freshEnd, $segment['end']) < 0;
+
+                    if ($response->getRegionError() !== null || $shrank) {
+                        // The region error or the shrink means the un-awaited
+                        // send cannot be trusted to cover the sub-range, and
+                        // batchScan awaits outside any per-range retry loop.
+                        // Re-run the whole sub-range through the retrying
+                        // sequential path instead of silently returning a
+                        // partial result (issue #293; the unbounded fan-out
+                        // guards the shrink the same way).
+                        // executeScanForRegion() already continues past a
+                        // split inside the segment, so clear the recorded
+                        // fresh end to keep the outer continuation below from
+                        // re-scanning the same keys.
+                        $freshEnds[$index] = '';
+                        $batch = $this->executeScanForRegion(
+                            $executor,
+                            $segment['start'],
+                            $segment['end'],
+                            $remaining === PHP_INT_MAX ? 0 : $remaining,
+                            $keyOnly,
+                            false,
+                            $columnFamily,
+                        );
+                    } else {
+                        $batch = $this->parseScanPairs($response, $keyOnly);
+                    }
+
                     array_push($results, ...$batch);
                     $remaining -= count($batch);
                     $lastIndex = $index;
@@ -580,7 +819,7 @@ final readonly class RawKvScanner
                 // Sequential fallback for the rare split-after-enumeration
                 // case: the fresh end key of the last consumed segment still
                 // sits inside the requested range, so continue from there.
-                if ($remaining > 0 && $lastIndex === count($segments) - 1) {
+                if ($remaining > 0 && $lastIndex === $segmentCount - 1) {
                     $cursorStart = $freshEnds[$lastIndex];
                     $segmentStart = $segments[$lastIndex]['start'];
                     // The cursor must have advanced past the segment start
@@ -588,8 +827,8 @@ final readonly class RawKvScanner
                     // whole sub-range was covered by the dispatched segments.
                     if (
                         $cursorStart !== ''
-                        && $cursorStart > $segmentStart
-                        && ($endKey === '' || $cursorStart < $endKey)
+                        && strcmp($cursorStart, $segmentStart) > 0
+                        && ($endKey === '' || strcmp($cursorStart, $endKey) < 0)
                     ) {
                         $rest = $this->executeScanForRegion(
                             $executor,
@@ -665,7 +904,7 @@ final readonly class RawKvScanner
                 // Clip the wire start (upper) key down to the fresh region's
                 // end after a split; the wire reads [endKey, startKey).
                 $wireStartKey = $startKey;
-                if ($freshEndKey !== '' && $freshEndKey < $wireStartKey) {
+                if ($freshEndKey !== '' && strcmp($freshEndKey, $wireStartKey) < 0) {
                     $wireStartKey = $freshEndKey;
                 }
                 $request = new RawScanRequest();
@@ -678,7 +917,7 @@ final readonly class RawKvScanner
             } else {
                 // Re-clip against the freshly resolved region: TiKV rejects
                 // ranges that cross region boundaries.
-                $wireEndKey = $freshEndKey !== '' && ($endKey === '' || $freshEndKey < $endKey)
+                $wireEndKey = $freshEndKey !== '' && ($endKey === '' || strcmp($freshEndKey, $endKey) < 0)
                     ? $freshEndKey
                     : $endKey;
                 $request = new RawScanRequest();
