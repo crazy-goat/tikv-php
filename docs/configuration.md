@@ -139,7 +139,10 @@ Two additional APIs reduce PD traffic where that is safe and explicit:
 - `getTimestampBatch(int $count)` requests up to `$count` timestamps in
   a single `Tso` RPC (`TsoRequest.count`) and hands them out in order
   (consecutive values; the 18-bit logical counter wraps into the next
-  physical millisecond correctly). PD may grant fewer timestamps than
+  physical millisecond correctly). `$count` must be `>= 1` and
+  `<= 1000` (`TimestampOracle::MAX_TIMESTAMP_POOL_SIZE`, the same cap as
+  `tsoPoolSize`); a count outside that range throws
+  `InvalidArgumentException`. PD may grant fewer timestamps than
   requested; the returned list never exceeds the grant. An explicit batch
   discards the pool (it advances PD beyond the pooled range).
 - `getLowResolutionTimestamp()` returns a timestamp that is at most

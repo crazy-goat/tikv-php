@@ -93,11 +93,13 @@ final class TxnKvClient
      * `getTimestamp()` hands out pooled values and refills when the pool is
      * exhausted, so N calls cost roughly N / poolSize round trips instead
      * of N. Default: 64 (see Connection\TimestampOracle); 1 disables
-     * pooling (one `Tso` RPC per call). Must be >= 1 and <= 1000. Accepted
-     * on the shared connection factory (`ConnectionFactory::create()`,
-     * reached via both `RawKvClient::create()` and `TxnKvClient::create()`),
-     * but it only affects transaction timestamp consumers (TxnKv) — RawKV
-     * has no transaction timestamp.
+     * pooling (one `Tso` RPC per call). Must be >= 1 and
+     * <= {@see \CrazyGoat\TiKV\Client\Connection\TimestampOracle::MAX_TIMESTAMP_POOL_SIZE}
+     * (1000). Accepted on the shared connection factory
+     * (`ConnectionFactory::create()`, reached via both
+     * `RawKvClient::create()` and `TxnKvClient::create()`), but it only
+     * affects transaction timestamp consumers (TxnKv) — RawKV has no
+     * transaction timestamp.
      */
     public const OPT_TSO_POOL_SIZE = 'tsoPoolSize';
 

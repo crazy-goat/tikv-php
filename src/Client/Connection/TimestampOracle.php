@@ -359,10 +359,10 @@ final class TimestampOracle
      * (issue #420, GAP-06 low-resolution cache).
      *
      * With no staleness bound configured (default) this is equivalent to
-     * a fresh {@see getTimestampBatch()} call: every call performs a fresh
-     * TSO RPC. With a bound set, repeated calls within the bound reuse the
-     * cached timestamp and save the PD round trip — suitable for
-     * staleness-tolerant consumers such as lock resolution
+     * a single fresh TSO RPC (`requestTimestampRange(1)`): every call
+     * performs a fresh TSO RPC. With a bound set, repeated calls within
+     * the bound reuse the cached timestamp and save the PD round trip —
+     * suitable for staleness-tolerant consumers such as lock resolution
      * (`CheckTxnStatus.current_ts`), never for start/commit timestamps.
      *
      * This path deliberately bypasses the pooled `getTimestamp()` (it uses
