@@ -1088,6 +1088,30 @@ final readonly class TwoPhaseCommitter
                                         'Write conflict during pessimistic lock',
                                     );
                                 }
+
+                                $retryable = $keyError->getRetryable();
+                                if ($retryable !== '') {
+                                    throw new TransactionConflictException(
+                                        'Pessimistic lock failed: retryable: ' . $retryable,
+                                    );
+                                }
+
+                                $abort = $keyError->getAbort();
+                                if ($abort !== '') {
+                                    throw new TransactionConflictException(
+                                        'Pessimistic lock failed: abort: ' . $abort,
+                                    );
+                                }
+
+                                // Fail closed (issue #454): a KeyError variant
+                                // other than deadlock/locked/conflict must never
+                                // leave this loop as if every lock was acquired,
+                                // or the transaction would proceed to prewrite
+                                // keys it does not hold a lock on. Mirrors the
+                                // #214 handling of unrecognised prewrite variants.
+                                throw new TiKvException(
+                                    'Pessimistic lock failed: ' . KeyErrorDescriber::describe($keyError),
+                                );
                             }
                         }
                     }

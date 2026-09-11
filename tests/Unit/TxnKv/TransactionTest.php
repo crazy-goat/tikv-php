@@ -1169,6 +1169,113 @@ class TransactionTest extends TestCase
         $txn->commit();
     }
 
+    /**
+     * Issue #454 (TXN-25): a KvPessimisticLock response carrying a KeyError
+     * variant that is neither deadlock, locked nor conflict (here
+     * `commit_ts_expired`) used to fall through the error loop with no
+     * exception, so the batch was treated as fully locked and the
+     * transaction proceeded to prewrite keys it did not hold a lock on.
+     * It must fail closed with a typed exception and never issue a
+     * KvPrewrite or KvCommit.
+     */
+    public function testCommitPessimisticLockUnrecognisedVariantThrowsAndSkipsPrewrite(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $keyError = new KeyError();
+        $keyError->setCommitTsExpired(new \CrazyGoat\Proto\Kvrpcpb\CommitTsExpired());
+
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors([$keyError]);
+
+        $methodSequence = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$methodSequence,
+                $lockResponse
+): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame('Pessimistic lock failed: CommitTsExpired', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPessimisticLock'], $methodSequence);
+    }
+
+    /**
+     * Issue #454 (TXN-25): `retryable` is a named variant that previously
+     * fell through the pessimistic-lock error loop as success. It must map to
+     * a typed TransactionConflictException and abort before prewrite, matching
+     * the prewrite/rollback handling of the same variant.
+     */
+    public function testCommitPessimisticLockRetryableThrowsAndSkipsPrewrite(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $keyError = new KeyError();
+        $keyError->setRetryable('optimistic lock not found');
+
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors([$keyError]);
+
+        $methodSequence = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$methodSequence,
+                $lockResponse
+): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('Pessimistic lock failed: retryable: optimistic lock not found', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPessimisticLock'], $methodSequence);
+    }
+
     public function testCommitPessimisticLockDeadlockExceptionCarriesKeyAndHash(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);

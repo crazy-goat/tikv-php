@@ -1,0 +1,103 @@
+# EdD — konfiguracja dla crazy-goat/tikv-php (pierwszy realny przebieg POC).
+#
+# Odpalenie (z katalogu edd):
+#   go run ./cmd/edd \
+#     -config ~/work/tikv-php/edd.config.yaml \
+#     -repo   ~/work/tikv-php \
+#     -worktrees ~/work/tikv-php/.worktrees \
+#     -gh-repo crazy-goat/tikv-php \
+#     -base master \
+#     -addr :8080
+#
+# Wartości poniżej są dostrojone do tego repo (labelki, milestone'y, CI,
+# skrypt priorytetyzacji), nie skopiowane z przykładu.
+
+edd:
+  # POC: jedno issue naraz. Chcemy obejrzeć cały przebieg, nie przepustowość —
+  # przy capacity > 1 pierwszy błąd jest trudniejszy do przeczytania.
+  capacity: 1
+
+  roles:
+    workers: 1
+    reviewers: 1
+    oracles: 1
+    # mergers: 1 na twardo — podanie tego pola jest błędem configu, nie override'em
+
+  retry:
+    implement: 5
+    review_loop: 3
+    # ci_long: 2 próby to tu mało: integration-tests stawiają TiKV w dockerze
+    # i flake'ują na sieci. Trzeci strzał jest tańszy niż eskalacja do człowieka.
+    ci_long: 3
+    merge: 3
+
+  parker:
+    needs_info_ping_days: 7
+    processing_ttl_hours: 24
+
+  lease:
+    # Issue z v0.5.0 to refaktory perf (ScanRegions, batch TSO) — kilkadziesiąt
+    # minut pracy. Krótszy TTL ubijałby workera w środku roboty. To jednocześnie
+    # zadanie testowe pod pomiar kompakcji kontekstu.
+    worktree_ttl: 2h
+
+  ci:
+    split: auto
+    # .github/workflows/ci.yml: lint (PHPCS+Rector+PHPStan) i unit-tests mają
+    # timeout 5 min; integration-tests (docker-compose TiKV) to długa ścieżka.
+    fast_max_minutes: 3
+    # CI odpala się na `pull_request` do master bez filtra na draft, więc drafty
+    # realnie odpalają checki — zgłaszamy to zgodnie z prawdą.
+    drafts_trigger_ci: true
+
+  merge:
+    # Pliki, na których konflikt jest mechaniczny, nie merytoryczny.
+    # findings.md celowo nie ma na liście — jest untracked w tym repo.
+    auto_resolve:
+      - CHANGELOG.md
+      - README.md
+      - docs/**
+    # Historia mastera jest liniowa ("fix: ... (#243) (#529)") — squash trzyma konwencję.
+    strategy: squash
+
+  milestones:
+    # Zgodne z bin/pick-issue.sh: najniższy otwarty milestone. Dziś v0.5.0
+    # (2 otwarte issue: #292, #293) — mały, domykalny zakres na POC.
+    order: lowest_open_first
+    # Repo ma już rodzinę labelek bot-*: bot-ready/working/done/failed/aborted.
+    # Trzymamy jego konwencję zamiast wprowadzać własne "processing".
+    processing_label: bot-working
+    # UWAGA: tej labelki jeszcze nie ma, trzeba ją utworzyć przed przebiegiem:
+    #   gh label create bot-findings -d "Issue zalozone z findingu agenta" -c BFD4F2
+    findings_label: bot-findings
+
+  dashboard:
+    enabled: true
+
+  backlog:
+    order: oldest-first
+    # W repo jest bin/pick-issue.sh --json, który robi dokładnie to, co
+    # order_script — ale w innym formacie (nasz kontrakt: stdin JSON otwartych
+    # issue, stdout ID po przecinku; skrypt: bez stdin, JSON na stdout).
+    # Wymaga cienkiej owijki, więc na POC zostaje oldest-first.
+    # order_script: ./bin/edd-order.sh
+
+  models:
+    # ID musza byc w katalogu silnika (GET /api/model) -- edd sprawdza to na
+    # starcie. omen-alpha (z pierwszej wersji tego pliku) zniknal z providera
+    # i run padal na "Model unavailable", palac limit prob w ulamku sekundy.
+    # Trzeci segment to wariant, czyli sila rozumowania modelu
+    # (DeepSeek V4 Flash 0731 ma: not-thinking, low, medium, high, max).
+    # Warianty tez sa sprawdzane w katalogu na starcie.
+    # Nazwa modelu ma spacje, wiec musi byc w cudzyslowach.
+    coder: # trudnosc issue (z intake) -> wariant
+      low: "nexos-ai/DeepSeek V4 Flash 0731/low"
+      medium: "nexos-ai/DeepSeek V4 Flash 0731/medium"
+      high: "nexos-ai/DeepSeek V4 Flash 0731/high"
+    reviewer: # o poziom wyzej niz coder: czytanie kodu pod AC jest trudniejsze
+      low: "nexos-ai/DeepSeek V4 Flash 0731/medium"
+      medium: "nexos-ai/DeepSeek V4 Flash 0731/high"
+      high: "nexos-ai/DeepSeek V4 Flash 0731/max"
+    oracle: "nexos-ai/Kimi K3/high" # jeden poziom, zawsze
+    triage: "nexos-ai/GLM 5.3 Flash/low" # dedup + filing findingow
+    merger: rules-only # mechanika (rebase/CI/merge), bez LLM
