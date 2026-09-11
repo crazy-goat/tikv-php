@@ -857,11 +857,14 @@ attribute to the constant, easy to blame the mock.
 Facts fixed by the implementation, worth not re-deriving:
 
 - A `TsoResponse` grant of $count timestamps hands out as consecutive
-  integers `base … base + $count - 1`; plain integer addition wraps the
-  18-bit logical counter into the next physical millisecond correctly
-  (no manual wrap logic needed). PD may grant *fewer* than requested —
-  never hand out beyond the grant (`TsoResponse.count`), and a missing
-  count (0) is treated as a single-timestamp grant with a warning.
+  integers `base - ($count - 1) … base`, **not** `base … base + $count - 1`:
+  PD's response timestamp is the *highest* of the granted range
+  (client-rust's `allocate_timestamps`), so the oracle walks backwards by
+  `$count - 1`. Plain integer arithmetic wraps the 18-bit logical counter
+  into the next physical millisecond correctly (no manual wrap logic
+  needed). PD may grant *fewer* than requested — never hand out beyond
+  the grant (`TsoResponse.count`), and a missing count (0) is treated as
+  a single-timestamp grant with a warning.
 - `getLowResolutionTimestamp()` must treat a **negative clock age** as
   stale: a backwards clock jump otherwise serves a timestamp that is
   already older than the bound (the `ageMs >= 0` guard). `0` staleness

@@ -79,8 +79,9 @@ final class TxnKvClient
     /**
      * options[] key for the maximum staleness (ms) of the low-resolution
      * TSO timestamp cache (issue #420, GAP-06). Used only by
-     * staleness-tolerant consumers (lock resolution `current_ts`); start
-     * and commit timestamps always come from a fresh TSO RPC. Default:
+     * staleness-tolerant consumers (lock resolution `current_ts`);
+     * start/commit timestamps come from PD (pooled via
+     * {@see self::OPT_TSO_POOL_SIZE}, not a fresh RPC per call). Default:
      * unset = no caching (getLowResolutionTimestamp() fetches fresh).
      * Must be >= 0; 0 bounds staleness but never returns stale data.
      */
@@ -92,8 +93,11 @@ final class TxnKvClient
      * `getTimestamp()` hands out pooled values and refills when the pool is
      * exhausted, so N calls cost roughly N / poolSize round trips instead
      * of N. Default: 64 (see Connection\TimestampOracle); 1 disables
-     * pooling (one `Tso` RPC per call). Must be >= 1. TxnKvClient
-     * only — RawKvClient has no transaction timestamp.
+     * pooling (one `Tso` RPC per call). Must be >= 1 and <= 1000. Accepted
+     * on the shared connection factory (`ConnectionFactory::create()`,
+     * reached via both `RawKvClient::create()` and `TxnKvClient::create()`),
+     * but it only affects transaction timestamp consumers (TxnKv) — RawKV
+     * has no transaction timestamp.
      */
     public const OPT_TSO_POOL_SIZE = 'tsoPoolSize';
 

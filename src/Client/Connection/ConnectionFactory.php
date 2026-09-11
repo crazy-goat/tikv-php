@@ -261,7 +261,8 @@ final class ConnectionFactory
     /**
      * Resolve options['tsoPoolSize'] (issue #292): the number of timestamps
      * requested per pooled `Tso` RPC. null (absent) = TimestampOracle's
-     * default; 1 disables pooling. Must be an int >= 1.
+     * default; 1 disables pooling. Must be an int
+     * `>= 1` and `<= TimestampOracle::MAX_TIMESTAMP_POOL_SIZE`.
      *
      * @param array<string, mixed> $options
      */
@@ -280,6 +281,12 @@ final class ConnectionFactory
         }
         if ($poolSize < 1) {
             throw new InvalidArgumentException("options['tsoPoolSize'] must be >= 1");
+        }
+        if ($poolSize > TimestampOracle::MAX_TIMESTAMP_POOL_SIZE) {
+            throw new InvalidArgumentException(sprintf(
+                "options['tsoPoolSize'] must be <= %d",
+                TimestampOracle::MAX_TIMESTAMP_POOL_SIZE,
+            ));
         }
 
         return $poolSize;

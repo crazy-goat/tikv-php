@@ -44,11 +44,27 @@ final class TimestampOracle
     public const DEFAULT_TIMESTAMP_POOL_SIZE = 64;
 
     /**
-     * Default maximum age (ms) of a pooled timestamp before the pool is
-     * discarded and refilled (issue #292). Bounds how far the pooled
-     * physical window may lag the wall clock.
+     * Upper bound on `tsoPoolSize` (issue #292), and therefore on
+     * `TsoRequest.count` (a uint32) and the size of the in-memory pool.
+     * A larger grant lengthens the pooled physical window — and with it
+     * the real-time-ordering risk of serving an old timestamp — while the
+     * RPC-amortisation benefit flattens out.
      */
-    public const DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS = 1000;
+    public const MAX_TIMESTAMP_POOL_SIZE = 1000;
+
+    /**
+     * Default maximum age (ms) of a pooled timestamp before the pool is
+     * discarded and refilled (issue #292). This bounds the
+     * real-time-ordering window: a pooled timestamp fetched up to this
+     * many ms ago may be served after a concurrent commit, handing out a
+     * `start_ts` below that `commit_ts` (stale read / spurious
+     * `TxnAbortedByGcException`). A 64-timestamp grant spans well under
+     * 1 ms of physical time, so 5 ms keeps reuse a small, documented
+     * multiple of the grant's own window while still amortising the TSO
+     * RPC over many `getTimestamp()` calls — the safety/performance
+     * tradeoff.
+     */
+    public const DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS = 5;
 
     /** Cached low-resolution timestamp, or null when not populated. */
     private ?int $lowResCachedTs = null;
@@ -66,6 +82,8 @@ final class TimestampOracle
 
     /** @var list<int> remaining timestamps from the last pooled grant (ascending) */
     private array $timestampPool = [];
+    /** Index of the next unserved timestamp in {@see $timestampPool}. */
+    private int $poolOffset = 0;
     /** Wall-clock milliseconds at which the current pool was fetched. */
     private ?int $poolFetchedAtMs = null;
     /** Cluster ID observed when the pool was fetched (null = not yet learned). */
@@ -86,13 +104,14 @@ final class TimestampOracle
      * @param int|null $poolSize number of timestamps requested per pooled TSO
      *                           grant (issue #292). null = the default
      *                           ({@see self::DEFAULT_TIMESTAMP_POOL_SIZE});
-     *                           1 disables pooling; must be >= 1
+     *                           1 disables pooling; must be >= 1 and
+     *                           <= {@see self::MAX_TIMESTAMP_POOL_SIZE}
      * @param int|null $poolMaxAgeMs maximum age (ms) a pooled timestamp may
      *                               reach before the pool is discarded and
      *                               refilled; null = the default
      *                               ({@see self::DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS});
      *                               must be >= 0
-     * @param \Closure(): int|null $pid process-id source for the fork guard;
+     * @param (\Closure(): int)|null $pid process-id source for the fork guard;
      *                                 null = getmypid(); injectable for tests
      */
     public function __construct(
@@ -113,6 +132,12 @@ final class TimestampOracle
         if ($resolvedPoolSize < 1) {
             throw new InvalidArgumentException('Timestamp pool size must be >= 1');
         }
+        if ($resolvedPoolSize > self::MAX_TIMESTAMP_POOL_SIZE) {
+            throw new InvalidArgumentException(sprintf(
+                'Timestamp pool size must be <= %d',
+                self::MAX_TIMESTAMP_POOL_SIZE,
+            ));
+        }
         $this->poolSize = $resolvedPoolSize;
 
         $resolvedPoolMaxAgeMs = $poolMaxAgeMs ?? self::DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS;
@@ -132,8 +157,10 @@ final class TimestampOracle
      * default {@see self::DEFAULT_TIMESTAMP_POOL_SIZE}). Each call hands
      * out the next pooled value, so N calls cost roughly N / poolSize
      * round trips. The pool is discarded — and a fresh grant requested —
-     * whenever it is exhausted, outlives its physical window, the process
-     * forks, or the cluster ID changes.
+     * whenever it is exhausted, outlives its real-time-ordering window
+     * (`poolMaxAgeMs`, default
+     * {@see self::DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS}), the process forks,
+     * or the cluster ID changes.
      *
      * Fails closed on TSO unavailability: a locally fabricated timestamp
      * would violate TiKV MVCC ordering (snapshot isolation / global ordering),
@@ -152,9 +179,10 @@ final class TimestampOracle
 
         $this->discardPoolIfInvalid();
 
-        if ($this->timestampPool !== []) {
+        if ($this->poolOffset < count($this->timestampPool)) {
             /** @var int $pooled */
-            $pooled = array_shift($this->timestampPool);
+            $pooled = $this->timestampPool[$this->poolOffset];
+            $this->poolOffset++;
 
             return $pooled;
         }
@@ -278,7 +306,7 @@ final class TimestampOracle
      */
     private function discardPoolIfInvalid(): void
     {
-        if ($this->timestampPool === []) {
+        if ($this->poolOffset >= count($this->timestampPool)) {
             return;
         }
 
@@ -310,6 +338,7 @@ final class TimestampOracle
     private function resetPool(): void
     {
         $this->timestampPool = [];
+        $this->poolOffset = 0;
         $this->poolFetchedAtMs = null;
         $this->poolClusterId = null;
         $this->poolPid = null;

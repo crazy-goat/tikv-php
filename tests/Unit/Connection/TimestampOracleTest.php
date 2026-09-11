@@ -502,6 +502,26 @@ class TimestampOracleTest extends TestCase
         $this->makeOracle($grpc, poolSize: 0);
     }
 
+    public function testGetTimestampRejectsPoolSizeAboveMaximum(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->never())->method('call');
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Timestamp pool size must be <= 1000');
+        $this->makeOracle($grpc, poolSize: TimestampOracle::MAX_TIMESTAMP_POOL_SIZE + 1);
+    }
+
+    public function testGetTimestampRejectsNegativePoolMaxAge(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->never())->method('call');
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Timestamp pool max age must be >= 0');
+        $this->makeOracle($grpc, poolMaxAgeMs: -1);
+    }
+
     public function testHundredSequentialGetTimestampsUseFewerThanTenGrpcCalls(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
@@ -526,7 +546,7 @@ class TimestampOracleTest extends TestCase
             },
         );
 
-        $oracle = $this->makeOracle($grpc);
+        $oracle = $this->makeOracle($grpc, clock: static fn (): int => 1_000_000);
 
         $previous = null;
         for ($i = 0; $i < 100; $i++) {
@@ -567,7 +587,11 @@ class TimestampOracleTest extends TestCase
         );
 
         // A tiny pool forces several refills over the run.
-        $oracle = $this->makeOracle($grpc, poolSize: 4);
+        $oracle = $this->makeOracle(
+            $grpc,
+            clock: static fn (): int => 1_000_000,
+            poolSize: 4,
+        );
 
         $previous = null;
         for ($i = 0; $i < 10; $i++) {
@@ -603,6 +627,51 @@ class TimestampOracleTest extends TestCase
         $this->assertSame(2000, $oracle->getTimestamp());
     }
 
+    public function testDefaultPoolMaxAgeAllowsReuseAtTheBound(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        // Exactly one RPC: the second call is still inside the default bound.
+        $grpc->expects($this->once())
+            ->method('call')
+            ->willReturn($this->makePooledResponse(1000, 64));
+
+        $nowMs = 1_000_000;
+        $clock = function () use (&$nowMs): int {
+            return $nowMs;
+        };
+        // No explicit poolMaxAgeMs: pins the shipped default bound.
+        $oracle = $this->makeOracle($grpc, clock: $clock);
+
+        $this->assertSame(1000, $oracle->getTimestamp());
+        $nowMs += TimestampOracle::DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS;
+
+        $this->assertSame(1001, $oracle->getTimestamp());
+    }
+
+    public function testDefaultPoolMaxAgeRefillsOncePastTheBound(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makePooledResponse(1000, 64),
+                $this->makePooledResponse(2000, 64),
+            );
+
+        $nowMs = 1_000_000;
+        $clock = function () use (&$nowMs): int {
+            return $nowMs;
+        };
+        // No explicit poolMaxAgeMs: pins the shipped default bound.
+        $oracle = $this->makeOracle($grpc, clock: $clock);
+
+        $this->assertSame(1000, $oracle->getTimestamp());
+        $nowMs += TimestampOracle::DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS + 1;
+
+        // The stale pool must not be served; a fresh grant is required.
+        $this->assertSame(2000, $oracle->getTimestamp());
+    }
+
     public function testGetTimestampDiscardsPoolWhenClusterIdChanges(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
@@ -628,6 +697,8 @@ class TimestampOracleTest extends TestCase
             fn (): ?int => $pdClient->getClusterId(),
             fn (int $id) => $pdClient->setClusterId($id),
             new NullLogger(),
+            null,
+            static fn (): int => 1_000_000,
         );
 
         $this->assertSame(1000, $oracle->getTimestamp());
@@ -649,6 +720,7 @@ class TimestampOracleTest extends TestCase
         $pid = 1000;
         $oracle = $this->makeOracle(
             $grpc,
+            clock: static fn (): int => 1_000_000,
             pid: function () use (&$pid): int {
                 return $pid;
             },
@@ -671,13 +743,70 @@ class TimestampOracleTest extends TestCase
                 $this->makePooledResponse(6000, 64),
             );
 
-        $oracle = $this->makeOracle($grpc);
+        $oracle = $this->makeOracle($grpc, clock: static fn (): int => 1_000_000);
 
         // Fill the pool with 1000..1063; the batch advances PD to 5000 and
         // must drop the pool so getTimestamp() cannot return 1001 next.
         $this->assertSame(1000, $oracle->getTimestamp());
         $this->assertSame([5000], $oracle->getTimestampBatch(1));
         $this->assertSame(6000, $oracle->getTimestamp());
+    }
+
+    public function testLowResolutionTimestampDoesNotDisturbPool(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makePooledResponse(1000, 64),
+                $this->makeTsoResponse(1715000000000, 9, 1),
+            );
+
+        $oracle = $this->makeOracle(
+            $grpc,
+            stalenessMs: 100,
+            clock: static fn (): int => 1_000_000,
+        );
+
+        // Fill the pooled range 1000..1063; 1000 is served by the first call.
+        $this->assertSame(1000, $oracle->getTimestamp());
+        // The low-resolution path fetches its own timestamp and must not
+        // drop or perturb the pool.
+        $this->assertSame(((1715000000000 << 18) + 9), $oracle->getLowResolutionTimestamp());
+        // Still served from the pool: no third RPC.
+        $this->assertSame(1001, $oracle->getTimestamp());
+    }
+
+    public function testFailedPoolRefillLeavesNothingPooledToServe(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(3))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->makePooledResponse(1000, 2),
+                $this->throwException(new GrpcException('tso unavailable', 14)),
+                $this->makePooledResponse(2000, 1),
+            );
+
+        $oracle = $this->makeOracle(
+            $grpc,
+            clock: static fn (): int => 1_000_000,
+            poolSize: 2,
+        );
+
+        $this->assertSame(1000, $oracle->getTimestamp());
+        $this->assertSame(1001, $oracle->getTimestamp());
+
+        try {
+            // Pool exhausted -> refill; the TSO RPC fails closed.
+            $oracle->getTimestamp();
+            $this->fail('Expected TiKvException to be thrown');
+        } catch (TiKvException) {
+        }
+
+        // Nothing from the failed refill may be served: the next call must
+        // perform a fresh RPC rather than replay a pooled/stale value.
+        $this->assertSame(2000, $oracle->getTimestamp());
     }
 
     // ==================================================================

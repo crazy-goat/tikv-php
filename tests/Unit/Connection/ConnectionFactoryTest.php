@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Connection;
 use CrazyGoat\TiKV\Client\Connection\ConnectionBundle;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
+use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use PHPUnit\Framework\TestCase;
@@ -122,6 +123,17 @@ class ConnectionFactoryTest extends TestCase
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['tsoPoolSize' => 0],
+        );
+    }
+
+    public function testTsoPoolSizeRejectsValueAboveMaximum(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['tsoPoolSize'] must be <= 1000");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tsoPoolSize' => TimestampOracle::MAX_TIMESTAMP_POOL_SIZE + 1],
         );
     }
 

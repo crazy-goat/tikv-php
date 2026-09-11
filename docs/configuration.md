@@ -61,18 +61,21 @@ $options = [
     'gcSafePointRefreshMs' => 30000,
     // Low-resolution TSO timestamp cache (issue #420): maximum allowed
     // staleness in milliseconds of the timestamp served by
-    // PdClientInterface::getLowResolutionTimestamp(). TxnKvClient only —
-    // used only by staleness-tolerant consumers (lock resolution
-    // current_ts); start/commit timestamps always come from a fresh TSO
-    // RPC. Default: unset = no caching (each call fetches fresh). 0
-    // bounds staleness but never returns a timestamp cached from an
-    // earlier millisecond.
+    // PdClientInterface::getLowResolutionTimestamp(). Used only by
+    // staleness-tolerant consumers (lock resolution current_ts);
+    // start/commit timestamps come from PD (pooled via tsoPoolSize, not a
+    // fresh RPC per call). Default: unset = no caching (each call fetches
+    // fresh). 0 bounds staleness but never returns a timestamp cached from
+    // an earlier millisecond.
     'lowResTimestampMaxStalenessMs' => 200,
     // PD TSO timestamp pool (issue #292): the number of consecutive
     // timestamps requested per pooled Tso RPC. getTimestamp() serves from
     // the pool and refills when exhausted; N calls cost roughly
-    // N / tsoPoolSize round trips. Default: 64. 1 disables pooling
-    // (one Tso RPC per call). Must be >= 1. See "Timestamp Batching and
+    // N / tsoPoolSize round trips. Accepted on the shared connection
+    // factory (RawKvClient::create() and TxnKvClient::create()), but only
+    // affects transaction timestamp consumers (TxnKv) — RawKV has no
+    // transaction timestamp. Default: 64. 1 disables pooling (one Tso RPC
+    // per call). Must be >= 1 and <= 1000. See "Timestamp Batching and
     // Pooling" below.
     'tsoPoolSize' => 64,
     // Replica read preference (issue #421): an instance of
@@ -121,7 +124,9 @@ consecutive timestamps in one `Tso` RPC and serves subsequent calls from
 that range, refilling when it is exhausted (issue #292). N calls therefore
 cost roughly N / `tsoPoolSize` round trips instead of N. The pool is
 discarded — and a fresh grant requested — whenever it is exhausted, ages
-past its physical window (1 s), the process forks, or the cluster ID
+past its real-time-ordering window (5 ms by default; serving a timestamp
+fetched earlier risks handing out a `start_ts` below a concurrently
+committed `commit_ts`), the process forks, or the cluster ID
 changes; a PD error is never papered over and no timestamp is ever
 fabricated locally. Set `tsoPoolSize` to 1 to restore one `Tso` RPC per
 call.
