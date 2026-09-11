@@ -1270,6 +1270,82 @@ class TransactionTest extends TestCase
         $this->assertSame([3000, 3000], $forUpdateTsList, 'one for_update_ts shared by the locking pass');
     }
 
+    /**
+     * Issue #292 (PERF-05): a pessimistic commit spanning five regions must
+     * make exactly two PdClient::getTimestamp() calls — one for_update_ts
+     * covering the whole locking pass and one commit ts. Before the TSO was
+     * hoisted out of the per-region loop this was six or more.
+     *
+     * The spy counts at the PdClientInterface boundary, so it also pins the
+     * caller contract independently of the TimestampOracle pool.
+     */
+    public function testCommitPessimisticLockFiveRegionsMakesExactlyTwoTsoCalls(): void
+    {
+        $regions = [
+            $this->makeRegion(1, '', 'k2'),
+            $this->makeRegion(2, 'k2', 'k3'),
+            $this->makeRegion(3, 'k3', 'k4'),
+            $this->makeRegion(4, 'k4', 'k5'),
+            $this->makeRegion(5, 'k5', ''),
+        ];
+        $this->pdClient->method('scanRegions')->willReturn($regions);
+        $this->stubScanRegionLookup($regions);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $tsCalls = 0;
+        $this->pdClient->method('getTimestamp')
+            ->willReturnCallback(static function () use (&$tsCalls): int {
+                ++$tsCalls;
+                return 3000 * $tsCalls; // lock pass: 3000, commit ts: 6000
+            });
+
+        $lockResponse = new PessimisticLockResponse();
+        $prewriteResponse = new PrewriteResponse();
+        $commitResponse = new CommitResponse();
+
+        $forUpdateTsList = [];
+        $lockRpcCount = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                \CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest
+                |\CrazyGoat\Proto\Kvrpcpb\PrewriteRequest
+                |\CrazyGoat\Proto\Kvrpcpb\CommitRequest $request,
+            ) use (
+                &$forUpdateTsList,
+                &$lockRpcCount,
+                $lockResponse,
+                $prewriteResponse,
+                $commitResponse,
+            ): object {
+                if ($method === 'KvPessimisticLock' && $request instanceof PessimisticLockRequest) {
+                    $lockRpcCount++;
+                    $forUpdateTsList[] = $request->getForUpdateTs();
+                    return $lockResponse;
+                }
+                return match ($method) {
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+        $txn->set('k3', 'v3');
+        $txn->set('k4', 'v4');
+        $txn->set('k5', 'v5');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(2, $tsCalls, 'one for_update_ts + one commit ts for five regions');
+        $this->assertSame(5, $lockRpcCount, 'each region is locked exactly once');
+        $this->assertSame([3000, 3000, 3000, 3000, 3000], $forUpdateTsList);
+    }
+
     public function testCommitPessimisticLockBudgetExhaustedThrowsLockWaitTimeout(): void
     {
         $rawKey = 'sensitive-key-219'; // unique key so absence in the message is provable
