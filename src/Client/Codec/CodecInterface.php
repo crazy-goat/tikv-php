@@ -46,6 +46,11 @@ interface CodecInterface
 
     /**
      * Decode a region key that was previously encoded with encodeRegionKey().
+     *
+     * @throws \InvalidArgumentException when the encoded key is malformed for
+     *         the codec (e.g. a truncated memory-comparable group in V1 Txn
+     *         mode). Callers must not swallow this: an undecodable PD boundary
+     *         would otherwise be cached and misroute lookups.
      */
     public function decodeRegionKey(string $encodedKey): string;
 

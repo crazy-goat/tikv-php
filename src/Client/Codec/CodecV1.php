@@ -79,7 +79,9 @@ final readonly class CodecV1 implements CodecInterface
     public function decodeRange(string $encodedStart, string $encodedEnd): array
     {
         return [
-            $this->decodeRegionKey($encodedStart),
+            // Empty boundaries mean "unbounded" and are never MCE-encoded —
+            // decoding '' would throw (the terminator is missing by design).
+            $encodedStart === '' ? '' : $this->decodeRegionKey($encodedStart),
             $encodedEnd === '' ? '' : $this->decodeRegionKey($encodedEnd),
         ];
     }

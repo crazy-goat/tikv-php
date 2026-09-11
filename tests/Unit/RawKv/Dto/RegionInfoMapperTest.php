@@ -7,6 +7,8 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv\Dto;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
@@ -101,5 +103,89 @@ class RegionInfoMapperTest extends TestCase
         $info = RegionInfoMapper::fromProto($region, null);
 
         $this->assertSame([], $info->peers);
+    }
+
+    // ========================================================================
+    //  codec decoding (GAP-01)
+    // ========================================================================
+
+    public function testTxnCodecDecodesBoundariesIntoUserKeySpace(): void
+    {
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $region = new Region();
+        $region->setId(5);
+        // EncodeBytes("m") = 6d00000000000000f8,
+        // EncodeBytes("z") = 7a00000000000000f8.
+        $region->setStartKey((string) hex2bin('6d00000000000000f8'));
+        $region->setEndKey((string) hex2bin('7a00000000000000f8'));
+        $region->setRegionEpoch($epoch);
+
+        $info = RegionInfoMapper::fromProto($region, null, new CodecV1(Mode::Txn));
+
+        $this->assertSame('m', $info->startKey);
+        $this->assertSame('z', $info->endKey);
+    }
+
+    public function testTxnCodecPreservesUnboundedBoundaries(): void
+    {
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $region = new Region();
+        $region->setId(5);
+        $region->setStartKey('');
+        $region->setEndKey('');
+        $region->setRegionEpoch($epoch);
+
+        $info = RegionInfoMapper::fromProto($region, null, new CodecV1(Mode::Txn));
+
+        $this->assertSame('', $info->startKey);
+        $this->assertSame('', $info->endKey);
+    }
+
+    public function testNoCodecLeavesBoundariesUntouched(): void
+    {
+        // The optional codec defaults to null — direct (RawKV) usage and
+        // existing callers keep the PD-reported bytes verbatim.
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $region = new Region();
+        $region->setId(5);
+        $region->setStartKey('a');
+        $region->setEndKey('b');
+        $region->setRegionEpoch($epoch);
+
+        $info = RegionInfoMapper::fromProto($region, null);
+
+        $this->assertSame('a', $info->startKey);
+        $this->assertSame('b', $info->endKey);
+    }
+
+    public function testTxnCodecThrowsOnMalformedEncodedBoundary(): void
+    {
+        // A PD-supplied boundary that is not valid MCE (here a truncated
+        // 3-byte group, shorter than one 9-byte group) must fail closed: the
+        // mapper does not swallow the codec's \InvalidArgumentException, so
+        // no bogus boundary key can enter RegionCache and misroute lookups.
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $region = new Region();
+        $region->setId(5);
+        $region->setStartKey("\x00\x00\x00");
+        $region->setEndKey('');
+        $region->setRegionEpoch($epoch);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Truncated MCE-encoded data');
+
+        RegionInfoMapper::fromProto($region, null, new CodecV1(Mode::Txn));
     }
 }

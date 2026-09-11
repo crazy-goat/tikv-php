@@ -95,13 +95,13 @@ class CodecV1Test extends TestCase
     {
         $codec = new CodecV1(Mode::Txn);
         $encoded = $codec->encodeRegionKey('hello');
-        $this->assertSame("hello\x00\x00", $encoded);
+        $this->assertSame('68656c6c6f000000fc', bin2hex($encoded));
     }
 
     public function testTxnKvDecodeRegionKeyUsesMce(): void
     {
         $codec = new CodecV1(Mode::Txn);
-        $decoded = $codec->decodeRegionKey("hello\x00\x00");
+        $decoded = $codec->decodeRegionKey((string) hex2bin('68656c6c6f000000fc'));
         $this->assertSame('hello', $decoded);
     }
 
@@ -109,22 +109,25 @@ class CodecV1Test extends TestCase
     {
         $codec = new CodecV1(Mode::Txn);
         [$start, $end] = $codec->encodeRange('a', 'z');
-        $this->assertSame("a\x00\x00", $start);
-        $this->assertSame("z\x00\x00", $end);
+        $this->assertSame('6100000000000000f8', bin2hex($start));
+        $this->assertSame('7a00000000000000f8', bin2hex($end));
     }
 
     public function testTxnKvEncodeRangeWithEmptyEnd(): void
     {
         $codec = new CodecV1(Mode::Txn);
         [$start, $end] = $codec->encodeRange('a', '');
-        $this->assertSame("a\x00\x00", $start);
+        $this->assertSame('6100000000000000f8', bin2hex($start));
         $this->assertSame('', $end); // empty end key preserved as unbounded
     }
 
     public function testTxnKvDecodeRange(): void
     {
         $codec = new CodecV1(Mode::Txn);
-        [$start, $end] = $codec->decodeRange("a\x00\x00", "z\x00\x00");
+        [$start, $end] = $codec->decodeRange(
+            (string) hex2bin('6100000000000000f8'),
+            (string) hex2bin('7a00000000000000f8'),
+        );
         $this->assertSame('a', $start);
         $this->assertSame('z', $end);
     }
@@ -132,8 +135,27 @@ class CodecV1Test extends TestCase
     public function testTxnKvDecodeRangeWithEmptyEnd(): void
     {
         $codec = new CodecV1(Mode::Txn);
-        [$start, $end] = $codec->decodeRange("a\x00\x00", '');
+        [$start, $end] = $codec->decodeRange((string) hex2bin('6100000000000000f8'), '');
         $this->assertSame('a', $start);
+        $this->assertSame('', $end);
+    }
+
+    public function testTxnKvDecodeRangeWithEmptyStart(): void
+    {
+        // An empty start key means "unbounded" too and must survive the round
+        // trip unchanged — decodeRegionKey('') would throw on the missing MCE
+        // terminator (mirrors RegionInfoMapper's end-key guard).
+        $codec = new CodecV1(Mode::Txn);
+        [$start, $end] = $codec->decodeRange('', (string) hex2bin('7a00000000000000f8'));
+        $this->assertSame('', $start);
+        $this->assertSame('z', $end);
+    }
+
+    public function testTxnKvDecodeRangeWithBothBoundariesEmpty(): void
+    {
+        $codec = new CodecV1(Mode::Txn);
+        [$start, $end] = $codec->decodeRange('', '');
+        $this->assertSame('', $start);
         $this->assertSame('', $end);
     }
 
@@ -178,9 +200,10 @@ class CodecV1Test extends TestCase
         $codec = new CodecV1(Mode::Txn);
         $this->assertSame('', $codec->encodeKey(''));
         $this->assertSame('', $codec->decodeKey(''));
-        // Empty region key in Txn mode gets MCE-encoded to just the terminator
-        $this->assertSame("\x00\x00", $codec->encodeRegionKey(''));
-        $this->assertSame('', $codec->decodeRegionKey("\x00\x00"));
+        // Empty region key in Txn mode gets MCE-encoded to a single padded
+        // all-zero group with marker 0xF7.
+        $this->assertSame('0000000000000000f7', bin2hex($codec->encodeRegionKey('')));
+        $this->assertSame('', $codec->decodeRegionKey((string) hex2bin('0000000000000000f7')));
     }
 
     public function testBinaryKeysPreservedInRawMode(): void
@@ -197,7 +220,7 @@ class CodecV1Test extends TestCase
     {
         $custom = new MemComparableCodec();
         $codec = new CodecV1(Mode::Txn, $custom);
-        $this->assertSame("hello\x00\x00", $codec->encodeRegionKey('hello'));
+        $this->assertSame('68656c6c6f000000fc', bin2hex($codec->encodeRegionKey('hello')));
     }
 
     public function testRoundTripMixedModes(): void
