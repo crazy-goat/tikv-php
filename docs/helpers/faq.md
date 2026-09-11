@@ -1216,3 +1216,43 @@ fail-closed fallback today: `commit_ts_expired`, `txn_lock_not_found`. Add a
 regression test in `TransactionTest` that records the gRPC method sequence and
 asserts `['KvPrewrite']` — no `KvCommit` — for both the deadlock and the
 unrecognised-variant cases.
+
+## Raw user keys must not appear in exception messages either — redact and expose via a typed accessor (GRPC-10)
+
+Exception messages are a logging channel: Monolog/Sentry/Bugsnag index
+`$e->getMessage()`, uncaught-exception handlers write it to stderr, and
+framework error pages render it. So the same rule that already applied to
+`LoggerInterface` contexts applies to every thrown message. Issue #269 found
+four sites that redacted for the log but interpolated the raw key into the
+exception thrown immediately afterwards (`RetryExecutor`'s attempt-cap and
+deadline messages, `RegionErrorHandler`'s two per-pair messages). Always pass
+keys through `KeyRedactor::redact()` in messages, and when code genuinely
+needs the raw key, add a typed accessor on the exception instead of embedding
+it in the message (`RetryBudgetExhaustedException::getRawKey()`) — callers
+must never parse keys out of `getMessage()`. A guard test
+(`tests/Unit/Security/ExceptionMessageRedactionGuardTest.php`) tokenises
+`src/Client` and fails any `sprintf()` call whose format string carries a
+key-bearing message (`for key`) but whose arguments lack a
+`KeyRedactor::redact()` invocation, so the pattern cannot silently return.
+
+## `KeyRedactor::redact()` output already contains quotes — pass it to an unquoted `%s`, and anchor key-redaction guards to the `sprintf()` argument list
+
+Two lessons from the #269 (GRPC-10) review:
+
+1. **Doubled quotes in exception messages.** `KeyRedactor::redact()` already
+   starts with `"` and, for short keys (up to 8 bytes), also ends with `"`:
+   `"6b65795f61" (5 bytes)` vs `"757365725f656d61... (28 bytes)`. A template that also
+   quotes the placeholder (`for key "%s"`) renders
+   `... for key ""757365725f656d61... (28 bytes)"`. Pass the redacted value to an
+   *unquoted* `%s` (`for key %s`). Do not change `KeyRedactor`'s own output —
+   log contexts store the value unwrapped and depend on the current shape.
+2. **Guard tests must scan the `sprintf()` argument list, not raw text.** The
+   first cut matched the raw form with a text regex keyed off a positional
+   bare `$key`; it stayed green only because the raw key was passed as the
+   named `rawKey: $key` argument, and a legal refactor to positional
+   constructor arguments would have made it fail on the *correctly redacted*
+   code. The final guard tokenises the file, locates each `sprintf()` call,
+   and requires a `KeyRedactor::redact()` token inside that call, which is
+   immune to quoting and to unrelated `$key` arguments on adjacent
+   constructors. Any future source-scanning guard should follow the same
+   "inspect the call, not the file text" rule.

@@ -378,7 +378,7 @@ final readonly class TwoPhaseCommitter
         $locked = $error->getLocked();
         if ($locked !== null) {
             throw new TxnRetryableException(
-                sprintf('Heartbeat failed: locked key "%s"', KeyRedactor::redact($primary)),
+                sprintf('Heartbeat failed: locked key %s', KeyRedactor::redact($primary)),
                 BackoffType::TxnLock,
             );
         }

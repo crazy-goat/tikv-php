@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **[GRPC-10]**: the raw key is no longer embedded in retry exception messages. `RetryBudgetExhaustedException` gains a trailing optional `?string $rawKey` constructor argument and a `getRawKey(): ?string` accessor; the raw key is deliberately kept out of `getMessage()`. **Backward compatibility:** callers that parsed the raw key out of the exception message must switch to `getRawKey()` — the typed accessor replaces message parsing. (#269)
+
 ### Fixed
+
+- **[GRPC-10]**: exception messages now redact user keys with `KeyRedactor::redact()`, matching the logging layer. Four sites interpolated the raw key while every surrounding log context redacted it: `RetryExecutor`'s attempt-cap and wall-clock-deadline messages, and `RegionErrorHandler`'s two per-pair (`null` and described) `KeyError` messages. Exception messages are a logging channel (Monolog/Sentry/Bugsnag capture `getMessage()`, uncaught-exception handlers write it to stderr, framework error pages render it), so keys embedding tenant/user IDs, e-mail addresses or session tokens were reaching log aggregation and error trackers unredacted. Message wording is otherwise preserved, except that the templates no longer add their own quotes around the already-quoted redacted form (`for key %s`, not `for key "%s"`); the pre-existing heartbeat `locked key` message is normalised the same way. A unit guard test tokenises `src/Client` and fails any `sprintf()` key-bearing message that lacks a `KeyRedactor::redact()` argument. (#269)
 
 - **[TXN-09]**: prewrite now fails closed on every `KeyError` variant. `TwoPhaseCommitter::handlePrewriteErrors()` previously handled only `locked`/`conflict`/`retryable`/`abort` and silently treated any other variant — notably `deadlock`, `already_exist`, `assertion_failed`, `primary_mismatch`, `txn_not_found` and `commit_ts_too_large` — as a successful prewrite, so `commit()` proceeded to `KvCommit` even though the prewrite had failed. A `deadlock` now raises `DeadlockException` carrying the deadlock key, key hash and lock timestamp (mirroring the pessimistic-lock path, now shared through `throwDeadlock()`), the remaining named variants raise `TransactionConflictException`, and any unrecognised variant raises a base `TiKvException` described via `KeyErrorDescriber`, so no response can be mistaken for success. (#214)
 

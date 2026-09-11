@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -331,9 +332,53 @@ class RetryExecutorTest extends TestCase
             $executor->execute('test_key', $operation, $classifier);
         } catch (RetryBudgetExhaustedException $e) {
             $this->assertSame(3, $e->attempts());
-            $this->assertStringContainsString('test_key', $e->getMessage());
+            $this->assertStringContainsString('Retry attempt cap (3) exhausted', $e->getMessage());
+            // The raw key must never reach the exception message; it is
+            // exposed only through the typed accessor (issue #269, GRPC-10).
+            $this->assertStringNotContainsString('test_key', $e->getMessage());
+            $this->assertSame('test_key', $e->getRawKey());
             $previous = $e->getPrevious();
             $this->assertSame($lastError, $previous);
+            throw $e;
+        }
+    }
+
+    /**
+     * Regression test for issue #269 (GRPC-10): a key that embeds personal
+     * data must never appear verbatim in the RetryBudgetExhaustedException
+     * message — exception messages are a logging channel. The raw key stays
+     * available to code through getRawKey().
+     *
+     * Uses an explicit BackoffType::None classifier so the retry loop runs
+     * to the attempt cap without sleeping (see docs/helpers/faq.md).
+     */
+    public function testAttemptCapExhaustionRedactsRawKeyInMessage(): void
+    {
+        $executor = $this->createExecutor(
+            maxBackoffMs: 10000,
+            serverBusyBudgetMs: 10000,
+            maxAttempts: 2,
+        );
+
+        $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
+        $rawKey = 'user_email:alice@example.com';
+
+        $operation = function (): void {
+            throw new TiKvException('test error');
+        };
+
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        try {
+            $executor->execute($rawKey, $operation, $classifier);
+        } catch (RetryBudgetExhaustedException $e) {
+            $message = $e->getMessage();
+            $this->assertStringNotContainsString($rawKey, $message);
+            $this->assertStringContainsString(KeyRedactor::redact($rawKey), $message);
+            $this->assertStringContainsString('Retry attempt cap (2) exhausted for key', $message);
+            // The raw key is still available to calling code, just not in
+            // the message.
+            $this->assertSame($rawKey, $e->getRawKey());
             throw $e;
         }
     }
@@ -362,6 +407,42 @@ class RetryExecutorTest extends TestCase
         $this->expectExceptionMessage('Retry deadline (1 ms) exhausted');
 
         $executor->execute('test_key', $operation, $classifier);
+    }
+
+    /**
+     * Regression test for issue #269 (GRPC-10): the wall-clock deadline
+     * branch must redact the key in the exception message too, and expose it
+     * only via getRawKey(). BackoffType::None keeps the deadline check on a
+     * zero-sleep loop, so the test is fast.
+     */
+    public function testDeadlineExhaustionRedactsRawKeyInMessage(): void
+    {
+        $executor = $this->createExecutor(
+            maxBackoffMs: 10000,
+            serverBusyBudgetMs: 10000,
+            maxAttempts: 100000, // high enough that the deadline fires first
+            deadlineMs: 1,
+        );
+
+        $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
+        $rawKey = 'user_email:alice@example.com';
+
+        $operation = function (): void {
+            throw new TiKvException('test error');
+        };
+
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        try {
+            $executor->execute($rawKey, $operation, $classifier);
+        } catch (RetryBudgetExhaustedException $e) {
+            $message = $e->getMessage();
+            $this->assertStringNotContainsString($rawKey, $message);
+            $this->assertStringContainsString(KeyRedactor::redact($rawKey), $message);
+            $this->assertStringContainsString('Retry deadline (1 ms) exhausted for key', $message);
+            $this->assertSame($rawKey, $e->getRawKey());
+            throw $e;
+        }
     }
 
     public function testDeadlineNotHitWhenOperationSucceeds(): void

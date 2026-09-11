@@ -720,7 +720,9 @@ since issue #241):
 
 When either bound is reached the executor throws
 `RetryBudgetExhaustedException` (extends `TiKvException`). This exception
-exposes `attempts()` and `elapsedOrBackoffMs()` for diagnostics.
+exposes `attempts()` and `elapsedOrBackoffMs()` for diagnostics, and
+`getRawKey()` for the un-redacted key (the key is redacted in the message —
+see issue #269).
 
 ### Custom Retry (Advanced)
 

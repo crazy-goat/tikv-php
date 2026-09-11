@@ -17,6 +17,8 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Google\Protobuf\Internal\Message;
 use Monolog\Handler\TestHandler;
 use Monolog\Level;
@@ -240,6 +242,42 @@ class LoggingIntegrationTest extends TestCase
         }
 
         $this->assertTrue($this->testHandler->hasErrorThatContains('budget exhausted'));
+    }
+
+    /**
+     * Issue #269 (GRPC-10): exception messages are a logging channel too.
+     * Before the fix, RetryBudgetExhaustedException embedded the raw key
+     * while the immediately preceding log record from the same method
+     * redacted it. This test is pure PHP — the GrpcClientInterface is
+     * mocked and no real channel or ext-grpc is needed. DataIsNotReady is
+     * the only zero-backoff class, so the 30-attempt cap fires in
+     * milliseconds without sleeping.
+     */
+    public function testRetryBudgetExceptionMessageDoesNotContainRawKey(): void
+    {
+        $cache = new RegionCache(logger: $this->logger);
+        $client = new RawKvClient($this->pdClient, $this->grpc, $cache, 20000, $this->logger);
+
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->method('call')
+            ->willThrowException(new TiKvException('DataIsNotReady'));
+
+        $rawKey = 'user_email:alice@example.com';
+
+        $caught = null;
+        try {
+            $client->get($rawKey);
+        } catch (TiKvException $e) {
+            $caught = $e;
+        }
+
+        $this->assertInstanceOf(RetryBudgetExhaustedException::class, $caught);
+        $this->assertStringNotContainsString($rawKey, $caught->getMessage());
+        $this->assertStringContainsString(KeyRedactor::redact($rawKey), $caught->getMessage());
+        // Raw key is still available to code, but not in the message.
+        $this->assertSame($rawKey, $caught->getRawKey());
     }
 
     public function testLogContextContainsRedactedKey(): void
