@@ -715,10 +715,12 @@ touched; re-probe after an interval rather than tight-looping.
 
 **Error:**
 ```
-RetryBudgetExhaustedException: Retry attempt cap (30) exhausted for key "<key>"
-RetryBudgetExhaustedException: Retry deadline (30000 ms) exhausted for key "<key>"
+RetryBudgetExhaustedException: Retry attempt cap (30) exhausted for key "<redacted-key>"
+RetryBudgetExhaustedException: Retry deadline (30000 ms) exhausted for key "<redacted-key>"
 ```
-(the two messages come from the same class)
+(the two messages come from the same class; since issue #269 the key is
+redacted as `"<hex-prefix>... (N bytes)"`, not shown verbatim — use
+`RetryBudgetExhaustedException::getRawKey()` if your code needs the raw key)
 
 **What it means:** The internal retry loop gave up: either the attempt cap
 (30 by default) or the wall-clock deadline (30000 ms by default,

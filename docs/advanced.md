@@ -565,8 +565,9 @@ function parallelScan(
 > throws `CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException`
 > (extends `TiKvException`). Treat it as a **hard failure**, not as a signal
 > to retry again; it exposes `attempts()` and `elapsedOrBackoffMs()` for
-> diagnostics, and `getPrevious()` for the original TiKV error. The two
-> sleep budgets behave differently: exhausting them **rethrows the original
+> diagnostics, `getPrevious()` for the original TiKV error, and `getRawKey()`
+> for the un-redacted key (the message itself is redacted — issue #269). The
+> two sleep budgets behave differently: exhausting them **rethrows the original
 > TiKV error** instead.
 
 Built-in retry budgets (full reference incl. per-error backoff strategies:
