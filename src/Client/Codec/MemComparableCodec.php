@@ -7,48 +7,54 @@ namespace CrazyGoat\TiKV\Client\Codec;
 /**
  * Memory Comparable Encoding (MCE) for region keys.
  *
- * TiKV uses MCE to encode region boundary keys so that byte-wise lexicographic
- * comparison of encoded keys produces the same ordering as the original keys.
+ * TiKV and PD report transactional region boundaries in an encoded key space
+ * so that byte-wise lexicographic comparison of encoded keys matches the
+ * ordering of the original user keys. This class implements precisely the
+ * TiDB `codec.EncodeBytes` / `codec.DecodeBytes` scheme that client-go uses
+ * for `Mode::Txn` region lookups (`internal/apicodec/mem_codec.go` +
+ * `pkg/util/codec/bytes.go`).
  *
- * The encoding escapes bytes 0x00 and 0xFF with a padding scheme, then appends
- * a terminator to mark the end of the key:
+ * Encoding walks the key in 8-byte groups. Each group is written verbatim and
+ * followed by a marker byte:
  *
- *   - 0x00 → 0x00 0xFF
- *   - 0xFF → 0xFF 0x00
- *   - any other byte → passed through unchanged
- *   - terminator → 0x00 0x00
+ *   - full group (8 bytes)  → marker 0xFF
+ *   - final partial group   → padded with 0x00 to 8 bytes, marker 0xFF - pad
  *
- * Decoding reverses the process: the terminator 0x00 0x00 marks the end, and
- * escaped pairs are restored to their original value.
+ * where `pad = 8 - (bytes in the group)`. The loop runs for
+ * `idx = 0; idx <= len; idx += 8`, so a key whose length is an exact multiple
+ * of 8 also gets a trailing all-zero group (pad = 8, marker 0xF7), and the
+ * empty key encodes to a single such group.
  *
- * This implementation follows the TiDB codec.EncodeBytes / DecodeBytes
- * convention used in both V1 (TxnKV) and V2 for PD region lookups.
+ * Decoding reads 9-byte groups (8 data bytes + marker), computes
+ * `pad = 0xFF - marker`, verifies the pad bytes are zero, appends the first
+ * `8 - pad` bytes, and stops after the group whose `pad != 0`. Malformed
+ * input (truncated group, marker implying `pad > 8`, or non-zero padding)
+ * raises an `\InvalidArgumentException`.
  */
 final class MemComparableCodec
 {
+    private const GROUP_SIZE = 8;
+    private const MARKER = 0xFF;
+    private const PAD_BYTE = "\x00";
+
     /**
      * Encode a key using Memory Comparable Encoding.
      *
-     * The input key is escaped and terminated so that encoded keys sort in
-     * the same binary order as the original keys.
+     * The returned bytes sort in the same order as the original keys, and the
+     * encoding is losslessly reversible by {@see self::decode()}.
      */
     public function encode(string $key): string
     {
         $encoded = '';
+        $length = \strlen($key);
 
-        for ($i = 0, $len = \strlen($key); $i < $len; $i++) {
-            $byte = \ord($key[$i]);
-            if ($byte === 0x00) {
-                $encoded .= "\x00\xFF";
-            } elseif ($byte === 0xFF) {
-                $encoded .= "\xFF\x00";
-            } else {
-                $encoded .= \chr($byte);
-            }
+        for ($idx = 0; $idx <= $length; $idx += self::GROUP_SIZE) {
+            $group = substr($key, $idx, self::GROUP_SIZE);
+            $pad = self::GROUP_SIZE - \strlen($group);
+
+            $encoded .= $group . str_repeat(self::PAD_BYTE, $pad);
+            $encoded .= \chr((self::MARKER - $pad) & 0xFF);
         }
-
-        // Append terminator
-        $encoded .= "\x00\x00";
 
         return $encoded;
     }
@@ -56,56 +62,55 @@ final class MemComparableCodec
     /**
      * Decode a Memory Comparable Encoded key back to its original value.
      *
-     * Reads until the terminator (0x00 0x00) is found and reverses the
-     * escaping.
+     * Trailing bytes after the terminating group are ignored.
      *
      * @param  string $encoded The MCE-encoded key
      * @return string The decoded key
-     * @throws \InvalidArgumentException if the encoded key does not contain
-     *         a valid terminator
+     * @throws \InvalidArgumentException if the encoded key is malformed
      */
     public function decode(string $encoded): string
     {
         $decoded = '';
-        $len = \strlen($encoded);
-        $i = 0;
+        $length = \strlen($encoded);
 
-        while ($i < $len) {
-            if ($i + 1 >= $len) {
+        for ($idx = 0; $idx < $length; $idx += self::GROUP_SIZE + 1) {
+            if ($idx + self::GROUP_SIZE + 1 > $length) {
                 throw new \InvalidArgumentException(
-                    'Unexpected end of MCE-encoded data before terminator',
+                    sprintf('Truncated MCE-encoded data at byte %d', $idx),
                 );
             }
 
-            $byte = \ord($encoded[$i]);
-            $next = \ord($encoded[$i + 1]);
+            $group = substr($encoded, $idx, self::GROUP_SIZE);
+            $marker = \ord($encoded[$idx + self::GROUP_SIZE]);
+            $pad = self::MARKER - $marker;
 
-            // Check for terminator: 0x00 0x00
-            if ($byte === 0x00 && $next === 0x00) {
-                // Move past the terminator and return
+            if ($pad > self::GROUP_SIZE) {
+                throw new \InvalidArgumentException(
+                    sprintf('Invalid MCE marker 0x%02X at byte %d', $marker, $idx + self::GROUP_SIZE),
+                );
+            }
+
+            if ($pad > 0) {
+                $padding = substr($group, self::GROUP_SIZE - $pad);
+                if (rtrim($padding, self::PAD_BYTE) !== '') {
+                    throw new \InvalidArgumentException(
+                        sprintf(
+                            'Non-zero MCE padding at byte %d',
+                            $idx + self::GROUP_SIZE - $pad,
+                        ),
+                    );
+                }
+            }
+
+            $decoded .= substr($group, 0, self::GROUP_SIZE - $pad);
+
+            if ($pad !== 0) {
                 return $decoded;
             }
-
-            // Check for escaped sequences
-            if ($byte === 0x00 && $next === 0xFF) {
-                $decoded .= "\x00";
-                $i += 2;
-                continue;
-            }
-
-            if ($byte === 0xFF && $next === 0x00) {
-                $decoded .= "\xFF";
-                $i += 2;
-                continue;
-            }
-
-            // Regular byte
-            $decoded .= \chr($byte);
-            $i++;
         }
 
         throw new \InvalidArgumentException(
-            'MCE-encoded data is missing the terminator (0x00 0x00)',
+            'MCE-encoded data is missing its terminating group',
         );
     }
 }
