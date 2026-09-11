@@ -57,15 +57,27 @@ project-wide exception work).
 > the sixteen classes above.
 
 `TiKvException` itself is also thrown **directly** — no more specific subclass —
-at four sites, so a `catch` on any single subclass will not match these; only a
-bare `catch (TiKvException $e)` does:
+at fifteen `throw new TiKvException(...)` statements across thirteen call sites
+(some inside shared private helpers), so a `catch` on any single subclass will
+not match these; only a bare `catch (TiKvException $e)` does. Several are
+fail-closed defense-in-depth paths that are unreachable unless a collaborator's
+contract changes (noted per row):
 
 | Site | Thrown when | Message (verbatim in `src/`) |
 |---|---|---|
 | `PdClient::getRegion()` | PD returned no region for the requested key. Fail-closed by design: a fabricated region would be cached and silently misroute requests. Reachable from every region-resolved operation. | `PD GetRegion returned no region for key` |
-| `TimestampOracle::getTimestamp()` | The TSO RPC failed. **Re-wraps a `GrpcException`** (preserved as `getPrevious()`, gRPC status code kept) into the base class, so `catch (GrpcException)` around a transaction begin/commit will **not** match. | `TSO request failed: %s` (sprintf'd with the wrapped message) |
-| `TimestampOracle` response check (private, same call) | The TSO response carried no timestamp. Fail-closed: no local timestamp is fabricated. | `TSO response missing timestamp` |
+| `PdClient::getGCSafePoint()` | PD returned an error header for `GetGCSafePoint`. | `PD GetGCSafePoint failed: %s` |
+| `PdClient::updateServiceGCSafePoint()` | PD returned an error header for `UpdateServiceGCSafePoint` (the "not supported" / GC-v1 case is handled separately as `null`). Reachable via `TxnKvClient::holdGcSafePoint()`. | `PD UpdateServiceGCSafePoint failed: %s` |
+| `PdClient::uint64ToInt()` (private) | A PD uint64 scalar (`GC safe point` / `min GC safe point`) was non-numeric, did not round-trip through a PHP int (out of 64-bit range or non-canonical), or was negative. Called from `getGCSafePoint()` and `updateServiceGCSafePoint()`. Three throw statements. | `PD returned a non-numeric %s: %s` / `PD returned an invalid %s: %s` |
+| `TimestampOracle::requestTimestampRange()` (private; reached from `getTimestamp()`, `getTimestampBatch()` and the pool refill) | The TSO RPC failed. **Re-wraps a `GrpcException`** (preserved as `getPrevious()`, gRPC status code kept) into the base class, so `catch (GrpcException)` around a transaction begin/commit will **not** match. Reachable from every timestamp mint (`begin()`, `commit()`, …). | `TSO request failed: %s` (sprintf'd with the wrapped message) |
+| `TimestampOracle::extractTimestampRange()` (private, same call) | The TSO response carried no timestamp. Fail-closed: no local timestamp is fabricated. | `TSO response missing timestamp` |
+| `SafePointCache::get()` | PD returned a negative GC safe point (defensive; PD safe points are uint64). Caught by `TxnKvClient::validateStartTsAgainstGcSafePoint()`, which degrades to a warning (fail-open), so it does not normally reach the caller. | `PD returned invalid GC safe point: %d` |
 | `TwoPhaseCommitter` heartbeat (reachable via `Transaction::heartbeat()`) | `KvTxnHeartBeat` reported a `retryable` or `abort` KeyError payload → `TransactionConflictException`; a `locked` payload → `TxnRetryableException` (`BackoffType::TxnLock`, deliberately **not** `LockResolver::resolveLock()`ed — the only lock a heartbeat can report is the calling transaction's own primary lock, and resolving it would roll the transaction back under itself); any other payload variant (`txn_not_found`, `txn_lock_not_found`, …) → the base class with the variant named, via the shared `KeyErrorDescriber` (see [#492](https://github.com/crazy-goat/tikv-php/issues/492)). | `Heartbeat failed: retryable: <server text>` / `Heartbeat failed: abort: <server text>` / `Heartbeat failed: locked key "<redacted primary>"` / `Heartbeat failed: <variant>` |
+| `TwoPhaseCommitter` prewrite (reachable via `Transaction::commit()`) | `KvPrewrite` reported a `KeyError`: `deadlock` → `DeadlockException` (key/hash/lockTs); `locked` → resolves the lock then `TxnRetryableException`; `conflict` / `retryable` / `abort` and `already_exist` / `assertion_failed` / `primary_mismatch` / `txn_not_found` / `commit_ts_too_large` → `TransactionConflictException`; any other variant (`commit_ts_expired`, `txn_lock_not_found`, …) → the base class with the variant named, via `KeyErrorDescriber`. Fail-closed (issue #214): before that fix, unhandled variants fell out of the loop and prewrite was treated as successful, so `KvCommit` ran against keys that held no lock. Prewrite runs outside the shared retry executor, so these escape `commit()` rather than being auto-retried. | `Deadlock detected during prewrite` / `Lock conflict during prewrite, resolved - retry` / `Write conflict during prewrite` / `Prewrite failed: <variant>` |
+| `TxnReader::batchGetFromTiKV()` (private) | Defense in depth: `RegionResolver::batchResolveRegions()` left a `batchGet()` key without a region. Unreachable unless the resolver contract changes (issue #244); a silent skip would read back as `null`. | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
+| `RegionResolver::batchResolveRegions()` | PD returned regions that do not cover one of the requested keys. Fail-closed: a silently dropped key would be lost from the batch. | `PD could not resolve the region for key %s; refusing to silently drop it from the batch` (key redacted) |
+| `RegionGrouper::groupKeysByRegionBatch()` | Defense in depth: a batch key was left without a region by the resolver. Unreachable unless the resolver contract changes (issue #244). | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
+| `RegionGrouper::groupItemsByRegion()` | Defense in depth: a batch item was left without a region by the resolver. Unreachable unless the resolver contract changes (issue #244). | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
 
 ### What Each Class Means
 

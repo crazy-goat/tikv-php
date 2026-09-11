@@ -1666,12 +1666,13 @@ class TransactionTest extends TestCase
 
     /**
      * Stub the region/PD dependencies and make KvPrewrite answer with a
-     * response containing a single failing KeyError. KvCommit is stubbed so
-     * a test can prove it is never reached via the recorded method sequence.
+     * response containing the given failing KeyErrors, in order. KvCommit is
+     * stubbed so a test can prove it is never reached via the recorded method
+     * sequence.
      *
      * @param list<string> $methodSequence Collected RPC method names, by ref.
      */
-    private function stubPrewriteError(KeyError $keyError, array &$methodSequence): void
+    private function stubPrewriteError(array &$methodSequence, KeyError ...$keyErrors): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
         $this->regionCache->method('put');
@@ -1682,7 +1683,7 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getTimestamp')->willReturn(2000);
 
         $prewriteResponse = new PrewriteResponse();
-        $prewriteResponse->setErrors([$keyError]);
+        $prewriteResponse->setErrors($keyErrors);
 
         $this->grpc->method('call')
             ->willReturnCallback(function (
@@ -1719,7 +1720,7 @@ class TransactionTest extends TestCase
         $keyError->setDeadlock($deadlock);
 
         $methodSequence = [];
-        $this->stubPrewriteError($keyError, $methodSequence);
+        $this->stubPrewriteError($methodSequence, $keyError);
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'v1');
@@ -1735,7 +1736,43 @@ class TransactionTest extends TestCase
         }
 
         $this->assertSame(['KvPrewrite'], $methodSequence);
-        $this->assertNotContains('KvCommit', $methodSequence);
+    }
+
+    /**
+     * Issue #214 (TXN-09): when a prewrite response carries several KeyErrors
+     * the first one wins — `handlePrewriteErrors()` throws on the first
+     * variant it recognises and never inspects the rest.
+     */
+    public function testCommitPrewriteMultipleErrorsThrowsFirstVariantAndSkipsCommit(): void
+    {
+        $deadlock = new Deadlock();
+        $deadlock->setDeadlockKey('first-key');
+        $deadlock->setDeadlockKeyHash(7);
+        $deadlock->setLockTs(11);
+
+        $first = new KeyError();
+        $first->setDeadlock($deadlock);
+
+        // A later, equally fatal variant that must not be the one reported.
+        $second = new KeyError();
+        $second->setAbort('second variant must not win');
+
+        $methodSequence = [];
+        $this->stubPrewriteError($methodSequence, $first, $second);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected DeadlockException was not thrown');
+        } catch (DeadlockException $e) {
+            $this->assertSame('first-key', $e->getDeadlockKey());
+            $this->assertSame(7, $e->getDeadlockKeyHash());
+            $this->assertSame(11, $e->getLockTs());
+        }
+
+        $this->assertSame(['KvPrewrite'], $methodSequence);
     }
 
     /**
@@ -1749,7 +1786,7 @@ class TransactionTest extends TestCase
         $keyError->setAlreadyExist(new \CrazyGoat\Proto\Kvrpcpb\AlreadyExist());
 
         $methodSequence = [];
-        $this->stubPrewriteError($keyError, $methodSequence);
+        $this->stubPrewriteError($methodSequence, $keyError);
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'v1');
@@ -1762,7 +1799,6 @@ class TransactionTest extends TestCase
         }
 
         $this->assertSame(['KvPrewrite'], $methodSequence);
-        $this->assertNotContains('KvCommit', $methodSequence);
     }
 
     /**
@@ -1776,7 +1812,7 @@ class TransactionTest extends TestCase
         $keyError->setCommitTsExpired(new \CrazyGoat\Proto\Kvrpcpb\CommitTsExpired());
 
         $methodSequence = [];
-        $this->stubPrewriteError($keyError, $methodSequence);
+        $this->stubPrewriteError($methodSequence, $keyError);
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'v1');
@@ -1789,7 +1825,6 @@ class TransactionTest extends TestCase
         }
 
         $this->assertSame(['KvPrewrite'], $methodSequence);
-        $this->assertNotContains('KvCommit', $methodSequence);
     }
 
     public function testSecondaryCommitFailureDoesNotFailCommittedTransaction(): void

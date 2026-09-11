@@ -1192,8 +1192,11 @@ implementing issue #415:
 
 ## Prewrite `KeyError` handling must be exhaustive and fail-closed (TXN-09, issue #214)
 
-`KeyError` is a protobuf oneof: a response carries exactly one variant, and
-`getX() !== null` / `getX() !== ''` is the only way to identify it. The
+`KeyError` is a flat protobuf message whose variant fields are independently
+nullable — TiKV sets exactly one variant field in practice (a `debug_info`
+string may accompany it); the only real `oneof` in that proto is
+`CheckTxnStatusResponse.error`. `getX() !== null` / `getX() !== ''` is how the
+variant is identified. The
 original `TwoPhaseCommitter::handlePrewriteErrors()` checked only `locked`,
 `conflict`, `retryable` and `abort`, so a `deadlock` (reachable on pessimistic
 prewrite) or `primary_mismatch`/`txn_not_found` payload fell off the end of the
