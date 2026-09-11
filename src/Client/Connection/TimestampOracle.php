@@ -44,10 +44,12 @@ final class TimestampOracle
     public const DEFAULT_TIMESTAMP_POOL_SIZE = 64;
 
     /**
-     * Upper bound on `tsoPoolSize` (issue #292), and therefore on
-     * `TsoRequest.count` (a uint32) and the size of the in-memory pool.
-     * A larger grant lengthens the pooled physical window — and with it
-     * the real-time-ordering risk of serving an old timestamp — while the
+     * Upper bound on `tsoPoolSize` (issue #292) and on the public
+     * `getTimestampBatch()` count: both reach `TsoRequest.count` (a
+     * uint32), and the pool path also sizes the in-memory pool, so one cap
+     * bounds the wire grant and the derived timestamp array alike. A
+     * larger grant lengthens the pooled physical window — and with it the
+     * real-time-ordering risk of serving an old timestamp — while the
      * RPC-amortisation benefit flattens out.
      */
     public const MAX_TIMESTAMP_POOL_SIZE = 1000;
@@ -207,19 +209,27 @@ final class TimestampOracle
      * afterwards could return a value below one this batch already
      * returned. Use {@see getTimestamp()} for the pooled path.
      *
-     * @param int $count number of timestamps to request (>= 1)
+     * @param int $count number of timestamps to request (>= 1 and
+     *                   <= {@see self::MAX_TIMESTAMP_POOL_SIZE})
      * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
      *
      * @return list<int> at most $count monotonically increasing timestamps
      *                   (PD may grant fewer than requested; never fewer than 1)
      *
-     * @throws InvalidArgumentException when $count is < 1
+     * @throws InvalidArgumentException when $count is < 1 or
+     *                                  > {@see self::MAX_TIMESTAMP_POOL_SIZE}
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
      */
     public function getTimestampBatch(int $count, ?int $timeoutMs = null): array
     {
         if ($count < 1) {
             throw new InvalidArgumentException('Timestamp batch count must be >= 1');
+        }
+        if ($count > self::MAX_TIMESTAMP_POOL_SIZE) {
+            throw new InvalidArgumentException(sprintf(
+                'Timestamp batch count must be <= %d',
+                self::MAX_TIMESTAMP_POOL_SIZE,
+            ));
         }
 
         $this->resetPool();

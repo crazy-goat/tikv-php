@@ -71,12 +71,15 @@ $options = [
     // PD TSO timestamp pool (issue #292): the number of consecutive
     // timestamps requested per pooled Tso RPC. getTimestamp() serves from
     // the pool and refills when exhausted; N calls cost roughly
-    // N / tsoPoolSize round trips. Accepted on the shared connection
-    // factory (RawKvClient::create() and TxnKvClient::create()), but only
-    // affects transaction timestamp consumers (TxnKv) — RawKV has no
-    // transaction timestamp. Default: 64. 1 disables pooling (one Tso RPC
-    // per call). Must be >= 1 and <= 1000. See "Timestamp Batching and
-    // Pooling" below.
+    // N / tsoPoolSize round trips. The pool is also bounded by a 5 ms
+    // real-time-ordering window: a pooled timestamp fetched more than 5 ms
+    // ago is discarded and refilled, because serving it could hand out a
+    // start_ts below a concurrently committed commit_ts. Accepted on the
+    // shared connection factory (RawKvClient::create() and
+    // TxnKvClient::create()), but only affects transaction timestamp
+    // consumers (TxnKv) — RawKV has no transaction timestamp. Default: 64.
+    // 1 disables pooling (one Tso RPC per call). Must be >= 1 and <= 1000.
+    // See "Timestamp Batching and Pooling" below.
     'tsoPoolSize' => 64,
     // Replica read preference (issue #421): an instance of
     // ReplicaReadPolicy controlling which peer serves read requests.
@@ -143,8 +146,8 @@ Two additional APIs reduce PD traffic where that is safe and explicit:
   `lowResTimestampMaxStalenessMs` old (option below; default unset =
   fresh fetch, i.e. unchanged behaviour). It is used internally by lock
   resolution (`CheckTxnStatus.current_ts`) and is safe only for
-  staleness-tolerant consumers — never for start/commit timestamps. It
-  always takes a fresh (non-pooled) timestamp.
+  staleness-tolerant consumers — never for start/commit timestamps. When
+  it does fetch, it uses a fresh (non-pooled) timestamp.
 
 Additionally, the pessimistic-lock path in `TwoPhaseCommitter` acquires
 one `for_update_ts` per locking pass instead of one per region, cutting

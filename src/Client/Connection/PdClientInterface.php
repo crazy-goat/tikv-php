@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\Connection;
 
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 
@@ -73,11 +74,13 @@ interface PdClientInterface
      * Get a batch of monotonically increasing timestamps from PD in a
      * single TSO RPC (issue #420).
      *
-     * @param int $count number of timestamps to request (>= 1)
+     * @param int $count number of timestamps to request (>= 1 and
+     *                   <= {@see TimestampOracle::MAX_TIMESTAMP_POOL_SIZE})
      * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
      *
      * @return list<int> at most $count monotonically increasing timestamps
      *
+     * @throws InvalidArgumentException When $count is out of range
      * @throws GrpcException On transport error
      * @throws TiKvException On PD error
      */

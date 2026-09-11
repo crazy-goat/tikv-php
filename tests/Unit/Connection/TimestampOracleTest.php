@@ -429,6 +429,18 @@ class TimestampOracleTest extends TestCase
         $oracle->getTimestampBatch(0);
     }
 
+    public function testGetTimestampBatchRejectsCountAboveMaximum(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->never())->method('call');
+
+        $oracle = $this->makeOracle($grpc);
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Timestamp batch count must be <= 1000');
+        $oracle->getTimestampBatch(TimestampOracle::MAX_TIMESTAMP_POOL_SIZE + 1);
+    }
+
     public function testGetTimestampBatchNeverExceedsGrantedCount(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
@@ -458,7 +470,7 @@ class TimestampOracleTest extends TestCase
             )
             ->willReturn($this->makePooledResponse(1000, 4));
 
-        $oracle = $this->makeOracle($grpc, poolSize: 4);
+        $oracle = $this->makeOracle($grpc, clock: static fn (): int => 1_000_000, poolSize: 4);
 
         $this->assertSame(1000, $oracle->getTimestamp());
         $this->assertSame(1001, $oracle->getTimestamp());
@@ -625,6 +637,16 @@ class TimestampOracleTest extends TestCase
         $nowMs = 1_000_200; // age 200ms > the 100ms window: pool must be discarded
 
         $this->assertSame(2000, $oracle->getTimestamp());
+    }
+
+    public function testDefaultPoolMaxAgeIsFiveMilliseconds(): void
+    {
+        // Pin the shipped default independently of the bound-relative tests:
+        // the pool-age bound is a real-time-ordering safety parameter, so a
+        // regression to a larger value must fail loudly here rather than
+        // silently pass a test that derives its clock advance from the
+        // (now-regressed) constant.
+        $this->assertSame(5, TimestampOracle::DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS);
     }
 
     public function testDefaultPoolMaxAgeAllowsReuseAtTheBound(): void

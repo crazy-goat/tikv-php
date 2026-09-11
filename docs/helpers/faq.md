@@ -1045,7 +1045,7 @@ Design points that are easy to get wrong on a later refactor:
   directly (so its existing "fresh fetch" tests still pass), and only
   `refillPool()` stores into the pool.
 - **Bound the pool by the injected wall clock, not by the TSO physical.**
-  A `now - poolFetchedAtMs > poolMaxAgeMs` (default 1 s) check discards a
+  A `now - poolFetchedAtMs > poolMaxAgeMs` (default 5 ms) check discards a
   pool that outlived its physical window; a *negative* age (clock jump
   backwards) is treated as uncertain and refills. Comparing the pooled
   `physical` against local `microtime()` instead would make pooling
