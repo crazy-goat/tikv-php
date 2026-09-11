@@ -111,6 +111,22 @@ class RawKvClientTest extends TestCase
         return new GrpcFuture($call, $response::class);
     }
 
+    private function scanResponseWithKeys(string ...$keys): RawScanResponse
+    {
+        $pairs = [];
+        foreach ($keys as $key) {
+            $pair = new KvPair();
+            $pair->setKey($key);
+            $pair->setValue('v-' . $key);
+            $pairs[] = $pair;
+        }
+
+        $response = new RawScanResponse();
+        $response->setKvs($pairs);
+
+        return $response;
+    }
+
     // ========================================================================
     // Cluster ID
     // ========================================================================
@@ -1423,6 +1439,232 @@ class RawKvClientTest extends TestCase
         $result = $this->client->batchScan([['a', 'z']], 10);
 
         $this->assertSame('k1', $result[0][0]['key']);
+    }
+
+    public function testBatchScanRerunsMiddleSubRangeWhenRegionShrankAfterEnumeration(): void
+    {
+        // The cached chain is stale: the middle region still claims [m, t)
+        // while getByKey() already sees it split into [m, q) + [q, t). The
+        // concurrent send for the stale [m, t) can therefore only cover
+        // [m, q), and the waiter must re-run that whole sub-range through the
+        // sequential path instead of dropping [q, t).
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $staleMiddle = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 't',
+        );
+        $shrunkenMiddle = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 2,
+            epochVersion: 2,
+            startKey: 'm',
+            endKey: 'q',
+        );
+        $middleTail = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 2,
+            epochVersion: 2,
+            startKey: 'q',
+            endKey: 't',
+        );
+        $region4 = new RegionInfo(
+            regionId: 4,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 't',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $staleMiddle, $region4]);
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static function (string $key) use ($region1, $shrunkenMiddle, $middleTail, $region4): RegionInfo {
+                if (strcmp($key, 'm') < 0) {
+                    return $region1;
+                }
+                if (strcmp($key, 'q') < 0) {
+                    return $shrunkenMiddle;
+                }
+
+                return strcmp($key, 't') < 0 ? $middleTail : $region4;
+            },
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // One concurrent send per enumerated segment; each response carries a
+        // key inside its (stale) range. The middle send only reaches [m, q).
+        $asyncResponses = [
+            $this->scanResponseWithKeys('a1'),
+            $this->scanResponseWithKeys('m1'),
+            $this->scanResponseWithKeys('t1'),
+        ];
+        $this->grpc->method('callAsync')->willReturnCallback(
+            function () use (&$asyncResponses): GrpcFuture {
+                return $this->okFuture(array_shift($asyncResponses) ?? new RawScanResponse());
+            },
+        );
+
+        // The sequential retrying path (sync call) must cover the shrunken
+        // middle sub-range in full: [m, q) then [q, t).
+        /** @var list<RawScanRequest> $syncRequests */
+        $syncRequests = [];
+        $this->grpc->expects($this->atLeastOnce())->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+            ) use (&$syncRequests): Message {
+                /** @var RawScanRequest $request */
+                $syncRequests[] = $request;
+
+                if ($request->getStartKey() === 'm') {
+                    return $this->scanResponseWithKeys('m1');
+                }
+                if ($request->getStartKey() === 'q') {
+                    return $this->scanResponseWithKeys('q1', 's1');
+                }
+
+                return new RawScanResponse();
+            },
+        );
+
+        $result = $this->client->batchScan([['a', 'z']], 10);
+
+        // q1/s1 prove [q, t) was not dropped; a single m1 proves the
+        // concurrent middle batch was discarded, not concatenated.
+        $this->assertSame(
+            ['a1', 'm1', 'q1', 's1', 't1'],
+            array_column($result[0], 'key'),
+        );
+        $this->assertSame(['m', 'q'], array_map(
+            static fn(RawScanRequest $request): string => $request->getStartKey(),
+            $syncRequests,
+        ));
+    }
+
+    public function testUnboundedScanFallsBackToSequentialWhenMiddleRegionShrank(): void
+    {
+        // Same stale-chain/shrunken-middle setup as the batchScan case, but
+        // driven through the unbounded fan-out (scanSegmentsInParallel): the
+        // non-final shrunken segment must trigger the sequential fallback so
+        // the whole [a, z) page is covered without a hole.
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $staleMiddle = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 't',
+        );
+        $shrunkenMiddle = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 2,
+            epochVersion: 2,
+            startKey: 'm',
+            endKey: 'q',
+        );
+        $middleTail = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 2,
+            epochVersion: 2,
+            startKey: 'q',
+            endKey: 't',
+        );
+        $region4 = new RegionInfo(
+            regionId: 4,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 't',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $staleMiddle, $region4]);
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static function (string $key) use ($region1, $shrunkenMiddle, $middleTail, $region4): RegionInfo {
+                if (strcmp($key, 'm') < 0) {
+                    return $region1;
+                }
+                if (strcmp($key, 'q') < 0) {
+                    return $shrunkenMiddle;
+                }
+
+                return strcmp($key, 't') < 0 ? $middleTail : $region4;
+            },
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // Concurrent sends are discarded once the fallback fires.
+        $this->grpc->method('callAsync')->willReturnCallback(
+            fn(): GrpcFuture => $this->okFuture(new RawScanResponse()),
+        );
+
+        /** @var list<string> $syncStarts */
+        $syncStarts = [];
+        $this->grpc->expects($this->atLeastOnce())->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+            ) use (&$syncStarts): Message {
+                /** @var RawScanRequest $request */
+                $syncStarts[] = $request->getStartKey();
+
+                return match ($request->getStartKey()) {
+                    'a' => $this->scanResponseWithKeys('a1'),
+                    'm' => $this->scanResponseWithKeys('m1'),
+                    'q' => $this->scanResponseWithKeys('q1', 's1'),
+                    't' => $this->scanResponseWithKeys('t1'),
+                    default => new RawScanResponse(),
+                };
+            },
+        );
+
+        $result = $this->client->scan('a', 'z', 0, false);
+
+        $this->assertSame(
+            ['a1', 'm1', 'q1', 's1', 't1'],
+            array_column($result, 'key'),
+        );
+        // The fallback re-scans the page sequentially from the first segment.
+        $this->assertSame(['a', 'm', 'q', 't'], $syncStarts);
     }
 
     // ========================================================================
