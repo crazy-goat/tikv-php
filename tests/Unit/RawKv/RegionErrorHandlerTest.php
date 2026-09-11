@@ -21,6 +21,7 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -322,8 +323,10 @@ class RegionErrorHandlerTest extends TestCase
         } catch (RegionException $e) {
             self::assertStringContainsString('BatchGet', $e->getMessage());
             self::assertStringContainsString($expectedFragment, $e->getMessage());
-            // binary-safe: message must contain the key bytes.
-            self::assertTrue(str_contains($e->getMessage(), $key));
+            // Raw key bytes must never reach the exception message; only the
+            // redacted representation is allowed (issue #269, GRPC-10).
+            self::assertStringNotContainsString($key, $e->getMessage());
+            self::assertStringContainsString(KeyRedactor::redact($key), $e->getMessage());
         }
     }
 
@@ -404,7 +407,40 @@ class RegionErrorHandlerTest extends TestCase
 
         self::assertIsString($result);
         self::assertStringContainsString('null', $result);
-        self::assertTrue(str_contains($result, "\x00\xffuser"));
+        self::assertStringNotContainsString("\x00\xffuser", $result);
+        self::assertStringContainsString(KeyRedactor::redact("\x00\xffuser"), $result);
+    }
+
+    /**
+     * Regression test for issue #269 (GRPC-10): a per-pair KeyError whose key
+     * embeds personal data must surface a redacted key in the RegionException
+     * message thrown by check(), never the raw key.
+     */
+    public function testPerPairKeyErrorRedactsRawKeyInExceptionMessage(): void
+    {
+        $rawKey = 'user_email:alice@example.com';
+
+        $keyError = new KeyError();
+        $keyError->setRetryable('too old');
+
+        $pair = new KvPair();
+        $pair->setKey($rawKey);
+        $pair->setError($keyError);
+        $pair->setValue('');
+
+        $response = new RawBatchGetResponse();
+        $response->setPairs([$pair]);
+
+        try {
+            RegionErrorHandler::check($response);
+            $this->fail('Expected RegionException for per-pair KeyError');
+        } catch (RegionException $e) {
+            $message = $e->getMessage();
+            $this->assertStringNotContainsString($rawKey, $message);
+            $this->assertStringContainsString(KeyRedactor::redact($rawKey), $message);
+            $this->assertStringContainsString('per-pair error for key', $message);
+            $this->assertStringContainsString('retryable: too old', $message);
+        }
     }
 
     public function testPerPairBatchGetWithMultiplePairsThrowsOnFirstError(): void
