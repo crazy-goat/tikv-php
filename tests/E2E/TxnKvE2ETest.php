@@ -600,15 +600,16 @@ class TxnKvE2ETest extends TestCase
      * Runs a transactional workload against a transactional keyspace
      * pre-split into at least three regions.
      *
-     * TiKV stores transactional region boundaries in an encoded form, so a
-     * region lookup that compares the raw user key against those boundaries
-     * misroutes once the transactional keyspace covers more than one region —
-     * TiKV then rejects the request with a "Key ... is out of [region ...]"
-     * (KeyNotInRegion-class) error. The GAP-01 fix encodes lookup keys with
-     * the memory-comparable codec (and decodes returned boundaries), so this
-     * workload must succeed across regions. The keys deliberately include
-     * binary bytes and the exact split-boundary keys to exercise the cases
-     * where raw byte ordering differs from the encoded ordering.
+     * TiKV stores transactional region boundaries in a memory-comparable
+     * encoded form, so a region lookup that compares the raw user key against
+     * those boundaries misroutes once the transactional keyspace covers more
+     * than one region — TiKV then rejects the request with a "Key ... is out
+     * of [region ...]" (KeyNotInRegion-class) error. The GAP-01 fix encodes
+     * lookup keys with the memory-comparable codec (and losslessly decodes the
+     * returned boundaries), so this workload must succeed across regions. The
+     * keys deliberately include binary bytes and the exact split-boundary keys
+     * to exercise the cases where raw byte ordering differs from the encoded
+     * ordering.
      */
     public function testTxnWorkloadAcrossPreSplitRegions(): void
     {
@@ -616,12 +617,12 @@ class TxnKvE2ETest extends TestCase
 
         $this->splitTxnKeyspaceIntoRegions($pdEndpoints, 3);
 
-        // Keys spread across the three regions. The exact split boundary keys
-        // ("\x01\x00", "mrr") are prefixes of the encoded region boundaries, so
-        // a raw (pre-fix) lookup misroutes them; the binary keys exercise the
-        // byte-ordering divergence directly. All keys stay below the 0x72
-        // ('r') keyspace-namespace boundary so the workload range maps onto
-        // exactly the three split regions and nothing else.
+        // Keys spread across the three regions. "\x01\x00" and "mrr" are the
+        // exact split boundaries (their MCE encodings are the regions' start
+        // keys), so a raw pre-fix lookup misroutes them; the binary keys
+        // exercise the byte-ordering divergence directly. All keys stay below
+        // the 0x72 ('r') keyspace-namespace boundary so the workload range maps
+        // onto exactly the three split regions and nothing else.
         $keys = [
             "\x00",
             "\x01\x00",
@@ -657,6 +658,26 @@ class TxnKvE2ETest extends TestCase
         foreach ($keys as $i => $key) {
             $this->assertSame('value-' . $i, $values[$key] ?? null, sprintf('batchGet of key %s', bin2hex($key)));
         }
+
+        // Forward scan across all three regions. With the lossless MCE decoder
+        // RegionCache stores the true user-key boundaries, so each per-region
+        // sub-scan starts exactly at the split boundary ("\x01\x00" / "mrr").
+        // The old escape decoder stopped at the first 0x00 0x00 and produced
+        // "\x01", one byte below the region's lower bound, which TiKV rejects
+        // as an invalid range. TxnKV has no reverse-scan API (only RawKV does),
+        // so a forward scan is the strongest cross-region scan coverage
+        // available for the transactional path.
+        $scan = $this->testClient->begin(['pessimistic' => false]);
+        $scanned = $scan->scan("\x00", "\x72");
+        $scan->rollback();
+
+        $scannedMap = [];
+        foreach ($scanned as $entry) {
+            $scannedMap[$entry['key']] = $entry['value'];
+        }
+        foreach ($keys as $i => $key) {
+            $this->assertSame('value-' . $i, $scannedMap[$key] ?? null, sprintf('scan of key %s', bin2hex($key)));
+        }
     }
 
     /**
@@ -664,15 +685,20 @@ class TxnKvE2ETest extends TestCase
      * covers at least $targetRegionCount regions, splitting it with TiKV's
      * SplitRegion RPC when needed.
      *
-     * The splits run through a raw-codec connection bundle: the split keys
-     * are given in the user-key space TiKV expects for the V1 transactional
-     * region layout.
+     * The splits run through a Mode::Txn connection bundle so region
+     * discovery matches the production TxnKV path; the split keys themselves
+     * are raw user keys (TiKV encodes the boundary internally).
      *
      * @param string[] $pdEndpoints
      */
     private function splitTxnKeyspaceIntoRegions(array $pdEndpoints, int $targetRegionCount): void
     {
-        $bundle = ConnectionFactory::create($pdEndpoints, null, [], new CodecV1(Mode::Raw));
+        // The transactional keyspace is discovered and looked up through the
+        // same Mode::Txn codec the production client uses: PD reports region
+        // boundaries MCE-encoded, so scanRegions()/getRegion() take raw user
+        // keys and return decoded boundaries. The split keys themselves stay
+        // raw — SplitRegion accepts a raw user key.
+        $bundle = ConnectionFactory::create($pdEndpoints, null, [], new CodecV1(Mode::Txn));
 
         try {
             $regionsForWorkloadRange = (fn(): array => $bundle->pdClient->scanRegions("\x00", "\x72"));
