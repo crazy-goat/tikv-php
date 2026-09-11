@@ -1256,3 +1256,27 @@ Two lessons from the #269 (GRPC-10) review:
    immune to quoting and to unrelated `$key` arguments on adjacent
    constructors. Any future source-scanning guard should follow the same
    "inspect the call, not the file text" rule.
+
+## The pessimistic-lock error loop is also exhaustive/fail-closed (TXN-25, issue #454)
+
+`TwoPhaseCommitter::pessimisticLockBatch()` is the second `KeyError`
+consumer (after `handlePrewriteErrors()`, TXN-09/#214) that must never treat
+an unrecognised variant as success. It checked only `deadlock` (throw),
+`locked` (resolve + set `$needRetry`) and `conflict` (throw), so
+`retryable`, `abort`, `already_exist`, `assertion_failed`,
+`primary_mismatch`, `txn_not_found`, `commit_ts_expired`,
+`txn_lock_not_found` fell off the end of the per-region loop with
+`$needRetry` still `false`; the post-loop guard then saw no region error and
+`break`-ed, and `commit()` prewrote keys whose pessimistic lock was never
+acquired. The fix mirrors #214: `retryable`/`abort` raise
+`TransactionConflictException`, every other variant raises a base
+`TiKvException` built with `KeyErrorDescriber::describe()`, and the throw
+happens before the do-while condition so it escapes the retry loop instead
+of being converted to `LockWaitTimeoutException`. Note the deliberate
+asymmetry: `handleRollbackError()` maps `retryable` to `TxnRetryableException`
+(a rollback can restart the whole txn), while the lock/prewrite paths map it
+to `TransactionConflictException` — match the path, not the variant name.
+The regression tests live in `TransactionTest` and use the shared
+`stubPessimisticLockError()` helper (records the gRPC method sequence and
+asserts `['KvPessimisticLock']`, i.e. no `KvPrewrite`/`KvCommit`); there is
+also a first-variant-wins test for multi-error responses.
