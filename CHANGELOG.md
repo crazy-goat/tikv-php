@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **[TXN-09]**: prewrite now fails closed on every `KeyError` variant. `TwoPhaseCommitter::handlePrewriteErrors()` previously handled only `locked`/`conflict`/`retryable`/`abort` and silently treated any other variant — notably `deadlock`, `already_exist`, `assertion_failed`, `primary_mismatch`, `txn_not_found` and `commit_ts_too_large` — as a successful prewrite, so `commit()` proceeded to `KvCommit` even though the prewrite had failed. A `deadlock` now raises `DeadlockException` carrying the deadlock key, key hash and lock timestamp (mirroring the pessimistic-lock path, now shared through `throwDeadlock()`), the remaining named variants raise `TransactionConflictException`, and any unrecognised variant raises a base `TiKvException` described via `KeyErrorDescriber`, so no response can be mistaken for success. (#214)
 
+- **[TXN-25]**: pessimistic-lock acquisition now fails closed on every `KeyError` variant. `TwoPhaseCommitter::pessimisticLockBatch()` handled only `deadlock`/`locked`/`conflict`, so any other variant — `retryable`, `abort`, `already_exist`, `assertion_failed`, `primary_mismatch`, `txn_not_found`, `commit_ts_expired`, … — fell off the end of the per-region error loop with `$needRetry` left `false`, the batch was treated as fully locked, and `commit()` proceeded to prewrite keys whose pessimistic lock was never acquired. `retryable`/`abort` now raise `TransactionConflictException` (mirroring `handlePrewriteErrors()`, #214) and every other variant raises a base `TiKvException` described via `KeyErrorDescriber`, so a `KvPessimisticLock` response can no longer be mistaken for a successful lock. (#454)
+
 ## [v0.5.0] - 2026-09-11
 
 ### Added

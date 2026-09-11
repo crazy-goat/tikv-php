@@ -1180,36 +1180,11 @@ class TransactionTest extends TestCase
      */
     public function testCommitPessimisticLockUnrecognisedVariantThrowsAndSkipsPrewrite(): void
     {
-        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
-        $this->regionCache->method('put');
-        $this->regionCache->method('invalidate');
-        $this->pdClient->method('getStore')->willReturn($this->makeStore());
-        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
-        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
-        $this->pdClient->method('getTimestamp')->willReturn(2000);
-
         $keyError = new KeyError();
         $keyError->setCommitTsExpired(new \CrazyGoat\Proto\Kvrpcpb\CommitTsExpired());
 
-        $lockResponse = new PessimisticLockResponse();
-        $lockResponse->setErrors([$keyError]);
-
         $methodSequence = [];
-        $this->grpc->method('call')
-            ->willReturnCallback(function (
-                string $addr,
-                string $svc,
-                string $method,
-            ) use (
-                &$methodSequence,
-                $lockResponse
-): object {
-                $methodSequence[] = $method;
-                return match ($method) {
-                    'KvPessimisticLock' => $lockResponse,
-                    default => throw new \RuntimeException("Unexpected method: $method"),
-                };
-            });
+        $this->stubPessimisticLockError($methodSequence, $keyError);
 
         $txn = $this->createTransaction(['pessimistic' => true]);
         $txn->set('k1', 'v1');
@@ -1228,40 +1203,16 @@ class TransactionTest extends TestCase
      * Issue #454 (TXN-25): `retryable` is a named variant that previously
      * fell through the pessimistic-lock error loop as success. It must map to
      * a typed TransactionConflictException and abort before prewrite, matching
-     * the prewrite/rollback handling of the same variant.
+     * `handlePrewriteErrors()` (a `retryable` there is also a conflict, not a
+     * retry).
      */
     public function testCommitPessimisticLockRetryableThrowsAndSkipsPrewrite(): void
     {
-        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
-        $this->regionCache->method('put');
-        $this->regionCache->method('invalidate');
-        $this->pdClient->method('getStore')->willReturn($this->makeStore());
-        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
-        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
-        $this->pdClient->method('getTimestamp')->willReturn(2000);
-
         $keyError = new KeyError();
         $keyError->setRetryable('optimistic lock not found');
 
-        $lockResponse = new PessimisticLockResponse();
-        $lockResponse->setErrors([$keyError]);
-
         $methodSequence = [];
-        $this->grpc->method('call')
-            ->willReturnCallback(function (
-                string $addr,
-                string $svc,
-                string $method,
-            ) use (
-                &$methodSequence,
-                $lockResponse
-): object {
-                $methodSequence[] = $method;
-                return match ($method) {
-                    'KvPessimisticLock' => $lockResponse,
-                    default => throw new \RuntimeException("Unexpected method: $method"),
-                };
-            });
+        $this->stubPessimisticLockError($methodSequence, $keyError);
 
         $txn = $this->createTransaction(['pessimistic' => true]);
         $txn->set('k1', 'v1');
@@ -1271,6 +1222,60 @@ class TransactionTest extends TestCase
             $this->fail('Expected TransactionConflictException was not thrown');
         } catch (TransactionConflictException $e) {
             $this->assertSame('Pessimistic lock failed: retryable: optimistic lock not found', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPessimisticLock'], $methodSequence);
+    }
+
+    /**
+     * Issue #454 (TXN-25): `abort` is the other named string variant a
+     * KvPessimisticLock KeyError can carry. It previously fell through as
+     * success and must now abort with a typed exception before prewrite.
+     */
+    public function testCommitPessimisticLockAbortThrowsAndSkipsPrewrite(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setAbort('transaction aborted');
+
+        $methodSequence = [];
+        $this->stubPessimisticLockError($methodSequence, $keyError);
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('Pessimistic lock failed: abort: transaction aborted', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPessimisticLock'], $methodSequence);
+    }
+
+    /**
+     * Issue #454 (TXN-25): when a KvPessimisticLock response carries several
+     * KeyErrors the first recognised variant wins — the loop throws and never
+     * inspects the rest, so the transaction cannot proceed to prewrite.
+     */
+    public function testCommitPessimisticLockMultipleErrorsThrowsFirstVariant(): void
+    {
+        $first = new KeyError();
+        $first->setAbort('first variant must win');
+        $second = new KeyError();
+        $second->setCommitTsExpired(new \CrazyGoat\Proto\Kvrpcpb\CommitTsExpired());
+
+        $methodSequence = [];
+        $this->stubPessimisticLockError($methodSequence, $first, $second);
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('Pessimistic lock failed: abort: first variant must win', $e->getMessage());
         }
 
         $this->assertSame(['KvPessimisticLock'], $methodSequence);
@@ -1805,6 +1810,45 @@ class TransactionTest extends TestCase
                 return match ($method) {
                     'KvPrewrite' => $prewriteResponse,
                     'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+    }
+
+    /**
+     * Stub the region/PD dependencies and make KvPessimisticLock answer with
+     * a response containing the given failing KeyErrors, in order. Every
+     * other RPC method (KvPrewrite, KvCommit) throws, so a test proves the
+     * transaction never proceeds past the failed lock via the recorded
+     * method sequence.
+     *
+     * @param list<string> $methodSequence Collected RPC method names, by ref.
+     */
+    private function stubPessimisticLockError(array &$methodSequence, KeyError ...$keyErrors): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors($keyErrors);
+
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$methodSequence,
+                $lockResponse,
+            ): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
                     default => throw new \RuntimeException("Unexpected method: $method"),
                 };
             });
