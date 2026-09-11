@@ -1516,9 +1516,8 @@ class RawKvScannerTest extends TestCase
             logger: new NullLogger(),
         );
 
-        // A fully warm cache must never call PD; at most one call is
-        // tolerated for a cache that still needed priming.
-        $this->pdClient->expects($this->atMost(1))->method('scanRegions');
+        // A fully warm cache must never call PD.
+        $this->pdClient->expects($this->never())->method('scanRegions');
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
         $pageSize = 256;
@@ -1555,6 +1554,50 @@ class RawKvScannerTest extends TestCase
 
         $this->assertSame($pageCount * $pageSize, $seen);
         $this->assertSame($pageCount, $pagesServed);
+    }
+
+    public function testReverseScanServesFromWarmCacheWithoutScanRegions(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->defaultRegion('a', 'm', regionId: 1));
+        $cache->put($this->defaultRegion('m', '', regionId: 2));
+
+        $scanner = new RawKvScanner(
+            $this->pdClient,
+            $this->grpc,
+            new RegionResolver($this->pdClient, $cache),
+            new TimeoutConfig(),
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $cache,
+            logger: new NullLogger(),
+        );
+
+        // reverseScan() routes through the region cache too (issue #293):
+        // a warm chain means no PD ScanRegions call.
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pairY = new KvPair();
+        $pairY->setKey('key_y');
+        $pairY->setValue('val_y');
+
+        $pairL = new KvPair();
+        $pairL->setKey('key_l');
+        $pairL->setValue('val_l');
+
+        // The upper region [m, +inf) is scanned first in reverse order.
+        $upper = new RawScanResponse();
+        $upper->setKvs([$pairY]);
+        $lower = new RawScanResponse();
+        $lower->setKvs([$pairL]);
+
+        $this->grpc->method('call')
+            ->willReturnOnConsecutiveCalls($upper, $lower);
+
+        $result = $scanner->reverseScan('z', 'a', 100, false);
+
+        $this->assertSame(['key_y', 'key_l'], array_column($result, 'key'));
     }
 
     private function responseWithRegionError(Error $error): RawScanResponse

@@ -19,7 +19,8 @@ interface RegionCacheInterface
      *
      * The chain starts at the region containing $startKey and is followed
      * through each region's end key until a region covers $endKey (an empty
-     * end key means +infinity, matching {@see PdClientInterface::scanRegions()}).
+     * end key means +infinity, matching
+     * {@see \CrazyGoat\TiKV\Client\Connection\PdClientInterface::scanRegions()}).
      *
      * Returns an empty array when the cache does not hold the complete chain
      * (a cold or partially warm cache, or a gap), so the caller falls back to

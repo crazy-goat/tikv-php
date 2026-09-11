@@ -1163,29 +1163,32 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $pair = new KvPair();
-        $pair->setKey('k1');
-        $pair->setValue('v1');
-        $clean = new RawScanResponse();
-        $clean->setKvs([$pair]);
-
         $error = new Error();
         $error->setMessage('not leader');
         $regionError = new RawScanResponse();
         $regionError->setRegionError($error);
 
-        // The concurrent fan-out receives a region error; scan() must
-        // discard that page and re-run it through the sequential retrying
-        // path (which receives the clean response).
-        $asyncResponses = [$regionError, $clean];
+        // The region error sits on the DATA-BEARING region and the other
+        // parallel response is empty: without the guard parseScanPairs()
+        // would drop k1 and the final assertion would be [] — so passing it
+        // proves the sequential fallback actually ran.
+        $asyncResponses = [$regionError, new RawScanResponse()];
         $this->grpc->method('callAsync')->willReturnCallback(
-            fn(): GrpcFuture => $this->okFuture(array_shift($asyncResponses)),
+            function () use (&$asyncResponses): GrpcFuture {
+                return $this->okFuture(array_shift($asyncResponses) ?? new RawScanResponse());
+            },
         );
-        $this->grpc->method('call')->willReturnCallback(
-            function (string $address, string $service, string $method, Message $request) use ($pair): Message {
+
+        // The fan-out never uses the synchronous call path; the sequential
+        // fallback does, so assert it was exercised (not vacuous).
+        $this->grpc->expects($this->atLeastOnce())->method('call')->willReturnCallback(
+            function (string $address, string $service, string $method, Message $request): Message {
                 $response = new RawScanResponse();
                 /** @var RawScanRequest $request */
                 if ($request->getStartKey() === 'a') {
+                    $pair = new KvPair();
+                    $pair->setKey('k1');
+                    $pair->setValue('v1');
                     $response->setKvs([$pair]);
                 }
 
@@ -1196,6 +1199,230 @@ class RawKvClientTest extends TestCase
         $result = $this->client->scan('a', 'z', 0, false);
 
         $this->assertSame(['k1'], array_column($result, 'key'));
+    }
+
+    public function testUnboundedScanSplitContinuationUsesRemainingBudget(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 'z',
+        );
+        // The last enumerated region shrank to [m, q) before the send: the
+        // fan-out must continue from 'q' to 'z' with the real budget.
+        $shrunkenRegion2 = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 2,
+            epochVersion: 2,
+            startKey: 'm',
+            endKey: 'q',
+        );
+
+        $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2]);
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static function (string $key) use ($region1, $region2, $shrunkenRegion2): RegionInfo {
+                if (strcmp($key, 'm') < 0) {
+                    return $region1;
+                }
+
+                return strcmp($key, 'q') < 0 ? $shrunkenRegion2 : $region2;
+            },
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair1 = new KvPair();
+        $pair1->setKey('k1');
+        $pair1->setValue('v1');
+        $pair2 = new KvPair();
+        $pair2->setKey('k2');
+        $pair2->setValue('v2');
+
+        $response1 = new RawScanResponse();
+        $response1->setKvs([$pair1]);
+        $response2 = new RawScanResponse();
+        $response2->setKvs([$pair2]);
+
+        $asyncResponses = [$response1, $response2];
+        $this->grpc->method('callAsync')->willReturnCallback(
+            function () use (&$asyncResponses): GrpcFuture {
+                return $this->okFuture(array_shift($asyncResponses) ?? new RawScanResponse());
+            },
+        );
+
+        /** @var list<RawScanRequest> $syncRequests */
+        $syncRequests = [];
+        $this->grpc->expects($this->atLeastOnce())->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+            ) use (&$syncRequests): Message {
+                /** @var RawScanRequest $request */
+                $syncRequests[] = $request;
+
+                return new RawScanResponse();
+            },
+        );
+
+        $result = $this->client->scan('a', 'z', 0, false);
+
+        $this->assertSame(['k1', 'k2'], array_column($result, 'key'));
+        $this->assertNotEmpty($syncRequests);
+        // The continuation must carry the real remaining budget: 0 would be
+        // treated as "unbounded" by executeScanForRegion() and issue a full
+        // unbounded wire read of the remainder before trimming.
+        $this->assertSame('q', $syncRequests[0]->getStartKey());
+        $this->assertGreaterThan(0, $syncRequests[0]->getLimit());
+    }
+
+    public function testUnboundedScanFanOutIsWindowedAndStopsWhenBudgetExhausted(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 't',
+        );
+        $region3 = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 't',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2, $region3]);
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static function (string $key) use ($region1, $region2, $region3): RegionInfo {
+                if ($key < 'm') {
+                    return $region1;
+                }
+
+                return $key < 't' ? $region2 : $region3;
+            },
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // Concurrency cap of 2 over 3 regions: only the first window may be
+        // dispatched, and the budget is exhausted by that window's data, so
+        // the third region must never be sent (bounded fan-out, early stop).
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            maxConcurrency: 2,
+        );
+
+        $pairs = [];
+        for ($i = 0; $i < RawKvClient::MAX_SCAN_LIMIT; $i++) {
+            $pair = new KvPair();
+            $pair->setKey(sprintf('k%05d', $i));
+            $pair->setValue('v');
+            $pairs[] = $pair;
+        }
+        $full = new RawScanResponse();
+        $full->setKvs($pairs);
+
+        /** @var list<RawScanRequest> $requests */
+        $requests = [];
+        $this->grpc->expects($this->exactly(2))->method('callAsync')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+            ) use (
+                &$requests,
+                $full,
+            ): GrpcFuture {
+                /** @var RawScanRequest $request */
+                $requests[] = $request;
+
+                return $this->okFuture($full);
+            },
+        );
+
+        $result = $client->scan('a', 'z', 0, false);
+
+        $this->assertCount(RawKvClient::MAX_SCAN_LIMIT, $result);
+        // Every dispatched region carries the (positive) remaining budget,
+        // never an unbounded/zero limit.
+        $this->assertGreaterThan(0, $requests[0]->getLimit());
+        $this->assertGreaterThan(0, $requests[1]->getLimit());
+    }
+
+    public function testBatchScanRetriesSubRangeOnRegionError(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getRegionsInRange')->willReturn([$region]);
+        $this->regionCache->method('getByKey')->willReturn($region);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $error = new Error();
+        $error->setMessage('epoch not match');
+        $errorResponse = new RawScanResponse();
+        $errorResponse->setRegionError($error);
+
+        // The concurrent batchScan send reports a region error; the sub-range
+        // must be re-run through the sequential retrying path rather than
+        // returned as a silently partial result.
+        $this->grpc->method('callAsync')->willReturnCallback(
+            fn(): GrpcFuture => $this->okFuture($errorResponse),
+        );
+
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+        $clean = new RawScanResponse();
+        $clean->setKvs([$pair]);
+
+        $this->grpc->expects($this->atLeastOnce())->method('call')->willReturn($clean);
+
+        $result = $this->client->batchScan([['a', 'z']], 10);
+
+        $this->assertSame('k1', $result[0][0]['key']);
     }
 
     // ========================================================================
