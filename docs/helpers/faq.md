@@ -1142,32 +1142,42 @@ through `executeScanForRegion()` (the concurrent send is awaited outside the
 per-range retry loop, so a region error there is neither retried nor
 invalidated otherwise).
 
-## TxnKV region lookups must be MCE-encoded — and a MCE-decoded boundary is not a valid txn scan start key (GAP-01)
+## TxnKV region lookups must be MCE-encoded (GAP-01)
 
 Validated empirically against TiKV v8.5.5 / PD v8.5.5 (V1 txn cluster) while
 implementing issue #415:
 
-1. **PD reports transactional region boundaries in an encoded form**
-   (`split_key` + ts-suffix-ish bytes, e.g. splitting at `\x01\x00` yields a
-   boundary that hex-decodes to `0100000000000000f9`; PD v8.5.5 also
-   pre-creates keyspace-namespace regions at `72 00 … fb` / `78 00 … fb` even
-   under API V1). Querying `GetRegion(enc(user_key))` with the
-   memory-comparable encoding separates keys correctly across a split, while
-   raw user keys misroute: the A/B test wrote binary + boundary keys across
-   three regions — the MCE client committed/read everything, the raw client
-   failed with `Key … is out of [region …]` (KeyNotInRegion-class).
-2. **`MemComparableCodec::decode` is lossy on these boundaries.** It stops at
-   the first `0x00 0x00` pair inside the ts-suffix, so `0100…f9` decodes to
-   `\x01` instead of the true split key `\x01\x00`. The lossy order-preserving
-   decode is fine for `RegionCache` lookups (binary search in user space still
-   lands on the right region) but **not** as a txn `KvScan` start key: TiKV
-   validates the range start against the region's physical lower bound and
-   rejects `\x01` (`InvalidReqRange`, start one byte below the bound), while
-   the true key `\x01\x00` or the raw encoded boundary bytes are accepted.
-   Consequence: `TxnReader::scan()` starting a sub-range at a decoded region
-   boundary fails on a multi-region cluster (latent since any split makes
-   region starts reachable). GAP-01's E2E test therefore drives the workload
-   with writes/reads/batchGet across the split regions, not `scan()`.
+1. **PD reports transactional region boundaries in an encoded form.** TiKV /
+   PD store txn region boundaries using TiDB's `codec.EncodeBytes` (the
+   memory-comparable encoding, MCE). The encoding walks the key in 8-byte
+   groups: each full group is followed by marker `0xFF`; the final partial
+   group is padded with `0x00` to 8 bytes and followed by marker
+   `0xFF - padCount`, where `padCount = 8 - remaining`. The loop runs for
+   `idx = 0; idx <= len; idx += 8`, so a key whose length is an exact multiple
+   of 8 also gets a trailing all-zero group. Examples:
+   `EncodeBytes("") = 0000000000000000f7`,
+   `EncodeBytes("\x01\x00") = 0100000000000000f9`,
+   `EncodeBytes("mrr") = 6d72720000000000fa`,
+   `EncodeBytes("hello") = 68656c6c6f000000fc`.
+   Querying `GetRegion(enc(user_key))` with the MCE encoding separates keys
+   correctly across a split, while raw user keys misroute: the A/B test wrote
+   binary + boundary keys across three regions — the MCE client
+   committed/read everything, the raw client failed with
+   `Key … is out of [region …]` (KeyNotInRegion-class).
+2. **The first implementation used the wrong encoding.** It escaped `0x00` /
+   `0xFF` and used a `0x00 0x00` terminator, which is not TiDB's
+   `EncodeBytes`. Its `decode` was also lossy: it stopped at the first
+   `0x00 0x00` pair inside the MCE bytes, so `0100000000000000f9` decoded to
+   `\x01` instead of the true split key `\x01\x00`. That broke multi-region
+   `scan()`: TiKV validates the range start against the region's lower bound
+   and rejects `\x01` (`InvalidReqRange`, one byte below the bound), while the
+   true key `\x01\x00` is accepted. `MemComparableCodec` now implements TiDB
+   `EncodeBytes` / `DecodeBytes` faithfully, so `decode` is lossless and a
+   decoded boundary is a valid txn scan start key. The GAP-01 E2E test
+   (`TxnKvE2ETest::testTxnWorkloadAcrossPreSplitRegions`) drives writes, reads,
+   `batchGet()` **and a forward `scan()`** across the split regions. (TxnKV
+   exposes no reverse-scan API — only RawKV does — so a forward scan is the
+   strongest cross-region scan coverage available for the transactional path.)
 3. Manual region pre-split for E2E is reliable on v8.5.5 via the raw gRPC
    call `tikvpb.Tikv/SplitRegion` (service string `tikvpb.Tikv`, method
    `SplitRegion`) with a `kvrpcpb.SplitRegionRequest` carrying
@@ -1176,4 +1186,6 @@ implementing issue #415:
    `PdClient::getStore()`. A fresh (empty-volume) V1 cluster reports 5
    pre-created namespace regions (raw keyspace 0 / 1, txn keyspace 0 / 1),
    so "region count" must be counted over the workload key range
-   (`scanRegions("\x00", "\x72")`), not over the whole keyspace.
+   (`scanRegions("\x00", "\x72")`), not over the whole keyspace. Region
+   discovery and `SplitRegion` targeting go through the same `Mode::Txn`
+   codec as the production client; the `split_key` stays a raw user key.
