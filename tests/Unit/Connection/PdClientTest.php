@@ -12,6 +12,7 @@ use CrazyGoat\Proto\Pdpb\GetRegionRequest;
 use CrazyGoat\Proto\Pdpb\GetRegionResponse;
 use CrazyGoat\Proto\Pdpb\GetStoreResponse;
 use CrazyGoat\Proto\Pdpb\ResponseHeader;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
@@ -19,8 +20,10 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -833,6 +836,81 @@ class PdClientTest extends TestCase
         $this->assertSame('m', $result[0]->startKey);
         // Unbounded end survives unchanged.
         $this->assertSame('', $result[0]->endKey);
+    }
+
+    public function testScanRegionsDecodesEveryBoundaryAcrossMultipleRegionsInTxnMode(): void
+    {
+        // Three regions covering the whole keyspace: an unbounded start, two
+        // internal split boundaries (m, z) and an unbounded end. PD reports
+        // boundaries MCE-encoded; every internal boundary must come back as
+        // the hard-coded user key while unbounded boundaries stay empty.
+        // EncodeBytes("m") = 6d00000000000000f8,
+        // EncodeBytes("z") = 7a00000000000000f8.
+        $encodedM = (string) hex2bin('6d00000000000000f8');
+        $encodedZ = (string) hex2bin('7a00000000000000f8');
+
+        $region1 = $this->makeRegion('', $encodedM);
+        $region1->setId(1);
+        $region2 = $this->makeRegion($encodedM, $encodedZ);
+        $region2->setId(2);
+        $region3 = $this->makeRegion($encodedZ, '');
+        $region3->setId(3);
+
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response = new \CrazyGoat\Proto\Pdpb\ScanRegionsResponse();
+        $response->setHeader($header);
+        $response->setRegionMetas([$region1, $region2, $region3]);
+        $response->setLeaders([
+            $this->makePeer(1, 1),
+            $this->makePeer(2, 2),
+            $this->makePeer(3, 3),
+        ]);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
+        $result = $client->scanRegions('', '');
+
+        $this->assertCount(3, $result);
+        $this->assertSame('', $result[0]->startKey);
+        $this->assertSame('m', $result[0]->endKey);
+        $this->assertSame('m', $result[1]->startKey);
+        $this->assertSame('z', $result[1]->endKey);
+        $this->assertSame('z', $result[2]->startKey);
+        $this->assertSame('', $result[2]->endKey);
+    }
+
+    public function testCreateWiresCodecModeIntoPdClient(): void
+    {
+        // Both public factories must build their codec with the right mode:
+        // TxnKvClient -> Mode::Txn (MCE-encoded PD region lookups),
+        // RawKvClient -> Mode::Raw (byte-for-byte passthrough). Probe the
+        // codec the PdClient actually received rather than asserting on the
+        // private field value in isolation: EncodeBytes("m") =
+        // 6d00000000000000f8 must come out of the TxnKv wiring and the raw
+        // key out of the RawKv wiring (issue #415, GAP-01).
+        $txnCodec = $this->codecOf(TxnKvClient::create(['pd:2379']));
+        $rawCodec = $this->codecOf(RawKvClient::create(['pd:2379']));
+
+        $this->assertSame('6d00000000000000f8', bin2hex($txnCodec->encodeRegionKey('m')));
+        $this->assertSame('m', $rawCodec->encodeRegionKey('m'));
+    }
+
+    private function codecOf(object $client): CodecInterface
+    {
+        $pdClient = (new \ReflectionProperty($client, 'pdClient'))->getValue($client);
+        if (!$pdClient instanceof PdClient) {
+            throw new \LogicException('Expected create() to wire a PdClient');
+        }
+
+        $codec = (new \ReflectionProperty(PdClient::class, 'codec'))->getValue($pdClient);
+        if (!$codec instanceof CodecInterface) {
+            throw new \LogicException('Expected PdClient to carry a CodecInterface');
+        }
+
+        return $codec;
     }
 
     // ========================================================================

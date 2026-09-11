@@ -38,6 +38,11 @@ final class RegionInfoMapper
      * @param Peer|null $leader region leader, or null when PD reports none
      * @param CodecInterface|null $codec when provided, the region's boundary
      *        keys are decoded from PD's encoded space into user-key space
+     *
+     * @throws \InvalidArgumentException when a non-empty boundary key is
+     *         rejected by the codec as malformed (e.g. a truncated MCE group):
+     *         the failure is deliberately NOT swallowed so a bogus boundary
+     *         never reaches {@see \CrazyGoat\TiKV\Client\Cache\RegionCache}
      */
     public static function fromProto(Region $region, ?Peer $leader, ?CodecInterface $codec = null): RegionInfo
     {

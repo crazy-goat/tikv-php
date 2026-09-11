@@ -166,4 +166,26 @@ class RegionInfoMapperTest extends TestCase
         $this->assertSame('a', $info->startKey);
         $this->assertSame('b', $info->endKey);
     }
+
+    public function testTxnCodecThrowsOnMalformedEncodedBoundary(): void
+    {
+        // A PD-supplied boundary that is not valid MCE (here a truncated
+        // 3-byte group, shorter than one 9-byte group) must fail closed: the
+        // mapper does not swallow the codec's \InvalidArgumentException, so
+        // no bogus boundary key can enter RegionCache and misroute lookups.
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $region = new Region();
+        $region->setId(5);
+        $region->setStartKey("\x00\x00\x00");
+        $region->setEndKey('');
+        $region->setRegionEpoch($epoch);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Truncated MCE-encoded data');
+
+        RegionInfoMapper::fromProto($region, null, new CodecV1(Mode::Txn));
+    }
 }

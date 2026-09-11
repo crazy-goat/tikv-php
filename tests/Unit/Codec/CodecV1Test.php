@@ -140,6 +140,25 @@ class CodecV1Test extends TestCase
         $this->assertSame('', $end);
     }
 
+    public function testTxnKvDecodeRangeWithEmptyStart(): void
+    {
+        // An empty start key means "unbounded" too and must survive the round
+        // trip unchanged — decodeRegionKey('') would throw on the missing MCE
+        // terminator (mirrors RegionInfoMapper's end-key guard).
+        $codec = new CodecV1(Mode::Txn);
+        [$start, $end] = $codec->decodeRange('', (string) hex2bin('7a00000000000000f8'));
+        $this->assertSame('', $start);
+        $this->assertSame('z', $end);
+    }
+
+    public function testTxnKvDecodeRangeWithBothBoundariesEmpty(): void
+    {
+        $codec = new CodecV1(Mode::Txn);
+        [$start, $end] = $codec->decodeRange('', '');
+        $this->assertSame('', $start);
+        $this->assertSame('', $end);
+    }
+
     // ========================================================================
     //  API version / keyspace metadata
     // ========================================================================
