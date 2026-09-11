@@ -191,7 +191,8 @@ final class HeartbeatKeyErrorTest extends TestCase
         self::assertInstanceOf(RetryBudgetExhaustedException::class, $e);
         self::assertInstanceOf(TxnRetryableException::class, $e->getPrevious());
         self::assertSame(BackoffType::TxnLock, $e->getPrevious()->backoffType);
-        // 'key1' is short, so KeyRedactor hex-encodes it: 6b657931.
+        // 'key1' is short, so KeyRedactor hex-encodes it: 6b657931. The
+        // redacted value already carries its own quotes ("6b657931" (4 bytes)).
         self::assertStringStartsWith('Heartbeat failed: locked key "', $e->getPrevious()->getMessage());
         self::assertStringContainsString('6b657931', $e->getPrevious()->getMessage());
         // The own-primary-lock invariant: heartbeat resolves nothing — the

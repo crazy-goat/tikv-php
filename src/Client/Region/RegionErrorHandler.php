@@ -96,11 +96,11 @@ final class RegionErrorHandler
     private static function describeKeyError(string $key, ?object $keyError): string
     {
         if ($keyError === null) {
-            return sprintf('per-pair error for key "%s": null', KeyRedactor::redact($key));
+            return sprintf('per-pair error for key %s: null', KeyRedactor::redact($key));
         }
 
         return sprintf(
-            'per-pair error for key "%s": %s',
+            'per-pair error for key %s: %s',
             KeyRedactor::redact($key),
             KeyErrorDescriber::describe($keyError),
         );

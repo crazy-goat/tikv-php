@@ -97,7 +97,7 @@ final readonly class RetryExecutor
                 ]);
                 throw new RetryBudgetExhaustedException(
                     sprintf(
-                        'Retry attempt cap (%d) exhausted for key "%s"',
+                        'Retry attempt cap (%d) exhausted for key %s',
                         $this->maxAttempts,
                         KeyRedactor::redact($key),
                     ),
@@ -250,7 +250,7 @@ final readonly class RetryExecutor
         ]);
         throw new RetryBudgetExhaustedException(
             sprintf(
-                'Retry deadline (%d ms) exhausted for key "%s"',
+                'Retry deadline (%d ms) exhausted for key %s',
                 $this->deadlineMs,
                 KeyRedactor::redact($key),
             ),
