@@ -1216,3 +1216,20 @@ fail-closed fallback today: `commit_ts_expired`, `txn_lock_not_found`. Add a
 regression test in `TransactionTest` that records the gRPC method sequence and
 asserts `['KvPrewrite']` — no `KvCommit` — for both the deadlock and the
 unrecognised-variant cases.
+
+## Raw user keys must not appear in exception messages either — redact and expose via a typed accessor (GRPC-10)
+
+Exception messages are a logging channel: Monolog/Sentry/Bugsnag index
+`$e->getMessage()`, uncaught-exception handlers write it to stderr, and
+framework error pages render it. So the same rule that already applied to
+`LoggerInterface` contexts applies to every thrown message. Issue #269 found
+four sites that redacted for the log but interpolated the raw key into the
+exception thrown immediately afterwards (`RetryExecutor`'s attempt-cap and
+deadline messages, `RegionErrorHandler`'s two per-pair messages). Always pass
+keys through `KeyRedactor::redact()` in messages, and when code genuinely
+needs the raw key, add a typed accessor on the exception instead of embedding
+it in the message (`RetryBudgetExhaustedException::getRawKey()`) — callers
+must never parse keys out of `getMessage()`. A guard test
+(`tests/Unit/Security/ExceptionMessageRedactionGuardTest.php`) scans
+`src/Client` for the raw `sprintf('… for key "%s"', …, $key)` shape so the
+pattern cannot silently return.
