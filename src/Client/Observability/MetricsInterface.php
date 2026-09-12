@@ -81,7 +81,7 @@ interface MetricsInterface
      *                           sites with NO enclosing retry executor,
      *                           check($…, notLeaderOwnedByRetryExecutor: false)
      *                           DOES invalidate with reason 'not_leader'
-     *                           (prewrite loop, pessimistic lock batch,
+     *                           (pessimistic lock batch,
      *                           primary-region commit, batchGetFromTiKV),
      *                           mirroring the CHANGELOG wording.
      * - 'retry_region_error': RetryExecutor invalidated before scheduling the

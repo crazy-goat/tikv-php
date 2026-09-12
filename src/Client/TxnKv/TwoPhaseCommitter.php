@@ -211,7 +211,13 @@ final readonly class TwoPhaseCommitter
             // the closure so the leader switch / cache invalidation performed
             // by the executor takes effect on the next attempt — the same
             // stale-capture class as #267/#500/#502. Prewrite is idempotent
-            // for a given start_ts, so replay is safe.
+            // for a given start_ts, so replay is safe. Known limitation: there
+            // is no split-regroup path here. If the region split after
+            // grouping, re-resolving by the first mutation's key can return a
+            // region that no longer covers the whole group, and the executor
+            // keeps retrying the over-wide prewrite until its budget runs out
+            // (same limitation as pessimisticLockBatch() #500 and batch
+            // rollback #502).
             $result = $retryExecutor->execute(
                 $firstKey,
                 function () use (
