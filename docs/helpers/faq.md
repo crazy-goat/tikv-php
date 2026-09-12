@@ -302,7 +302,10 @@ retry closure and the `scanRegions()` result is pre-populated into the
 region cache (so the first attempt is a cache hit). Remaining limitation:
 because of the #295 fan-out the retry closure only observes dispatch-phase
 failures; response-borne region errors surface at wait time as
-`BatchPartialFailureException` (tracked by #236/#189). A region that shrank
+`BatchPartialFailureException`. Unlike `RawKvBatch` — whose response-borne
+region errors are now retried in the wait phase by #183 — this
+`RawKvRangeOps` wait-time path is still **unfixed** and remains an open gap;
+#236/#189 covered the batch wrappers, not `RawKvRangeOps`. A region that shrank
 after enumeration (a split) is also guarded by
 `RawKvRangeOps::assertRegionCoversRange()`: `deleteRange` fails closed, and
 `checksum` refuses a partial result — its data read is silently clamped by
@@ -926,20 +929,25 @@ temporarily replacing the warning-early-return with `self::fail()`) and activate
 automatically when the fix merges — no env var to clean up later, and no
 duplicate tests alongside the fix PR's own coverage.
 
-## RawKvBatch hardcodes `new Call(...)` — region errors inside batch responses can only be tested at the wait-boundary composition
+## RawKvBatch hardcodes `new Call(...)` — retries are tested via the wait boundary or a dead channel
 
 `RawKvBatch::execute*ForRegionAsync()` constructs `\Grpc\Call` directly, so
 the transport cannot be injected with a mocked Call (which `GrpcFutureTest`
-does for the future itself). Consequently a `NotLeader`/`EpochNotMatch`
-returned inside a `RawBatchGetResponse` cannot be delivered end-to-end
-through `batchGet()` in unit tests. The pinned tests for issue #330
-(`RawKvBatchTest`) instead drive the **exact composition RawKvBatch builds**
-— `CheckedGrpcFuture::fromGrpcFuture(new GrpcFuture($mockCall, ...))` (fast
-path) or `fromCallable()` wrapping `RegionErrorHandler::check()` (multi-region
-waiter) — through `BatchAsyncExecutor::executeParallel()`, which is where the
-error is actually classified and reported. Split-limit tests count RPCs via
-the `GrpcClientInterface::getChannel` mock against a dead `127.0.0.1:1`
-channel and expect `BatchPartialFailureException` (issue #330).
+does for the future itself). A response-borne region error therefore cannot
+be delivered end-to-end through `batchGet()` in unit tests. Before #183 the
+contract was pinned at the wait-boundary composition
+(`CheckedGrpcFuture::fromGrpcFuture(...)` through
+`BatchAsyncExecutor::executeParallel()`, issue #330); those tests were
+replaced when #183 moved the retry into
+`CheckedGrpcFuture::fromRetryableDispatch()`. The current coverage:
+`CheckedGrpcFutureRetryableDispatchTest` pins the retry/invalidate/
+switchLeader/terminal behaviour with synthetic `fromCallable()` futures, and
+`RawKvBatchTest::testBatch*WithRetryReResolvesRegionOnEveryAttempt` reaches
+the real `RawKvBatch` dispatch path by invoking the private `*WithRetry`
+methods via reflection against a dead `127.0.0.1:1` channel, asserting
+`pdClient->getRegion` and `grpc->getChannel` are each called exactly twice
+with `maxAttempts: 2` — one resolution/send per attempt, which the old
+dispatch-only-retry code could not produce.
 
 ## Several legacy RawKvBatchTest TTL tests silently dispatch nothing
 
@@ -1321,3 +1329,50 @@ request `a..z`); `assertRegionCoversRange()` fires before the second send, so
 expect exactly **one** `callAsync` and a `TiKvException` whose message
 contains `shrank` (wrapped by the fan-out as `BatchPartialFailureException`).
 Reference: `RetryBudgetSharedAcrossRegionsTest`.
+
+## Batch region errors: eager first dispatch + retry in the waiter (#183)
+
+`RawKvBatch` needs two things that look contradictory: the #295 fan-out
+(every region's gRPC send issued during the dispatch phase, before any wait)
+and per-region retry of response-borne region errors (which are only known
+during the wait phase). Wrapping the dispatch closure in
+`RetryExecutor::execute()` cannot do it: the closure returns an un-awaited
+`CheckedGrpcFuture`, so `execute()` returns before the response exists and
+never sees a `NotLeader`/`EpochNotMatch`; the error surfaces later in
+`BatchAsyncExecutor`, outside the retry loop.
+
+`CheckedGrpcFuture::fromRetryableDispatch($dispatch, $retryExecutor, $key)`
+reconciles them: it calls `$dispatch()` once eagerly at construction (so the
+executor's dispatch phase still stamps every region's send) and sets the
+waiter to `$retryExecutor->execute($key, $operation)`. On its first
+invocation `$operation` rethrows the captured eager-dispatch `TiKvException`
+(or awaits the eager future); every later invocation calls `$dispatch()`
+again, which re-resolves the region and issues a fresh send. Only
+`TiKvException` is captured at construction — any other throwable propagates
+unchanged. `inner()`/`hasInnerFuture` expose the first attempt's gRPC future
+for best-effort cancellation; retries after the first are not cancellable.
+PHPStan L9 correlates the try/catch: at the rethrow check it already knows
+`$first` is non-null whenever `$eagerError` is null, so an
+`if ($first instanceof self)` guard is dead code (`instanceof.alwaysTrue` /
+`deadCode.unreachable`) — call `$first->waitForExecutor()` directly.
+
+Test seam: drive the composition directly with `fromCallable()` futures (no
+`\Grpc\Call` mocks, no ext-grpc) and a real `RetryExecutor` over a mocked
+`RegionCacheInterface`; `NotLeader` with a hint must call `switchLeader`
+(not `invalidate`), `EpochNotMatch` must `invalidate`, and a non-retryable
+error must propagate after exactly one attempt.
+`tests/Unit/Batch/CheckedGrpcFutureRetryableDispatchTest.php` is the
+reference. When a test pins dispatch counts through a dead endpoint, pass
+`maxAttempts: 1` (or a tiny `maxBackoffMs`) to stop the new wait-phase retry
+from adding re-dispatches — `RawKvBatchConcurrencyCapTest` and the
+`RawKvBatchTest` split/duplicate tests do this, otherwise a 30-attempt
+`TiKvRpc` backoff against `127.0.0.1:1` makes the suite take minutes.
+
+To observe *region re-resolution per attempt* specifically, do not count
+`regionCache->getByKey()`: the executor also calls it once per retryable
+failure for its own invalidation lookup, so the count is attempts + retries.
+Force a cache miss (`getByKey` → null), stub `pdClient->getRegion`, and count
+that (and/or `grpc->getChannel`, exactly one per dispatch): with
+`maxAttempts: 2` both are exactly 2, while the old dispatch-only-retry code
+resolved once. Reference:
+`RawKvBatchTest::testBatchGetWithRetryReResolvesRegionOnEveryAttempt`.

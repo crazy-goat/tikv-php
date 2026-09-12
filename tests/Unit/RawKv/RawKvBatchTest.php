@@ -6,12 +6,9 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
-use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
-use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
-use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
@@ -19,14 +16,15 @@ use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
-use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
@@ -123,7 +121,7 @@ class RawKvBatchTest extends TestCase
         // and fails at connection time (issue #322 pattern).
         $this->expectException(BatchPartialFailureException::class);
 
-        $retryExecutor = $this->createRetryExecutor();
+        $retryExecutor = $this->createRetryExecutor(1);
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], 60, $retryExecutor);
         $this->addToAssertionCount(1);
     }
@@ -143,7 +141,7 @@ class RawKvBatchTest extends TestCase
         // and fails at connection time (issue #322 pattern).
         $this->expectException(BatchPartialFailureException::class);
 
-        $retryExecutor = $this->createRetryExecutor();
+        $retryExecutor = $this->createRetryExecutor(1);
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], ['k1' => 60, 'k2' => 120], $retryExecutor);
         $this->addToAssertionCount(1);
     }
@@ -210,7 +208,7 @@ class RawKvBatchTest extends TestCase
         // and fails at connection time (issue #322 pattern).
         $this->expectException(BatchPartialFailureException::class);
 
-        $retryExecutor = $this->createRetryExecutor();
+        $retryExecutor = $this->createRetryExecutor(1);
         // 3 keys with scalar TTL - old code would send a 1-element ttls array
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2', 'k3' => 'v3'], 60, $retryExecutor);
         $this->addToAssertionCount(1);
@@ -233,7 +231,7 @@ class RawKvBatchTest extends TestCase
         // because there is no TiKV server in unit tests.
         $this->expectException(BatchPartialFailureException::class);
 
-        $retryExecutor = $this->createRetryExecutor();
+        $retryExecutor = $this->createRetryExecutor(1);
         // PHP models literal "12345"/"0" array keys as int; build the pairs
         // through string-typed keys so they reach batchPut() with their
         // declared contract (numeric-string keys must survive to the wire).
@@ -271,39 +269,15 @@ class RawKvBatchTest extends TestCase
     }
 
     // ========================================================================
-    // Issue #330: pin the retry behaviour for region errors returned INSIDE
-    // batch responses. RawKvBatch::batchGetWithRetry() runs only the dispatch
-    // (region resolution + send) inside RetryExecutor::execute() and returns
-    // an un-awaited CheckedGrpcFuture; the region-error check happens later,
-    // inside CheckedGrpcFuture::waitForExecutor(), during
-    // BatchAsyncExecutor's wait phase — outside the retry executor entirely.
-    // RawKvBatch hardcodes `new Call(...)` so the transport cannot be
-    // injected; the tests below therefore drive the exact wait-boundary
-    // composition RawKvBatch builds (CheckedGrpcFuture + GrpcFuture over a
-    // mocked \Grpc\Call, or fromCallable over the multi-region waiter)
-    // through BatchAsyncExecutor::executeParallel(), which is the code path
-    // that actually classifies/reports the error.
-    // Pinned contract: a region error inside a batch response is NOT retried
-    // and the region cache is NOT invalidated — the error surfaces as a
-    // BatchPartialFailureException.
+    // Issue #330 pinned the old (buggy) contract: a region error carried
+    // inside a batch response was NOT retried and the region cache was NOT
+    // invalidated because the wait phase ran outside RetryExecutor. That
+    // contract is superseded by issue #183: the wait phase now retries the
+    // whole dispatch+await cycle per region. The fixed contract is pinned in
+    // tests/Unit/Batch/CheckedGrpcFutureRetryableDispatchTest.php, which
+    // drives CheckedGrpcFuture::fromRetryableDispatch() directly with pure
+    // PHP (no ext-grpc) so it runs in the normal Unit job.
     // ========================================================================
-
-    private function notLeaderError(int $regionId, int $hintStoreId): Error
-    {
-        $leader = new Peer();
-        $leader->setId(1);
-        $leader->setStoreId($hintStoreId);
-
-        $notLeader = new NotLeader();
-        $notLeader->setRegionId($regionId);
-        $notLeader->setLeader($leader);
-
-        $error = new Error();
-        $error->setMessage('not leader');
-        $error->setNotLeader($notLeader);
-
-        return $error;
-    }
 
     /**
      * Mock \Grpc\Call that resolves a recv batch to a serialized response
@@ -318,78 +292,6 @@ class RawKvBatchTest extends TestCase
         ]);
 
         return $call;
-    }
-
-    public function testBatchGetNotLeaderInsideResponseIsNotRetriedSurfacesAsPartialFailure(): void
-    {
-        // RawBatchGetResponse #1 carries a NotLeader region_error pointing at
-        // store 2. The pinned contract: the RPC is NOT reissued (exactly one
-        // startBatch recv = one wait = zero retries) and the error surfaces
-        // as a BatchPartialFailureException instead of transparent recovery.
-        $response = new RawBatchGetResponse();
-        $response->setRegionError($this->notLeaderError(1, 2));
-
-        $call = $this->createMock(Call::class);
-        $call->expects($this->exactly(1))->method('startBatch')->willReturn([
-            'status' => ['code' => 0, 'details' => 'OK'],
-            'message' => $response->serializeToString(),
-        ]);
-
-        // The exact wait-boundary wrapper RawKvBatch::batchGetWithRetry()
-        // builds for the single-region fast path.
-        $future = CheckedGrpcFuture::fromGrpcFuture(
-            new GrpcFuture($call, RawBatchGetResponse::class),
-        );
-
-        $this->regionCache->expects($this->never())->method('invalidate');
-
-        try {
-            (new BatchAsyncExecutor(new NullLogger()))->executeParallel([1 => fn(): CheckedGrpcFuture => $future]);
-            self::fail('Expected BatchPartialFailureException');
-        } catch (BatchPartialFailureException $e) {
-            $errors = $e->getRegionErrors();
-            self::assertCount(1, $errors);
-            self::assertArrayHasKey(1, $errors);
-            $regionError = $errors[1];
-            self::assertInstanceOf(RegionException::class, $regionError);
-            self::assertNotNull($regionError->notLeader);
-            self::assertNotNull($regionError->notLeader->getLeader());
-            self::assertSame(2, (int) $regionError->notLeader->getLeader()->getStoreId());
-            self::assertSame(1, $e->getTotalRegions());
-        }
-    }
-
-    public function testEpochNotMatchInsideBatchResponseIsNotInvalidatedEither(): void
-    {
-        // Multi-region waiter path (CheckedGrpcFuture::fromCallable), exactly
-        // as batchGetWithRetry()'s split/merge branch builds it: the waiter
-        // runs RegionErrorHandler::check() on each response. Non-NotLeader
-        // errors do not carry a leader hint to switch to, yet even they are
-        // not invalidated here — check() is invoked without a cache in the
-        // batch wait path.
-        $response = new RawBatchGetResponse();
-        $error = new Error();
-        $error->setMessage('epoch not match');
-        $error->setEpochNotMatch(new EpochNotMatch());
-        $response->setRegionError($error);
-
-        $waiter = static function () use ($response): Message {
-            RegionErrorHandler::check($response);
-            return $response;
-        };
-
-        $this->regionCache->expects($this->never())->method('invalidate');
-
-        try {
-            (new BatchAsyncExecutor(new NullLogger()))->executeParallel([
-                7 => fn(): CheckedGrpcFuture => CheckedGrpcFuture::fromCallable($waiter),
-            ]);
-            self::fail('Expected BatchPartialFailureException');
-        } catch (BatchPartialFailureException $e) {
-            self::assertArrayHasKey(7, $e->getRegionErrors());
-            self::assertInstanceOf(RegionException::class, $e->getRegionErrors()[7]);
-            self::assertSame(1, $e->getTotalRegions());
-        }
     }
 
     public function testBatchPutPartialFailureReportsWhichRegionsFailedAndDispatched(): void
@@ -434,7 +336,9 @@ class RawKvBatchTest extends TestCase
     {
         // 600 keys in one region → exactly 2 RawBatchGet RPCs
         // (MAX_BATCH_LIMIT = 512). The wait phase fails against the dead
-        // channel, which is what pins the *dispatch count*.
+        // channel, which is what pins the *dispatch count*. maxAttempts=1
+        // disables the wait-phase retry introduced by #183 so getChannel()
+        // is not called again for each retry.
         $keys = array_map(static fn(int $i): string => 'k' . $i, range(0, 599));
 
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
@@ -447,13 +351,14 @@ class RawKvBatchTest extends TestCase
         );
 
         $this->expectException(BatchPartialFailureException::class);
-        $this->batch->batchGet($keys, $this->createRetryExecutor());
+        $this->batch->batchGet($keys, $this->createRetryExecutor(1));
     }
 
     public function testBatchPutSplitsOnByteSizeNotOnlyCount(): void
     {
         // 10 pairs of ~2KB values = 20480 bytes > MAX_BATCH_PUT_SIZE (16384)
-        // → at least 2 RawBatchPut RPCs despite only 10 pairs.
+        // → at least 2 RawBatchPut RPCs despite only 10 pairs. maxAttempts=1
+        // pins the dispatch count (see testBatchGetSplitsIntoSubBatchesAtMaxBatchLimit).
         $pairs = [];
         foreach (range(0, 9) as $i) {
             $pairs['k' . $i] = str_repeat('x', 2048);
@@ -469,7 +374,7 @@ class RawKvBatchTest extends TestCase
         );
 
         $this->expectException(BatchPartialFailureException::class);
-        $this->batch->batchPut($pairs, 60, $this->createRetryExecutor());
+        $this->batch->batchPut($pairs, 60, $this->createRetryExecutor(1));
     }
 
     public function testBatchGetWithDuplicateKeysDoesNotDuplicateRegionDispatch(): void
@@ -477,6 +382,7 @@ class RawKvBatchTest extends TestCase
         // batchGet(['a', 'a', 'b']) — duplicates collapse in the result map
         // (one entry per key); the pinned observable here is that the batch
         // is dispatched once for the single region, not once per duplicate.
+        // maxAttempts=1 keeps the wait-phase retry (#183) from re-dispatching.
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
@@ -487,7 +393,104 @@ class RawKvBatchTest extends TestCase
         );
 
         $this->expectException(BatchPartialFailureException::class);
-        $this->batch->batchGet(['a', 'a', 'b'], $this->createRetryExecutor());
+        $this->batch->batchGet(['a', 'a', 'b'], $this->createRetryExecutor(1));
+    }
+
+    // ========================================================================
+    // Issue #183: the per-region retry wrappers must route through
+    // CheckedGrpcFuture::fromRetryableDispatch(), whose retry loop re-invokes
+    // the dispatch closure — so every attempt resolves the region afresh.
+    // The old (dispatch-only retry) code resolved the region once and replayed
+    // the same un-awaited future, so a retryable region error would never be
+    // retried at all. These tests drive the *private* wrappers directly
+    // (ReflectionMethod) against a dead endpoint: each attempt fails with a
+    // retryable gRPC UNAVAILABLE, and with maxAttempts = 2 exactly two
+    // region resolutions (pdClient->getRegion) and two gRPC sends
+    // (grpc->getChannel) must happen. The region cache is forced to miss so
+    // the re-resolution count is observable without cache-hit masking.
+    // ========================================================================
+
+    public function testBatchGetWithRetryReResolvesRegionOnEveryAttempt(): void
+    {
+        $future = $this->invokeWithDeadEndpoint('batchGetWithRetry', [['k1'], $this->createRetryExecutor(2)]);
+
+        $this->assertRetryBudgetExhaustedWithTransportError($future);
+    }
+
+    public function testBatchPutWithRetryReResolvesRegionOnEveryAttempt(): void
+    {
+        $future = $this->invokeWithDeadEndpoint('batchPutWithRetry', [
+            [$this->kvPair('k1', 'v1')],
+            0,
+            $this->createRetryExecutor(2),
+        ]);
+
+        $this->assertRetryBudgetExhaustedWithTransportError($future);
+    }
+
+    public function testBatchDeleteWithRetryReResolvesRegionOnEveryAttempt(): void
+    {
+        $future = $this->invokeWithDeadEndpoint('batchDeleteWithRetry', [
+            ['k1'],
+            $this->createRetryExecutor(2),
+        ]);
+
+        $this->assertRetryBudgetExhaustedWithTransportError($future);
+    }
+
+    private function kvPair(string $key, string $value): KvPair
+    {
+        $pair = new KvPair();
+        $pair->setKey($key);
+        $pair->setValue($value);
+
+        return $pair;
+    }
+
+    /**
+     * Set up a cluster mock whose region cache always misses and whose gRPC
+     * channel points at a dead endpoint, then invoke the requested private
+     * wrapper. The caller must include the RetryExecutor sized with
+     * maxAttempts = 2 so exactly two dispatch attempts occur.
+     *
+     * @param array<int, mixed> $args full argument list for $method
+     */
+    private function invokeWithDeadEndpoint(string $method, array $args): CheckedGrpcFuture
+    {
+        $this->requireGrpcExtension();
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->pdClient->expects($this->exactly(2))
+            ->method('getRegion')
+            ->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->grpc->expects($this->exactly(2))->method('getChannel')->willReturnCallback(
+            fn(): \Grpc\Channel => new \Grpc\Channel('127.0.0.1:1', [
+                'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+            ]),
+        );
+
+        $reflection = new \ReflectionMethod(RawKvBatch::class, $method);
+        /** @var CheckedGrpcFuture $future */
+        $future = $reflection->invoke($this->batch, ...$args);
+
+        return $future;
+    }
+
+    /**
+     * @param CheckedGrpcFuture $future already dispatched (eagerly) against
+     *                                  the dead endpoint
+     */
+    private function assertRetryBudgetExhaustedWithTransportError(CheckedGrpcFuture $future): void
+    {
+        try {
+            $future->waitForExecutor();
+            self::fail('Expected the attempt cap to be exhausted against the dead endpoint');
+        } catch (RetryBudgetExhaustedException $e) {
+            // Issue #183 review: pinning the attempt count with maxAttempts = 2
+            // must not hide the actual transport failure.
+            self::assertInstanceOf(GrpcException::class, $e->getPrevious());
+        }
     }
 
     /**
@@ -498,7 +501,7 @@ class RawKvBatchTest extends TestCase
         return [$key => $value];
     }
 
-    private function createRetryExecutor(): RetryExecutor
+    private function createRetryExecutor(int $maxAttempts = RetryExecutor::DEFAULT_MAX_ATTEMPTS): RetryExecutor
     {
         return new RetryExecutor(
             20000,
@@ -507,6 +510,7 @@ class RawKvBatchTest extends TestCase
             $this->grpc,
             new RegionResolver($this->pdClient, $this->regionCache),
             new NullLogger(),
+            $maxAttempts,
         );
     }
 }

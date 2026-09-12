@@ -189,6 +189,10 @@ final class RawKvBatchConcurrencyCapTest extends TestCase
             $this->grpc,
             new RegionResolver($this->pdClient, $this->regionCache),
             new NullLogger(),
+            // maxAttempts=1 disables the wait-phase re-dispatch introduced by
+            // #183 so the getChannel() counter below measures only the
+            // windowed dispatch, not sequential retries.
+            maxAttempts: 1,
         );
     }
 }
