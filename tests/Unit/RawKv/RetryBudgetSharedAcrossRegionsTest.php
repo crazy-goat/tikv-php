@@ -469,4 +469,174 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->assertCount(4, $results);
         $this->assertSame([2, 2, 2, 2], $failuresPerRegion);
     }
+
+    /**
+     * Issue #190: a retried deleteRange/checksum dispatch must re-resolve the
+     * region inside the retry closure instead of replaying the stale region
+     * captured before the loop.
+     *
+     * The first resolution is a cache hit on the stale leader (store 1); the
+     * first callAsync fails with a retryable StaleCommand, the executor's
+     * invalidation lookup sees the stale region again, and the next
+     * resolution misses the cache so PD answers with the region under the new
+     * leader (store 2). The second callAsync then throws a deliberately
+     * non-retryable error, so the loop stops after exactly two attempts with
+     * no dependency on backoff jitter.
+     *
+     * @param callable(RawKvRangeOps): void $operation
+     */
+    private function assertRetryReresolvesToNewLeader(callable $operation): void
+    {
+        $region1 = $this->defaultRegion('', 'z', regionId: 1, leaderStoreId: 1);
+        $region2 = $this->defaultRegion('', 'z', regionId: 1, leaderStoreId: 2);
+
+        $store1 = new Store();
+        $store1->setId(1);
+        $store1->setAddress('tikv1:20160');
+        $store2 = new Store();
+        $store2->setId(2);
+        $store2->setAddress('tikv2:20160');
+
+        // First resolution: cache hit on the stale leader. Second: the
+        // RetryExecutor's invalidation lookup. Third: post-invalidation miss,
+        // so the resolver falls through to PD.
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($region1, $region1, null);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('scanRegions')->willReturn([$region1]);
+        $this->pdClient->method('getRegion')->willReturn($region2);
+        $this->pdClient->method('getStore')->willReturnCallback(
+            static fn(int $storeId): Store => $storeId === 2 ? $store2 : $store1,
+        );
+
+        /** @var list<string> $addresses */
+        $addresses = [];
+        $this->grpc->expects($this->exactly(2))->method('callAsync')->willReturnCallback(
+            function (string $address) use (&$addresses): never {
+                $addresses[] = $address;
+                if (count($addresses) === 1) {
+                    throw new TiKvException('StaleCommand');
+                }
+
+                // Unclassified by ErrorClassifier -> non-retryable: the loop
+                // stops after the second attempt.
+                throw new TiKvException('fatal-test-error');
+            },
+        );
+
+        $rangeOps = new RawKvRangeOps(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            new TimeoutConfig(),
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            logger: new NullLogger(),
+        );
+
+        try {
+            $operation($rangeOps);
+            $this->fail('Expected the non-retryable dispatch error to propagate');
+        } catch (TiKvException) {
+            // The fan-out wraps dispatch failures in
+            // BatchPartialFailureException (a TiKvException); either way the
+            // second, non-retryable error is what stops the loop.
+        }
+
+        $this->assertSame(
+            ['tikv1:20160', 'tikv2:20160'],
+            $addresses,
+            'The retried dispatch must re-resolve the region and target the new leader store',
+        );
+    }
+
+    public function testDeleteRangeRetryReresolvesRegionAndTargetsNewLeader(): void
+    {
+        $this->assertRetryReresolvesToNewLeader(
+            static function (RawKvRangeOps $ops): void {
+                $ops->deleteRange('a', 'z');
+            },
+        );
+    }
+
+    public function testChecksumRetryReresolvesRegionAndTargetsNewLeader(): void
+    {
+        $this->assertRetryReresolvesToNewLeader(
+            static function (RawKvRangeOps $ops): void {
+                $ops->checksum('a', 'z');
+            },
+        );
+    }
+
+    /**
+     * Issue #190: when a retry re-resolves a region that shrank (split) so it
+     * no longer covers the clipped sub-range, the operation must fail loudly
+     * instead of sending the partial range. For checksum this is critical:
+     * the raw read is silently clamped by the region snapshot, so a partial
+     * success would be XOR-merged as if complete. The guard fires on the
+     * second resolution, before any second send, so exactly one callAsync is
+     * made.
+     *
+     * @param callable(RawKvRangeOps): void $operation
+     */
+    private function assertShrunkRegionFailsClosed(callable $operation): void
+    {
+        $region1 = $this->defaultRegion('', 'z', regionId: 1, leaderStoreId: 1);
+        $region2 = $this->defaultRegion('', 'k', regionId: 1, leaderStoreId: 2);
+
+        // First resolution: cache hit on the (full) stale region. Second: the
+        // RetryExecutor's invalidation lookup. Third: miss, so PD answers with
+        // the shrunken region whose end key no longer covers a..z.
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($region1, $region1, null);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('scanRegions')->willReturn([$region1]);
+        $this->pdClient->method('getRegion')->willReturn($region2);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // First attempt is dispatched and fails retryably; the second is
+        // aborted by the coverage guard before its send.
+        $this->grpc->expects($this->once())->method('callAsync')->willReturnCallback(
+            function (): never {
+                throw new TiKvException('StaleCommand');
+            },
+        );
+
+        $rangeOps = new RawKvRangeOps(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            new TimeoutConfig(),
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            logger: new NullLogger(),
+        );
+
+        try {
+            $operation($rangeOps);
+            $this->fail('Expected a shrunken region to fail closed');
+        } catch (TiKvException $e) {
+            $this->assertStringContainsString('shrank', $e->getMessage());
+        }
+    }
+
+    public function testDeleteRangeFailsClosedWhenRegionShrankAfterRetry(): void
+    {
+        $this->assertShrunkRegionFailsClosed(
+            static function (RawKvRangeOps $ops): void {
+                $ops->deleteRange('a', 'z');
+            },
+        );
+    }
+
+    public function testChecksumFailsClosedWhenRegionShrankAfterRetry(): void
+    {
+        $this->assertShrunkRegionFailsClosed(
+            static function (RawKvRangeOps $ops): void {
+                $ops->checksum('a', 'z');
+            },
+        );
+    }
 }

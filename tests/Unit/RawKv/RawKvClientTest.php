@@ -1823,9 +1823,11 @@ class RawKvClientTest extends TestCase
 
     public function testChecksumReturnsResult(): void
     {
-        $this->regionCache->method('getByKey')->willReturn(null);
-        $this->regionCache->method('put');
         $region = new RegionInfo(1, 1, 1, 1, 1, 'a', 'z');
+        // checksum() pre-populates the cache from scanRegions(); the per-region
+        // retried closure then resolves the region from that cache (issue #190).
+        $this->regionCache->method('getByKey')->willReturn($region);
+        $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$region]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 

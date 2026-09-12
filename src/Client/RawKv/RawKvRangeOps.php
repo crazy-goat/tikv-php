@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -24,6 +25,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 
 final readonly class RawKvRangeOps
@@ -56,6 +58,10 @@ final readonly class RawKvRangeOps
      * longer abort at the first failing region but surface together as a
      * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException}.
      * deleteRange is idempotent, so retrying the whole operation remains safe.
+     *
+     * Retries re-resolve the region per attempt (issue #190), so the
+     * `scanRegions()` result is pre-populated into the region cache to keep
+     * the first attempt a cache hit (no extra PD `getRegion` round trip).
      */
     public function deleteRange(string $startKey, string $endKey, string $columnFamily = ''): void
     {
@@ -65,13 +71,15 @@ final readonly class RawKvRangeOps
 
         $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
         $clipper = new RegionRangeClipper();
 
         $calls = [];
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $rangeStart, $rangeEnd]) {
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $rangeStart, $rangeEnd]) {
             $calls[] = fn(): CheckedGrpcFuture => $this->deleteRangeWithRetry(
                 $executor,
-                $region,
                 $rangeStart,
                 $rangeEnd,
                 $columnFamily,
@@ -94,18 +102,24 @@ final readonly class RawKvRangeOps
      * Region errors surface as a
      * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException};
      * checksum is idempotent, so retrying the whole operation remains safe.
+     *
+     * As in {@see self::deleteRange()}, the `scanRegions()` result is
+     * pre-populated into the region cache so the per-attempt re-resolution
+     * (issue #190) is a cache hit on the first try.
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
         $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
         $clipper = new RegionRangeClipper();
 
         $calls = [];
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $rangeStart, $rangeEnd]) {
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $rangeStart, $rangeEnd]) {
             $calls[] = fn(): CheckedGrpcFuture => $this->checksumWithRetry(
                 $executor,
-                $region,
                 $rangeStart,
                 $rangeEnd,
             );
@@ -135,21 +149,32 @@ final readonly class RawKvRangeOps
      * Issue one RawDeleteRange send for a single clipped sub-range and
      * return an un-waited future so the batch executor can fan out all
      * regions' sends before awaiting any of them.
+     *
+     * The original clipped `[startKey, endKey)` bounds are intentionally kept
+     * when the region is re-resolved (issue #190): after a split the fresh
+     * region may no longer cover them. The request fails loudly in that case
+     * ({@see self::assertRegionCoversRange()}) instead of sending it to the
+     * smaller region; there is no split-continuation logic (tracked
+     * separately). deleteRange would also be rejected by raftstore
+     * (KeyNotInRegion), so refusing client-side is the same fail-closed
+     * outcome, just clearer.
      */
     private function deleteRangeWithRetry(
         RetryExecutor $executor,
-        RegionInfo $region,
         string $startKey,
         string $endKey,
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         /** @var CheckedGrpcFuture $future */
         $future = $executor->execute($startKey, function () use (
-            $region,
             $startKey,
             $endKey,
             $columnFamily,
         ): CheckedGrpcFuture {
+            // Resolve the region on every attempt so retries pick up cache
+            // invalidation and leader switching (issue #190).
+            $region = $this->regionResolver->getRegionInfo($startKey);
+            $this->assertRegionCoversRange($region, $startKey, $endKey);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRangeRequest();
@@ -195,15 +220,25 @@ final readonly class RawKvRangeOps
     /**
      * Issue one RawChecksum send for a single clipped sub-range and return
      * an un-waited future (fan-out pattern, see deleteRangeWithRetry()).
+     *
+     * As in {@see self::deleteRangeWithRetry()}, the clipped bounds are kept
+     * on re-resolution. A raw checksum read is silently clamped by the region
+     * snapshot rather than rejected, so a region that shrank after
+     * enumeration must be refused explicitly: otherwise a success response
+     * covering only part of the sub-range would be XOR-merged into the result
+     * as if complete.
      */
     private function checksumWithRetry(
         RetryExecutor $executor,
-        RegionInfo $region,
         string $startKey,
         string $endKey,
     ): CheckedGrpcFuture {
         /** @var CheckedGrpcFuture $future */
-        $future = $executor->execute($startKey, function () use ($region, $startKey, $endKey): CheckedGrpcFuture {
+        $future = $executor->execute($startKey, function () use ($startKey, $endKey): CheckedGrpcFuture {
+            // Resolve the region on every attempt so retries pick up cache
+            // invalidation and leader switching (issue #190).
+            $region = $this->regionResolver->getRegionInfo($startKey);
+            $this->assertRegionCoversRange($region, $startKey, $endKey);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $range = new KeyRange();
@@ -247,6 +282,43 @@ final readonly class RawKvRangeOps
         });
 
         return $future;
+    }
+
+    /**
+     * Refuse to send a clipped sub-range when a region re-resolved inside a
+     * retry no longer covers it (a post-enumeration split left the fresh
+     * region smaller than `[startKey, endKey)`).
+     *
+     * The two raw paths are not equally safe with a stale upper bound: the
+     * raftstore rejects a cross-region delete-range command with
+     * `KeyNotInRegion`, but a raw checksum read is silently clamped to the
+     * region snapshot, so a success response covering only part of the range
+     * would be XOR-merged as if complete. Guard both. The check never fires
+     * for a region whose end key equals the clipped sub-range end, or whose
+     * end key is empty (unbounded).
+     *
+     * @throws TiKvException A non-retryable error (deliberately free of every
+     *     classifier keyword) so the retry loop stops without replaying the
+     *     stale sub-range.
+     */
+    private function assertRegionCoversRange(RegionInfo $region, string $startKey, string $endKey): void
+    {
+        if ($region->endKey === '') {
+            return;
+        }
+
+        if ($endKey !== '' && strcmp($region->endKey, $endKey) >= 0) {
+            return;
+        }
+
+        throw new TiKvException(sprintf(
+            'Region %d shrank to an upper bound of %s after enumeration and no '
+            . 'longer covers the clipped sub-range starting at key %s; refusing '
+            . 'a partial operation',
+            $region->regionId,
+            KeyRedactor::redact($region->endKey),
+            KeyRedactor::redact($startKey),
+        ));
     }
 
     private function createRetryExecutor(): RetryExecutor
