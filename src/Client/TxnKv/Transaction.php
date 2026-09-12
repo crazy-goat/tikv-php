@@ -339,6 +339,24 @@ final class Transaction
     // ---------------------------------------------------------------
 
     /**
+     * Send a heartbeat for this transaction's primary lock to extend its TTL.
+     *
+     * This is the supported mechanism for application-level long-running
+     * transactions: a transaction left open between operations keeps its
+     * locks only for the granted TTL (the optimistic prewrite baseline is
+     * 3000 ms plus 10 ms per write-set mutation, capped at 120000 ms — see
+     * {@see TwoPhaseCommitter}), so a caller that runs a long computation
+     * between writes must call this method before the previously granted TTL
+     * elapses, otherwise concurrent readers may roll the locks back. 10 s is
+     * a safe default `$adviseLockTtlMs`.
+     *
+     * The committer additionally heartbeats automatically during the prewrite
+     * loop (issue #218, TXN-13), so callers only need to heartbeat for the
+     * gaps between their own operations.
+     *
+     * @param int $adviseLockTtlMs Requested lock TTL in milliseconds
+     * @return int The actual lock TTL granted by TiKV
+     *
      * @throws InvalidStateException
      * @throws TiKvException
      * @throws RegionException

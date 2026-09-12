@@ -1431,3 +1431,22 @@ per-page budget is the `RawKvScanner` constructor's `scanPageSize` (default
 is the reference. `ScanIterator` is unchanged (it always passed a bounded
 `batchSize`). This supersedes the `0 → MAX_SCAN_LIMIT` note in the #332
 negative-limit entry above.
+
+## The optimistic prewrite primary region is always processed first — the heartbeat guard only bites for async commit (TXN-13, #218)
+
+Issue #218 added a `$primaryLockWritten` guard before heartbeating the primary
+during the prewrite loop. In the ordinary optimistic path the primary key is
+`array_key_first($state->getWriteSet())` and `buildMutations()` preserves the
+write-set insertion order, so the primary's region is always the first group
+processed and the guard is already `true` at the first post-prewrite check.
+The guard only has an observable effect when `commit()` deliberately reorders
+the primary region LAST for multi-region async commit, where it correctly
+suppresses every prewrite heartbeat. Do not write a unit test that expects the
+primary region to be processed second without async commit — grouping follows
+mutation order (`RegionGrouper::groupItemsByRegion()`), so the primary region
+comes first. For deterministic heartbeat tests, inject the optional
+`?\Closure $clock` constructor parameter on `TwoPhaseCommitter` (the clock is
+read via `nowMs()`, so mutating a captured `$this->nowMs` from the mocked
+gRPC callback simulates a slow prewrite without sleeping). Rector's
+`FlipTypeControlToUseExclusiveTypeRector` rewrites a `$this->clock !== null`
+check on a nullable `\Closure` property to `$this->clock instanceof \Closure`.
