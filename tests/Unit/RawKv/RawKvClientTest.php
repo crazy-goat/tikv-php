@@ -1458,6 +1458,14 @@ class RawKvClientTest extends TestCase
                 $firstWindow,
             ),
         );
+        // The window above is derived from the mock's call counter, so it
+        // cannot on its own prove region 3 ('t') was excluded: whatever is
+        // dispatched third is by construction the boundary array_slice()
+        // cuts at. The third request is the *next page's* first dispatch,
+        // carrying the page-1 continuation cursor ('k10239' . "\x00"), not
+        // region 3 ('t'). If the per-window cap were removed, region 3 would
+        // be dispatched in the first window and this start key would be 't'.
+        $this->assertSame('k10239' . "\x00", $requests[2]->getStartKey());
     }
 
     public function testUnboundedScanPaginatesAcrossMultipleRegionsInParallelPages(): void
