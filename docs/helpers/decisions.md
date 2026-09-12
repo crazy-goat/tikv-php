@@ -74,3 +74,20 @@ Two review decisions on the #238 fix (REG-07) that should not be "corrected" lat
 E2E suites (`E2E-RawKV`, `E2E-TxnKV`) spin up real TiKV clusters via docker
 compose — they only run when relevant paths change (`src/`, `tests/E2E/`,
 docker/composer files, CI workflow).
+
+## `scan(limit: 0)`'s `maxScanRows` guard is per fetched page, not per row (issue #191)
+
+Review of the #191 branch (`RawKvScanner::assertWithinScanLimit()`) confirmed
+the guard is evaluated after each internally paged fetch, so an unbounded scan
+whose `options['maxScanRows']` is smaller than the page size (`scanPageSize`,
+default `MAX_SCAN_LIMIT` = 10240) still reads and buffers one full page before
+throwing; `getScannedRows()` can therefore exceed `getMaxRows()` (the
+client-level test pins `maxRows=1` / `scannedRows=2`). Peak memory is
+`maxScanRows` rows of accumulated results plus up to
+`maxConcurrency × scanPageSize` rows of one in-flight page — not a hard
+`maxScanRows` bound. This is deliberate: shrinking the page to `maxScanRows`
+would issue one RawScan RPC per row for small guards, so do not "tighten" the
+guard to per-row without accepting that cost. A useful side effect to keep:
+the loop can only continue while accumulated rows are below `maxScanRows`, so
+the guard also bounds the page count — even a server that ignores the
+continuation cursor cannot make `scan(limit: 0)` loop forever.

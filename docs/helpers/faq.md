@@ -1393,3 +1393,21 @@ that (and/or `grpc->getChannel`, exactly one per dispatch): with
 `maxAttempts: 2` both are exactly 2, while the old dispatch-only-retry code
 resolved once. Reference:
 `RawKvBatchTest::testBatchGetWithRetryReResolvesRegionOnEveryAttempt`.
+
+## `limit: 0` scans paginate and are guarded, not capped (RAW-06, issue #191)
+
+`RawKvScanner::validateScanLimit()` used to normalise a `0` limit to
+`MAX_SCAN_LIMIT` (10240), so `scan('a', 'z', 0)` silently returned at most
+10240 rows. Since #191 `0` is preserved and `scan()`/`reverseScan()` page
+internally — forward scans continue from `lastKey . "\x00"`, reverse scans
+move the descending upper bound down to each page's lowest key — so the whole
+range is returned. Because the result is buffered in one PHP array, a new
+configurable guard throws the new `ScanLimitExceededException` when the
+accumulated rows exceed `options['maxScanRows']` (default
+`RawKvClient::DEFAULT_MAX_SCAN_ROWS` = 100000); it never truncates. The
+per-page budget is the `RawKvScanner` constructor's `scanPageSize` (default
+`MAX_SCAN_LIMIT`), a test seam so multi-page tests do not materialise
+10240-row pages — `RawKvScannerTest::testScanLimitZeroPaginatesPastAPageBoundary`
+is the reference. `ScanIterator` is unchanged (it always passed a bounded
+`batchSize`). This supersedes the `0 → MAX_SCAN_LIMIT` note in the #332
+negative-limit entry above.

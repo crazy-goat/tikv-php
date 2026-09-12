@@ -36,28 +36,30 @@ extends `\InvalidArgumentException` directly — it is **not** a
     ├── InvalidStateException                      src/Client/Exception/
     ├── InvalidStoreAddressException               src/Client/Exception/
     ├── RegionException                            src/Client/Exception/
+    ├── ScanLimitExceededException                 src/Client/Exception/
     ├── StoreNotFoundException                     src/Client/Exception/
     ├── RetryBudgetExhaustedException              src/Client/Retry/
     ├── DeadlockException                          src/Client/TxnKv/Exception/
     ├── LockWaitTimeoutException                   src/Client/TxnKv/Exception/
     ├── TransactionConflictException               src/Client/TxnKv/Exception/
     ├── TxnAbortedByGcException                    src/Client/TxnKv/Exception/
-    └── TxnRetryableException                      src/Client/TxnKv/Exception/
+    ├── TxnRetryableException                      src/Client/TxnKv/Exception/
+    └── UndeterminedCommitException                src/Client/TxnKv/Exception/
 
 \InvalidArgumentException  ← outside the TiKvException hierarchy
 └── InvalidArgumentException                        src/Client/Exception/
 ```
 
-All sixteen `TiKvException` subclasses are `final`; `TiKvException` itself is
+All seventeen `TiKvException` subclasses are `final`; `TiKvException` itself is
 the only non-final class in the tree (it is the intended base for any custom
 project-wide exception work).
 
 > The client never throws a raw `\Exception`, `\RuntimeException` or
 > `\InvalidArgumentException`: everything that can reach your code is one of
-> the sixteen classes above.
+> the seventeen classes above.
 
 `TiKvException` itself is also thrown **directly** — no more specific subclass —
-at fifteen `throw new TiKvException(...)` statements across thirteen call sites
+at seventeen `throw new TiKvException(...)` statements across fifteen call sites
 (some inside shared private helpers), so a `catch` on any single subclass will
 not match these; only a bare `catch (TiKvException $e)` does. Several are
 fail-closed defense-in-depth paths that are unreachable unless a collaborator's
@@ -74,10 +76,12 @@ contract changes (noted per row):
 | `SafePointCache::get()` | PD returned a negative GC safe point (defensive; PD safe points are uint64). Caught by `TxnKvClient::validateStartTsAgainstGcSafePoint()`, which degrades to a warning (fail-open), so it does not normally reach the caller. | `PD returned invalid GC safe point: %d` |
 | `TwoPhaseCommitter` heartbeat (reachable via `Transaction::heartbeat()`) | `KvTxnHeartBeat` reported a `retryable` or `abort` KeyError payload → `TransactionConflictException`; a `locked` payload → `TxnRetryableException` (`BackoffType::TxnLock`, deliberately **not** `LockResolver::resolveLock()`ed — the only lock a heartbeat can report is the calling transaction's own primary lock, and resolving it would roll the transaction back under itself); any other payload variant (`txn_not_found`, `txn_lock_not_found`, …) → the base class with the variant named, via the shared `KeyErrorDescriber` (see [#492](https://github.com/crazy-goat/tikv-php/issues/492)). | `Heartbeat failed: retryable: <server text>` / `Heartbeat failed: abort: <server text>` / `Heartbeat failed: locked key "<redacted primary>"` / `Heartbeat failed: <variant>` |
 | `TwoPhaseCommitter` prewrite (reachable via `Transaction::commit()`) | `KvPrewrite` reported a `KeyError`: `deadlock` → `DeadlockException` (key/hash/lockTs); `locked` → resolves the lock then `TxnRetryableException`; `conflict` / `retryable` / `abort` and `already_exist` / `assertion_failed` / `primary_mismatch` / `txn_not_found` / `commit_ts_too_large` → `TransactionConflictException`; any other variant (`commit_ts_expired`, `txn_lock_not_found`, …) → the base class with the variant named, via `KeyErrorDescriber`. Fail-closed (issue #214): before that fix, unhandled variants fell out of the loop and prewrite was treated as successful, so `KvCommit` ran against keys that held no lock. Since issue #213, prewrite runs inside the shared retry executor with the transaction classifier: region errors (`NotLeader`, `EpochNotMatch`, `RegionNotFound`, `ServerIsBusy`) and a resolved `locked` conflict are auto-retried (the region is re-resolved on each attempt), while `DeadlockException`, `TransactionConflictException` and unrecognised variants are fatal and escape `commit()`. | `Deadlock detected during prewrite` / `Lock conflict during prewrite, resolved - retry` / `Write conflict during prewrite` / `Prewrite failed: <variant>` |
+| `TwoPhaseCommitter` pessimistic lock (reachable via `Transaction::commit()` on a pessimistic transaction, before prewrite) | `KvPessimisticLock` reported a `KeyError`: `deadlock` → `DeadlockException`; `locked` → resolves the lock then `TxnRetryableException`; `conflict` / `retryable` / `abort` → `TransactionConflictException`; any other variant → the base class with the variant named, via `KeyErrorDescriber` (fail-closed, issue #454). | `Pessimistic lock failed: <variant>` |
 | `TxnReader::batchGetFromTiKV()` (private) | Defense in depth: `RegionResolver::batchResolveRegions()` left a `batchGet()` key without a region. Unreachable unless the resolver contract changes (issue #244); a silent skip would read back as `null`. | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
 | `RegionResolver::batchResolveRegions()` | PD returned regions that do not cover one of the requested keys. Fail-closed: a silently dropped key would be lost from the batch. | `PD could not resolve the region for key %s; refusing to silently drop it from the batch` (key redacted) |
 | `RegionGrouper::groupKeysByRegionBatch()` | Defense in depth: a batch key was left without a region by the resolver. Unreachable unless the resolver contract changes (issue #244). | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
 | `RegionGrouper::groupItemsByRegion()` | Defense in depth: a batch item was left without a region by the resolver. Unreachable unless the resolver contract changes (issue #244). | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
+| `RawKvRangeOps::assertRegionCoversRange()` (private; called from `deleteRange()` and `checksum()`) | The resolved region shrank to an upper bound that no longer covers the clipped sub-range (split after enumeration). Deliberately free of every retry-classifier keyword so the retry loop stops without replaying the stale sub-range; a clamped raw read would otherwise be reported as a complete delete/checksum (issue #190). | `Region %d shrank to an upper bound of %s after enumeration and no longer covers the clipped sub-range starting at key %s; refusing a partial operation` (keys redacted) |
 
 ### What Each Class Means
 
@@ -92,6 +96,7 @@ contract changes (noted per row):
 | [`InvalidStateException`](../src/Client/Exception/InvalidStateException.php) | `TiKvException` | Client/transaction is in a state that cannot serve the call (e.g. CAS without atomic mode, transaction already committed) |
 | [`InvalidStoreAddressException`](../src/Client/Exception/InvalidStoreAddressException.php) | `TiKvException` | PD returned a store address that failed validation (not a bare `host:port`, reserved scheme, out-of-range port, or outside the allowed host policy) |
 | [`RegionException`](../src/Client/Exception/RegionException.php) | `TiKvException` | Region-level error reported by TiKV (NotLeader, EpochNotMatch, ServerIsBusy, …); carries `public readonly ?NotLeader $notLeader` and `?ErrorKind $errorKind` |
+| [`ScanLimitExceededException`](../src/Client/Exception/ScanLimitExceededException.php) | `TiKvException` | An unbounded scan (`limit: 0`) collected more than `options['maxScanRows']` rows (default 100000); accessors: `getMaxRows()`, `getScannedRows()`. Thrown instead of silently truncating — switch to `scanIterator()`/`scanPrefixIterator()` or raise the option (issue #191) |
 | [`StoreNotFoundException`](../src/Client/Exception/StoreNotFoundException.php) | `TiKvException` | The store backing a region leader is missing from PD; carries `public readonly int $storeId` |
 | [`RetryBudgetExhaustedException`](../src/Client/Retry/RetryBudgetExhaustedException.php) | `TiKvException` | The internal retry loop exhausted its attempt cap or wall-clock deadline; accessors: `attempts()`, `elapsedOrBackoffMs()`, `getPrevious()` (original error), `getRawKey()` (the un-redacted key, kept out of the message — see #269) |
 | [`DeadlockException`](../src/Client/TxnKv/Exception/DeadlockException.php) | `TiKvException` | Pessimistic locking detected a deadlock; accessors: `getDeadlockKey()`, `getDeadlockKeyHash()`, `getLockTs()` |
@@ -128,6 +133,7 @@ Verdict legend:
 | `InvalidStateException` | **Never retry** — fix the calling code / lifecycle first |
 | `ClientClosedException` | **Never retry** on that client instance — reopen a new client if appropriate |
 | `InvalidStoreAddressException` | **Never retry** — classified fatal before any retry backoff (`ErrorClassifier::classify()` returns null), so the client did not retry and will not succeed next time without configuration change |
+| `ScanLimitExceededException` | **Never retry** — the same query will hit the same guard. Switch to `scanIterator()`/`scanPrefixIterator()` (constant memory) or raise `options['maxScanRows']` |
 | `HealthCheckException` | Probe result only — no user data was touched. Re-probe after an interval instead of tight-looping |
 | `TransactionConflictException` | **New transaction** — the transaction's writes were not applied |
 | `DeadlockException` | **New transaction** |
@@ -197,8 +203,8 @@ additional possibility for every row that includes `RegionException`.
 
 | Method | Throws | Notes |
 |---|---|---|
-| `__construct` | `InvalidArgumentException` | Bad option values (`retryDeadlineMs < 0`, `maxConcurrency < 1`) |
-| `create()` | `InvalidArgumentException` | Empty PD endpoints array; invalid `options['tls']` material, `options['timeout']`, `options['slowLog']`, `options['metrics']`, `options['allowedStoreHosts']`, `options['storeHostPolicy']`, `options['allowedStorePorts']`, `options['retryDeadlineMs']`, `options['maxConcurrency']` |
+| `__construct` | `InvalidArgumentException` | Bad option values (`retryDeadlineMs < 0`, `maxConcurrency < 1`, `maxScanRows < 1`) |
+| `create()` | `InvalidArgumentException` | Empty PD endpoints array; invalid `options['tls']` material, `options['timeout']`, `options['slowLog']`, `options['metrics']`, `options['allowedStoreHosts']`, `options['storeHostPolicy']`, `options['allowedStorePorts']`, `options['retryDeadlineMs']`, `options['maxConcurrency']`, `options['maxScanRows']` |
 | `setAtomicForCAS(bool)` / `isAtomicForCAS()` | — | Plain setters/getters, nothing thrown |
 | `setColumnFamily(string)` / `getColumnFamily()` | — | Plain setters/getters, nothing thrown |
 | `get(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Key validated non-empty + size limit before the RPC |
@@ -212,9 +218,9 @@ additional possibility for every row that includes `RegionException`.
 | `batchDelete(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | As above |
 | `scanIterator(...)` | `ClientClosedException`, `InvalidArgumentException` | `batchSize` validated synchronously in the factory call (`ScanIterator::__construct`, bounds 1..10240); the underlying scan RPCs happen during iteration |
 | `scanPrefixIterator(string, int $batchSize = 1024, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException` | Same synchronous validation as `scanIterator()` |
-| `scan(string, string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Limit validated (`'Scan limit must be 0 or greater'`, max 10240) even though the annotation omits it |
-| `scanPrefix(string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Delegates to `scan()`; limit validated |
-| `reverseScan(...)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Limit validated |
+| `scan(string, string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `ScanLimitExceededException` | Limit validated (`'Scan limit must be 0 or greater'`; max 10240 per RPC). `limit: 0` returns the whole range by paging internally; collecting more than `options['maxScanRows']` rows throws `ScanLimitExceededException` instead of truncating (issue #191) |
+| `scanPrefix(string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `ScanLimitExceededException` | Delegates to `scan()`; same `limit: 0` pagination + guard semantics |
+| `reverseScan(...)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `ScanLimitExceededException` | Limit validated; `limit: 0` pages internally (descending bound moves down each page) and is guarded by `options['maxScanRows']` |
 | `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved |
 | `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole |
 | `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics |
@@ -368,7 +374,7 @@ See also:
 
 - [Operations guide](operations.md) — what each method does
 - [Configuration guide](configuration.md) — `retryDeadlineMs`,
-  `serverBusyBudgetMs`, `maxBackoffMs`, `maxConcurrency` options
+  `serverBusyBudgetMs`, `maxBackoffMs`, `maxConcurrency`, `maxScanRows` options
 - [Troubleshooting](troubleshooting.md) — symptom-first problem solving
 - [Advanced features](advanced.md) — retry-strategy chapter
 

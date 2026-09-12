@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
@@ -31,6 +32,25 @@ final readonly class RawKvScanner
 {
     public const MAX_SCAN_LIMIT = 10240;
 
+    /**
+     * Default number of rows an unbounded scan (limit 0) may return before
+     * throwing {@see ScanLimitExceededException} (issue #191). A `limit: 0`
+     * scan pages internally to honour the "whole range" contract; this guard
+     * caps the accumulated result so it cannot grow without bound.
+     *
+     * The guard is evaluated once per internally fetched page, after that
+     * page has been buffered, so it is page-granular rather than a strict
+     * per-row memory bound: when `maxScanRows` is smaller than the page size
+     * (`scanPageSize`, default {@see self::MAX_SCAN_LIMIT}) the scan reads a
+     * whole page before throwing, and a page fanned out across
+     * `maxConcurrency` regions may have further in-flight responses. Peak
+     * memory is therefore the accumulated rows (up to about `maxScanRows`)
+     * plus up to `maxConcurrency x scanPageSize` rows of one fetched page.
+     * Configurable through `options['maxScanRows']` on
+     * {@see RawKvClient::create()}.
+     */
+    public const DEFAULT_MAX_SCAN_ROWS = 100000;
+
     public function __construct(
         private PdClientInterface $pdClient,
         private GrpcClientInterface $grpc,
@@ -45,39 +65,140 @@ final readonly class RawKvScanner
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
         /** Read preference for scans (issue #421). */
         private ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
+        /** Row cap for an unbounded (limit 0) scan; exceeded throws (issue #191). */
+        private int $maxScanRows = self::DEFAULT_MAX_SCAN_ROWS,
+        /**
+         * Per-page row budget used when a `limit: 0` scan paginates internally
+         * (issue #191). Defaults to {@see self::MAX_SCAN_LIMIT}; lower values
+         * are a test seam, not a production knob.
+         */
+        private int $scanPageSize = self::MAX_SCAN_LIMIT,
     ) {
+        if ($this->maxScanRows < 1) {
+            throw new InvalidArgumentException('maxScanRows must be >= 1');
+        }
+        if ($this->scanPageSize < 1 || $this->scanPageSize > self::MAX_SCAN_LIMIT) {
+            throw new InvalidArgumentException(sprintf(
+                'scanPageSize must be between 1 and %d',
+                self::MAX_SCAN_LIMIT,
+            ));
+        }
     }
 
     /**
+     * Range scan over [startKey, endKey).
+     *
+     * `limit = 0` means "the whole range": the scan pages internally at
+     * {@see self::$scanPageSize} rows per RPC and buffers every row, so the
+     * documented unbounded contract holds for ranges larger than one TiKV
+     * page (issue #191). The accumulated buffer is capped by
+     * {@see self::$maxScanRows}; once the buffered rows exceed it a
+     * {@see ScanLimitExceededException} is thrown instead of silently
+     * truncating. The cap is checked per fetched page (page-granular), not per
+     * row, so a page may be buffered in full before the throw.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
     {
-        // The caller asked for an unbounded scan (limit 0) — remember that
-        // before normalisation, because only an unbounded page may fan its
-        // per-region scans out concurrently (issue #293).
-        $unbounded = $limit === 0;
         $limit = $this->validateScanLimit($limit);
-        $executor = $this->createRetryExecutor();
 
-        $regions = $this->resolveScanRegions($startKey, $endKey);
-
-        $clipper = new RegionRangeClipper();
-        /** @var list<array{RegionInfo, string, string}> $segments */
-        $segments = iterator_to_array($clipper->clipForward($regions, $startKey, $endKey), false);
-
-        // Issue #293: an unbounded page spanning several regions fans its
-        // RawScan sends out concurrently in bounded windows (see
-        // scanSegmentsInParallel()). The region ranges are disjoint, so
-        // concatenating the responses in region order restores key order.
-        if ($unbounded && count($segments) > 1) {
-            return $this->scanSegmentsInParallel($executor, $segments, $endKey, $limit, $keyOnly, $columnFamily);
+        if ($limit === 0) {
+            return $this->scanUnbounded($startKey, $endKey, $keyOnly, $columnFamily);
         }
+
+        $executor = $this->createRetryExecutor();
+        $segments = $this->clipForwardSegments($startKey, $endKey);
 
         return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
     }
 
     /**
+     * Page a `limit: 0` forward scan to completion, advancing the cursor past
+     * the last key of each full page (mirroring {@see ScanIterator}'s
+     * `lastKey . "\x00"` continuation) and stopping on the first short or
+     * empty page. Rows are buffered and guarded by {@see self::$maxScanRows}.
+     *
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function scanUnbounded(string $startKey, string $endKey, bool $keyOnly, string $columnFamily): array
+    {
+        $results = [];
+        $cursor = $startKey;
+
+        while (true) {
+            $executor = $this->createRetryExecutor();
+            $segments = $this->clipForwardSegments($cursor, $endKey);
+
+            // A page spanning several regions keeps the #293 concurrent
+            // fan-out; a single-region page takes the sequential path.
+            $page = count($segments) > 1
+                ? $this->scanSegmentsInParallel(
+                    $executor,
+                    $segments,
+                    $endKey,
+                    $this->scanPageSize,
+                    $keyOnly,
+                    $columnFamily,
+                )
+                : $this->scanSegmentsSequentially(
+                    $executor,
+                    $segments,
+                    $this->scanPageSize,
+                    $keyOnly,
+                    $columnFamily,
+                );
+
+            if ($page === []) {
+                break;
+            }
+
+            $this->assertWithinScanLimit(count($results) + count($page));
+            array_push($results, ...$page);
+
+            if (count($page) < $this->scanPageSize) {
+                break;
+            }
+
+            $lastKey = $page[count($page) - 1]['key'];
+            $cursor = $lastKey . "\x00";
+
+            if ($endKey !== '' && strcmp($cursor, $endKey) >= 0) {
+                break;
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Enumerate the regions covering the forward range and clip them to it.
+     *
+     * @return list<array{RegionInfo, string, string}>
+     */
+    private function clipForwardSegments(string $startKey, string $endKey): array
+    {
+        $regions = $this->resolveScanRegions($startKey, $endKey);
+        $clipper = new RegionRangeClipper();
+
+        /** @var list<array{RegionInfo, string, string}> $segments */
+        $segments = iterator_to_array($clipper->clipForward($regions, $startKey, $endKey), false);
+
+        return $segments;
+    }
+
+    /**
+     * Reverse range scan over [endKey, startKey), returned in descending
+     * order (`startKey` is the exclusive upper bound, `endKey` the lower).
+     *
+     * `limit = 0` means "the whole range": the scan pages internally at
+     * {@see self::$scanPageSize} rows per RPC, moving the descending upper
+     * bound down to the lowest key of each full page, and buffers every row
+     * (issue #191). The buffer is capped by {@see self::$maxScanRows}; once
+     * the buffered rows exceed it a {@see ScanLimitExceededException} is
+     * thrown instead of silently truncating. Like the forward path, the cap
+     * is checked per fetched page (page-granular), not per row.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     public function reverseScan(
@@ -88,10 +209,75 @@ final readonly class RawKvScanner
         string $columnFamily = '',
     ): array {
         $limit = $this->validateScanLimit($limit);
+
+        if ($limit === 0) {
+            return $this->reverseScanUnbounded($startKey, $endKey, $keyOnly, $columnFamily);
+        }
+
+        return $this->reverseScanPage($startKey, $endKey, $limit, $keyOnly, $columnFamily);
+    }
+
+    /**
+     * Page a `limit: 0` reverse scan to completion. After a full page the
+     * exclusive upper bound becomes the page's lowest key, so the next page
+     * reads strictly below it (equal keys cannot repeat — keys are unique).
+     *
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function reverseScanUnbounded(string $startKey, string $endKey, bool $keyOnly, string $columnFamily): array
+    {
+        $results = [];
+        $upper = $startKey;
+
+        while (true) {
+            $page = $this->reverseScanPage($upper, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
+
+            if ($page === []) {
+                break;
+            }
+
+            $this->assertWithinScanLimit(count($results) + count($page));
+            array_push($results, ...$page);
+
+            if (count($page) < $this->scanPageSize) {
+                break;
+            }
+
+            $lastKey = $page[count($page) - 1]['key'];
+            if ($lastKey === '' || strcmp($lastKey, $upper) >= 0) {
+                // Defensive: no forward progress would loop forever.
+                break;
+            }
+            $upper = $lastKey;
+        }
+
+        return $results;
+    }
+
+    /**
+     * Scan one bounded reverse page over the clipped regions. The wire range
+     * is [endKey, startKey); enumerate it through the region cache like the
+     * forward scan, then walk it in reverse.
+     *
+     * @param int $limit positive page budget (never the `0` "unbounded"
+     *                   sentinel: the public API routes `limit: 0` to
+     *                   {@see self::reverseScanUnbounded()}). Passing `0`
+     *                   here would set no request limit and silently read an
+     *                   unbounded region.
+     *
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function reverseScanPage(
+        string $startKey,
+        string $endKey,
+        int $limit,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
+        assert($limit > 0, 'reverseScanPage() requires a positive page budget; use reverseScanUnbounded() for limit 0');
+
         $executor = $this->createRetryExecutor();
 
-        // The wire range is [endKey, startKey); enumerate it through the
-        // region cache like the forward scan, then walk it in reverse.
         $regions = array_reverse($this->resolveScanRegions($endKey, $startKey));
 
         $results = [];
@@ -99,27 +285,39 @@ final readonly class RawKvScanner
 
         $clipper = new RegionRangeClipper();
         foreach ($clipper->clipReverse($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
-            $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
             $regionResults = $this->executeScanForRegion(
                 $executor,
                 $scanStart,
                 $scanEnd,
-                $regionLimit,
+                $remaining,
                 $keyOnly,
                 true,
                 $columnFamily,
             );
             array_push($results, ...$regionResults);
 
-            if ($remaining > 0) {
-                $remaining -= count($regionResults);
-                if ($remaining <= 0) {
-                    break;
-                }
+            $remaining -= count($regionResults);
+            if ($remaining <= 0) {
+                break;
             }
         }
 
         return $results;
+    }
+
+    /**
+     * Fail closed after a fetched page pushes the accumulated row count past
+     * the configured {@see self::$maxScanRows} maximum (issue #191). Because
+     * a page is fetched (and may be fanned out across regions) before this
+     * runs, the observed `$rows` can exceed `maxScanRows` by up to one page.
+     *
+     * @throws ScanLimitExceededException
+     */
+    private function assertWithinScanLimit(int $rows): void
+    {
+        if ($rows > $this->maxScanRows) {
+            throw new ScanLimitExceededException($this->maxScanRows, $rows);
+        }
     }
 
     /**
@@ -982,14 +1180,18 @@ final readonly class RawKvScanner
         return new BatchAsyncExecutor($this->logger);
     }
 
+    /**
+     * Validate a caller-supplied scan limit and return it unchanged.
+     *
+     * `0` is preserved (it means "the whole range"; the caller paginates
+     * internally — issue #191), while an explicit limit above the per-RPC
+     * {@see self::MAX_SCAN_LIMIT} is rejected because one RawScan RPC cannot
+     * exceed it.
+     */
     private function validateScanLimit(int $limit): int
     {
         if ($limit < 0) {
             throw new InvalidArgumentException('Scan limit must be 0 or greater');
-        }
-
-        if ($limit === 0) {
-            return self::MAX_SCAN_LIMIT;
         }
 
         if ($limit > self::MAX_SCAN_LIMIT) {

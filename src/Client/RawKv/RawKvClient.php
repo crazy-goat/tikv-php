@@ -110,8 +110,28 @@ final class RawKvClient
      */
     public const OPT_REPLICA_READ = 'replicaRead';
 
+    /**
+     * options[] key for the maximum number of rows an unbounded scan
+     * (`limit: 0`) may return before throwing
+     * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
+     * (issue #191). `limit: 0` pages
+     * internally so the documented "whole range" contract holds, but the
+     * accumulated result still lives in one PHP array; this guard caps it
+     * (silently truncating instead is forbidden). The guard is evaluated per
+     * internally fetched page — after the page has been buffered — so it is
+     * page-granular, not a strict per-row memory bound: with a guard smaller
+     * than the page size (`RawKvScanner::MAX_SCAN_LIMIT`, 10240) a whole page
+     * is read before the throw, and `getScannedRows()` can exceed
+     * `getMaxRows()`. Must be `>= 1`. Bounded scans (`limit > 0`) are
+     * unaffected.
+     */
+    public const OPT_MAX_SCAN_ROWS = 'maxScanRows';
+
     /** Default bound on in-flight requests for fanned-out batch and range operations. */
     public const DEFAULT_MAX_CONCURRENCY = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY;
+
+    /** Default row cap for an unbounded (`limit: 0`) scan (issue #191). */
+    public const DEFAULT_MAX_SCAN_ROWS = RawKvScanner::DEFAULT_MAX_SCAN_ROWS;
 
     private bool $closed = false;
 
@@ -159,6 +179,7 @@ final class RawKvClient
             retryDeadlineMs: self::resolveRetryDeadline($options),
             maxConcurrency: self::resolveMaxConcurrency($options),
             replicaReadPolicy: self::resolveReplicaReadPolicy($options),
+            maxScanRows: self::resolveMaxScanRows($options),
         );
     }
 
@@ -190,12 +211,16 @@ final class RawKvClient
         int $maxConcurrency = self::DEFAULT_MAX_CONCURRENCY,
         /** Read preference applied to every read issued by this client (issue #421). */
         private readonly ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
+        int $maxScanRows = self::DEFAULT_MAX_SCAN_ROWS,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
         if ($maxConcurrency < 1) {
             throw new InvalidArgumentException('maxConcurrency must be >= 1');
+        }
+        if ($maxScanRows < 1) {
+            throw new InvalidArgumentException('maxScanRows must be >= 1');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->maxConcurrency = $maxConcurrency;
@@ -255,6 +280,7 @@ final class RawKvClient
             $this->retryDeadlineMs,
             $this->maxConcurrency,
             $this->replicaReadPolicy,
+            $maxScanRows,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -438,6 +464,33 @@ final class RawKvClient
         }
 
         return $maxConcurrency;
+    }
+
+    /**
+     * Resolve options['maxScanRows'] (see OPT_MAX_SCAN_ROWS) for create():
+     * the row cap for an unbounded (`limit: 0`) scan (issue #191). Must be
+     * >= 1.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveMaxScanRows(array $options): int
+    {
+        if (!array_key_exists(self::OPT_MAX_SCAN_ROWS, $options)) {
+            return self::DEFAULT_MAX_SCAN_ROWS;
+        }
+
+        $maxScanRows = $options[self::OPT_MAX_SCAN_ROWS];
+        if (!is_int($maxScanRows)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['maxScanRows'] must be an int, %s given",
+                get_debug_type($maxScanRows),
+            ));
+        }
+        if ($maxScanRows < 1) {
+            throw new InvalidArgumentException("options['maxScanRows'] must be >= 1");
+        }
+
+        return $maxScanRows;
     }
 
     /**
@@ -753,12 +806,28 @@ final class RawKvClient
     }
 
     /**
+     * Range scan over [startKey, endKey).
+     *
+     * `limit = 0` means **the whole range**: the call pages internally
+     * (`RawKvScanner::MAX_SCAN_LIMIT` rows per RPC) and collects every row,
+     * so it is no longer silently truncated at 10240 (issue #191). Because
+     * the whole result is still buffered in one PHP array, the total is
+     * bounded by `options['maxScanRows']` (default
+     * {@see RawKvClient::DEFAULT_MAX_SCAN_ROWS}); exceeding it throws
+     * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
+     * rather than truncating. For ranges larger than that, or to keep memory
+     * flat, use {@see RawKvClient::scanIterator()} instead.
+     *
+     * @param int $limit Maximum rows to return; 0 = the whole range
+     *                   (paginated internally, guarded by maxScanRows)
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
+     *         limit is 0 and more than `options['maxScanRows']` rows match
      */
     public function scan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {
@@ -772,11 +841,21 @@ final class RawKvClient
     }
 
     /**
+     * Prefix scan: convenience wrapper around {@see RawKvClient::scan()}.
+     *
+     * `limit = 0` returns the whole prefix (paginated internally and guarded
+     * by `options['maxScanRows']`, see {@see RawKvClient::scan()}); for large
+     * prefixes prefer {@see RawKvClient::scanPrefixIterator()}, which keeps
+     * memory to a single page.
+     *
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
+     * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
+     *         limit is 0 and more than `options['maxScanRows']` rows match
      */
     public function scanPrefix(string $prefix, int $limit = 0, bool $keyOnly = false): array
     {
@@ -786,12 +865,29 @@ final class RawKvClient
     }
 
     /**
+     * Reverse range scan over [endKey, startKey), returned in descending
+     * order (`startKey` = exclusive upper bound, `endKey` = lower bound).
+     *
+     * `limit = 0` means **the whole range**: the call pages internally
+     * (moving the descending upper bound to the lowest key of each full
+     * page) and collects every row (issue #191). The total is bounded by
+     * `options['maxScanRows']` (default
+     * {@see RawKvClient::DEFAULT_MAX_SCAN_ROWS}); exceeding it throws
+     * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
+     * rather than truncating. There is no reverse iterator, so for a very
+     * large reverse range raise `maxScanRows` consciously or page it in the
+     * caller.
+     *
+     * @param int $limit Maximum rows to return; 0 = the whole range
+     *                   (paginated internally, guarded by maxScanRows)
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
+     *         limit is 0 and more than `options['maxScanRows']` rows match
      */
     public function reverseScan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array
     {

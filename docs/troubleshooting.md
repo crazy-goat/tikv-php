@@ -576,7 +576,8 @@ same failure deterministically). Real messages include:
 - `Key must not be empty in <method>`
 - `Key size (<len>) exceeds maximum allowed size (<max>) in <method>`
 - `Value size (<len>) exceeds maximum allowed size (<max>) in <method>`
-- `Scan limit must be 0 or greater` / `Scan limit (<n>) exceeds maximum allowed scan limit of <max>` (max 10240; to read more than 10240 keys, use the lazy [scan iterators](operations.md#iterating-large-ranges) instead of one big `scan()` call)
+- `Scan limit must be 0 or greater` / `Scan limit (<n>) exceeds maximum allowed scan limit of <max>` (max 10240 per RPC; `limit: 0` returns the whole range by paging internally, buffered up to `options['maxScanRows']` — for a range larger than that, or for constant memory, use the lazy [scan iterators](operations.md#iterating-large-ranges))
+- `Unbounded scan collected <n> rows, exceeding the configured maximum of <max>` (`ScanLimitExceededException`) — a `limit: 0` scan matched more rows than `options['maxScanRows']` (default 100000) and refuses to silently truncate; switch to the lazy scan iterators or raise the option
 - `eachLimit must be greater than 0`
 - `Prefix must not be empty -- refusing to delete all keys`
 - `PD endpoints array must not be empty`

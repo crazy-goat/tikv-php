@@ -27,18 +27,22 @@ use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\RawKv\ScanIterator;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -731,29 +735,42 @@ class RawKvClientTest extends TestCase
     // scan()
     // ========================================================================
 
-    public function testScanLimitZeroIsCappedToMax(): void
+    public function testScanLimitZeroAppliesMaxScanRowsGuard(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $pairs = [];
-        for ($i = 0; $i < RawKvClient::MAX_SCAN_LIMIT; $i++) {
-            $pair = new KvPair();
-            $pair->setKey('k' . $i);
-            $pair->setValue('v' . $i);
-            $pairs[] = $pair;
-        }
+        $pair1 = new KvPair();
+        $pair1->setKey('k1');
+        $pair1->setValue('v1');
+        $pair2 = new KvPair();
+        $pair2->setKey('k2');
+        $pair2->setValue('v2');
 
         $response = new RawScanResponse();
-        $response->setKvs($pairs);
+        $response->setKvs([$pair1, $pair2]);
 
         $this->grpc->method('call')->willReturn($response);
 
-        $result = $this->client->scan('k', 'l', 0);
+        // limit 0 no longer silently caps at MAX_SCAN_LIMIT; the whole range
+        // is collected and a guard throws when it exceeds options['maxScanRows']
+        // (issue #191).
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            maxScanRows: 1,
+        );
 
-        $this->assertCount(RawKvClient::MAX_SCAN_LIMIT, $result);
+        try {
+            $client->scan('k', 'l', 0);
+            $this->fail('Expected ScanLimitExceededException was not thrown');
+        } catch (ScanLimitExceededException $e) {
+            $this->assertSame(1, $e->getMaxRows());
+            $this->assertSame(2, $e->getScannedRows());
+        }
     }
 
     public function testScanLimitExceedingMaxThrowsException(): void
@@ -1362,9 +1379,11 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        // Concurrency cap of 2 over 3 regions: only the first window may be
-        // dispatched, and the budget is exhausted by that window's data, so
-        // the third region must never be sent (bounded fan-out, early stop).
+        // Concurrency cap of 2 over 3 regions: only the first window is
+        // dispatched before the page budget is exhausted by that window's
+        // data, so the third region is not part of the first page. Because
+        // limit 0 now paginates (issue #191), only the first two calls carry
+        // data; the follow-up pages return empty so the scan terminates.
         $client = new RawKvClient(
             $this->pdClient,
             $this->grpc,
@@ -1384,7 +1403,11 @@ class RawKvClientTest extends TestCase
 
         /** @var list<RawScanRequest> $requests */
         $requests = [];
-        $this->grpc->expects($this->exactly(2))->method('callAsync')->willReturnCallback(
+        $callCount = 0;
+        // Index of the first follow-up-page dispatch (an empty response).
+        // Everything captured before it belongs to the first page's window.
+        $firstEmptyAt = null;
+        $this->grpc->method('callAsync')->willReturnCallback(
             function (
                 string $address,
                 string $service,
@@ -1392,10 +1415,19 @@ class RawKvClientTest extends TestCase
                 Message $request,
             ) use (
                 &$requests,
+                &$callCount,
+                &$firstEmptyAt,
                 $full,
             ): GrpcFuture {
                 /** @var RawScanRequest $request */
                 $requests[] = $request;
+                $callCount++;
+
+                if ($callCount > 2) {
+                    $firstEmptyAt ??= count($requests) - 1;
+
+                    return $this->okFuture(new RawScanResponse());
+                }
 
                 return $this->okFuture($full);
             },
@@ -1404,10 +1436,146 @@ class RawKvClientTest extends TestCase
         $result = $client->scan('a', 'z', 0, false);
 
         $this->assertCount(RawKvClient::MAX_SCAN_LIMIT, $result);
+        // The first page's window covers only region 1 ('a') and region 2
+        // ('m'); region 3 ('t') is never dispatched in the same window.
+        $this->assertGreaterThanOrEqual(2, count($requests));
+        $this->assertSame('a', $requests[0]->getStartKey());
+        $this->assertSame('m', $requests[1]->getStartKey());
         // Every dispatched region carries the (positive) remaining budget,
         // never an unbounded/zero limit.
         $this->assertGreaterThan(0, $requests[0]->getLimit());
         $this->assertGreaterThan(0, $requests[1]->getLimit());
+        // Pin the first-page window composition: the follow-up page starts
+        // with an empty response, so every request captured before it must be
+        // exactly regions 1 and 2 — region 3 ('t') excluded.
+        $this->assertNotNull($firstEmptyAt);
+        $firstWindow = array_slice($requests, 0, $firstEmptyAt);
+        $this->assertCount(2, $firstWindow);
+        $this->assertSame(
+            ['a', 'm'],
+            array_map(
+                static fn (RawScanRequest $request): string => $request->getStartKey(),
+                $firstWindow,
+            ),
+        );
+        // The window above is derived from the mock's call counter, so it
+        // cannot on its own prove region 3 ('t') was excluded: whatever is
+        // dispatched third is by construction the boundary array_slice()
+        // cuts at. The third request is the *next page's* first dispatch,
+        // carrying the page-1 continuation cursor ('k10239' . "\x00"), not
+        // region 3 ('t'). If the per-window cap were removed, region 3 would
+        // be dispatched in the first window and this start key would be 't'.
+        $this->assertSame('k10239' . "\x00", $requests[2]->getStartKey());
+    }
+
+    public function testUnboundedScanPaginatesAcrossMultipleRegionsInParallelPages(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 't',
+        );
+        $region3 = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 't',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2, $region3]);
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static function (string $key) use ($region1, $region2, $region3): RegionInfo {
+                if ($key < 'm') {
+                    return $region1;
+                }
+
+                return $key < 't' ? $region2 : $region3;
+            },
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // The production page size (MAX_SCAN_LIMIT = 10240) is too large for a
+        // small deterministic test, so inject a scanner with a two-row page
+        // budget; the client's own concurrency cap is separate and must also
+        // be set on the scanner.
+        $scanner = new RawKvScanner(
+            $this->pdClient,
+            $this->grpc,
+            new RegionResolver($this->pdClient, $this->regionCache),
+            new TimeoutConfig(),
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            regionCache: $this->regionCache,
+            logger: new NullLogger(),
+            maxConcurrency: 2,
+            scanPageSize: 2,
+        );
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            scanner: $scanner,
+            maxConcurrency: 2,
+        );
+
+        // Page 1 spans regions 1 ('a') and 2 ('m'), one row each → a full
+        // two-row page; region 3 is never dispatched in the first window.
+        // The cursor then advances past region 2's last key, so page 2 again
+        // spans two segments (the remainder of region 2, then region 3):
+        // region 2 yields nothing and region 3 yields the final row, a short
+        // page that stops the scan. Both pages exercise the parallel branch.
+        /** @var list<RawScanRequest> $requests */
+        $requests = [];
+        $this->grpc->method('callAsync')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+            ) use (&$requests): GrpcFuture {
+                /** @var RawScanRequest $request */
+                $requests[] = $request;
+
+                $response = match ($request->getStartKey()) {
+                    'a' => $this->scanResponseWithKeys('k0'),
+                    'm' => $this->scanResponseWithKeys('m0'),
+                    't' => $this->scanResponseWithKeys('t0'),
+                    default => new RawScanResponse(),
+                };
+
+                return $this->okFuture($response);
+            },
+        );
+
+        $result = $client->scan('a', 'z', 0, false);
+
+        $this->assertSame(['k0', 'm0', 't0'], array_column($result, 'key'));
+
+        // Page 1 fan-out: regions 1 and 2. Page 2 fan-out: the clipped
+        // remainder of region 2 (starting at the advanced cursor) and region
+        // 3.
+        $this->assertCount(4, $requests);
+        $this->assertSame('a', $requests[0]->getStartKey());
+        $this->assertSame('m', $requests[1]->getStartKey());
+        $this->assertSame('m0' . "\x00", $requests[2]->getStartKey());
+        $this->assertSame('t', $requests[3]->getStartKey());
     }
 
     public function testBatchScanRetriesSubRangeOnRegionError(): void

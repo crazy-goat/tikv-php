@@ -134,9 +134,12 @@ try {
         echo "  $key => $value\n";
     }
     
-    // Scan all users
-    $allUsers = $client->scanPrefix('user:');
-    echo "Found " . count($allUsers) . " users by scanning\n";
+    // Scan all users with the lazy iterator (constant memory)
+    $userCount = 0;
+    foreach ($client->scanPrefixIterator('user:') as $_) {
+        $userCount++;
+    }
+    echo "Found $userCount users by scanning\n";
     
     // Cleanup
     $client->delete('hello');
@@ -203,7 +206,9 @@ $client->batchDelete(['k1', 'k2']);
 ### Scanning
 
 ```php
-// Range scan [startKey, endKey)
+// Range scan [startKey, endKey). limit: 0 (the default) returns the whole
+// range: the client pages internally and buffers every row, guarded by
+// options['maxScanRows'] (default 100000).
 $results = $client->scan('user:a', 'user:z');
 
 // Prefix scan (convenience method)
@@ -215,7 +220,19 @@ $results = $client->scanPrefix('user:');
 //   ['key' => 'user:2', 'value' => 'Bob'],
 //   ...
 // ]
+
+// For a large range, prefer the lazy iterator — it holds one page at a time
+// and never buffers the whole range:
+foreach ($client->scanPrefixIterator('user:', batchSize: 500) as $key => $value) {
+    echo "$key: $value\n";
+}
 ```
+
+`limit: 0` no longer silently caps the result at one TiKV page (10240 rows).
+Because the complete result is still held in memory, an unbounded scan that
+matches more than `options['maxScanRows']` rows throws
+`ScanLimitExceededException` instead of truncating; use
+`scanIterator()` / `scanPrefixIterator()` for datasets larger than that.
 
 ### Resource Cleanup
 
