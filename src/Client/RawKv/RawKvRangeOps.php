@@ -15,14 +15,17 @@ use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 
 final readonly class RawKvRangeOps
@@ -149,9 +152,12 @@ final readonly class RawKvRangeOps
      *
      * The original clipped `[startKey, endKey)` bounds are intentionally kept
      * when the region is re-resolved (issue #190): after a split the fresh
-     * region may no longer cover them, so the request fails closed instead of
-     * deleting a truncated sub-range. The fan-out has no split-continuation
-     * logic (tracked separately).
+     * region may no longer cover them. The request fails loudly in that case
+     * ({@see self::assertRegionCoversRange()}) instead of sending it to the
+     * smaller region; there is no split-continuation logic (tracked
+     * separately). deleteRange would also be rejected by raftstore
+     * (KeyNotInRegion), so refusing client-side is the same fail-closed
+     * outcome, just clearer.
      */
     private function deleteRangeWithRetry(
         RetryExecutor $executor,
@@ -168,6 +174,7 @@ final readonly class RawKvRangeOps
             // Resolve the region on every attempt so retries pick up cache
             // invalidation and leader switching (issue #190).
             $region = $this->regionResolver->getRegionInfo($startKey);
+            $this->assertRegionCoversRange($region, $startKey, $endKey);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRangeRequest();
@@ -215,8 +222,11 @@ final readonly class RawKvRangeOps
      * an un-waited future (fan-out pattern, see deleteRangeWithRetry()).
      *
      * As in {@see self::deleteRangeWithRetry()}, the clipped bounds are kept
-     * on re-resolution: a region that shrank after enumeration fails closed
-     * rather than checksumming a truncated sub-range.
+     * on re-resolution. A raw checksum read is silently clamped by the region
+     * snapshot rather than rejected, so a region that shrank after
+     * enumeration must be refused explicitly: otherwise a success response
+     * covering only part of the sub-range would be XOR-merged into the result
+     * as if complete.
      */
     private function checksumWithRetry(
         RetryExecutor $executor,
@@ -228,6 +238,7 @@ final readonly class RawKvRangeOps
             // Resolve the region on every attempt so retries pick up cache
             // invalidation and leader switching (issue #190).
             $region = $this->regionResolver->getRegionInfo($startKey);
+            $this->assertRegionCoversRange($region, $startKey, $endKey);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $range = new KeyRange();
@@ -271,6 +282,43 @@ final readonly class RawKvRangeOps
         });
 
         return $future;
+    }
+
+    /**
+     * Refuse to send a clipped sub-range when a region re-resolved inside a
+     * retry no longer covers it (a post-enumeration split left the fresh
+     * region smaller than `[startKey, endKey)`).
+     *
+     * The two raw paths are not equally safe with a stale upper bound: the
+     * raftstore rejects a cross-region delete-range command with
+     * `KeyNotInRegion`, but a raw checksum read is silently clamped to the
+     * region snapshot, so a success response covering only part of the range
+     * would be XOR-merged as if complete. Guard both. The check never fires
+     * for a region whose end key equals the clipped sub-range end, or whose
+     * end key is empty (unbounded).
+     *
+     * @throws TiKvException A non-retryable error (deliberately free of every
+     *     classifier keyword) so the retry loop stops without replaying the
+     *     stale sub-range.
+     */
+    private function assertRegionCoversRange(RegionInfo $region, string $startKey, string $endKey): void
+    {
+        if ($region->endKey === '') {
+            return;
+        }
+
+        if ($endKey !== '' && strcmp($region->endKey, $endKey) >= 0) {
+            return;
+        }
+
+        throw new TiKvException(sprintf(
+            'Region %d shrank to an upper bound of %s after enumeration and no '
+            . 'longer covers the clipped sub-range starting at key %s; refusing '
+            . 'a partial operation',
+            $region->regionId,
+            KeyRedactor::redact($region->endKey),
+            KeyRedactor::redact($startKey),
+        ));
     }
 
     private function createRetryExecutor(): RetryExecutor

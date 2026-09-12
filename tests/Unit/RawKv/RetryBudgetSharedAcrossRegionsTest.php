@@ -568,4 +568,75 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
             },
         );
     }
+
+    /**
+     * Issue #190: when a retry re-resolves a region that shrank (split) so it
+     * no longer covers the clipped sub-range, the operation must fail loudly
+     * instead of sending the partial range. For checksum this is critical:
+     * the raw read is silently clamped by the region snapshot, so a partial
+     * success would be XOR-merged as if complete. The guard fires on the
+     * second resolution, before any second send, so exactly one callAsync is
+     * made.
+     *
+     * @param callable(RawKvRangeOps): void $operation
+     */
+    private function assertShrunkRegionFailsClosed(callable $operation): void
+    {
+        $region1 = $this->defaultRegion('', 'z', regionId: 1, leaderStoreId: 1);
+        $region2 = $this->defaultRegion('', 'k', regionId: 1, leaderStoreId: 2);
+
+        // First resolution: cache hit on the (full) stale region. Second: the
+        // RetryExecutor's invalidation lookup. Third: miss, so PD answers with
+        // the shrunken region whose end key no longer covers a..z.
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($region1, $region1, null);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('scanRegions')->willReturn([$region1]);
+        $this->pdClient->method('getRegion')->willReturn($region2);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // First attempt is dispatched and fails retryably; the second is
+        // aborted by the coverage guard before its send.
+        $this->grpc->expects($this->once())->method('callAsync')->willReturnCallback(
+            function (): never {
+                throw new TiKvException('StaleCommand');
+            },
+        );
+
+        $rangeOps = new RawKvRangeOps(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            new TimeoutConfig(),
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 600000,
+            logger: new NullLogger(),
+        );
+
+        try {
+            $operation($rangeOps);
+            $this->fail('Expected a shrunken region to fail closed');
+        } catch (TiKvException $e) {
+            $this->assertStringContainsString('shrank', $e->getMessage());
+        }
+    }
+
+    public function testDeleteRangeFailsClosedWhenRegionShrankAfterRetry(): void
+    {
+        $this->assertShrunkRegionFailsClosed(
+            static function (RawKvRangeOps $ops): void {
+                $ops->deleteRange('a', 'z');
+            },
+        );
+    }
+
+    public function testChecksumFailsClosedWhenRegionShrankAfterRetry(): void
+    {
+        $this->assertShrunkRegionFailsClosed(
+            static function (RawKvRangeOps $ops): void {
+                $ops->checksum('a', 'z');
+            },
+        );
+    }
 }

@@ -291,17 +291,24 @@ lower bound), because the wire start key can sit exactly on the region's
 end boundary where the cache lookup misses and PD answers with the
 *neighbouring* region. After a split the fresh region is smaller, so the
 wire range must be re-clipped on every attempt (end key for forward,
-start/upper key for reverse) — TiKV rejects ranges that cross region
-boundaries. The same stale-capture bug in `RawKvRangeOps`
+start/upper key for reverse). The blanket "TiKV rejects ranges that cross
+region boundaries" holds only for write commands: raftstore rejects a
+cross-region delete-range command with `KeyNotInRegion`, but raw read paths
+(scan/checksum) are silently clamped by the region snapshot, so a client that
+keeps a stale upper bound receives a partial success — re-clip or guard
+explicitly. The same stale-capture bug in `RawKvRangeOps`
 (deleteRange/checksum) was fixed by #190: resolution now happens inside the
 retry closure and the `scanRegions()` result is pre-populated into the
 region cache (so the first attempt is a cache hit). Remaining limitation:
 because of the #295 fan-out the retry closure only observes dispatch-phase
 failures; response-borne region errors surface at wait time as
-`BatchPartialFailureException` (tracked by #236/#189), and a region that
-shrank after enumeration fails closed — the original clipped bounds are kept
-and there is no split-continuation, so no truncated delete/checksum is sent.
-The rollback closures
+`BatchPartialFailureException` (tracked by #236/#189). A region that shrank
+after enumeration (a split) is also guarded by
+`RawKvRangeOps::assertRegionCoversRange()`: `deleteRange` fails closed, and
+`checksum` refuses a partial result — its data read is silently clamped by
+the region snapshot, so a truncated checksum would otherwise be XOR-merged
+as if complete. The original clipped bounds are kept and there is no
+split-continuation (independent limitation). The rollback closures
 (`batchRollback()`, `pessimisticRollbackAll()` in `TwoPhaseCommitter`)
 had the same bug and were fixed the same way (#502): `getRegionInfo()`
 inside the closure on every attempt — there the group's
@@ -1308,4 +1315,9 @@ address of each attempt and assert the pair — e.g.
 `willReturnOnConsecutiveCalls($stale, $stale, null)` so the retry models the
 invalidation lookup before going to PD. No `\Grpc\Call` / resolved-future
 machinery is required, so the test stays in the `Unit` suite under `php -n`.
+The same harness covers the fail-closed shrink guard: let the
+post-invalidation `getRegion` return a smaller region (end key `k` for the
+request `a..z`); `assertRegionCoversRange()` fires before the second send, so
+expect exactly **one** `callAsync` and a `TiKvException` whose message
+contains `shrank` (wrapped by the fan-out as `BatchPartialFailureException`).
 Reference: `RetryBudgetSharedAcrossRegionsTest`.
