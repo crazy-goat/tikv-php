@@ -55,6 +55,10 @@ final readonly class RawKvRangeOps
      * longer abort at the first failing region but surface together as a
      * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException}.
      * deleteRange is idempotent, so retrying the whole operation remains safe.
+     *
+     * Retries re-resolve the region per attempt (issue #190), so the
+     * `scanRegions()` result is pre-populated into the region cache to keep
+     * the first attempt a cache hit (no extra PD `getRegion` round trip).
      */
     public function deleteRange(string $startKey, string $endKey, string $columnFamily = ''): void
     {
@@ -64,6 +68,9 @@ final readonly class RawKvRangeOps
 
         $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
         $clipper = new RegionRangeClipper();
 
         $calls = [];
@@ -92,11 +99,18 @@ final readonly class RawKvRangeOps
      * Region errors surface as a
      * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException};
      * checksum is idempotent, so retrying the whole operation remains safe.
+     *
+     * As in {@see self::deleteRange()}, the `scanRegions()` result is
+     * pre-populated into the region cache so the per-attempt re-resolution
+     * (issue #190) is a cache hit on the first try.
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
         $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
         $clipper = new RegionRangeClipper();
 
         $calls = [];
@@ -132,6 +146,12 @@ final readonly class RawKvRangeOps
      * Issue one RawDeleteRange send for a single clipped sub-range and
      * return an un-waited future so the batch executor can fan out all
      * regions' sends before awaiting any of them.
+     *
+     * The original clipped `[startKey, endKey)` bounds are intentionally kept
+     * when the region is re-resolved (issue #190): after a split the fresh
+     * region may no longer cover them, so the request fails closed instead of
+     * deleting a truncated sub-range. The fan-out has no split-continuation
+     * logic (tracked separately).
      */
     private function deleteRangeWithRetry(
         RetryExecutor $executor,
@@ -193,6 +213,10 @@ final readonly class RawKvRangeOps
     /**
      * Issue one RawChecksum send for a single clipped sub-range and return
      * an un-waited future (fan-out pattern, see deleteRangeWithRetry()).
+     *
+     * As in {@see self::deleteRangeWithRetry()}, the clipped bounds are kept
+     * on re-resolution: a region that shrank after enumeration fails closed
+     * rather than checksumming a truncated sub-range.
      */
     private function checksumWithRetry(
         RetryExecutor $executor,

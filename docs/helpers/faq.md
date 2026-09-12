@@ -292,8 +292,16 @@ end boundary where the cache lookup misses and PD answers with the
 *neighbouring* region. After a split the fresh region is smaller, so the
 wire range must be re-clipped on every attempt (end key for forward,
 start/upper key for reverse) — TiKV rejects ranges that cross region
-boundaries. Same stale-capture bug remains in `RawKvRangeOps`
-(deleteRange/checksum) as of this fix. The rollback closures
+boundaries. The same stale-capture bug in `RawKvRangeOps`
+(deleteRange/checksum) was fixed by #190: resolution now happens inside the
+retry closure and the `scanRegions()` result is pre-populated into the
+region cache (so the first attempt is a cache hit). Remaining limitation:
+because of the #295 fan-out the retry closure only observes dispatch-phase
+failures; response-borne region errors surface at wait time as
+`BatchPartialFailureException` (tracked by #236/#189), and a region that
+shrank after enumeration fails closed — the original clipped bounds are kept
+and there is no split-continuation, so no truncated delete/checksum is sent.
+The rollback closures
 (`batchRollback()`, `pessimisticRollbackAll()` in `TwoPhaseCommitter`)
 had the same bug and were fixed the same way (#502): `getRegionInfo()`
 inside the closure on every attempt — there the group's
@@ -1281,7 +1289,7 @@ The regression tests live in `TransactionTest` and use the shared
 asserts `['KvPessimisticLock']`, i.e. no `KvPrewrite`/`KvCommit`); there is
 also a first-variant-wins test for multi-error responses.
 
-## Range-op retries only see dispatch-phase failures — and a resolved GrpcFuture can be built without ext-grpc
+## Range-op retries only see dispatch-phase failures — make both callAsync attempts throw in the regression test
 
 `RawKvRangeOps::deleteRange()/checksum()` fan their per-region sends out
 through `callAsync()` and return an un-waited `CheckedGrpcFuture`; the wait
@@ -1290,17 +1298,14 @@ So moving `getRegionInfo($startKey)` inside the retry closure (#190) only
 helps for errors raised during *dispatch* (`callAsync()` itself or
 store-address resolution) — a region error carried on the response surfaces
 at wait time and is not retried per region at all (the documented fan-out
-trade-off). To prove the re-resolve in a pure-PHP `Unit` test, the retried
-`callAsync()` must return a *successful* future on the second attempt, but
-`\Grpc\Call` (GrpcFuture's constructor dependency) does not exist under
-`php -n`, so a Call mock cannot be used. Build an already-resolved future
-directly:
-
-    $reflection = new \ReflectionClass(GrpcFuture::class);
-    $future = $reflection->newInstanceWithoutConstructor();
-    $reflection->getProperty('completed')->setValue($future, true);
-    $reflection->getProperty('result')->setValue($future, $response);
-
-`wait()` then returns `$response` without touching a channel. Do NOT call
-`ReflectionProperty::setAccessible()` — it is a no-op since PHP 8.1 and
-deprecated on 8.5. Reference: `RetryBudgetSharedAcrossRegionsTest`.
+trade-off). Proving the re-resolve in a pure-PHP `Unit` test therefore does
+**not** need a successful second future: let the first `callAsync()` throw a
+retryable `TiKvException('StaleCommand')` and the second throw a
+deliberately non-retryable one (`ErrorClassifier` leaves it unclassified, so
+the loop stops and the original exception propagates). Record the target
+address of each attempt and assert the pair — e.g.
+`['tikv1:20160', 'tikv2:20160']` — with `regionCache->getByKey()` stubbed
+`willReturnOnConsecutiveCalls($stale, $stale, null)` so the retry models the
+invalidation lookup before going to PD. No `\Grpc\Call` / resolved-future
+machinery is required, so the test stays in the `Unit` suite under `php -n`.
+Reference: `RetryBudgetSharedAcrossRegionsTest`.

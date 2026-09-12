@@ -5,12 +5,9 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
-use CrazyGoat\Proto\Kvrpcpb\RawChecksumResponse;
-use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
-use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
@@ -21,7 +18,6 @@ use CrazyGoat\TiKV\Client\RawKv\RawKvRangeOps;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
-use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -477,13 +473,19 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
     /**
      * Issue #190: a retried deleteRange/checksum dispatch must re-resolve the
      * region inside the retry closure instead of replaying the stale region
-     * captured before the loop. The first dispatch fails with a retryable
-     * StaleCommand; PD then reports the region under a new leader store, so
-     * the second dispatch must target that store's address.
+     * captured before the loop.
+     *
+     * The first resolution is a cache hit on the stale leader (store 1); the
+     * first callAsync fails with a retryable StaleCommand, the executor's
+     * invalidation lookup sees the stale region again, and the next
+     * resolution misses the cache so PD answers with the region under the new
+     * leader (store 2). The second callAsync then throws a deliberately
+     * non-retryable error, so the loop stops after exactly two attempts with
+     * no dependency on backoff jitter.
      *
      * @param callable(RawKvRangeOps): void $operation
      */
-    private function assertRetryReresolvesToNewLeader(Message $successResponse, callable $operation): void
+    private function assertRetryReresolvesToNewLeader(callable $operation): void
     {
         $region1 = $this->defaultRegion('', 'z', regionId: 1, leaderStoreId: 1);
         $region2 = $this->defaultRegion('', 'z', regionId: 1, leaderStoreId: 2);
@@ -495,11 +497,14 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $store2->setId(2);
         $store2->setAddress('tikv2:20160');
 
-        $this->regionCache->method('getByKey')->willReturn(null);
+        // First resolution: cache hit on the stale leader. Second: the
+        // RetryExecutor's invalidation lookup. Third: post-invalidation miss,
+        // so the resolver falls through to PD.
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($region1, $region1, null);
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1]);
-        $this->pdClient->method('getRegion')->willReturnOnConsecutiveCalls($region1, $region2);
+        $this->pdClient->method('getRegion')->willReturn($region2);
         $this->pdClient->method('getStore')->willReturnCallback(
             static fn(int $storeId): Store => $storeId === 2 ? $store2 : $store1,
         );
@@ -507,13 +512,15 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         /** @var list<string> $addresses */
         $addresses = [];
         $this->grpc->expects($this->exactly(2))->method('callAsync')->willReturnCallback(
-            function (string $address) use (&$addresses, $successResponse): GrpcFuture {
+            function (string $address) use (&$addresses): never {
                 $addresses[] = $address;
                 if (count($addresses) === 1) {
                     throw new TiKvException('StaleCommand');
                 }
 
-                return $this->resolvedFuture($successResponse);
+                // Unclassified by ErrorClassifier -> non-retryable: the loop
+                // stops after the second attempt.
+                throw new TiKvException('fatal-test-error');
             },
         );
 
@@ -528,7 +535,14 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
             logger: new NullLogger(),
         );
 
-        $operation($rangeOps);
+        try {
+            $operation($rangeOps);
+            $this->fail('Expected the non-retryable dispatch error to propagate');
+        } catch (TiKvException) {
+            // The fan-out wraps dispatch failures in
+            // BatchPartialFailureException (a TiKvException); either way the
+            // second, non-retryable error is what stops the loop.
+        }
 
         $this->assertSame(
             ['tikv1:20160', 'tikv2:20160'],
@@ -540,7 +554,6 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
     public function testDeleteRangeRetryReresolvesRegionAndTargetsNewLeader(): void
     {
         $this->assertRetryReresolvesToNewLeader(
-            new RawDeleteRangeResponse(),
             static function (RawKvRangeOps $ops): void {
                 $ops->deleteRange('a', 'z');
             },
@@ -550,28 +563,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
     public function testChecksumRetryReresolvesRegionAndTargetsNewLeader(): void
     {
         $this->assertRetryReresolvesToNewLeader(
-            new RawChecksumResponse(),
             static function (RawKvRangeOps $ops): void {
                 $ops->checksum('a', 'z');
             },
         );
-    }
-
-    /**
-     * Build an already-resolved GrpcFuture without ext-grpc.
-     *
-     * The Unit suite runs with `php -n`, where `\Grpc\Call` (the constructor
-     * dependency of GrpcFuture) does not exist, so a Call mock cannot be used
-     * here. The future's private `completed`/`result` state is populated
-     * directly; `wait()` then returns the response without touching a channel.
-     */
-    private function resolvedFuture(Message $response): GrpcFuture
-    {
-        $reflection = new \ReflectionClass(GrpcFuture::class);
-        $future = $reflection->newInstanceWithoutConstructor();
-        $reflection->getProperty('completed')->setValue($future, true);
-        $reflection->getProperty('result')->setValue($future, $response);
-
-        return $future;
     }
 }
