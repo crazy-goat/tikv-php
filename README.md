@@ -177,6 +177,33 @@ $client->ingest(['k1' => 'v1', 'k2' => 'v2'], ttl: 3600);
 > operations guide for the full semantics, the fixed 60 s ingest deadline and
 > the recovery procedure for a cluster stuck in import mode.
 
+### Transactions (TxnKV)
+
+Optimistic transactions take write locks during prewrite. The prewrite lock
+TTL scales with the write-set size — **3000 ms + 10 ms per mutation, capped at
+120000 ms** — so a large multi-region prewrite cannot outlive its own locks
+(an expired lock is rolled back by concurrent readers and the commit fails).
+While the prewrite loop runs, the client automatically heartbeats the primary
+lock once half of the computed TTL has elapsed (single-region 1PC commits are
+exempt, and a lock can only be extended between region prewrites).
+
+A transaction that stays open between operations keeps its locks only for the
+granted TTL, so it must extend them itself with `Transaction::heartbeat()`
+before the last granted TTL elapses (10 s is a safe default):
+
+```php
+$txn = $txnClient->begin();
+
+$txn->set('account:1', '100');
+
+// ... a long computation or external call ...
+
+$txn->heartbeat(10000); // extend the primary lock TTL by ~10 s
+
+$txn->set('account:2', '0');
+$txn->commit();
+```
+
 ### TLS/SSL Configuration
 
 ```php

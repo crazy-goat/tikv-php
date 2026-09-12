@@ -55,10 +55,53 @@ use Psr\Log\NullLogger;
  * Handles prewrite, commit, rollback, pessimistic locking and transaction
  * heartbeat.  Operates on a shared TransactionState and delegates retry
  * decisions to a caller-provided RetryExecutor.
+ *
+ * ## Lock TTL policy (issue #218, TXN-13)
+ *
+ * The optimistic prewrite lock TTL scales with the transaction's write-set
+ * size: `3000 ms + 10 ms per mutation`, capped at `120000 ms`. The baseline
+ * alone was too short for a multi-region prewrite loop, so a concurrent
+ * reader could roll the still-being-prewritten locks back and the commit
+ * failed with `TxnLockNotFound` (a torn transaction). The cap mirrors
+ * client-go's `maxLockTTL`.
+ *
+ * ## Heartbeat contract
+ *
+ * During the prewrite loop the committer sends a {@see heartbeat()} for the
+ * primary lock once the elapsed time reaches half of the computed TTL (the
+ * window resets after each heartbeat). One-phase commits are exempt: 1PC
+ * leaves no lock, so a heartbeat would fail an already-committed transaction.
+ * A lock can only be heartbeated between region prewrites — a single prewrite
+ * RPC that by itself outlives the TTL cannot be kept alive (PHP has no timer);
+ * the scaled TTL only narrows that window. Application-level long
+ * transactions — anything that keeps a transaction open between operations
+ * — must call {@see \CrazyGoat\TiKV\Client\TxnKv\Transaction::heartbeat()}
+ * themselves before the granted TTL elapses; 10 s is a safe default.
  */
 final readonly class TwoPhaseCommitter
 {
     private const OPTIMISTIC_LOCK_TTL_MS = 3000;
+
+    /**
+     * Additional optimistic lock TTL granted per write-set mutation (issue
+     * #218, TXN-13). client-go scales the optimistic lock TTL by byte size;
+     * the mutation count is the equivalent, deterministic signal available
+     * on the client side.
+     */
+    private const LOCK_TTL_PER_MUTATION_MS = 10;
+
+    /**
+     * Upper bound for the optimistic lock TTL (issue #218, TXN-13) — mirrors
+     * client-go's `maxLockTTL`. Caps the prewrite liveness window for a
+     * pathologically large write set.
+     */
+    private const MAX_LOCK_TTL_MS = 120000;
+
+    /**
+     * Pessimistic locks use a fixed TTL (deliberately out of scope for
+     * issue #218): the pessimistic path locks every key up front and the
+     * prewrite heartbeat contract applies to the optimistic write path only.
+     */
     private const PESSIMISTIC_LOCK_TTL_MS = 30000;
     private const PESSIMISTIC_LOCK_RETRY_DELAY_MS = 100;
     private const PESSIMISTIC_LOCK_MAX_REGROUPS = 10;
@@ -100,6 +143,13 @@ final readonly class TwoPhaseCommitter
         private bool $enable1Pc = false,
         private bool $enableAsyncCommit = false,
         private LoggerInterface $logger = new NullLogger(),
+        /**
+         * Optional monotonic clock (milliseconds since an arbitrary epoch)
+         * used by the prewrite heartbeat check. Injectable for deterministic
+         * tests (issue #218); defaults to the wall clock. Typed `\Closure`,
+         * not `callable`: PHP properties cannot be typed callable.
+         */
+        private ?\Closure $clock = null,
     ) {
     }
 
@@ -111,6 +161,30 @@ final readonly class TwoPhaseCommitter
     public function getPriority(): int
     {
         return $this->priority;
+    }
+
+    private function nowMs(): int
+    {
+        if ($this->clock instanceof \Closure) {
+            return ($this->clock)();
+        }
+
+        return (int) (microtime(true) * 1000);
+    }
+
+    /**
+     * Lock TTL for the optimistic prewrite, scaled with the write-set size.
+     * Baseline 3000 ms + LOCK_TTL_PER_MUTATION_MS per mutation, capped at
+     * MAX_LOCK_TTL_MS. (client-go scales by byte size; mutation count is the
+     * equivalent, deterministic signal here.)
+     *
+     * @param Mutation[] $mutations
+     */
+    private function optimisticLockTtlMs(array $mutations): int
+    {
+        $ttl = self::OPTIMISTIC_LOCK_TTL_MS + count($mutations) * self::LOCK_TTL_PER_MUTATION_MS;
+
+        return min($ttl, self::MAX_LOCK_TTL_MS);
     }
 
     // ---------------------------------------------------------------
@@ -139,6 +213,17 @@ final readonly class TwoPhaseCommitter
         }
 
         $mutations = $this->buildMutations($state);
+        // The lock TTL the prewrite will actually carry: pessimistic
+        // transactions use the fixed pessimistic TTL, optimistic transactions
+        // scale with the write-set size (issue #218, TXN-13). The same value
+        // drives the prewrite-heartbeat trigger and advise, so the pessimistic
+        // path heartbeats against its own 30 s TTL rather than the smaller
+        // optimistic one.
+        $lockTtlMs = $this->pessimistic
+            ? self::PESSIMISTIC_LOCK_TTL_MS
+            : $this->optimisticLockTtlMs($mutations);
+        $prewriteStartedAtMs = $this->nowMs();
+        $primaryLockWritten = false;
         $keysByRegion = $this->groupMutationsByRegion($mutations);
         $allKeys = $state->getWriteKeys();
 
@@ -223,6 +308,7 @@ final readonly class TwoPhaseCommitter
                 function () use (
                     $firstKey,
                     $regionMutations,
+                    $lockTtlMs,
                     $primary,
                     $state,
                     $useOnePc,
@@ -234,6 +320,7 @@ final readonly class TwoPhaseCommitter
                     return $this->prewriteForRegion(
                         $region,
                         $regionMutations,
+                        $lockTtlMs,
                         $primary,
                         $state,
                         $useOnePc,
@@ -251,6 +338,31 @@ final readonly class TwoPhaseCommitter
                 // TiKV declines async commit by answering the primary
                 // prewrite with min_commit_ts = 0.
                 $asyncAccepted = $result['minCommitTs'] > 0;
+                $primaryLockWritten = true;
+            }
+
+            // Keep the primary lock alive when a long prewrite loop would let
+            // its TTL expire before commit (issue #218, TXN-13). Only after
+            // the primary region has been prewritten (heartbeating a not-yet
+            // written primary would surface TxnLockNotFound), and never for a
+            // one-phase commit: 1PC writes the commit record inside the
+            // prewrite and leaves no lock, so a heartbeat would come back
+            // TxnNotFound and fail an already-committed transaction. Reset the
+            // window after each heartbeat. With multi-region async commit the
+            // primary region is deliberately prewritten LAST, so no heartbeat
+            // fires before the primary exists (at most one fires on that final
+            // iteration) — acceptable because async commit is capped at
+            // ASYNC_COMMIT_MAX_KEYS and the commit decision is already carried
+            // by the primary lock. A single region prewrite that by itself
+            // outlives the TTL cannot be heartbeated mid-RPC (PHP has no
+            // timer); the scaled TTL only reduces that window.
+            if (
+                $primaryLockWritten
+                && !$useOnePc
+                && $this->nowMs() - $prewriteStartedAtMs >= intdiv($lockTtlMs, 2)
+            ) {
+                $this->heartbeat($primary, $state, $retryExecutor, $classifier, $lockTtlMs);
+                $prewriteStartedAtMs = $this->nowMs();
             }
         }
 
@@ -442,6 +554,7 @@ final readonly class TwoPhaseCommitter
     private function prewriteForRegion(
         RegionInfo $region,
         array $mutations,
+        int $lockTtlMs,
         string $primary,
         TransactionState $state,
         bool $useOnePc = false,
@@ -455,7 +568,7 @@ final readonly class TwoPhaseCommitter
         $request->setMutations($mutations);
         $request->setPrimaryLock($primary);
         $request->setStartVersion($this->startTs);
-        $request->setLockTtl(self::OPTIMISTIC_LOCK_TTL_MS);
+        $request->setLockTtl($lockTtlMs);
 
         if ($useOnePc) {
             $request->setTryOnePc(true);
@@ -472,7 +585,8 @@ final readonly class TwoPhaseCommitter
         if ($this->pessimistic) {
             $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->startTs;
             $request->setForUpdateTs($forUpdateTs);
-            $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
+            // lock_ttl already carries PESSIMISTIC_LOCK_TTL_MS for the
+            // pessimistic path (see commit()).
             $actions = [];
             foreach ($mutations as $mutation) {
                 $actions[] = PessimisticAction::DO_PESSIMISTIC_CHECK;
