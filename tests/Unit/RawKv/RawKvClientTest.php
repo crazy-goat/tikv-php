@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -731,29 +732,42 @@ class RawKvClientTest extends TestCase
     // scan()
     // ========================================================================
 
-    public function testScanLimitZeroIsCappedToMax(): void
+    public function testScanLimitZeroAppliesMaxScanRowsGuard(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $pairs = [];
-        for ($i = 0; $i < RawKvClient::MAX_SCAN_LIMIT; $i++) {
-            $pair = new KvPair();
-            $pair->setKey('k' . $i);
-            $pair->setValue('v' . $i);
-            $pairs[] = $pair;
-        }
+        $pair1 = new KvPair();
+        $pair1->setKey('k1');
+        $pair1->setValue('v1');
+        $pair2 = new KvPair();
+        $pair2->setKey('k2');
+        $pair2->setValue('v2');
 
         $response = new RawScanResponse();
-        $response->setKvs($pairs);
+        $response->setKvs([$pair1, $pair2]);
 
         $this->grpc->method('call')->willReturn($response);
 
-        $result = $this->client->scan('k', 'l', 0);
+        // limit 0 no longer silently caps at MAX_SCAN_LIMIT; the whole range
+        // is collected and a guard throws when it exceeds options['maxScanRows']
+        // (issue #191).
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            maxScanRows: 1,
+        );
 
-        $this->assertCount(RawKvClient::MAX_SCAN_LIMIT, $result);
+        try {
+            $client->scan('k', 'l', 0);
+            $this->fail('Expected ScanLimitExceededException was not thrown');
+        } catch (ScanLimitExceededException $e) {
+            $this->assertSame(1, $e->getMaxRows());
+            $this->assertSame(2, $e->getScannedRows());
+        }
     }
 
     public function testScanLimitExceedingMaxThrowsException(): void
@@ -1362,9 +1376,11 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        // Concurrency cap of 2 over 3 regions: only the first window may be
-        // dispatched, and the budget is exhausted by that window's data, so
-        // the third region must never be sent (bounded fan-out, early stop).
+        // Concurrency cap of 2 over 3 regions: only the first window is
+        // dispatched before the page budget is exhausted by that window's
+        // data, so the third region is not part of the first page. Because
+        // limit 0 now paginates (issue #191), only the first two calls carry
+        // data; the follow-up pages return empty so the scan terminates.
         $client = new RawKvClient(
             $this->pdClient,
             $this->grpc,
@@ -1384,7 +1400,8 @@ class RawKvClientTest extends TestCase
 
         /** @var list<RawScanRequest> $requests */
         $requests = [];
-        $this->grpc->expects($this->exactly(2))->method('callAsync')->willReturnCallback(
+        $callCount = 0;
+        $this->grpc->method('callAsync')->willReturnCallback(
             function (
                 string $address,
                 string $service,
@@ -1392,18 +1409,25 @@ class RawKvClientTest extends TestCase
                 Message $request,
             ) use (
                 &$requests,
+                &$callCount,
                 $full,
             ): GrpcFuture {
                 /** @var RawScanRequest $request */
                 $requests[] = $request;
+                $callCount++;
 
-                return $this->okFuture($full);
+                return $this->okFuture($callCount <= 2 ? $full : new RawScanResponse());
             },
         );
 
         $result = $client->scan('a', 'z', 0, false);
 
         $this->assertCount(RawKvClient::MAX_SCAN_LIMIT, $result);
+        // The first page's window covers only region 1 ('a') and region 2
+        // ('m'); region 3 ('t') is never dispatched in the same window.
+        $this->assertGreaterThanOrEqual(2, count($requests));
+        $this->assertSame('a', $requests[0]->getStartKey());
+        $this->assertSame('m', $requests[1]->getStartKey());
         // Every dispatched region carries the (positive) remaining budget,
         // never an unbounded/zero limit.
         $this->assertGreaterThan(0, $requests[0]->getLimit());

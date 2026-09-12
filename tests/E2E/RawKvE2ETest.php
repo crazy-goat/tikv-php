@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\E2E;
 
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -85,6 +87,20 @@ class RawKvE2ETest extends TestCase
     {
         $this->testClient->put($key, $value);
         $this->keysToCleanup[] = $key;
+    }
+
+    /**
+     * Helper: best-effort cleanup of a whole prefix (used by the
+     * large-range tests, which deliberately do not track thousands of keys
+     * individually).
+     */
+    private function deletePrefixQuietly(string $prefix): void
+    {
+        try {
+            $this->testClient->deletePrefix($prefix);
+        } catch (\Exception) {
+            // Best-effort cleanup; the prefix is unique per test run.
+        }
     }
 
     // ========================================================================
@@ -352,6 +368,55 @@ class RawKvE2ETest extends TestCase
         $results = $this->testClient->scan('scan-all-', 'scan-all.', 0);
 
         $this->assertCount(3, $results);
+    }
+
+    public function testScanPrefixLimitZeroReturnsAllKeysBeyondMaxScanLimit(): void
+    {
+        // A prefix holding more than MAX_SCAN_LIMIT keys must be returned in
+        // full by limit: 0 (internal pagination) instead of being silently
+        // truncated to one TiKV page (issue #191).
+        $prefix = 'scan-over-' . uniqid() . '-';
+        $total = RawKvClient::MAX_SCAN_LIMIT + 50;
+
+        try {
+            $pairs = [];
+            for ($i = 0; $i < $total; $i++) {
+                $pairs[sprintf('%s%05d', $prefix, $i)] = 'v' . $i;
+            }
+            $this->testClient->batchPut($pairs);
+
+            $results = $this->testClient->scanPrefix($prefix, 0);
+
+            $this->assertCount($total, $results);
+            $this->assertSame(sprintf('%s%05d', $prefix, 0), $results[0]['key']);
+            $this->assertSame(sprintf('%s%05d', $prefix, $total - 1), $results[$total - 1]['key']);
+        } finally {
+            $this->deletePrefixQuietly($prefix);
+        }
+    }
+
+    public function testScanLimitZeroThrowsWhenMaxScanRowsExceeded(): void
+    {
+        // The configurable guard throws rather than truncating (issue #191).
+        // A client whose maxScanRows is 1 cannot return the two matching keys.
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        $client = RawKvClient::create($pdEndpoints, options: ['maxScanRows' => 1]);
+        $prefix = 'scan-guard-' . uniqid() . '-';
+
+        try {
+            $client->batchPut([$prefix . 'a' => '1', $prefix . 'b' => '2']);
+
+            $this->expectException(ScanLimitExceededException::class);
+
+            $client->scanPrefix($prefix, 0);
+        } finally {
+            try {
+                $client->deletePrefix($prefix);
+            } catch (\Exception) {
+                // Best-effort cleanup on failure paths.
+            }
+            $client->close();
+        }
     }
 
     public function testScanLimitOne(): void
@@ -633,6 +698,34 @@ class RawKvE2ETest extends TestCase
         $results = $this->testClient->reverseScan('rev-all-d', 'rev-all-', 0);
 
         $this->assertCount(3, $results);
+    }
+
+    public function testReverseScanLimitZeroReturnsAllKeysBeyondMaxScanLimit(): void
+    {
+        // A reverse scan with limit: 0 must page internally (moving the
+        // descending upper bound) instead of stopping at one page (issue #191).
+        $prefix = 'rev-over-' . uniqid() . '-';
+        $total = RawKvClient::MAX_SCAN_LIMIT + 50;
+
+        try {
+            $pairs = [];
+            for ($i = 0; $i < $total; $i++) {
+                $pairs[sprintf('%s%05d', $prefix, $i)] = 'v' . $i;
+            }
+            $this->testClient->batchPut($pairs);
+
+            $results = $this->testClient->reverseScan(
+                RawKvSplitter::calculatePrefixEndKey($prefix),
+                $prefix,
+                0,
+            );
+
+            $this->assertCount($total, $results);
+            $this->assertSame(sprintf('%s%05d', $prefix, $total - 1), $results[0]['key']);
+            $this->assertSame(sprintf('%s%05d', $prefix, 0), $results[$total - 1]['key']);
+        } finally {
+            $this->deletePrefixQuietly($prefix);
+        }
     }
 
     public function testReverseScanValuesAreCorrect(): void

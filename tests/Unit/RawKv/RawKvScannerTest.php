@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
@@ -71,7 +72,19 @@ class RawKvScannerTest extends TestCase
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
-        $this->scanner = new RawKvScanner(
+        $this->scanner = $this->makeScanner();
+    }
+
+    /**
+     * Build a scanner against the shared mocks. The page-size parameter is a
+     * test seam so multi-page `limit: 0` behaviour can be exercised without
+     * materialising 10240-row pages (issue #191).
+     */
+    private function makeScanner(
+        int $maxScanRows = RawKvScanner::DEFAULT_MAX_SCAN_ROWS,
+        int $scanPageSize = RawKvScanner::MAX_SCAN_LIMIT,
+    ): RawKvScanner {
+        return new RawKvScanner(
             $this->pdClient,
             $this->grpc,
             $this->regionResolver,
@@ -80,7 +93,30 @@ class RawKvScannerTest extends TestCase
             serverBusyBudgetMs: 600000,
             regionCache: $this->regionCache,
             logger: new NullLogger(),
+            maxScanRows: $maxScanRows,
+            scanPageSize: $scanPageSize,
         );
+    }
+
+    /**
+     * Build a RawScanResponse carrying one KvPair per key.
+     *
+     * @param list<string> $keys
+     */
+    private function scanResponseWithKeys(array $keys): RawScanResponse
+    {
+        $pairs = [];
+        foreach ($keys as $key) {
+            $pair = new KvPair();
+            $pair->setKey($key);
+            $pair->setValue('v-' . $key);
+            $pairs[] = $pair;
+        }
+
+        $response = new RawScanResponse();
+        $response->setKvs($pairs);
+
+        return $response;
     }
 
     /**
@@ -405,7 +441,17 @@ class RawKvScannerTest extends TestCase
     // scanLimit validation
     // ========================================================================
 
-    public function testScanLimitZeroReturnsMaxScanLimit(): void
+    // ========================================================================
+    // limit: 0 paginates the whole range (issue #191)
+    //
+    // limit 0 used to be normalised to MAX_SCAN_LIMIT: a range with more
+    // rows was silently truncated to 10240 with no indication. It now pages
+    // internally, and a configurable maxScanRows guard throws
+    // ScanLimitExceededException rather than truncating. The page-size seam
+    // keeps these tests small (no 10240-row pages).
+    // ========================================================================
+
+    public function testScanLimitZeroPaginatesPastAPageBoundary(): void
     {
         $region = $this->defaultRegion('a', 'z');
         $this->stubRegionLookup([$region]);
@@ -413,22 +459,134 @@ class RawKvScannerTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturn([$region]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $pairs = [];
-        for ($i = 0; $i < RawKvScanner::MAX_SCAN_LIMIT; $i++) {
-            $pair = new KvPair();
-            $pair->setKey('k' . $i);
-            $pair->setValue('v' . $i);
-            $pairs[] = $pair;
+        $this->grpc->method('call')->willReturnOnConsecutiveCalls(
+            $this->scanResponseWithKeys(['k0', 'k1', 'k2']),
+            $this->scanResponseWithKeys(['k3', 'k4']),
+        );
+
+        $result = $this->makeScanner(scanPageSize: 3)->scan('a', 'z', 0, false);
+
+        $this->assertSame(['k0', 'k1', 'k2', 'k3', 'k4'], array_column($result, 'key'));
+    }
+
+    public function testScanLimitZeroStopsAfterEmptyPageAtExactPageBoundary(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // First page is exactly the page size; the follow-up page is empty,
+        // so the scan must stop instead of looping.
+        $this->grpc->method('call')->willReturnOnConsecutiveCalls(
+            $this->scanResponseWithKeys(['k0', 'k1', 'k2']),
+            new RawScanResponse(),
+        );
+
+        $result = $this->makeScanner(scanPageSize: 3)->scan('a', 'z', 0, false);
+
+        $this->assertSame(['k0', 'k1', 'k2'], array_column($result, 'key'));
+    }
+
+    public function testScanPrefixLimitZeroPaginatesLikeScan(): void
+    {
+        $region = $this->defaultRegion('p', 'q');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->method('call')->willReturnOnConsecutiveCalls(
+            $this->scanResponseWithKeys(['p0', 'p1']),
+            $this->scanResponseWithKeys(['p2']),
+        );
+
+        $result = $this->makeScanner(scanPageSize: 2)->scanPrefix('p', 0, false);
+
+        $this->assertSame(['p0', 'p1', 'p2'], array_column($result, 'key'));
+    }
+
+    public function testScanLimitZeroAllowsExactlyMaxScanRows(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->method('call')->willReturnOnConsecutiveCalls(
+            $this->scanResponseWithKeys(['k0', 'k1', 'k2']),
+            $this->scanResponseWithKeys(['k3', 'k4']),
+        );
+
+        $result = $this->makeScanner(maxScanRows: 5, scanPageSize: 3)->scan('a', 'z', 0, false);
+
+        $this->assertCount(5, $result);
+    }
+
+    public function testScanLimitZeroThrowsWhenMaxScanRowsExceeded(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->method('call')->willReturnOnConsecutiveCalls(
+            $this->scanResponseWithKeys(['k0', 'k1', 'k2']),
+            $this->scanResponseWithKeys(['k3', 'k4', 'k5']),
+        );
+
+        try {
+            $this->makeScanner(maxScanRows: 4, scanPageSize: 3)->scan('a', 'z', 0, false);
+            $this->fail('Expected ScanLimitExceededException was not thrown');
+        } catch (ScanLimitExceededException $e) {
+            $this->assertSame(4, $e->getMaxRows());
+            $this->assertSame(6, $e->getScannedRows());
+            $this->assertStringContainsString('exceeding the configured maximum of 4', $e->getMessage());
         }
+    }
 
-        $response = new RawScanResponse();
-        $response->setKvs($pairs);
+    public function testReverseScanLimitZeroPaginatesPastAPageBoundary(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnOnConsecutiveCalls(
+            $this->scanResponseWithKeys(['k3', 'k2']),
+            $this->scanResponseWithKeys(['k1', 'k0']),
+            new RawScanResponse(),
+        );
 
-        $result = $this->scanner->scan('a', 'z', 0, false);
+        $result = $this->makeScanner(scanPageSize: 2)->reverseScan('z', 'a', 0, false);
 
-        $this->assertCount(RawKvScanner::MAX_SCAN_LIMIT, $result);
+        $this->assertSame(['k3', 'k2', 'k1', 'k0'], array_column($result, 'key'));
+    }
+
+    public function testReverseScanLimitZeroThrowsWhenMaxScanRowsExceeded(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->method('call')->willReturnOnConsecutiveCalls(
+            $this->scanResponseWithKeys(['k3', 'k2']),
+            $this->scanResponseWithKeys(['k1', 'k0']),
+        );
+
+        try {
+            $this->makeScanner(maxScanRows: 3, scanPageSize: 2)->reverseScan('z', 'a', 0, false);
+            $this->fail('Expected ScanLimitExceededException was not thrown');
+        } catch (ScanLimitExceededException $e) {
+            $this->assertSame(3, $e->getMaxRows());
+            $this->assertSame(4, $e->getScannedRows());
+        }
     }
 
     public function testScanLimitExceedingMaxThrows(): void

@@ -48,6 +48,15 @@ $options = [
     // switches): at most this many units (ranges, regions or stores) are in
     // flight at once. Default: 16. Must be >= 1.
     'maxConcurrency' => 16,
+    // Row cap for an unbounded scan (scan()/scanPrefix()/reverseScan() with
+    // limit: 0, issue #191). limit: 0 returns the whole range by paging
+    // internally (up to MAX_SCAN_LIMIT = 10240 rows per RPC), so the whole
+    // result is buffered in one PHP array. When it would collect more than
+    // this many rows the client throws ScanLimitExceededException instead of
+    // silently truncating; bounded (limit > 0) scans and the lazy
+    // scanIterator()/scanPrefixIterator() are unaffected. Default: 100000.
+    // Must be >= 1.
+    'maxScanRows' => 100000,
     // GC safe-point validation at TxnKvClient::begin() (issue #422): when
     // true (default), a fresh start timestamp below the cluster's GC safe
     // point throws TxnAbortedByGcException immediately instead of failing

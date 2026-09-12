@@ -475,13 +475,17 @@ failures) happen lazily during iteration. The iterator is rewindable —
 variant. Full semantics: [Iterating Large Ranges](operations.md#iterating-large-ranges).
 
 An unbounded `scan($start, $end, limit: 0)` (or `scanPrefix($prefix, limit: 0)`)
-spanning several regions fans its per-region reads out concurrently in windows
-of at most `options['maxConcurrency']` regions (default 16): each window is
-dispatched with the remaining page budget, awaited, trimmed in key order, and
-the next window is only sent while budget remains. Peak memory is therefore
-bounded by `maxConcurrency × limit` rows instead of the number of regions, and a
-region/transport error (or a region that split after enumeration) transparently
-falls back to the sequential retrying path. For very large ranges prefer
+returns the **whole range** by paging internally (up to `MAX_SCAN_LIMIT` = 10240
+rows per RPC) and buffering every row (issue #191). Within a page that spans
+several regions, the per-region reads fan out concurrently in windows of at
+most `options['maxConcurrency']` regions (default 16): each window is dispatched
+with the remaining page budget, awaited, trimmed in key order, and the next
+window is only sent while budget remains. A region/transport error (or a region
+that split after enumeration) transparently falls back to the sequential
+retrying path. Because the complete result is still held in memory, an
+unbounded scan is guarded by `options['maxScanRows']` (default 100000) and
+throws `ScanLimitExceededException` when it would collect more than that —
+never a silent truncation. For very large ranges, or to keep memory flat, prefer
 `scanIterator()`, which keeps memory to a single page.
 
 If you need whole pages rather than row-by-row iteration (e.g. for a worker

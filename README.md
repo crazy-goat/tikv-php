@@ -49,15 +49,18 @@ $client->close();
 ### Scanning
 
 ```php
-// Range scan [startKey, endKey)
+// Range scan [startKey, endKey). limit: 0 (the default) returns the whole
+// range: the client pages internally and buffers every row, guarded by
+// options['maxScanRows'] (default 100000).
 $results = $client->scan('start', 'end', limit: 100);
 // Returns: [['key' => 'k1', 'value' => 'v1'], ['key' => 'k2', 'value' => 'v2'], ...]
 
-// Prefix scanning
+// Prefix scanning (limit: 0 returns all matching keys, buffered)
 $results = $client->scanPrefix('user:');
 
 // Lazy scan iterators — constant memory, auto-paginating (page of
-// $batchSize rows at a time; batchSize must be 1..10240, default 1024)
+// $batchSize rows at a time; batchSize must be 1..10240, default 1024).
+// Use these instead of scanPrefix()/scan() when a range may be large.
 foreach ($client->scanPrefixIterator('user:', batchSize: 500) as $key => $value) {
     process($key, $value);
 }
@@ -65,6 +68,10 @@ foreach ($client->scanPrefixIterator('user:', batchSize: 500) as $key => $value)
 foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key => $_) {
     // ...
 }
+
+// For an unbounded scan that matches more than options['maxScanRows'] rows
+// (default 100000) the client throws ScanLimitExceededException rather than
+// silently truncating; the iterators above have no such limit.
 
 // Reverse scan (descending order)
 // Note: startKey = upper bound (exclusive), endKey = lower bound (inclusive)
@@ -263,9 +270,12 @@ try {
         }
     }
     
-    // Scan all users
-    $allUsers = $client->scanPrefix('user:');
-    echo "Total users: " . count($allUsers) . "\n";
+    // Scan all users with the lazy iterator (constant memory)
+    $userCount = 0;
+    foreach ($client->scanPrefixIterator('user:') as $_) {
+        $userCount++;
+    }
+    echo "Total users: $userCount\n";
     
     // Check TTL
     $ttl = $client->getKeyTTL('user:123');
@@ -466,7 +476,7 @@ enable-ttl = true
 - ✅ Batch Async Execution
 - ✅ Retry with Exponential Backoff
 - ✅ Per-key TTL in BatchPut
-- ✅ Scan limit enforcement (MAX 10240)
+- ✅ Scan limit enforcement (MAX 10240 per RPC; `limit: 0` auto-paginates)
 - ✅ Batch auto-splitting by size/count
 
 ## Contributing

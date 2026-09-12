@@ -307,7 +307,10 @@ $results = $client->scan('startKey', 'endKey', limit: 100, keyOnly: false);
 **Parameters:**
 - `startKey` (string): Start of range (inclusive)
 - `endKey` (string): End of range (exclusive)
-- `limit` (int, optional): Maximum results (0 = unlimited)
+- `limit` (int, optional): Maximum results; `0` (default) returns the **whole
+  range** — the client pages internally (`MAX_SCAN_LIMIT` rows per RPC) and
+  buffers every row, up to the configurable `options['maxScanRows']` guard.
+  See [Iterating Large Ranges](#iterating-large-ranges).
 - `keyOnly` (bool, optional): Return only keys, no values
 
 **Returns:** `array<array{key: string, value: ?string}>`
@@ -315,7 +318,7 @@ $results = $client->scan('startKey', 'endKey', limit: 100, keyOnly: false);
 **Example:**
 
 ```php
-// Get all users (assuming user: prefix)
+// Get the first 100 users (assuming user: prefix)
 $users = $client->scan('user:', 'user;', limit: 100);
 foreach ($users as $user) {
     echo "{$user['key']}: {$user['value']}\n";
@@ -325,12 +328,10 @@ foreach ($users as $user) {
 $keys = $client->scan('log:2024-01-', 'log:2024-02-', keyOnly: true);
 echo "Found " . count($keys) . " log entries\n";
 
-// Need to read more than one page? Don't hand-roll a pagination loop —
-// use the built-in lazy scan iterator (see
-// [Iterating Large Ranges](#iterating-large-ranges) below):
-$allResults = [];
+// limit: 0 returns everything, but holds it all in memory. For a large
+// range prefer the lazy iterator, which keeps only one page in memory:
 foreach ($client->scanIterator('user:', 'user;') as $row) {
-    $allResults[] = $row;
+    process($row);
 }
 ```
 
@@ -344,7 +345,8 @@ $results = $client->scanPrefix('user:', limit: 100, keyOnly: false);
 
 **Parameters:**
 - `prefix` (string): Key prefix to scan
-- `limit` (int, optional): Maximum results
+- `limit` (int, optional): Maximum results; `0` (default) returns the whole
+  prefix (paginated internally, guarded by `options['maxScanRows']`)
 - `keyOnly` (bool, optional): Return only keys
 
 **Returns:** `array<array{key: string, value: ?string}>`
@@ -352,7 +354,7 @@ $results = $client->scanPrefix('user:', limit: 100, keyOnly: false);
 **Example:**
 
 ```php
-// Get all users
+// Get the whole prefix into memory (limit: 0 is the default)
 $users = $client->scanPrefix('user:');
 
 // Get all products in a category
@@ -361,16 +363,28 @@ $products = $client->scanPrefix('product:electronics:');
 // Count keys (keyOnly for efficiency)
 $keys = $client->scanPrefix('session:', keyOnly: true);
 $activeSessions = count($keys);
+
+// For a large prefix prefer the constant-memory lazy iterator:
+foreach ($client->scanPrefixIterator('user:') as $key => $value) {
+    process($key, $value);
+}
 ```
 
 **Implementation Note:** ScanPrefix is a convenience method that calculates the end key automatically by incrementing the last byte of the prefix.
 
 ### Iterating Large Ranges
 
-A single `scan()` call can return at most **10240** keys (the client-side scan
-limit, `RawKvClient::MAX_SCAN_LIMIT`), and even that amount is held in a PHP
-array at once. To read a range larger than that — or to keep memory flat at all
-— use the built-in **lazy scan iterator** instead of paging manually:
+A bounded `scan()` / `scanPrefix()` / `reverseScan()` call accepts at most
+`RawKvClient::MAX_SCAN_LIMIT` (10240) rows per RPC. Passing `limit: 0` does
+**not** cap the result at 10240: the client pages internally (10240 rows per
+RPC) and returns the complete range. That is convenient, but the whole result
+is still buffered in one PHP array, so an unbounded scan is guarded by
+`options['maxScanRows']` (default `RawKvClient::DEFAULT_MAX_SCAN_ROWS` =
+100000) — exceeding it throws `ScanLimitExceededException` rather than
+silently truncating.
+
+To read a range larger than `maxScanRows`, or to keep memory flat at all,
+use the built-in **lazy scan iterator** instead of paging manually:
 
 ```php
 // scanIterator(string $startKey, string $endKey, int $batchSize = 1024, bool $keyOnly = false): ScanIterator
@@ -423,7 +437,9 @@ follows:
   can be thrown mid-`foreach`, and the underlying scans use the same automatic
   retry logic as `scan()`.
 - **No reverse iterator** — there is no descending counterpart; for reverse
-  reads use `reverseScan()` with a limit (see [Reverse Scan](#reverse-scan)).
+  reads use `reverseScan()`. `limit: 0` returns the whole range by paging
+  internally (guarded by `options['maxScanRows']`); for a very large reverse
+  range either raise that guard deliberately or page in the caller.
 
 **See also:** [Scan Optimization](advanced.md#scan-optimization) in Advanced
 Features, and [docs/error-handling.md](error-handling.md) for the full
@@ -440,7 +456,8 @@ $results = $client->reverseScan('startKey', 'endKey', limit: 100, keyOnly: false
 **Parameters:**
 - `startKey` (string): Upper bound (exclusive) - scan starts below this
 - `endKey` (string): Lower bound (inclusive) - scan stops at or above this
-- `limit` (int, optional): Maximum results
+- `limit` (int, optional): Maximum results; `0` (default) returns the whole
+  range (paginated internally and guarded by `options['maxScanRows']`)
 - `keyOnly` (bool, optional): Return only keys
 
 **Returns:** `array<array{key: string, value: ?string}>`
