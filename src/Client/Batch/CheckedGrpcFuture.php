@@ -14,7 +14,7 @@ use Google\Protobuf\Internal\Message;
  * Lazy region-error-checking wrapper for the dispatch phase of a batch
  * operation.
  *
- * Two construction modes are supported:
+ * Three construction modes are supported:
  *
  *   1. {@see self::fromGrpcFuture()}: wrap an un-waited {@see GrpcFuture}.
  *      `waitForExecutor()` performs the underlying wait + a region-error
@@ -82,13 +82,22 @@ final readonly class CheckedGrpcFuture
      * plain-PHP row array during the wait, so any fully-resolved value is
      * accepted — the executor passes it through untouched.
      *
+     * An optional $inner future can be supplied when the callable merely
+     * decorates one real gRPC send (e.g. the slow-log timing wrapper).
+     * Keeping the underlying future reachable restores `cancel()` /
+     * `isCompleted()` semantics for the decorator instead of degrading it to
+     * a synthetic future with no cancellation ability. Backward compatible:
+     * existing one-argument call sites keep the synthetic behaviour.
+     *
      * @param callable(): mixed $waiter
+     * @param GrpcFuture|null   $inner  Underlying future for cancel/isCompleted,
+     *                                  or null when the callable is synthetic.
      */
-    public static function fromCallable(callable $waiter): self
+    public static function fromCallable(callable $waiter, ?GrpcFuture $inner = null): self
     {
         return new self(
-            inner: null,
-            hasInnerFuture: false,
+            inner: $inner,
+            hasInnerFuture: $inner instanceof GrpcFuture,
             waiter: Closure::fromCallable($waiter),
         );
     }

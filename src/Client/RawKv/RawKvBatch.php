@@ -443,6 +443,13 @@ final readonly class RawKvBatch
                     );
                 }
 
+                // Cancellation limitation (pre-existing, tracked separately
+                // from #183): this synthetic waiter merges the per-sub-region
+                // GrpcFutures, but fromCallable() exposes no single inner
+                // future, so cancelAll() cannot reach them. A retry triggered
+                // by one sub-response's region error therefore leaves the
+                // other sub-futures in flight. Rare (multi-region recovery
+                // path only); do not restructure here.
                 $waiter = function () use ($innerFutures): Message {
                     $allPairs = [];
                     foreach ($innerFutures as $future) {
@@ -538,6 +545,9 @@ final readonly class RawKvBatch
                     );
                 }
 
+                // Cancellation limitation (pre-existing, tracked separately
+                // from #183): cancelAll() cannot reach the per-sub-region
+                // GrpcFutures merged by this synthetic waiter — see batchGet.
                 $waiter = function () use ($innerFutures): Message {
                     foreach ($innerFutures as $future) {
                         /** @var RawBatchPutResponse $response */
@@ -615,6 +625,9 @@ final readonly class RawKvBatch
                     );
                 }
 
+                // Cancellation limitation (pre-existing, tracked separately
+                // from #183): cancelAll() cannot reach the per-sub-region
+                // GrpcFutures merged by this synthetic waiter — see batchGet.
                 $waiter = function () use ($innerFutures): Message {
                     foreach ($innerFutures as $future) {
                         /** @var RawBatchDeleteResponse $response */
@@ -674,6 +687,10 @@ final readonly class RawKvBatch
                     }
                 }
             },
+            // Keep the wrapped future's cancellation semantics reachable
+            // instead of degrading it to a synthetic future (issue #183
+            // review): a timed-out batch sub-future can still be cancelled.
+            $inner->inner(),
         );
     }
 
