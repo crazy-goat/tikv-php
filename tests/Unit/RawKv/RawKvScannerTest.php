@@ -489,6 +489,46 @@ class RawKvScannerTest extends TestCase
         $this->assertSame(['k0', 'k1', 'k2'], array_column($result, 'key'));
     }
 
+    public function testScanLimitZeroContinuesPastKeyEndingIn0xFF(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // A key ending in 0xFF is the continuation trap: the next request
+        // must start at lastKey . "\x00" (not a byte-increment that would
+        // overflow, nor a bare lastKey that would re-read the same row).
+        $lastKey = "k1\xFF";
+        /** @var list<RawScanRequest> $requests */
+        $requests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+            ) use (
+                $lastKey,
+                &$requests,
+            ): Message {
+                /** @var RawScanRequest $request */
+                $requests[] = $request;
+
+                return count($requests) === 1
+                    ? $this->scanResponseWithKeys([$lastKey])
+                    : new RawScanResponse();
+            },
+        );
+
+        $result = $this->makeScanner(scanPageSize: 1)->scan('a', 'z', 0, false);
+
+        $this->assertSame([$lastKey], array_column($result, 'key'));
+        $this->assertCount(2, $requests);
+        $this->assertSame($lastKey . "\x00", $requests[1]->getStartKey());
+    }
+
     public function testScanPrefixLimitZeroPaginatesLikeScan(): void
     {
         $region = $this->defaultRegion('p', 'q');

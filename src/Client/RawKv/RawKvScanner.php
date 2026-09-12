@@ -33,11 +33,21 @@ final readonly class RawKvScanner
     public const MAX_SCAN_LIMIT = 10240;
 
     /**
-     * Default number of rows an unbounded scan (limit 0) may buffer before
+     * Default number of rows an unbounded scan (limit 0) may return before
      * throwing {@see ScanLimitExceededException} (issue #191). A `limit: 0`
      * scan pages internally to honour the "whole range" contract; this guard
-     * keeps that from exhausting PHP memory. Configurable through
-     * `options['maxScanRows']` on {@see RawKvClient::create()}.
+     * caps the accumulated result so it cannot grow without bound.
+     *
+     * The guard is evaluated once per internally fetched page, after that
+     * page has been buffered, so it is page-granular rather than a strict
+     * per-row memory bound: when `maxScanRows` is smaller than the page size
+     * (`scanPageSize`, default {@see self::MAX_SCAN_LIMIT}) the scan reads a
+     * whole page before throwing, and a page fanned out across
+     * `maxConcurrency` regions may have further in-flight responses. Peak
+     * memory is therefore the accumulated rows (up to about `maxScanRows`)
+     * plus up to `maxConcurrency x scanPageSize` rows of one fetched page.
+     * Configurable through `options['maxScanRows']` on
+     * {@see RawKvClient::create()}.
      */
     public const DEFAULT_MAX_SCAN_ROWS = 100000;
 
@@ -81,9 +91,11 @@ final readonly class RawKvScanner
      * `limit = 0` means "the whole range": the scan pages internally at
      * {@see self::$scanPageSize} rows per RPC and buffers every row, so the
      * documented unbounded contract holds for ranges larger than one TiKV
-     * page (issue #191). The accumulated buffer is bounded by
-     * {@see self::$maxScanRows}; exceeding it throws
-     * {@see ScanLimitExceededException} instead of silently truncating.
+     * page (issue #191). The accumulated buffer is capped by
+     * {@see self::$maxScanRows}; once the buffered rows exceed it a
+     * {@see ScanLimitExceededException} is thrown instead of silently
+     * truncating. The cap is checked per fetched page (page-granular), not per
+     * row, so a page may be buffered in full before the throw.
      *
      * @return array<array{key: string, value: ?string}>
      */
@@ -182,9 +194,10 @@ final readonly class RawKvScanner
      * `limit = 0` means "the whole range": the scan pages internally at
      * {@see self::$scanPageSize} rows per RPC, moving the descending upper
      * bound down to the lowest key of each full page, and buffers every row
-     * (issue #191). The buffer is bounded by {@see self::$maxScanRows};
-     * exceeding it throws {@see ScanLimitExceededException} instead of
-     * silently truncating.
+     * (issue #191). The buffer is capped by {@see self::$maxScanRows}; once
+     * the buffered rows exceed it a {@see ScanLimitExceededException} is
+     * thrown instead of silently truncating. Like the forward path, the cap
+     * is checked per fetched page (page-granular), not per row.
      *
      * @return array<array{key: string, value: ?string}>
      */
@@ -246,6 +259,12 @@ final readonly class RawKvScanner
      * is [endKey, startKey); enumerate it through the region cache like the
      * forward scan, then walk it in reverse.
      *
+     * @param int $limit positive page budget (never the `0` "unbounded"
+     *                   sentinel: the public API routes `limit: 0` to
+     *                   {@see self::reverseScanUnbounded()}). Passing `0`
+     *                   here would set no request limit and silently read an
+     *                   unbounded region.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     private function reverseScanPage(
@@ -255,6 +274,8 @@ final readonly class RawKvScanner
         bool $keyOnly,
         string $columnFamily,
     ): array {
+        assert($limit > 0, 'reverseScanPage() requires a positive page budget; use reverseScanUnbounded() for limit 0');
+
         $executor = $this->createRetryExecutor();
 
         $regions = array_reverse($this->resolveScanRegions($endKey, $startKey));
@@ -285,8 +306,10 @@ final readonly class RawKvScanner
     }
 
     /**
-     * Fail closed when an unbounded scan would buffer more rows than the
-     * configured {@see self::$maxScanRows} maximum (issue #191).
+     * Fail closed after a fetched page pushes the accumulated row count past
+     * the configured {@see self::$maxScanRows} maximum (issue #191). Because
+     * a page is fetched (and may be fanned out across regions) before this
+     * runs, the observed `$rows` can exceed `maxScanRows` by up to one page.
      *
      * @throws ScanLimitExceededException
      */

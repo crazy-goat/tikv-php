@@ -112,13 +112,18 @@ final class RawKvClient
 
     /**
      * options[] key for the maximum number of rows an unbounded scan
-     * (`limit: 0`) may buffer before throwing
+     * (`limit: 0`) may return before throwing
      * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
      * (issue #191). `limit: 0` pages
      * internally so the documented "whole range" contract holds, but the
-     * accumulated result still lives in one PHP array; this guard keeps it
-     * from exhausting memory (silently truncating instead is forbidden).
-     * Must be `>= 1`. Bounded scans (`limit > 0`) are unaffected.
+     * accumulated result still lives in one PHP array; this guard caps it
+     * (silently truncating instead is forbidden). The guard is evaluated per
+     * internally fetched page — after the page has been buffered — so it is
+     * page-granular, not a strict per-row memory bound: with a guard smaller
+     * than the page size (`RawKvScanner::MAX_SCAN_LIMIT`, 10240) a whole page
+     * is read before the throw, and `getScannedRows()` can exceed
+     * `getMaxRows()`. Must be `>= 1`. Bounded scans (`limit > 0`) are
+     * unaffected.
      */
     public const OPT_MAX_SCAN_ROWS = 'maxScanRows';
 

@@ -484,8 +484,10 @@ window is only sent while budget remains. A region/transport error (or a region
 that split after enumeration) transparently falls back to the sequential
 retrying path. Because the complete result is still held in memory, an
 unbounded scan is guarded by `options['maxScanRows']` (default 100000) and
-throws `ScanLimitExceededException` when it would collect more than that —
-never a silent truncation. For very large ranges, or to keep memory flat, prefer
+throws `ScanLimitExceededException` once the accumulated rows exceed that —
+never a silent truncation. The guard is checked per fetched page (after the
+page is buffered), so a guard smaller than the page size still reads a whole
+page before throwing. For very large ranges, or to keep memory flat, prefer
 `scanIterator()`, which keeps memory to a single page.
 
 If you need whole pages rather than row-by-row iteration (e.g. for a worker

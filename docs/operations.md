@@ -308,9 +308,10 @@ $results = $client->scan('startKey', 'endKey', limit: 100, keyOnly: false);
 - `startKey` (string): Start of range (inclusive)
 - `endKey` (string): End of range (exclusive)
 - `limit` (int, optional): Maximum results; `0` (default) returns the **whole
-  range** — the client pages internally (`MAX_SCAN_LIMIT` rows per RPC) and
-  buffers every row, up to the configurable `options['maxScanRows']` guard.
-  See [Iterating Large Ranges](#iterating-large-ranges).
+  range** — the client pages internally (`RawKvClient::MAX_SCAN_LIMIT` rows per
+  RPC) and buffers every row, up to the configurable `options['maxScanRows']`
+  guard (checked per fetched page, not per row). See
+  [Iterating Large Ranges](#iterating-large-ranges).
 - `keyOnly` (bool, optional): Return only keys, no values
 
 **Returns:** `array<array{key: string, value: ?string}>`
@@ -346,7 +347,8 @@ $results = $client->scanPrefix('user:', limit: 100, keyOnly: false);
 **Parameters:**
 - `prefix` (string): Key prefix to scan
 - `limit` (int, optional): Maximum results; `0` (default) returns the whole
-  prefix (paginated internally, guarded by `options['maxScanRows']`)
+  prefix (paginated internally, guarded by `options['maxScanRows']`, checked
+  per fetched page)
 - `keyOnly` (bool, optional): Return only keys
 
 **Returns:** `array<array{key: string, value: ?string}>`
@@ -381,7 +383,10 @@ RPC) and returns the complete range. That is convenient, but the whole result
 is still buffered in one PHP array, so an unbounded scan is guarded by
 `options['maxScanRows']` (default `RawKvClient::DEFAULT_MAX_SCAN_ROWS` =
 100000) — exceeding it throws `ScanLimitExceededException` rather than
-silently truncating.
+silently truncating. The guard is evaluated per internally fetched page
+(after that page is buffered), so it is page-granular, not a strict per-row
+bound: a guard below the page size still reads a whole page before throwing,
+and `getScannedRows()` can exceed `getMaxRows()`.
 
 To read a range larger than `maxScanRows`, or to keep memory flat at all,
 use the built-in **lazy scan iterator** instead of paging manually:
@@ -438,8 +443,9 @@ follows:
   retry logic as `scan()`.
 - **No reverse iterator** — there is no descending counterpart; for reverse
   reads use `reverseScan()`. `limit: 0` returns the whole range by paging
-  internally (guarded by `options['maxScanRows']`); for a very large reverse
-  range either raise that guard deliberately or page in the caller.
+  internally (guarded by `options['maxScanRows']`, checked per fetched page);
+  for a very large reverse range either raise that guard deliberately or page
+  in the caller.
 
 **See also:** [Scan Optimization](advanced.md#scan-optimization) in Advanced
 Features, and [docs/error-handling.md](error-handling.md) for the full
@@ -457,7 +463,8 @@ $results = $client->reverseScan('startKey', 'endKey', limit: 100, keyOnly: false
 - `startKey` (string): Upper bound (exclusive) - scan starts below this
 - `endKey` (string): Lower bound (inclusive) - scan stops at or above this
 - `limit` (int, optional): Maximum results; `0` (default) returns the whole
-  range (paginated internally and guarded by `options['maxScanRows']`)
+  range (paginated internally and guarded by `options['maxScanRows']`, checked
+  per fetched page)
 - `keyOnly` (bool, optional): Return only keys
 
 **Returns:** `array<array{key: string, value: ?string}>`
