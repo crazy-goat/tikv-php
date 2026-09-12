@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\Mutation;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatRequest;
@@ -251,13 +252,43 @@ final class LockTtlScalingTest extends TestCase
         self::assertSame(TransactionStatus::Committed, $state->getStatus());
     }
 
-    private function createCommitter(?\Closure $clock = null, bool $enable1Pc = false): TwoPhaseCommitter
+    /**
+     * AC-1 (regression, second code-review finding): a pessimistic transaction
+     * prewrites with the fixed pessimistic lock TTL (30000 ms), and the
+     * prewrite heartbeat advises the same effective TTL — not the smaller
+     * optimistic one.
+     */
+    public function testPessimisticPrewriteUsesPessimisticLockTtl(): void
     {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getRegion')->willReturn($region);
+        $this->stubCommitRpc(prewriteClockJumpMs: 20000);
+
+        $committer = $this->createCommitter(fn (): int => $this->nowMs, pessimistic: true);
+
+        $state = new TransactionState();
+        $state->setWrite('a1', 'v');
+        $state->addPendingLockKey('a1');
+
+        $committer->commit($state, $this->createRetryExecutor(), static fn (): ?BackoffType => null);
+
+        self::assertCount(1, $this->prewriteRequests);
+        self::assertSame(30000, (int) $this->prewriteRequests[0]->getLockTtl());
+        self::assertCount(1, $this->heartbeatRequests);
+        self::assertSame(30000, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
+    }
+
+    private function createCommitter(
+        ?\Closure $clock = null,
+        bool $enable1Pc = false,
+        bool $pessimistic = false,
+    ): TwoPhaseCommitter {
         $resolver = $this->resolver();
 
         return new TwoPhaseCommitter(
             startTs: 1000,
-            pessimistic: false,
+            pessimistic: $pessimistic,
             priority: 0,
             pdClient: $this->pdClient,
             grpc: $this->grpc,
@@ -311,6 +342,7 @@ final class LockTtlScalingTest extends TestCase
 
             $response = match ($method) {
                 'KvPrewrite' => new PrewriteResponse(),
+                'KvPessimisticLock' => new PessimisticLockResponse(),
                 'KvCommit' => new CommitResponse(),
                 default => throw new \RuntimeException("Unexpected method: $method"),
             };

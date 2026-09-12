@@ -192,6 +192,8 @@ granted TTL, so it must extend them itself with `Transaction::heartbeat()`
 before the last granted TTL elapses (10 s is a safe default):
 
 ```php
+$txn = $txnClient->begin();
+
 $txn->set('account:1', '100');
 
 // ... a long computation or external call ...
