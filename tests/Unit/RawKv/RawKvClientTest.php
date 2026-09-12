@@ -675,7 +675,7 @@ class RawKvClientTest extends TestCase
         // layer, because there is no TiKV server in unit tests. maxBackoffMs=1
         // aborts the #183 wait-phase retry before re-dispatching.
         //
-        // Covers all three key shapes from issue #192/RAW-07: a coercible
+        // Covers all four key shapes from issue #192/RAW-07: a coercible
         // decimal key ("12345"), a decimal key that collapses to int 0
         // ("0"), a leading-zero key that PHP keeps as a string ("0123") and
         // an arbitrary binary key ("\x00\xff").
@@ -2993,9 +2993,12 @@ class RawKvClientTest extends TestCase
         $this->pdClient->expects($this->once())->method('getAllStores')->willThrowException($sentinel);
 
         try {
-            // Build the pair through a string-typed key so the map reaches
+            // Build the pairs through a string-typed key so the map reaches
             // ingest() with the documented array<string, string> contract.
-            $this->client->ingest($this->stringKeyedPairs('12345', 'value'));
+            $pairs = $this->stringKeyedPairs('12345', 'v')
+                + $this->stringKeyedPairs('0123', 'x')
+                + $this->stringKeyedPairs("\x00\xff", 'y');
+            $this->client->ingest($pairs);
             self::fail('Expected the numeric key to clear validation and reach the ingestor');
         } catch (GrpcException $e) {
             self::assertSame($sentinel, $e);
