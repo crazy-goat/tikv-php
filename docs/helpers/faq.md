@@ -302,7 +302,10 @@ retry closure and the `scanRegions()` result is pre-populated into the
 region cache (so the first attempt is a cache hit). Remaining limitation:
 because of the #295 fan-out the retry closure only observes dispatch-phase
 failures; response-borne region errors surface at wait time as
-`BatchPartialFailureException` (tracked by #236/#189). A region that shrank
+`BatchPartialFailureException`. Unlike `RawKvBatch` — whose response-borne
+region errors are now retried in the wait phase by #183 — this
+`RawKvRangeOps` wait-time path is still **unfixed** and remains an open gap;
+#236/#189 covered the batch wrappers, not `RawKvRangeOps`. A region that shrank
 after enumeration (a split) is also guarded by
 `RawKvRangeOps::assertRegionCoversRange()`: `deleteRange` fails closed, and
 `checksum` refuses a partial result — its data read is silently clamped by
@@ -1359,3 +1362,12 @@ reference. When a test pins dispatch counts through a dead endpoint, pass
 from adding re-dispatches — `RawKvBatchConcurrencyCapTest` and the
 `RawKvBatchTest` split/duplicate tests do this, otherwise a 30-attempt
 `TiKvRpc` backoff against `127.0.0.1:1` makes the suite take minutes.
+
+To observe *region re-resolution per attempt* specifically, do not count
+`regionCache->getByKey()`: the executor also calls it once per retryable
+failure for its own invalidation lookup, so the count is attempts + retries.
+Force a cache miss (`getByKey` → null), stub `pdClient->getRegion`, and count
+that (and/or `grpc->getChannel`, exactly one per dispatch): with
+`maxAttempts: 2` both are exactly 2, while the old dispatch-only-retry code
+resolved once. Reference:
+`RawKvBatchTest::testBatchGetWithRetryReResolvesRegionOnEveryAttempt`.
