@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\Batch;
 use Closure;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Google\Protobuf\Internal\Message;
 
 /**
@@ -28,6 +29,11 @@ use Google\Protobuf\Internal\Message;
  *      {@see \CrazyGoat\TiKV\Client\RawKv\RawKvBatch}, which issues sends
  *      for every sub-region up-front and then merges their responses
  *      during the wait phase.
+ *
+ *   3. {@see self::fromRetryableDispatch()}: combine both — issue the first
+ *      attempt eagerly during dispatch, then run the whole dispatch+wait
+ *      cycle under a {@see RetryExecutor} during the wait phase so a region
+ *      error carried on the response is retried per region (#183).
  *
  * The executor never sees the raw protobuf response without first
  * running {@see RegionErrorHandler::check()} on it.
@@ -84,6 +90,70 @@ final readonly class CheckedGrpcFuture
             inner: null,
             hasInnerFuture: false,
             waiter: Closure::fromCallable($waiter),
+        );
+    }
+
+    /**
+     * Build a future whose wait retries the whole dispatch+await cycle
+     * through $retryExecutor, preserving client-side fan-out: the first
+     * attempt is dispatched eagerly (at construction, i.e. during the
+     * executor's dispatch phase) and returned as a future; only the wait
+     * phase runs the retry loop.
+     *
+     * The first attempt is issued once, eagerly, so the executor's dispatch
+     * phase still stamps every region's send before any wait begins. Its
+     * region error (or the dispatch error itself) is fed into
+     * $retryExecutor so classification, NotLeader leader-switching, cache
+     * invalidation and backoff all run; every retry re-invokes $dispatch()
+     * to resolve the region afresh.
+     *
+     * @param callable(): self $dispatch Issues exactly one fresh attempt
+     *        (re-resolving the region) and returns its checked future.
+     */
+    public static function fromRetryableDispatch(
+        callable $dispatch,
+        RetryExecutor $retryExecutor,
+        string $key,
+    ): self {
+        $first = null;
+        $eagerError = null;
+
+        try {
+            $first = $dispatch();
+        } catch (TiKvException $e) {
+            // Defer the dispatch failure to the wait phase so RetryExecutor
+            // can classify it, switch leaders / invalidate the cache and
+            // apply backoff instead of failing the whole batch.
+            $eagerError = $e;
+        }
+
+        $firstInner = $first?->inner();
+        $firstDispatchPending = true;
+
+        $operation = static function () use (
+            &$firstDispatchPending,
+            $dispatch,
+            $first,
+            $eagerError,
+        ): mixed {
+            if (!$firstDispatchPending) {
+                return $dispatch()->waitForExecutor();
+            }
+            $firstDispatchPending = false;
+
+            if ($eagerError instanceof TiKvException) {
+                throw $eagerError;
+            }
+
+            // $dispatch() is typed `callable(): self`; if it threw, the
+            // TiKvException above rethrows, so $first is the eager future.
+            return $first->waitForExecutor();
+        };
+
+        return new self(
+            inner: $firstInner,
+            hasInnerFuture: $firstInner instanceof GrpcFuture,
+            waiter: static fn(): mixed => $retryExecutor->execute($key, $operation),
         );
     }
 

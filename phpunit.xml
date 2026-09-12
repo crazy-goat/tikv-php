@@ -32,6 +32,7 @@
             <file>tests/Unit/RawKv/RawKvClientTest.php</file>
             <file>tests/Unit/Batch/BatchAsyncExecutorTest.php</file>
             <file>tests/Unit/Batch/CheckedGrpcFutureTest.php</file>
+            <file>tests/Unit/Batch/CheckedGrpcFutureRetryableDispatchTest.php</file>
             <file>tests/Unit/Batch/ParallelRangeOpsCapTest.php</file>
             <file>tests/Unit/RawKv/SstIngestorTest.php</file>
         </testsuite>

@@ -1321,3 +1321,41 @@ request `a..z`); `assertRegionCoversRange()` fires before the second send, so
 expect exactly **one** `callAsync` and a `TiKvException` whose message
 contains `shrank` (wrapped by the fan-out as `BatchPartialFailureException`).
 Reference: `RetryBudgetSharedAcrossRegionsTest`.
+
+## Batch region errors: eager first dispatch + retry in the waiter (#183)
+
+`RawKvBatch` needs two things that look contradictory: the #295 fan-out
+(every region's gRPC send issued during the dispatch phase, before any wait)
+and per-region retry of response-borne region errors (which are only known
+during the wait phase). Wrapping the dispatch closure in
+`RetryExecutor::execute()` cannot do it: the closure returns an un-awaited
+`CheckedGrpcFuture`, so `execute()` returns before the response exists and
+never sees a `NotLeader`/`EpochNotMatch`; the error surfaces later in
+`BatchAsyncExecutor`, outside the retry loop.
+
+`CheckedGrpcFuture::fromRetryableDispatch($dispatch, $retryExecutor, $key)`
+reconciles them: it calls `$dispatch()` once eagerly at construction (so the
+executor's dispatch phase still stamps every region's send) and sets the
+waiter to `$retryExecutor->execute($key, $operation)`. On its first
+invocation `$operation` rethrows the captured eager-dispatch `TiKvException`
+(or awaits the eager future); every later invocation calls `$dispatch()`
+again, which re-resolves the region and issues a fresh send. Only
+`TiKvException` is captured at construction — any other throwable propagates
+unchanged. `inner()`/`hasInnerFuture` expose the first attempt's gRPC future
+for best-effort cancellation; retries after the first are not cancellable.
+PHPStan L9 correlates the try/catch: at the rethrow check it already knows
+`$first` is non-null whenever `$eagerError` is null, so an
+`if ($first instanceof self)` guard is dead code (`instanceof.alwaysTrue` /
+`deadCode.unreachable`) — call `$first->waitForExecutor()` directly.
+
+Test seam: drive the composition directly with `fromCallable()` futures (no
+`\Grpc\Call` mocks, no ext-grpc) and a real `RetryExecutor` over a mocked
+`RegionCacheInterface`; `NotLeader` with a hint must call `switchLeader`
+(not `invalidate`), `EpochNotMatch` must `invalidate`, and a non-retryable
+error must propagate after exactly one attempt.
+`tests/Unit/Batch/CheckedGrpcFutureRetryableDispatchTest.php` is the
+reference. When a test pins dispatch counts through a dead endpoint, pass
+`maxAttempts: 1` (or a tiny `maxBackoffMs`) to stop the new wait-phase retry
+from adding re-dispatches — `RawKvBatchConcurrencyCapTest` and the
+`RawKvBatchTest` split/duplicate tests do this, otherwise a 30-attempt
+`TiKvRpc` backoff against `127.0.0.1:1` makes the suite take minutes.

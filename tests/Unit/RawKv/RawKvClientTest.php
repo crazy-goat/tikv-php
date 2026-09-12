@@ -597,6 +597,10 @@ class RawKvClientTest extends TestCase
         // unit tests because RawKvBatch hardcodes `new Call(...)` (see
         // docs/helpers/faq.md) — that mapping is pinned by the E2E suite
         // (RawKvE2ETest::testBatchPutAndBatchGet / testBatchGetReturnsKeysInOrder).
+        //
+        // maxBackoffMs=1 makes the wait-phase retry (#183) abort on the first
+        // backoff (TiKvRpc base 100 ms > 1 ms) before re-dispatching, so
+        // getChannel() is called exactly once for the one sub-batch.
         $this->grpc->expects($this->exactly(1))->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
             'credentials' => \Grpc\ChannelCredentials::createInsecure(),
         ]));
@@ -605,7 +609,8 @@ class RawKvClientTest extends TestCase
         // layer and fails at connection time (issue #322 pattern).
         $this->expectException(BatchPartialFailureException::class);
 
-        $this->client->batchGet(['k1', 'k2']);
+        (new RawKvClient($this->pdClient, $this->grpc, $this->regionCache, maxBackoffMs: 1))
+            ->batchGet(['k1', 'k2']);
     }
 
     public function testBatchGetAcceptsNumericStringKeys(): void
@@ -624,10 +629,12 @@ class RawKvClientTest extends TestCase
         // Pre-fix: int keys from array_keys() hit validateKeyNotEmpty(string)
         // and throw a TypeError. Post-fix the keys are normalized and the
         // batch reaches the transport layer; with no TiKV server the batch
-        // fails at connection time (issue #322).
+        // fails at connection time (issue #322). maxBackoffMs=1 aborts the
+        // #183 wait-phase retry before re-dispatching.
         $this->expectException(BatchPartialFailureException::class);
 
-        $this->client->batchGet(array_keys(['12345' => 'v1', '0' => 'v2']));
+        (new RawKvClient($this->pdClient, $this->grpc, $this->regionCache, maxBackoffMs: 1))
+            ->batchGet(array_keys(['12345' => 'v1', '0' => 'v2']));
     }
 
     public function testBatchGetThrowsOnNonStringKey(): void
@@ -661,14 +668,16 @@ class RawKvClientTest extends TestCase
         // Pre-fix: PHP coerces the "12345"/"0" array keys to int, so
         // validateKeyNotEmpty(string) throws a TypeError here. Post-fix the
         // wire pairs are built and the request only fails at the transport
-        // layer, because there is no TiKV server in unit tests.
+        // layer, because there is no TiKV server in unit tests. maxBackoffMs=1
+        // aborts the #183 wait-phase retry before re-dispatching.
         $this->expectException(BatchPartialFailureException::class);
 
         // PHP models a literal "12345"/"0" array key as int; build the pairs
         // through a string-typed key so the map reaches batchPut() with its
         // declared contract (numeric-string keys must survive to the wire).
         $pairs = $this->stringKeyedPairs('12345', 'v') + $this->stringKeyedPairs('0', 'w');
-        $this->client->batchPut($pairs);
+        (new RawKvClient($this->pdClient, $this->grpc, $this->regionCache, maxBackoffMs: 1))
+            ->batchPut($pairs);
     }
 
     /**
@@ -703,10 +712,12 @@ class RawKvClientTest extends TestCase
         // Pre-fix: int keys from array_keys() hit validateKeyNotEmpty(string)
         // and throw a TypeError. Post-fix the keys are normalized and the
         // batch only fails at the transport layer, because there is no TiKV
-        // server in unit tests (issue #322).
+        // server in unit tests (issue #322). maxBackoffMs=1 aborts the #183
+        // wait-phase retry before re-dispatching.
         $this->expectException(BatchPartialFailureException::class);
 
-        $this->client->batchDelete(array_keys(['12345' => 'v1', '0' => 'v2']));
+        (new RawKvClient($this->pdClient, $this->grpc, $this->regionCache, maxBackoffMs: 1))
+            ->batchDelete(array_keys(['12345' => 'v1', '0' => 'v2']));
     }
 
     public function testBatchDeleteThrowsOnNonStringKey(): void

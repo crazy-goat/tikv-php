@@ -375,11 +375,14 @@ final readonly class RawKvBatch
     }
 
     // ========================================================================
-    // Retry wrappers - return un-waited CheckedGrpcFuture so the executor's
-    // dispatch phase issues all gRPC sends before any wait begins (true
-    // client-side fan-out at the wire layer for the common single-region
-    // case). Region-error checking runs once at the executor wait boundary
-    // via CheckedGrpcFuture::waitForExecutor().
+    // Retry wrappers - return a CheckedGrpcFuture whose first dispatch is
+    // issued eagerly (so the executor's dispatch phase still sends every
+    // region before any wait begins - true client-side fan-out at the wire
+    // layer) while the wait phase runs the dispatch+await cycle under
+    // RetryExecutor (issue #183). A region error carried on the response is
+    // therefore retried per region with cache invalidation / leader
+    // switching and backoff, instead of surfacing as a hard
+    // BatchPartialFailureException.
     // ========================================================================
 
     /**
@@ -391,72 +394,78 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $key = $keys[0] ?? '';
-        /** @var CheckedGrpcFuture $future */
-        $future = $retryExecutor->execute($key, function () use (
-            $keys,
-            $key,
-            $columnFamily,
-        ): CheckedGrpcFuture {
-            $fresh = $this->resolveRegion($key);
 
-            // Fast path: all keys still belong to the same region.
-            $allInRegion = true;
-            foreach ($keys as $k) {
-                if (!$this->keyInRegion($k, $fresh)) {
-                    $allInRegion = false;
-                    break;
-                }
-            }
+        return CheckedGrpcFuture::fromRetryableDispatch(
+            function () use (
+                $keys,
+                $key,
+                $columnFamily,
+            ): CheckedGrpcFuture {
+                $fresh = $this->resolveRegion($key);
 
-            if ($allInRegion) {
-                $inner = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
-                return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_read', $key);
-            }
-
-            // Multi-region path (rare error-recovery case after a split/merge):
-            // dispatch every sub-region's send up-front, then merge their
-            // responses during the wait phase. Because all sends are issued
-            // before any wait, server-side latencies overlap.
-            $resolved = $this->regionResolver->batchResolveRegions($keys);
-
-            $groups = [];
-            foreach ($keys as $k) {
-                $r = $resolved[$k] ?? null;
-                if ($r === null) {
-                    continue;
-                }
-                $gid = $r->regionId;
-                $groups[$gid] ??= ['region' => $r, 'keys' => []];
-                $groups[$gid]['keys'][] = $k;
-            }
-
-            $innerFutures = [];
-            foreach ($groups as $group) {
-                $innerFutures[] = $this->executeBatchGetForRegionAsync($group['region'], $group['keys'], $columnFamily);
-            }
-
-            $waiter = function () use ($innerFutures): Message {
-                $allPairs = [];
-                foreach ($innerFutures as $future) {
-                    /** @var RawBatchGetResponse $response */
-                    $response = $future->wait();
-                    RegionErrorHandler::check($response);
-                    foreach ($response->getPairs() as $pair) {
-                        $allPairs[] = $pair;
+                // Fast path: all keys still belong to the same region.
+                $allInRegion = true;
+                foreach ($keys as $k) {
+                    if (!$this->keyInRegion($k, $fresh)) {
+                        $allInRegion = false;
+                        break;
                     }
                 }
-                $merged = new RawBatchGetResponse();
-                $merged->setPairs($allPairs);
-                return $merged;
-            };
-            return $this->wrapWithLogging(
-                CheckedGrpcFuture::fromCallable($waiter),
-                'batch_read',
-                $key,
-            );
-        });
 
-        return $future;
+                if ($allInRegion) {
+                    $inner = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
+                    return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_read', $key);
+                }
+
+                // Multi-region path (rare error-recovery case after a split/merge):
+                // dispatch every sub-region's send up-front, then merge their
+                // responses during the wait phase. Because all sends are issued
+                // before any wait, server-side latencies overlap.
+                $resolved = $this->regionResolver->batchResolveRegions($keys);
+
+                $groups = [];
+                foreach ($keys as $k) {
+                    $r = $resolved[$k] ?? null;
+                    if ($r === null) {
+                        continue;
+                    }
+                    $gid = $r->regionId;
+                    $groups[$gid] ??= ['region' => $r, 'keys' => []];
+                    $groups[$gid]['keys'][] = $k;
+                }
+
+                $innerFutures = [];
+                foreach ($groups as $group) {
+                    $innerFutures[] = $this->executeBatchGetForRegionAsync(
+                        $group['region'],
+                        $group['keys'],
+                        $columnFamily,
+                    );
+                }
+
+                $waiter = function () use ($innerFutures): Message {
+                    $allPairs = [];
+                    foreach ($innerFutures as $future) {
+                        /** @var RawBatchGetResponse $response */
+                        $response = $future->wait();
+                        RegionErrorHandler::check($response);
+                        foreach ($response->getPairs() as $pair) {
+                            $allPairs[] = $pair;
+                        }
+                    }
+                    $merged = new RawBatchGetResponse();
+                    $merged->setPairs($allPairs);
+                    return $merged;
+                };
+                return $this->wrapWithLogging(
+                    CheckedGrpcFuture::fromCallable($waiter),
+                    'batch_read',
+                    $key,
+                );
+            },
+            $retryExecutor,
+            $key,
+        );
     }
 
     /**
@@ -471,79 +480,81 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $firstKey = $pairs !== [] ? $pairs[0]->getKey() : '';
-        /** @var CheckedGrpcFuture $future */
-        $future = $retryExecutor->execute($firstKey, function () use (
-            $pairs,
-            $ttl,
-            $firstKey,
-            $forCas,
-            $columnFamily,
-        ): CheckedGrpcFuture {
-            $fresh = $this->resolveRegion($firstKey);
 
-            // Fast path: all pairs still belong to the same region.
-            $allInRegion = true;
-            foreach ($pairs as $pair) {
-                if (!$this->keyInRegion($pair->getKey(), $fresh)) {
-                    $allInRegion = false;
-                    break;
-                }
-            }
-
-            if ($allInRegion) {
-                $inner = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
-                return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $firstKey);
-            }
-
-            // Multi-region path: dispatch every sub-region's send up-front.
-            $keys = array_map(fn(KvPair $p): string => $p->getKey(), $pairs);
-            $resolved = $this->regionResolver->batchResolveRegions($keys);
-
-            $hasPerKeyTtl = is_array($ttl);
-            $groups = [];
-            foreach ($pairs as $i => $pair) {
-                $k = $pair->getKey();
-                $r = $resolved[$k] ?? null;
-                if ($r === null) {
-                    continue;
-                }
-                $gid = $r->regionId;
-                $groups[$gid] ??= ['region' => $r, 'pairs' => [], 'ttls' => []];
-                $groups[$gid]['pairs'][] = $pair;
-                if ($hasPerKeyTtl) {
-                    $groups[$gid]['ttls'][] = $ttl[$i];
-                }
-            }
-
-            $innerFutures = [];
-            foreach ($groups as $group) {
-                $batchTtls = $group['ttls'];
-                $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
-                $innerFutures[] = $this->executeBatchPutForRegionAsync(
-                    $group['region'],
-                    $group['pairs'],
-                    $batchTtl,
-                    $forCas,
-                    $columnFamily,
-                );
-            }
-
-            $waiter = function () use ($innerFutures): Message {
-                foreach ($innerFutures as $future) {
-                    /** @var RawBatchPutResponse $response */
-                    $response = $future->wait();
-                    RegionErrorHandler::check($response);
-                }
-                return new RawBatchPutResponse();
-            };
-            return $this->wrapWithLogging(
-                CheckedGrpcFuture::fromCallable($waiter),
-                'batch_write',
+        return CheckedGrpcFuture::fromRetryableDispatch(
+            function () use (
+                $pairs,
+                $ttl,
                 $firstKey,
-            );
-        });
+                $forCas,
+                $columnFamily,
+            ): CheckedGrpcFuture {
+                $fresh = $this->resolveRegion($firstKey);
 
-        return $future;
+                // Fast path: all pairs still belong to the same region.
+                $allInRegion = true;
+                foreach ($pairs as $pair) {
+                    if (!$this->keyInRegion($pair->getKey(), $fresh)) {
+                        $allInRegion = false;
+                        break;
+                    }
+                }
+
+                if ($allInRegion) {
+                    $inner = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
+                    return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $firstKey);
+                }
+
+                // Multi-region path: dispatch every sub-region's send up-front.
+                $keys = array_map(fn(KvPair $p): string => $p->getKey(), $pairs);
+                $resolved = $this->regionResolver->batchResolveRegions($keys);
+
+                $hasPerKeyTtl = is_array($ttl);
+                $groups = [];
+                foreach ($pairs as $i => $pair) {
+                    $k = $pair->getKey();
+                    $r = $resolved[$k] ?? null;
+                    if ($r === null) {
+                        continue;
+                    }
+                    $gid = $r->regionId;
+                    $groups[$gid] ??= ['region' => $r, 'pairs' => [], 'ttls' => []];
+                    $groups[$gid]['pairs'][] = $pair;
+                    if ($hasPerKeyTtl) {
+                        $groups[$gid]['ttls'][] = $ttl[$i];
+                    }
+                }
+
+                $innerFutures = [];
+                foreach ($groups as $group) {
+                    $batchTtls = $group['ttls'];
+                    $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
+                    $innerFutures[] = $this->executeBatchPutForRegionAsync(
+                        $group['region'],
+                        $group['pairs'],
+                        $batchTtl,
+                        $forCas,
+                        $columnFamily,
+                    );
+                }
+
+                $waiter = function () use ($innerFutures): Message {
+                    foreach ($innerFutures as $future) {
+                        /** @var RawBatchPutResponse $response */
+                        $response = $future->wait();
+                        RegionErrorHandler::check($response);
+                    }
+                    return new RawBatchPutResponse();
+                };
+                return $this->wrapWithLogging(
+                    CheckedGrpcFuture::fromCallable($waiter),
+                    'batch_write',
+                    $firstKey,
+                );
+            },
+            $retryExecutor,
+            $firstKey,
+        );
     }
 
     /**
@@ -556,69 +567,71 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $key = $keys[0] ?? '';
-        /** @var CheckedGrpcFuture $future */
-        $future = $retryExecutor->execute($key, function () use (
-            $keys,
-            $key,
-            $forCas,
-            $columnFamily,
-        ): CheckedGrpcFuture {
-            $fresh = $this->resolveRegion($key);
 
-            // Fast path: all keys still belong to the same region.
-            $allInRegion = true;
-            foreach ($keys as $k) {
-                if (!$this->keyInRegion($k, $fresh)) {
-                    $allInRegion = false;
-                    break;
-                }
-            }
-
-            if ($allInRegion) {
-                $inner = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
-                return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $key);
-            }
-
-            // Multi-region path: dispatch every sub-region's send up-front.
-            $resolved = $this->regionResolver->batchResolveRegions($keys);
-
-            $groups = [];
-            foreach ($keys as $k) {
-                $r = $resolved[$k] ?? null;
-                if ($r === null) {
-                    continue;
-                }
-                $gid = $r->regionId;
-                $groups[$gid] ??= ['region' => $r, 'keys' => []];
-                $groups[$gid]['keys'][] = $k;
-            }
-
-            $innerFutures = [];
-            foreach ($groups as $group) {
-                $innerFutures[] = $this->executeBatchDeleteForRegionAsync(
-                    $group['region'],
-                    $group['keys'],
-                    $forCas,
-                    $columnFamily,
-                );
-            }
-
-            $waiter = function () use ($innerFutures): Message {
-                foreach ($innerFutures as $future) {
-                    /** @var RawBatchDeleteResponse $response */
-                    $response = $future->wait();
-                    RegionErrorHandler::check($response);
-                }
-                return new RawBatchDeleteResponse();
-            };
-            return $this->wrapWithLogging(
-                CheckedGrpcFuture::fromCallable($waiter),
-                'batch_write',
+        return CheckedGrpcFuture::fromRetryableDispatch(
+            function () use (
+                $keys,
                 $key,
-            );
-        });
+                $forCas,
+                $columnFamily,
+            ): CheckedGrpcFuture {
+                $fresh = $this->resolveRegion($key);
 
-        return $future;
+                // Fast path: all keys still belong to the same region.
+                $allInRegion = true;
+                foreach ($keys as $k) {
+                    if (!$this->keyInRegion($k, $fresh)) {
+                        $allInRegion = false;
+                        break;
+                    }
+                }
+
+                if ($allInRegion) {
+                    $inner = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
+                    return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $key);
+                }
+
+                // Multi-region path: dispatch every sub-region's send up-front.
+                $resolved = $this->regionResolver->batchResolveRegions($keys);
+
+                $groups = [];
+                foreach ($keys as $k) {
+                    $r = $resolved[$k] ?? null;
+                    if ($r === null) {
+                        continue;
+                    }
+                    $gid = $r->regionId;
+                    $groups[$gid] ??= ['region' => $r, 'keys' => []];
+                    $groups[$gid]['keys'][] = $k;
+                }
+
+                $innerFutures = [];
+                foreach ($groups as $group) {
+                    $innerFutures[] = $this->executeBatchDeleteForRegionAsync(
+                        $group['region'],
+                        $group['keys'],
+                        $forCas,
+                        $columnFamily,
+                    );
+                }
+
+                $waiter = function () use ($innerFutures): Message {
+                    foreach ($innerFutures as $future) {
+                        /** @var RawBatchDeleteResponse $response */
+                        $response = $future->wait();
+                        RegionErrorHandler::check($response);
+                    }
+                    return new RawBatchDeleteResponse();
+                };
+                return $this->wrapWithLogging(
+                    CheckedGrpcFuture::fromCallable($waiter),
+                    'batch_write',
+                    $key,
+                );
+            },
+            $retryExecutor,
+            $key,
+        );
     }
 
     /**
