@@ -56,8 +56,6 @@ final readonly class LockResolver
      *                                            handling around this resolveLock() call
      *                                            (see RegionErrorHandler::check()). Call
      *                                            sites with no enclosing execute() — e.g.
-     *                                            handlePrewriteErrors() reached from
-     *                                            commit()'s plain foreach and
      *                                            pessimisticLockBatch()'s do-while — must
      *                                            pass false so a NotLeader-carrying region
      *                                            error still invalidates instead of
