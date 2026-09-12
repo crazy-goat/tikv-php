@@ -68,8 +68,12 @@ use Psr\Log\NullLogger;
  * ## Heartbeat contract
  *
  * During the prewrite loop the committer sends a {@see heartbeat()} for the
- * primary lock before the elapsed time reaches half of the computed TTL
- * (the window resets after each heartbeat). Application-level long
+ * primary lock once the elapsed time reaches half of the computed TTL (the
+ * window resets after each heartbeat). One-phase commits are exempt: 1PC
+ * leaves no lock, so a heartbeat would fail an already-committed transaction.
+ * A lock can only be heartbeated between region prewrites — a single prewrite
+ * RPC that by itself outlives the TTL cannot be kept alive (PHP has no timer);
+ * the scaled TTL only narrows that window. Application-level long
  * transactions — anything that keeps a transaction open between operations
  * — must call {@see \CrazyGoat\TiKV\Client\TxnKv\Transaction::heartbeat()}
  * themselves before the granted TTL elapses; 10 s is a safe default.
@@ -209,7 +213,15 @@ final readonly class TwoPhaseCommitter
         }
 
         $mutations = $this->buildMutations($state);
-        $optimisticLockTtlMs = $this->optimisticLockTtlMs($mutations);
+        // The lock TTL the prewrite will actually carry: pessimistic
+        // transactions use the fixed pessimistic TTL, optimistic transactions
+        // scale with the write-set size (issue #218, TXN-13). The same value
+        // drives the prewrite-heartbeat trigger and advise, so the pessimistic
+        // path heartbeats against its own 30 s TTL rather than the smaller
+        // optimistic one.
+        $lockTtlMs = $this->pessimistic
+            ? self::PESSIMISTIC_LOCK_TTL_MS
+            : $this->optimisticLockTtlMs($mutations);
         $prewriteStartedAtMs = $this->nowMs();
         $primaryLockWritten = false;
         $keysByRegion = $this->groupMutationsByRegion($mutations);
@@ -296,7 +308,7 @@ final readonly class TwoPhaseCommitter
                 function () use (
                     $firstKey,
                     $regionMutations,
-                    $optimisticLockTtlMs,
+                    $lockTtlMs,
                     $primary,
                     $state,
                     $useOnePc,
@@ -308,7 +320,7 @@ final readonly class TwoPhaseCommitter
                     return $this->prewriteForRegion(
                         $region,
                         $regionMutations,
-                        $optimisticLockTtlMs,
+                        $lockTtlMs,
                         $primary,
                         $state,
                         $useOnePc,
@@ -332,17 +344,24 @@ final readonly class TwoPhaseCommitter
             // Keep the primary lock alive when a long prewrite loop would let
             // its TTL expire before commit (issue #218, TXN-13). Only after
             // the primary region has been prewritten (heartbeating a not-yet
-            // written primary would surface TxnLockNotFound). Reset the
-            // window after each heartbeat. With async commit the primary
-            // region is deliberately prewritten LAST (see reordering above),
-            // so no heartbeat can fire during prewrite there — acceptable
-            // because async commit is capped at ASYNC_COMMIT_MAX_KEYS and
-            // the commit decision is already carried by the primary lock.
+            // written primary would surface TxnLockNotFound), and never for a
+            // one-phase commit: 1PC writes the commit record inside the
+            // prewrite and leaves no lock, so a heartbeat would come back
+            // TxnNotFound and fail an already-committed transaction. Reset the
+            // window after each heartbeat. With multi-region async commit the
+            // primary region is deliberately prewritten LAST, so no heartbeat
+            // fires before the primary exists (at most one fires on that final
+            // iteration) — acceptable because async commit is capped at
+            // ASYNC_COMMIT_MAX_KEYS and the commit decision is already carried
+            // by the primary lock. A single region prewrite that by itself
+            // outlives the TTL cannot be heartbeated mid-RPC (PHP has no
+            // timer); the scaled TTL only reduces that window.
             if (
                 $primaryLockWritten
-                && $this->nowMs() - $prewriteStartedAtMs >= intdiv($optimisticLockTtlMs, 2)
+                && !$useOnePc
+                && $this->nowMs() - $prewriteStartedAtMs >= intdiv($lockTtlMs, 2)
             ) {
-                $this->heartbeat($primary, $state, $retryExecutor, $classifier, $optimisticLockTtlMs);
+                $this->heartbeat($primary, $state, $retryExecutor, $classifier, $lockTtlMs);
                 $prewriteStartedAtMs = $this->nowMs();
             }
         }
@@ -566,7 +585,8 @@ final readonly class TwoPhaseCommitter
         if ($this->pessimistic) {
             $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->startTs;
             $request->setForUpdateTs($forUpdateTs);
-            $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
+            // lock_ttl already carries PESSIMISTIC_LOCK_TTL_MS for the
+            // pessimistic path (see commit()).
             $actions = [];
             foreach ($mutations as $mutation) {
                 $actions[] = PessimisticAction::DO_PESSIMISTIC_CHECK;

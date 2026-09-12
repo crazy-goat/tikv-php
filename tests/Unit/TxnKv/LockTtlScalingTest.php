@@ -23,6 +23,7 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -207,7 +208,50 @@ final class LockTtlScalingTest extends TestCase
         self::assertCount(2, $this->prewriteRequests);
     }
 
-    private function createCommitter(?\Closure $clock = null): TwoPhaseCommitter
+    /**
+     * AC-2 (regression, code-review finding): an accepted one-phase commit
+     * writes the commit record inside the prewrite and leaves no primary lock,
+     * so the prewrite loop must never heartbeat — a heartbeat would return
+     * TxnNotFound and fail a transaction that is already durably committed.
+     */
+    public function testAcceptedOnePhaseCommitDoesNotHeartbeat(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getRegion')->willReturn($region);
+
+        $prewrite = new PrewriteResponse();
+        $prewrite->setOnePcCommitTs(12345);
+
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $address,
+            string $service,
+            string $method,
+            object $request,
+        ) use ($prewrite): object {
+            if ($request instanceof TxnHeartBeatRequest) {
+                $this->heartbeatRequests[] = $request;
+                throw new \RuntimeException('heartbeat must not be sent for an accepted 1PC');
+            }
+            // The single prewrite RPC alone outlives half the computed TTL.
+            $this->nowMs = 5000;
+
+            return $prewrite;
+        });
+
+        $committer = $this->createCommitter(fn (): int => $this->nowMs, enable1Pc: true);
+
+        $state = new TransactionState();
+        $state->setWrite('a1', 'v');
+
+        $committer->commit($state, $this->createRetryExecutor(), static fn (): ?BackoffType => null);
+
+        self::assertCount(0, $this->heartbeatRequests);
+        self::assertSame(12345, $state->getCommitTs());
+        self::assertSame(TransactionStatus::Committed, $state->getStatus());
+    }
+
+    private function createCommitter(?\Closure $clock = null, bool $enable1Pc = false): TwoPhaseCommitter
     {
         $resolver = $this->resolver();
 
@@ -222,6 +266,7 @@ final class LockTtlScalingTest extends TestCase
             lockResolver: new LockResolver($this->grpc, $resolver, $this->regionCache, $this->pdClient, 1000),
             timeoutConfig: new TimeoutConfig(),
             maxBackoffMs: 20000,
+            enable1Pc: $enable1Pc,
             clock: $clock,
         );
     }

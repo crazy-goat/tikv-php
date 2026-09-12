@@ -184,7 +184,8 @@ TTL scales with the write-set size — **3000 ms + 10 ms per mutation, capped at
 120000 ms** — so a large multi-region prewrite cannot outlive its own locks
 (an expired lock is rolled back by concurrent readers and the commit fails).
 While the prewrite loop runs, the client automatically heartbeats the primary
-lock before half of the computed TTL elapses.
+lock once half of the computed TTL has elapsed (single-region 1PC commits are
+exempt, and a lock can only be extended between region prewrites).
 
 A transaction that stays open between operations keeps its locks only for the
 granted TTL, so it must extend them itself with `Transaction::heartbeat()`

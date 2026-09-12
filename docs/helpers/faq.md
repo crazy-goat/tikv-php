@@ -1440,13 +1440,32 @@ during the prewrite loop. In the ordinary optimistic path the primary key is
 write-set insertion order, so the primary's region is always the first group
 processed and the guard is already `true` at the first post-prewrite check.
 The guard only has an observable effect when `commit()` deliberately reorders
-the primary region LAST for multi-region async commit, where it correctly
-suppresses every prewrite heartbeat. Do not write a unit test that expects the
-primary region to be processed second without async commit — grouping follows
-mutation order (`RegionGrouper::groupItemsByRegion()`), so the primary region
-comes first. For deterministic heartbeat tests, inject the optional
+the primary region LAST for multi-region async commit: it suppresses every
+heartbeat on the secondary iterations before the primary exists, and at most
+one heartbeat can fire on the primary's final iteration. Do not write a unit
+test that expects the primary region to be processed second without async
+commit — grouping follows mutation order
+(`RegionGrouper::groupItemsByRegion()`), so the primary region comes first. For
+deterministic heartbeat tests, inject the optional
 `?\Closure $clock` constructor parameter on `TwoPhaseCommitter` (the clock is
 read via `nowMs()`, so mutating a captured `$this->nowMs` from the mocked
 gRPC callback simulates a slow prewrite without sleeping). Rector's
 `FlipTypeControlToUseExclusiveTypeRector` rewrites a `$this->clock !== null`
 check on a nullable `\Closure` property to `$this->clock instanceof \Closure`.
+
+## TxnHeartBeat on a successfully one-phase-committed txn returns `TxnNotFound` — never heartbeat after `try_one_pc` (TXN-13 review)
+
+TiKV's 1PC path (`handle_1pc_locks()` in `src/storage/txn/commands/prewrite.rs`,
+v8.5.5) writes the commit record directly and never calls `put_lock`, so an
+accepted `try_one_pc` prewrite leaves **no primary lock**. A subsequent
+`TxnHeartBeat` for that primary hits `load_lock() == None` and returns
+`KeyError.txn_not_found`, which `TwoPhaseCommitter::handleHeartbeatError()`
+turns into a thrown `TiKvException`. This matters for the #218 prewrite-loop
+heartbeat: when 1PC is accepted (single region) and the prewrite RPC alone took
+at least half the computed TTL, the heartbeat fires *after* the transaction is
+already committed, so `commit()` throws even though the data is durable. Guard
+the prewrite heartbeat with `!$useOnePc` (1PC is single-region, so no later
+region needs the lock kept alive). Same source confirms `TxnHeartBeat` only
+ever **raises** a lock's TTL (`if lock.ttl < advise_ttl`), so an advise below
+the current TTL — e.g. the optimistic ~3020 ms advise sent for a 30000 ms
+pessimistic lock — can never shrink it.
