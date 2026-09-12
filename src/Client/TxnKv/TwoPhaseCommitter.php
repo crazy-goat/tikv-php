@@ -185,8 +185,12 @@ final readonly class TwoPhaseCommitter
         }
 
         foreach ($keysByRegion as $regionData) {
-            $region = $regionData['region'];
             $regionMutations = $regionData['mutations'];
+            // The group is never empty (groupMutationsByRegion() only emits
+            // groups that own at least one mutation); the null-coalesce keeps
+            // PHPStan happy about the list offset.
+            $firstMutation = $regionMutations[0] ?? null;
+            $firstKey = $firstMutation instanceof Mutation ? $firstMutation->getKey() : '';
             $isPrimaryRegion = false;
             foreach ($regionMutations as $mutation) {
                 if ($mutation->getKey() === $primary) {
@@ -195,15 +199,45 @@ final readonly class TwoPhaseCommitter
                 }
             }
 
-            $result = $this->prewriteForRegion(
-                $region,
-                $regionMutations,
-                $primary,
-                $state,
-                $isPrimaryRegion && $onePc,
-                $isPrimaryRegion && $async,
-                $isPrimaryRegion && $async ? $secondaries : [],
+            $useOnePc = $isPrimaryRegion && $onePc;
+            $useAsyncCommit = $isPrimaryRegion && $async;
+            $regionSecondaries = $useAsyncCommit ? $secondaries : [];
+
+            // Prewrite is the last transaction RPC that used to run outside a
+            // RetryExecutor (issue #213, TXN-08). Wrap each region's prewrite
+            // so region errors (NotLeader, EpochNotMatch, RegionNotFound,
+            // ServerIsBusy) and resolved lock conflicts retry instead of
+            // aborting the whole transaction. The region is re-resolved inside
+            // the closure so the leader switch / cache invalidation performed
+            // by the executor takes effect on the next attempt — the same
+            // stale-capture class as #267/#500/#502. Prewrite is idempotent
+            // for a given start_ts, so replay is safe.
+            $result = $retryExecutor->execute(
+                $firstKey,
+                function () use (
+                    $firstKey,
+                    $regionMutations,
+                    $primary,
+                    $state,
+                    $useOnePc,
+                    $useAsyncCommit,
+                    $regionSecondaries,
+                ): array {
+                    $region = $this->regionResolver->getRegionInfo($firstKey);
+
+                    return $this->prewriteForRegion(
+                        $region,
+                        $regionMutations,
+                        $primary,
+                        $state,
+                        $useOnePc,
+                        $useAsyncCommit,
+                        $regionSecondaries,
+                    );
+                },
+                $classifier,
             );
+
             $maxMinCommitTs = max($maxMinCommitTs, $result['minCommitTs']);
             if ($isPrimaryRegion) {
                 $primaryMinCommitTs = $result['minCommitTs'];
@@ -455,16 +489,14 @@ final readonly class TwoPhaseCommitter
             PrewriteResponse::class,
             $this->timeoutMs('write'),
         );
-        // commit()'s prewrite loop runs OUTSIDE any RetryExecutor, so no
-        // handleNotLeader() would ever drop a NotLeader-carrying region here
-        // — check() must self-invalidate or the stale entry survives up to
-        // TTL and keeps resolving to the moved leader (issue #474 review).
-        RegionErrorHandler::check(
-            $response,
-            $this->regionCache,
-            $region->regionId,
-            notLeaderOwnedByRetryExecutor: false,
-        );
+        // commit()'s prewrite loop now runs inside a RetryExecutor
+        // (issue #213, TXN-08), so its handleNotLeader() is the sole owner of
+        // NotLeader drops: it switches to the hinted leader when the peer is
+        // still cached and only invalidates otherwise. Self-invalidating here
+        // would double-count the metric and defeat valid-hint leader
+        // switching (issue #474), so NotLeader oneofs are left for the
+        // executor.
+        RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
 
         $errors = $response->getErrors();
         if (count($errors) > 0) {
@@ -492,10 +524,11 @@ final readonly class TwoPhaseCommitter
             if ($locked !== null) {
                 $rawPrimary = $locked->getPrimaryLock();
                 $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                // Reached from commit()'s plain foreach — no RetryExecutor
-                // wraps this, so the resolve must drop NotLeader regions
-                // itself (issue #474 review round 3).
-                $this->lockResolver->resolveLock($lockPrimary, $locked, notLeaderOwnedByRetryExecutor: false);
+                // Reached from commit()'s prewrite loop, which now runs
+                // inside a RetryExecutor (issue #213, TXN-08): the executor's
+                // handleNotLeader() owns NotLeader drops, so a NotLeader
+                // surfaced by the resolve propagates and is retried.
+                $this->lockResolver->resolveLock($lockPrimary, $locked);
                 throw new TxnRetryableException(
                     'Lock conflict during prewrite, resolved - retry',
                     BackoffType::TxnLock,

@@ -401,6 +401,23 @@ Issue #474 (regionInvalidated()) settled three rules worth reusing:
    on an actual state change (`removeById(): bool`) so retry storms count one
    real drop instead of one per attempt.
 
+## Wrapping a formerly-direct call site in RetryExecutor flips its NotLeader ownership — and mocks must answer getByKey()
+
+When issue #213 moved `TwoPhaseCommitter`'s prewrite loop under
+`RetryExecutor::execute()`, two follow-ups were mandatory and easy to miss:
+(1) `RegionErrorHandler::check(..., notLeaderOwnedByRetryExecutor: false)` and
+the prewrite `locked` `LockResolver::resolveLock(..., false)` had to drop the
+`false` again — inside a retry closure the executor's `handleNotLeader()` is
+the sole NotLeader owner (#474), and leaving `false` double-invalidates and
+breaks valid-hint leader switching. Any future "run X under the retry
+executor" change must audit every check/resolve call in X. (2) Re-resolving
+the region inside the closure adds a `RegionResolver::getRegionInfo()` call,
+which in tests means **every mocked-cache commit test must now stub
+`getByKey`** — a mock's `put()` from `batchResolveRegions()` stores nothing,
+so an unstubbed `getByKey` returns null and `PdClientInterface::getRegion()`
+tries (and fails, RegionInfo is final) to auto-generate a return value. The
+first-attempt cache hit is only real with a real `RegionCache`.
+
 ## Error-handling docs must be derived from source, not from the issue text
 
 Issue #394 [DOC-28] (docs/error-handling.md) said "fifteen exception classes";

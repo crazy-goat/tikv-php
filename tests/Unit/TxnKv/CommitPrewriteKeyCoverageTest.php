@@ -156,6 +156,11 @@ final class CommitPrewriteKeyCoverageTest extends TestCase
         $region2 = $this->region(2, 'm', '');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->regionCache->method('put');
+        // commit()'s prewrite loop re-resolves the region inside the retry
+        // closure (issue #213), so the mocked cache must answer the lookup.
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+        );
 
         [$txn, $getRequests] = $this->makeTransactionAndCaptureRpcs();
         $txn->set('a', 'v1');

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\Deadlock;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
@@ -15,6 +16,7 @@ use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
+use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
@@ -1976,6 +1978,163 @@ class TransactionTest extends TestCase
         }
 
         $this->assertSame(['KvPrewrite'], $methodSequence);
+    }
+
+    /**
+     * Issue #213 (TXN-08): prewrite must run inside the RetryExecutor, so a
+     * NotLeader region error on the first attempt is retried against the
+     * re-resolved region instead of aborting the whole transaction. The
+     * retry must target the NEW leader's store, proving the closure
+     * re-resolved the region after the executor's leader switch.
+     */
+    public function testCommitPrewriteRetriesOnNotLeaderAndResolvesFreshRegion(): void
+    {
+        $oldRegion = $this->makeRegion(1, '', '');
+        $newRegion = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 30,
+            leaderStoreId: 2,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: '',
+        );
+
+        // The cache serves the old leader for the first resolution; after
+        // RetryExecutor::handleNotLeader() switches the leader it serves the
+        // region with the new leader.
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($oldRegion, $newRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->expects($this->once())->method('switchLeader')->willReturn(true);
+        $this->pdClient->method('scanRegions')->willReturn([$oldRegion]);
+        $this->pdClient->method('getRegion')->willReturn($newRegion);
+        $this->pdClient->method('getStore')->willReturnCallback(
+            function (int $storeId): Store {
+                $store = new Store();
+                $store->setId($storeId);
+                $store->setAddress('127.0.0.1:2016' . $storeId);
+                return $store;
+            },
+        );
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $leader = new \CrazyGoat\Proto\Metapb\Peer();
+        $leader->setId(30);
+        $leader->setStoreId(2);
+        $notLeader = new \CrazyGoat\Proto\Errorpb\NotLeader();
+        $notLeader->setRegionId(1);
+        $notLeader->setLeader($leader);
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setMessage('not leader');
+        $regionError->setNotLeader($notLeader);
+
+        $prewriteAddresses = [];
+        $prewriteCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $svc,
+                string $method,
+            ) use (
+                &$prewriteAddresses,
+                &$prewriteCalls,
+                $regionError,
+            ): object {
+                if ($method === 'KvPrewrite') {
+                    $prewriteAddresses[] = $address;
+                    $prewriteCalls++;
+                    if ($prewriteCalls === 1) {
+                        $response = new PrewriteResponse();
+                        $response->setRegionError($regionError);
+                        return $response;
+                    }
+                    return new PrewriteResponse();
+                }
+                return match ($method) {
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(2, $prewriteCalls);
+        $this->assertSame(['127.0.0.1:20161', '127.0.0.1:20162'], $prewriteAddresses);
+    }
+
+    /**
+     * Issue #213 (TXN-08): a `KeyError.locked` on prewrite is resolved and
+     * the prewrite is retried inside the RetryExecutor instead of the
+     * `TxnRetryableException` escaping to the caller.
+     */
+    public function testCommitPrewriteRetriesAfterResolvedLockConflict(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $locked = new LockInfo();
+        $locked->setKey('k1');
+        $locked->setPrimaryLock('k1');
+        $locked->setLockVersion(999);
+        $keyError = new KeyError();
+        $keyError->setLocked($locked);
+
+        // The blocking transaction already committed at 5000, so resolveLock
+        // finalizes the lock with KvResolveLock and the conflict clears.
+        $status = new CheckTxnStatusResponse();
+        $status->setCommitVersion(5000);
+
+        $methods = [];
+        $prewriteCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $svc,
+                string $method,
+            ) use (
+                &$methods,
+                &$prewriteCalls,
+                $keyError,
+                $status,
+            ): object {
+                $methods[] = $method;
+                if ($method === 'KvPrewrite') {
+                    $prewriteCalls++;
+                    if ($prewriteCalls === 1) {
+                        $response = new PrewriteResponse();
+                        $response->setErrors([$keyError]);
+                        return $response;
+                    }
+                    return new PrewriteResponse();
+                }
+                return match ($method) {
+                    'KvCheckTxnStatus' => $status,
+                    'KvResolveLock' => new ResolveLockResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(2, $prewriteCalls);
+        $this->assertSame(
+            ['KvPrewrite', 'KvCheckTxnStatus', 'KvResolveLock', 'KvPrewrite', 'KvCommit'],
+            $methods,
+        );
     }
 
     public function testSecondaryCommitFailureDoesNotFailCommittedTransaction(): void
