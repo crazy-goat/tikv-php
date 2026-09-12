@@ -107,8 +107,9 @@ string-typed key parameter (helper method) to test the real-world contract.
 The cast-at-every-consumption-point rule above applies to the associative
 write APIs too: `batchPut()` / `ingest()` are declared `array<string, string>`
 but only *canonical* decimal-integer strings (`'12345'`, `'0'`) are coerced to
-int array keys. Leading-zero (`'00'`, `'0123'`), signed (`'+1'`, `'-0'`),
-decimal (`'1.0'`) and out-of-int-range forms stay **string** keys, so `'0'`
+int array keys. Leading-zero (`'00'`, `'0123'`), leading-plus or minus-zero
+(`'+1'`, `'-0'`), decimal (`'1.0'`) and out-of-int-range forms stay **string**
+keys (a canonical negative such as `'-1'` does coerce), so `'0'`
 and `'00'` are NOT the same key and do not collide. Every foreach key is
 string-cast before validation/setting (`(string) $key` in
 `RawKvClient::batchPut()`/`ingest()`, `RawKvBatch::batchPut()` and
