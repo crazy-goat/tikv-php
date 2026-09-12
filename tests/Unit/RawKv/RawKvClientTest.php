@@ -674,12 +674,20 @@ class RawKvClientTest extends TestCase
         // wire pairs are built and the request only fails at the transport
         // layer, because there is no TiKV server in unit tests. maxBackoffMs=1
         // aborts the #183 wait-phase retry before re-dispatching.
+        //
+        // Covers all three key shapes from issue #192/RAW-07: a coercible
+        // decimal key ("12345"), a decimal key that collapses to int 0
+        // ("0"), a leading-zero key that PHP keeps as a string ("0123") and
+        // an arbitrary binary key ("\x00\xff").
         $this->expectException(BatchPartialFailureException::class);
 
         // PHP models a literal "12345"/"0" array key as int; build the pairs
         // through a string-typed key so the map reaches batchPut() with its
         // declared contract (numeric-string keys must survive to the wire).
-        $pairs = $this->stringKeyedPairs('12345', 'v') + $this->stringKeyedPairs('0', 'w');
+        $pairs = $this->stringKeyedPairs('12345', 'v')
+            + $this->stringKeyedPairs('0', 'w')
+            + $this->stringKeyedPairs('0123', 'x')
+            + $this->stringKeyedPairs("\x00\xff", 'y');
         (new RawKvClient($this->pdClient, $this->grpc, $this->regionCache, maxBackoffMs: 1))
             ->batchPut($pairs);
     }
@@ -2971,6 +2979,27 @@ class RawKvClientTest extends TestCase
         $this->grpc->expects($this->never())->method('call');
 
         $this->client->ingest([]);
+    }
+
+    public function testIngestAcceptsNumericStringKey(): void
+    {
+        // Pre-fix (issue #192/RAW-07): PHP coerces the "12345" array key to
+        // int, so the foreach in ingest() passed it to
+        // validateKeyNotEmpty(string) and threw a TypeError before the SST
+        // pipeline ever started. A sentinel from the first downstream step
+        // (getAllStores) proves the numeric key cleared validation and the
+        // map reached the ingestor with its declared contract.
+        $sentinel = new GrpcException(details: 'reached ingestor', grpcStatusCode: 14);
+        $this->pdClient->expects($this->once())->method('getAllStores')->willThrowException($sentinel);
+
+        try {
+            // Build the pair through a string-typed key so the map reaches
+            // ingest() with the documented array<string, string> contract.
+            $this->client->ingest($this->stringKeyedPairs('12345', 'value'));
+            self::fail('Expected the numeric key to clear validation and reach the ingestor');
+        } catch (GrpcException $e) {
+            self::assertSame($sentinel, $e);
+        }
     }
 
     public function testIngestValidatesEmptyKey(): void

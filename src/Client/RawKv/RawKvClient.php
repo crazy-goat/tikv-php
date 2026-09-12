@@ -713,6 +713,15 @@ final class RawKvClient
     }
 
     /**
+     * Write multiple key-value pairs.
+     *
+     * Keys inherit PHP's array-key semantics: a decimal-string key such as
+     * `'12345'` is stored as an int array key, and `'0'` / `'00'` are
+     * indistinguishable (both int 0). Each key is string-cast before it
+     * reaches the wire, so a numeric key is written under its original
+     * bytes, but use per-key `put()` when two keys must differ only in their
+     * integer-ness (issue #192/RAW-07).
+     *
      * @param array<string, string> $keyValuePairs
      * @param int|array<array-key, int> $ttl
      *
@@ -985,6 +994,13 @@ final class RawKvClient
      * as SST files via the TiKV ImportSST service. All TiKV stores are
      * switched to import mode during the operation and switched back to
      * normal mode on completion (even on failure).
+     *
+     * Keys inherit PHP's array-key semantics: a decimal-string key such as
+     * `'12345'` is stored as an int array key, and `'0'` / `'00'` are
+     * indistinguishable (both int 0). Each key is string-cast before it
+     * reaches the wire, so a numeric key is written under its original
+     * bytes, but use per-key `put()` when two keys must differ only in their
+     * integer-ness (issue #192/RAW-07).
      *
      * @param array<string, string> $keyValuePairs Key-value pairs (sorted or unsorted)
      * @param int|null $ttl Time-to-live in seconds (null = no TTL)

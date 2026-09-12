@@ -367,7 +367,12 @@ class SstIngestorTest extends TestCase
         // PHP models literal "12345"/"0" array keys as int; build the pairs
         // through a string-typed key so the map reaches ingest() with its
         // declared contract (numeric-string keys must survive to the wire).
-        $pairs = $this->stringKeyedPairs('12345', 'v1') + $this->stringKeyedPairs('0', 'v2');
+        // Leading-zero ("0123") and binary ("\x00\xff") keys exercise the
+        // non-coerced string-key path too (issue #192/RAW-07).
+        $pairs = $this->stringKeyedPairs('12345', 'v1')
+            + $this->stringKeyedPairs('0', 'v2')
+            + $this->stringKeyedPairs('0123', 'v3')
+            + $this->stringKeyedPairs("\x00\xff", 'v4');
         $this->ingestor->ingest($pairs);
 
         // requests[0] is the SST meta chunk; the data batch carries the pairs.
@@ -377,7 +382,8 @@ class SstIngestorTest extends TestCase
             static fn(Pair $pair): string => $pair->getKey(),
             iterator_to_array($capturedRequests[1]->getBatch()->getPairs()),
         );
-        $this->assertSame(['0', '12345'], $keys);
+        // ksort(SORT_STRING) orders the keys bytewise: "\x00\xff" < "0" < "0123" < "12345".
+        $this->assertSame(["\x00\xff", '0', '0123', '12345'], $keys);
     }
 
     /**

@@ -102,6 +102,26 @@ hides the bug in reverse: PHPStan infers the literal as `array<int, string>`
 and rejects the `array<string, string>` parameter, so construct the map via a
 string-typed key parameter (helper method) to test the real-world contract.
 
+## Associative-array write APIs carry PHP's array-key semantics — `'0'`/`'00'` collapse, and use list APIs when bytes matter
+
+`batchPut()` / `ingest()` are declared `array<string, string>`, but PHP has
+no string decimal keys: `['12345' => …]` is stored with an **int** key at
+runtime (the declaration is a static contract only). Both APIs therefore
+string-cast every foreach key before validating/setting it —
+`(string) $key` in `RawKvClient::batchPut()`/`ingest()`,
+`RawKvBatch::batchPut()` and `SstIngestor::buildPairs()` (issue #322) — so a
+decimal key is stored under its original bytes. Two consequences are worth
+documenting for callers: (1) a decimal key and its int form are the *same*
+key, so an associative array cannot express two distinct byte keys that
+differ only by integer-ness; (2) `'0'` and `'00'` both become int `0` and
+are indistinguishable, while `'0123'` survives as a string only because PHP
+does not coerce leading-zero strings. When that distinction matters, use the
+list APIs (`batchGet()`/`batchDelete()` accept `string|int` elements) or
+per-key `put()`. This pitfall was fixed under #322; #192 (RAW-07) re-filed
+the exact same decimal-key `TypeError` later and was a duplicate — grep the
+source and `git log -S` the cited lines before implementing an audit finding
+(see the duplication entry below).
+
 ## There is no pre-push hook in this repo
 
 Lint is only enforced in CI. Run `composer lint` locally before pushing to
