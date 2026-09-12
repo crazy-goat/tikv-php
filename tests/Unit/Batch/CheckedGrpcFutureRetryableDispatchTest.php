@@ -280,6 +280,45 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
     }
 
     /**
+     * Documents the intentional current contract behind the #183 wait-phase
+     * retry. `RegionErrorHandler::check()` raises a bare
+     * `RegionException('BatchRequest', $serverError)` for a top-level
+     * non-region `error` string on RawBatchPut/RawBatchDelete responses —
+     * with no `errorKind` — and `ErrorClassifier` falls back to
+     * `BackoffType::RegionMiss` for any kind-less RegionException. A
+     * permanent server string such as "ttl is not enabled …" is therefore
+     * retried for up to the backoff budget. This mirrors the pre-existing
+     * single-key paths (`RawKvCrud::getKeyTTL`, `RawKvAtomic::compareAndSwap`)
+     * and is deliberately NOT reclassified in #183; the test pins it so a
+     * future classification change is a conscious decision (see CHANGELOG).
+     */
+    public function testBareBatchErrorStringRegionExceptionIsRetriedAsRegionMiss(): void
+    {
+        $attempts = 0;
+        $terminal = new RegionException('BatchRequest', 'ttl is not enabled, but get put request with ttl');
+        $ok = new RawBatchGetResponse();
+
+        $dispatch = function () use (&$attempts, $terminal, $ok): CheckedGrpcFuture {
+            $attempts++;
+            if ($attempts === 1) {
+                return $this->throwingFuture($terminal);
+            }
+
+            return $this->successFuture($ok);
+        };
+
+        $this->regionCache->method('getByKey')->willReturn($this->region());
+        // RegionMiss classification runs the standard retry_region_error
+        // invalidation path once, before the second attempt succeeds.
+        $this->regionCache->expects($this->once())->method('invalidate');
+
+        $future = CheckedGrpcFuture::fromRetryableDispatch($dispatch, $this->createRetryExecutor(), 'k1');
+
+        self::assertSame($ok, $future->waitForExecutor());
+        self::assertSame(2, $attempts, 'a bare BatchRequest RegionException is retried as RegionMiss');
+    }
+
+    /**
      * Only TiKvException is captured from the eager dispatch: any other
      * throwable propagates unchanged out of construction.
      */

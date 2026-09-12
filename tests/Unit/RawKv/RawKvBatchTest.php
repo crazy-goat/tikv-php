@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -23,6 +24,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
@@ -392,6 +394,103 @@ class RawKvBatchTest extends TestCase
 
         $this->expectException(BatchPartialFailureException::class);
         $this->batch->batchGet(['a', 'a', 'b'], $this->createRetryExecutor(1));
+    }
+
+    // ========================================================================
+    // Issue #183: the per-region retry wrappers must route through
+    // CheckedGrpcFuture::fromRetryableDispatch(), whose retry loop re-invokes
+    // the dispatch closure — so every attempt resolves the region afresh.
+    // The old (dispatch-only retry) code resolved the region once and replayed
+    // the same un-awaited future, so a retryable region error would never be
+    // retried at all. These tests drive the *private* wrappers directly
+    // (ReflectionMethod) against a dead endpoint: each attempt fails with a
+    // retryable gRPC UNAVAILABLE, and with maxAttempts = 2 exactly two
+    // region resolutions (pdClient->getRegion) and two gRPC sends
+    // (grpc->getChannel) must happen. The region cache is forced to miss so
+    // the re-resolution count is observable without cache-hit masking.
+    // ========================================================================
+
+    public function testBatchGetWithRetryReResolvesRegionOnEveryAttempt(): void
+    {
+        $future = $this->invokeWithDeadEndpoint('batchGetWithRetry', [['k1'], $this->createRetryExecutor(2)]);
+
+        $this->assertRetryBudgetExhaustedWithTransportError($future);
+    }
+
+    public function testBatchPutWithRetryReResolvesRegionOnEveryAttempt(): void
+    {
+        $future = $this->invokeWithDeadEndpoint('batchPutWithRetry', [
+            [$this->kvPair('k1', 'v1')],
+            0,
+            $this->createRetryExecutor(2),
+        ]);
+
+        $this->assertRetryBudgetExhaustedWithTransportError($future);
+    }
+
+    public function testBatchDeleteWithRetryReResolvesRegionOnEveryAttempt(): void
+    {
+        $future = $this->invokeWithDeadEndpoint('batchDeleteWithRetry', [
+            ['k1'],
+            $this->createRetryExecutor(2),
+        ]);
+
+        $this->assertRetryBudgetExhaustedWithTransportError($future);
+    }
+
+    private function kvPair(string $key, string $value): KvPair
+    {
+        $pair = new KvPair();
+        $pair->setKey($key);
+        $pair->setValue($value);
+
+        return $pair;
+    }
+
+    /**
+     * Set up a cluster mock whose region cache always misses and whose gRPC
+     * channel points at a dead endpoint, then invoke the requested private
+     * wrapper. The caller must include the RetryExecutor sized with
+     * maxAttempts = 2 so exactly two dispatch attempts occur.
+     *
+     * @param array<int, mixed> $args full argument list for $method
+     */
+    private function invokeWithDeadEndpoint(string $method, array $args): CheckedGrpcFuture
+    {
+        $this->requireGrpcExtension();
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->pdClient->expects($this->exactly(2))
+            ->method('getRegion')
+            ->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->grpc->expects($this->exactly(2))->method('getChannel')->willReturnCallback(
+            fn(): \Grpc\Channel => new \Grpc\Channel('127.0.0.1:1', [
+                'credentials' => \Grpc\ChannelCredentials::createInsecure(),
+            ]),
+        );
+
+        $reflection = new \ReflectionMethod(RawKvBatch::class, $method);
+        /** @var CheckedGrpcFuture $future */
+        $future = $reflection->invoke($this->batch, ...$args);
+
+        return $future;
+    }
+
+    /**
+     * @param CheckedGrpcFuture $future already dispatched (eagerly) against
+     *                                  the dead endpoint
+     */
+    private function assertRetryBudgetExhaustedWithTransportError(CheckedGrpcFuture $future): void
+    {
+        try {
+            $future->waitForExecutor();
+            self::fail('Expected the attempt cap to be exhausted against the dead endpoint');
+        } catch (RetryBudgetExhaustedException $e) {
+            // Issue #183 review: pinning the attempt count with maxAttempts = 2
+            // must not hide the actual transport failure.
+            self::assertInstanceOf(GrpcException::class, $e->getPrevious());
+        }
     }
 
     /**
