@@ -276,7 +276,7 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
         }
 
         self::assertGreaterThanOrEqual(3, $attempts);
-        self::assertLessThanOrEqual(5, $attempts);
+        self::assertLessThanOrEqual(4, $attempts);
     }
 
     /**

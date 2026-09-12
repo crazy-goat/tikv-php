@@ -929,20 +929,25 @@ temporarily replacing the warning-early-return with `self::fail()`) and activate
 automatically when the fix merges — no env var to clean up later, and no
 duplicate tests alongside the fix PR's own coverage.
 
-## RawKvBatch hardcodes `new Call(...)` — region errors inside batch responses can only be tested at the wait-boundary composition
+## RawKvBatch hardcodes `new Call(...)` — retries are tested via the wait boundary or a dead channel
 
 `RawKvBatch::execute*ForRegionAsync()` constructs `\Grpc\Call` directly, so
 the transport cannot be injected with a mocked Call (which `GrpcFutureTest`
-does for the future itself). Consequently a `NotLeader`/`EpochNotMatch`
-returned inside a `RawBatchGetResponse` cannot be delivered end-to-end
-through `batchGet()` in unit tests. The pinned tests for issue #330
-(`RawKvBatchTest`) instead drive the **exact composition RawKvBatch builds**
-— `CheckedGrpcFuture::fromGrpcFuture(new GrpcFuture($mockCall, ...))` (fast
-path) or `fromCallable()` wrapping `RegionErrorHandler::check()` (multi-region
-waiter) — through `BatchAsyncExecutor::executeParallel()`, which is where the
-error is actually classified and reported. Split-limit tests count RPCs via
-the `GrpcClientInterface::getChannel` mock against a dead `127.0.0.1:1`
-channel and expect `BatchPartialFailureException` (issue #330).
+does for the future itself). A response-borne region error therefore cannot
+be delivered end-to-end through `batchGet()` in unit tests. Before #183 the
+contract was pinned at the wait-boundary composition
+(`CheckedGrpcFuture::fromGrpcFuture(...)` through
+`BatchAsyncExecutor::executeParallel()`, issue #330); those tests were
+replaced when #183 moved the retry into
+`CheckedGrpcFuture::fromRetryableDispatch()`. The current coverage:
+`CheckedGrpcFutureRetryableDispatchTest` pins the retry/invalidate/
+switchLeader/terminal behaviour with synthetic `fromCallable()` futures, and
+`RawKvBatchTest::testBatch*WithRetryReResolvesRegionOnEveryAttempt` reaches
+the real `RawKvBatch` dispatch path by invoking the private `*WithRetry`
+methods via reflection against a dead `127.0.0.1:1` channel, asserting
+`pdClient->getRegion` and `grpc->getChannel` are each called exactly twice
+with `maxAttempts: 2` — one resolution/send per attempt, which the old
+dispatch-only-retry code could not produce.
 
 ## Several legacy RawKvBatchTest TTL tests silently dispatch nothing
 
