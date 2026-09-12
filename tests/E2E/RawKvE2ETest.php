@@ -276,6 +276,30 @@ class RawKvE2ETest extends TestCase
     }
 
     /**
+     * A purely numeric key must round-trip through the associative-array
+     * batch API. PHP stores `['12345' => 'v']` with an int key, so this pins
+     * that `batchPut()` writes it under the five bytes `12345` and that
+     * `get('12345')` reads it back (issue #192/RAW-07).
+     */
+    public function testBatchPutNumericStringKeyRoundTrip(): void
+    {
+        // Build the pair through a string-typed key; PHP still stores it as
+        // an int array key, which is exactly the boundary under test.
+        $this->testClient->batchPut($this->stringKeyedPairs('12345', 'numeric-value'));
+        $this->keysToCleanup[] = '12345';
+
+        $this->assertSame('numeric-value', $this->testClient->get('12345'));
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function stringKeyedPairs(string $key, string $value): array
+    {
+        return [$key => $value];
+    }
+
+    /**
      * Multi-region batch correctness check.
      *
      * Writes 600 keys (well over the region size split boundary) and reads
