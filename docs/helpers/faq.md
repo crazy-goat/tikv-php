@@ -1280,3 +1280,27 @@ The regression tests live in `TransactionTest` and use the shared
 `stubPessimisticLockError()` helper (records the gRPC method sequence and
 asserts `['KvPessimisticLock']`, i.e. no `KvPrewrite`/`KvCommit`); there is
 also a first-variant-wins test for multi-error responses.
+
+## Range-op retries only see dispatch-phase failures — and a resolved GrpcFuture can be built without ext-grpc
+
+`RawKvRangeOps::deleteRange()/checksum()` fan their per-region sends out
+through `callAsync()` and return an un-waited `CheckedGrpcFuture`; the wait
+happens later inside `BatchAsyncExecutor`, outside `RetryExecutor::execute()`.
+So moving `getRegionInfo($startKey)` inside the retry closure (#190) only
+helps for errors raised during *dispatch* (`callAsync()` itself or
+store-address resolution) — a region error carried on the response surfaces
+at wait time and is not retried per region at all (the documented fan-out
+trade-off). To prove the re-resolve in a pure-PHP `Unit` test, the retried
+`callAsync()` must return a *successful* future on the second attempt, but
+`\Grpc\Call` (GrpcFuture's constructor dependency) does not exist under
+`php -n`, so a Call mock cannot be used. Build an already-resolved future
+directly:
+
+    $reflection = new \ReflectionClass(GrpcFuture::class);
+    $future = $reflection->newInstanceWithoutConstructor();
+    $reflection->getProperty('completed')->setValue($future, true);
+    $reflection->getProperty('result')->setValue($future, $response);
+
+`wait()` then returns `$response` without touching a channel. Do NOT call
+`ReflectionProperty::setAccessible()` — it is a no-op since PHP 8.1 and
+deprecated on 8.5. Reference: `RetryBudgetSharedAcrossRegionsTest`.

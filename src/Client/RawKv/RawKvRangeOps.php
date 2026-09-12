@@ -18,7 +18,6 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
-use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
@@ -68,10 +67,9 @@ final readonly class RawKvRangeOps
         $clipper = new RegionRangeClipper();
 
         $calls = [];
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $rangeStart, $rangeEnd]) {
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $rangeStart, $rangeEnd]) {
             $calls[] = fn(): CheckedGrpcFuture => $this->deleteRangeWithRetry(
                 $executor,
-                $region,
                 $rangeStart,
                 $rangeEnd,
                 $columnFamily,
@@ -102,10 +100,9 @@ final readonly class RawKvRangeOps
         $clipper = new RegionRangeClipper();
 
         $calls = [];
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $rangeStart, $rangeEnd]) {
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $rangeStart, $rangeEnd]) {
             $calls[] = fn(): CheckedGrpcFuture => $this->checksumWithRetry(
                 $executor,
-                $region,
                 $rangeStart,
                 $rangeEnd,
             );
@@ -138,18 +135,19 @@ final readonly class RawKvRangeOps
      */
     private function deleteRangeWithRetry(
         RetryExecutor $executor,
-        RegionInfo $region,
         string $startKey,
         string $endKey,
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         /** @var CheckedGrpcFuture $future */
         $future = $executor->execute($startKey, function () use (
-            $region,
             $startKey,
             $endKey,
             $columnFamily,
         ): CheckedGrpcFuture {
+            // Resolve the region on every attempt so retries pick up cache
+            // invalidation and leader switching (issue #190).
+            $region = $this->regionResolver->getRegionInfo($startKey);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRangeRequest();
@@ -198,12 +196,14 @@ final readonly class RawKvRangeOps
      */
     private function checksumWithRetry(
         RetryExecutor $executor,
-        RegionInfo $region,
         string $startKey,
         string $endKey,
     ): CheckedGrpcFuture {
         /** @var CheckedGrpcFuture $future */
-        $future = $executor->execute($startKey, function () use ($region, $startKey, $endKey): CheckedGrpcFuture {
+        $future = $executor->execute($startKey, function () use ($startKey, $endKey): CheckedGrpcFuture {
+            // Resolve the region on every attempt so retries pick up cache
+            // invalidation and leader switching (issue #190).
+            $region = $this->regionResolver->getRegionInfo($startKey);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $range = new KeyRange();
