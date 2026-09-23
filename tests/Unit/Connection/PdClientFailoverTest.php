@@ -255,20 +255,22 @@ class PdClientFailoverTest extends TestCase
     {
         $memberCalls = 0;
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturnCallback(function (string $address, string $service, string $method) use (&$memberCalls): Message {
-            $this->rpcLog[] = ['address' => $address, 'method' => $method];
+        $grpc->method('call')->willReturnCallback(
+            function (string $address, string $service, string $method) use (&$memberCalls): Message {
+                $this->rpcLog[] = ['address' => $address, 'method' => $method];
 
-            if ($method === 'GetMembers') {
-                $memberCalls++;
+                if ($method === 'GetMembers') {
+                    $memberCalls++;
 
-                return $this->membersResponse(
-                    leaderId: 2,
-                    members: [[2, ['pd2:2379']], [1, ['pd1:2379']]],
-                );
-            }
+                    return $this->membersResponse(
+                        leaderId: 2,
+                        members: [[2, ['pd2:2379']], [1, ['pd1:2379']]],
+                    );
+                }
 
-            return $this->regionResponse();
-        });
+                return $this->regionResponse();
+            },
+        );
 
         $client = new PdClient($grpc, ['pd1:2379', 'pd2:2379'], new NullLogger());
         $client->getRegion('k');

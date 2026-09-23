@@ -75,7 +75,7 @@ final class PdFailoverE2ETest extends TestCase
         // Consistent with the other E2E tests: skip when the cluster is
         // unreachable instead of failing.
         try {
-            self::pdClient()->getTimestamp();
+            $this->pdClient()->getTimestamp();
         } catch (\Throwable) {
             $this->markTestSkipped('TiKV cluster not available');
         }
@@ -154,7 +154,7 @@ final class PdFailoverE2ETest extends TestCase
 
         self::fail(
             'Workload did not complete within 60s after PD came back'
-            . ($last !== null ? ': ' . $last->getMessage() : ''),
+            . ($last instanceof \Throwable ? ': ' . $last->getMessage() : ''),
         );
     }
 
@@ -173,7 +173,7 @@ final class PdFailoverE2ETest extends TestCase
         return file_exists('/var/run/docker.sock');
     }
 
-    private static function pdClient(): PdClientInterface
+    private function pdClient(): PdClientInterface
     {
         self::assertInstanceOf(PdClientInterface::class, self::$pdProbe);
 
@@ -267,7 +267,7 @@ final class PdFailoverE2ETest extends TestCase
         curl_setopt($handle, CURLOPT_TIMEOUT, 30);
 
         $body = curl_exec($handle);
-        $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+        $status = curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
         curl_close($handle);
 
         if ($status >= 300 || !is_string($body) || $body === '') {
@@ -316,7 +316,7 @@ final class PdFailoverE2ETest extends TestCase
 
         self::fail(
             'PD did not become healthy within ' . $timeoutSeconds . 's'
-            . ($lastException !== null ? ': ' . $lastException->getMessage() : ''),
+            . ($lastException instanceof \Throwable ? ': ' . $lastException->getMessage() : ''),
         );
     }
 }
