@@ -75,6 +75,9 @@ final class TimestampOracle
     /** Wall-clock milliseconds source for the low-resolution cache. */
     private readonly \Closure $clock;
 
+    /** Address source for the TSO RPC — shared with PdClient so TSO follows the PD leader. */
+    private readonly \Closure $pdAddress;
+
     /** Number of timestamps requested per pooled TSO grant (issue #292). */
     private readonly int $poolSize;
     /** Maximum age (ms) of a pooled timestamp before refilling (issue #292). */
@@ -115,10 +118,17 @@ final class TimestampOracle
      *                               must be >= 0
      * @param (\Closure(): int)|null $pid process-id source for the fork guard;
      *                                 null = getmypid(); injectable for tests
+     * @param string|(\Closure(): string) $pdAddress PD endpoint for the TSO
+     *        RPC. PdClient passes a closure over its current (leader-aware)
+     *        address so TSO follows the same leader (issue #416, GAP-02);
+     *         a plain string is accepted for standalone/test use.
+     * @param (\Closure(): void)|null $onTransportFailure invoked when a TSO
+     *        RPC fails on transport level (after cluster-id handling), so
+     *        the owning PdClient can fail over before the failure propagates
      */
     public function __construct(
         private readonly GrpcClientInterface $grpc,
-        private readonly string $pdAddress,
+        string|\Closure $pdAddress,
         private readonly \Closure $getClusterId,
         private readonly \Closure $setClusterId,
         private readonly LoggerInterface $logger = new NullLogger(),
@@ -127,7 +137,11 @@ final class TimestampOracle
         ?int $poolSize = null,
         ?int $poolMaxAgeMs = null,
         ?\Closure $pid = null,
+        private readonly ?\Closure $onTransportFailure = null,
     ) {
+        $this->pdAddress = $pdAddress instanceof \Closure
+            ? $pdAddress
+            : static fn (): string => $pdAddress;
         $this->clock = $clock ?? static fn (): int => (int) (microtime(true) * 1000);
 
         $resolvedPoolSize = $poolSize ?? self::DEFAULT_TIMESTAMP_POOL_SIZE;
@@ -260,6 +274,12 @@ final class TimestampOracle
 
             return $this->extractTimestampRange($response, $count);
         } catch (GrpcException $e) {
+            if ($this->extractClusterIdFromError($e->getMessage()) === null) {
+                // Transport-level failure: let the owning PdClient fail over
+                // to another endpoint before this failure propagates.
+                $this->onTransportFailure?->call($this);
+            }
+
             $this->logger->error('TSO request failed; refusing to fabricate a local timestamp', [
                 'error' => $e->getMessage(),
                 'grpcStatusCode' => $e->grpcStatusCode,
@@ -420,7 +440,7 @@ final class TimestampOracle
     {
         try {
             $response = $this->grpc->call(
-                $this->pdAddress,
+                ($this->pdAddress)(),
                 'pdpb.PD',
                 'Tso',
                 $request,
@@ -445,7 +465,7 @@ final class TimestampOracle
             $request->setHeader($this->createHeader());
 
             $response = $this->grpc->call(
-                $this->pdAddress,
+                ($this->pdAddress)(),
                 'pdpb.PD',
                 'Tso',
                 $request,

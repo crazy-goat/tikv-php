@@ -38,9 +38,18 @@ final class PdClient implements PdClientInterface
     private ?int $clusterId = null;
     private ?TimestampOracle $tso = null;
 
+    /** @var list<string> all configured PD endpoints */
+    private readonly array $pdAddresses;
+    /** Address currently used for PD RPCs (leader when discovery succeeded). */
+    private string $currentAddress;
+
+    /**
+     * @param string|list<string> $pdAddresses one PD address or a list of
+     *        PD cluster endpoints (issue #416, GAP-02)
+     */
     public function __construct(
         private readonly GrpcClientInterface $grpc,
-        private readonly string $pdAddress,
+        string|array $pdAddresses,
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly ?StoreCacheInterface $storeCache = null,
         private readonly ?int $lowResMaxStalenessMs = null,
@@ -54,6 +63,31 @@ final class PdClient implements PdClientInterface
          */
         private readonly CodecInterface $codec = new CodecV1(),
     ) {
+        if (is_string($pdAddresses)) {
+            $pdAddresses = [$pdAddresses];
+        }
+        $addresses = [];
+        foreach ($pdAddresses as $address) {
+            // @phpstan-ignore function.alreadyNarrowedType (runtime guard for untyped callers)
+            if (is_string($address) && $address !== '') {
+                $addresses[] = $address;
+            }
+        }
+        if ($addresses === []) {
+            throw new \InvalidArgumentException('At least one non-empty PD address is required');
+        }
+        $this->pdAddresses = $addresses;
+        $this->currentAddress = $addresses[0];
+    }
+
+    /**
+     * Address the next PD RPC will be sent to (the discovered leader when
+     * leader discovery has run). TimestampOracle reads this through the
+     * shared closure so TSO follows the same leader as PdClient.
+     */
+    public function currentPdAddress(): string
+    {
+        return $this->currentAddress;
     }
 
     public function getTimestamp(?int $timeoutMs = null): int
@@ -76,12 +110,13 @@ final class PdClient implements PdClientInterface
         if (!$this->tso instanceof TimestampOracle) {
             $this->tso = new TimestampOracle(
                 $this->grpc,
-                $this->pdAddress,
+                fn (): string => $this->currentAddress,
                 $this->getClusterId(...),
                 $this->setClusterId(...),
                 $this->logger,
                 $this->lowResMaxStalenessMs,
                 poolSize: $this->tsoPoolSize,
+                onTransportFailure: $this->markAddressBad(...),
             );
         }
 
@@ -419,12 +454,20 @@ final class PdClient implements PdClientInterface
             || str_contains($message, 'Not Supported');
     }
 
+    /** Whether leader discovery has already run for this client. */
+    private bool $leaderDiscovered = false;
+
     /**
-     * Execute a PD gRPC call with automatic cluster ID mismatch retry.
+     * Execute a PD gRPC call with automatic cluster ID mismatch retry and
+     * multi-endpoint failover (issue #416, GAP-02).
      *
-     * On first connect the client sends cluster_id=0. PD may reject with
-     * "mismatch cluster id, need X but got 0". We extract X, cache it,
-     * and retry exactly once.
+     * Two layers:
+     *  - inner ({@see callCurrentAddressWithClusterIdRetry}): the historical
+     *    "mismatch cluster id, need X but got 0" retry against one address;
+     *  - outer: on any remaining transport failure the current address is
+     *    marked bad, the PD leader is re-discovered via GetMembers against
+     *    the remaining configured endpoints, and the call is retried against
+     *    the new address — at most once per configured endpoint.
      *
      * @template T of Message
      * @param class-string<T> $responseClass
@@ -435,10 +478,224 @@ final class PdClient implements PdClientInterface
         Message $request,
         string $responseClass,
     ): Message {
-        $this->logger->debug('PD gRPC call', ['method' => $method, 'address' => $this->pdAddress]);
+        $this->discoverLeaderOnce();
+
+        $attempted = [];
+        while (true) {
+            $attempted[] = $this->currentAddress;
+            try {
+                return $this->callCurrentAddressWithClusterIdRetry($method, $request, $responseClass);
+            } catch (GrpcException $e) {
+                if ($this->extractClusterIdFromError($e->getMessage()) !== null) {
+                    // The inner layer already retried the mismatch; a mismatch
+                    // that survives it is not a transport failure and must not
+                    // trigger failover.
+                    throw $e;
+                }
+
+                $next = $this->failoverAfterTransportFailure($e, $method, $attempted);
+                if ($next === null) {
+                    throw $e;
+                }
+                $this->currentAddress = $next;
+            }
+        }
+    }
+
+    /**
+     * On first use with multiple endpoints, prefer the PD leader.
+     *
+     * Discovery is best-effort: any failure (single endpoint, unreachable
+     * peers) leaves the current address in place — the failover path will
+     * rediscover on the first transport failure.
+     */
+    private function discoverLeaderOnce(): void
+    {
+        if ($this->leaderDiscovered || count($this->pdAddresses) < 2) {
+            return;
+        }
+
+        $this->leaderDiscovered = true;
+        try {
+            $leader = $this->discoverLeaderAddress([]);
+            if ($leader !== null) {
+                $this->currentAddress = $leader;
+            }
+        } catch (GrpcException | TiKvException) {
+            // Discovery is opportunistic; fall back to the configured order.
+        }
+    }
+
+    /**
+     * Mark the current address bad and find another member to try.
+     *
+     * Runs GetMembers against every configured endpoint that has not been
+     * tried yet; on success switches to the discovered leader (when it is
+     * one of our endpoints and not already failed) or to the endpoint that
+     * answered the discovery call. Returns null when every endpoint is down.
+     *
+     * @param list<string> $attempted addresses already tried for this call
+     */
+    private function failoverAfterTransportFailure(GrpcException $e, string $method, array $attempted): ?string
+    {
+        $this->logger->warning('PD endpoint failed, attempting failover', [
+            'method' => $method,
+            'failedAddress' => $this->currentAddress,
+            'error' => $e->getMessage(),
+        ]);
+
+        try {
+            $next = $this->discoverLeaderAddress($attempted);
+        } catch (GrpcException | TiKvException $discoveryError) {
+            $this->logger->warning('PD leader rediscovery failed', [
+                'error' => $discoveryError->getMessage(),
+            ]);
+            return null;
+        }
+
+        if ($next === null) {
+            return null;
+        }
+
+        $this->logger->info('PD failover selected new address', ['newAddress' => $next]);
+
+        return $next;
+    }
+
+    /**
+     * Ask PD for its member list and resolve the leader's client URL.
+     *
+     * Tries each configured endpoint not in $excluded until one answers.
+     * Returns the leader member's client URL when it maps to one of our
+     * configured endpoints (and is not excluded); otherwise the URL of the
+     * endpoint that answered (PD followers answer GetMembers too and carry
+     * the current leader in the response). Returns null when the response
+     * carries no usable leader/members.
+     *
+     * @param list<string> $excluded
+     */
+    private function discoverLeaderAddress(array $excluded): ?string
+    {
+        foreach ($this->pdAddresses as $candidate) {
+            if (in_array($candidate, $excluded, true)) {
+                continue;
+            }
+
+            try {
+                $response = $this->callGetMembers($candidate);
+            } catch (GrpcException | TiKvException) {
+                continue;
+            }
+
+            $leaderUrl = $this->resolveLeaderUrl($response);
+            if (
+                $leaderUrl !== null
+                && !in_array($leaderUrl, $excluded, true)
+                && in_array($leaderUrl, $this->pdAddresses, true)
+            ) {
+                return $leaderUrl;
+            }
+
+            // No usable leader mapping — the endpoint that answered is as
+            // good a next hop as any (it is reachable and knows the leader).
+            if (!in_array($candidate, $excluded, true)) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private function callGetMembers(string $address): GetMembersResponse
+    {
+        $request = new GetMembersRequest();
+        $request->setHeader($this->createHeader());
+
+        /** @var GetMembersResponse $response */
+        $response = $this->grpc->call(
+            $address,
+            'pdpb.PD',
+            'GetMembers',
+            $request,
+            GetMembersResponse::class,
+        );
+
+        $this->learnClusterId($response);
+
+        return $response;
+    }
+
+    /**
+     * Resolve the client URL of the member whose ID equals
+     * GetMembersResponse.leader.member_id, preferring one of the configured
+     * endpoints.
+     */
+    private function resolveLeaderUrl(GetMembersResponse $response): ?string
+    {
+        $leader = $response->getLeader();
+        if (!$leader instanceof \CrazyGoat\Proto\Pdpb\Member) {
+            return null;
+        }
+
+        $leaderMemberId = (string) $leader->getMemberId();
+        foreach ($response->getMembers() as $member) {
+            if ((string) $member->getMemberId() !== $leaderMemberId) {
+                continue;
+            }
+
+            $urls = [];
+            foreach ($member->getClientUrls() as $url) {
+                $urls[] = (string) $url;
+            }
+
+            foreach ($urls as $url) {
+                if (in_array($url, $this->pdAddresses, true)) {
+                    return $url;
+                }
+            }
+
+            return $urls[0] ?? null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Called by TimestampOracle (via the onTransportFailure callback) when a
+     * TSO RPC fails on a transport level so the next call — PD's or TSO's —
+     * targets another endpoint.
+     */
+    private function markAddressBad(): void
+    {
+        $failed = $this->currentAddress;
+        $next = $this->discoverLeaderAddress([$failed]);
+        if ($next !== null) {
+            $this->currentAddress = $next;
+            $this->logger->info('PD failover after TSO transport failure', ['newAddress' => $next]);
+        }
+    }
+
+    /**
+     * Execute a PD gRPC call against the current address with automatic
+     * cluster ID mismatch retry.
+     *
+     * On first connect the client sends cluster_id=0. PD may reject with
+     * "mismatch cluster id, need X but got 0". We extract X, cache it,
+     * and retry exactly once.
+     *
+     * @template T of Message
+     * @param class-string<T> $responseClass
+     * @return T
+     */
+    private function callCurrentAddressWithClusterIdRetry(
+        string $method,
+        Message $request,
+        string $responseClass,
+    ): Message {
+        $this->logger->debug('PD gRPC call', ['method' => $method, 'address' => $this->currentAddress]);
         try {
             $response = $this->grpc->call(
-                $this->pdAddress,
+                $this->currentAddress,
                 'pdpb.PD',
                 $method,
                 $request,
@@ -460,7 +717,7 @@ final class PdClient implements PdClientInterface
                 $request->setHeader($this->createHeader());
 
                 $response = $this->grpc->call(
-                    $this->pdAddress,
+                    $this->currentAddress,
                     'pdpb.PD',
                     $method,
                     $request,
