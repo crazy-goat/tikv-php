@@ -7,3 +7,13 @@ parameters:
         - src/Proto
     bootstrapFiles:
         - tests/phpstan/bootstrap.php
+    ignoreErrors:
+        # composer.lock is not committed, so CI resolves the newest dev
+        # dependencies on every run. Newer phpstan(-phpunit) flags
+        # assertSame(literal, $obj->getter()) as method.alreadyNarrowedType
+        # in tests that assert a getter after seeding the state — the very
+        # assertions those tests exist for.
+        -
+            identifier: method.alreadyNarrowedType
+            paths:
+                - tests

@@ -129,7 +129,9 @@ $client = RawKvClient::create([
 ]);
 ```
 
-**Note**: Currently only the first endpoint is used. Future versions will support failover.
+**Note**: All endpoints are used: the client discovers the PD leader via
+`GetMembers` and fails over to another configured endpoint when the current
+one fails on transport level (issue #416).
 
 ### Timestamp Batching and Pooling (issues #420, #292)
 

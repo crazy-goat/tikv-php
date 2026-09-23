@@ -121,7 +121,8 @@ final class TxnKvClient
     private readonly string $serviceId;
 
     /**
-     * @param string[] $pdEndpoints PD addresses (currently only the first is used)
+     * @param string[] $pdEndpoints PD addresses; all are used for leader
+     *        discovery and failover (issue #416)
      * @param array<string, mixed> $options Client options, including 'tls' for TLS
      *                                      configuration, 'timeout' for timeout config,
      *                                      and 'metrics' for the metrics backend
