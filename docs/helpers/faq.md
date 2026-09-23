@@ -1469,3 +1469,15 @@ region needs the lock kept alive). Same source confirms `TxnHeartBeat` only
 ever **raises** a lock's TTL (`if lock.ttl < advise_ttl`), so an advise below
 the current TTL — e.g. the optimistic ~3020 ms advise sent for a 30000 ms
 pessimistic lock — can never shrink it.
+
+## A feature-gap fix obligates a docs sweep of its own "currently only the first…" claims
+
+Issue #416 (multi-endpoint PD failover) was implemented entirely in
+`PdClient`/`TimestampOracle`/`ConnectionFactory`, but the codebase carried two
+stale claims that no test can catch: `TxnKvClient::create()`'s docblock
+("currently only the first is used") and `docs/configuration.md`'s
+("Future versions will support failover"). Both were written when the
+limitation was real, and both became false the moment the limitation was
+fixed. When an issue removes a documented limitation, grep the repo for the
+limitation's phrasing (`only the first`, `not supported`, `Future versions`)
+before finishing — docblocks and `docs/*.md` drift independently of tests.

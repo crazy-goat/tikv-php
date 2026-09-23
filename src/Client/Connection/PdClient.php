@@ -38,6 +38,9 @@ final class PdClient implements PdClientInterface
     private ?int $clusterId = null;
     private ?TimestampOracle $tso = null;
 
+    /** Whether leader discovery has already run for this client. */
+    private bool $leaderDiscovered = false;
+
     /** @var list<string> all configured PD endpoints */
     private readonly array $pdAddresses;
     /** Address currently used for PD RPCs (leader when discovery succeeded). */
@@ -401,6 +404,11 @@ final class PdClient implements PdClientInterface
         $this->storeCache?->clear();
         $this->tso = null;
         $this->clusterId = null;
+        // Reset the failover state too so a closed-then-reused client
+        // re-runs leader discovery and starts from the first configured
+        // endpoint again (the PD leader may have changed while closed).
+        $this->leaderDiscovered = false;
+        $this->currentAddress = $this->pdAddresses[0];
     }
 
     private function createHeader(): RequestHeader
@@ -453,9 +461,6 @@ final class PdClient implements PdClientInterface
             || str_contains($message, 'not supported')
             || str_contains($message, 'Not Supported');
     }
-
-    /** Whether leader discovery has already run for this client. */
-    private bool $leaderDiscovered = false;
 
     /**
      * Execute a PD gRPC call with automatic cluster ID mismatch retry and
@@ -522,7 +527,11 @@ final class PdClient implements PdClientInterface
                 $this->currentAddress = $leader;
             }
         } catch (GrpcException | TiKvException) {
-            // Discovery is opportunistic; fall back to the configured order.
+            // Nearly unreachable: discoverLeaderAddress() catches these per
+            // endpoint. Kept as defense in depth — discovery is opportunistic
+            // and must never break the PD call it precedes; fall back to the
+            // configured order (the failover path will rediscover on the
+            // first transport failure).
         }
     }
 
@@ -547,6 +556,9 @@ final class PdClient implements PdClientInterface
         try {
             $next = $this->discoverLeaderAddress($attempted);
         } catch (GrpcException | TiKvException $discoveryError) {
+            // Nearly unreachable: discoverLeaderAddress() catches these per
+            // endpoint. Kept as defense in depth — a throw here would abort
+            // the failover instead of reporting the original transport error.
             $this->logger->warning('PD leader rediscovery failed', [
                 'error' => $discoveryError->getMessage(),
             ]);
@@ -598,9 +610,9 @@ final class PdClient implements PdClientInterface
 
             // No usable leader mapping — the endpoint that answered is as
             // good a next hop as any (it is reachable and knows the leader).
-            if (!in_array($candidate, $excluded, true)) {
-                return $candidate;
-            }
+            // $candidate cannot be excluded here: the loop top skipped
+            // excluded candidates already.
+            return $candidate;
         }
 
         return null;
@@ -627,8 +639,15 @@ final class PdClient implements PdClientInterface
 
     /**
      * Resolve the client URL of the member whose ID equals
-     * GetMembersResponse.leader.member_id, preferring one of the configured
-     * endpoints.
+     * GetMembersResponse.leader.member_id.
+     *
+     * Returns the leader's first client URL that maps to one of the
+     * configured endpoints when one exists; otherwise the leader's first
+     * client URL — which may NOT be one of the configured endpoints (PD may
+     * advertise addresses we were not given). The caller must therefore
+     * validate the returned URL against the configured endpoints before
+     * using it. Returns null when there is no leader member, the leader is
+     * absent from the member list, or the leader has no client URLs.
      */
     private function resolveLeaderUrl(GetMembersResponse $response): ?string
     {

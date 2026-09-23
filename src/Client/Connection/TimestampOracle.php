@@ -276,8 +276,13 @@ final class TimestampOracle
         } catch (GrpcException $e) {
             if ($this->extractClusterIdFromError($e->getMessage()) === null) {
                 // Transport-level failure: let the owning PdClient fail over
-                // to another endpoint before this failure propagates.
-                $this->onTransportFailure?->call($this);
+                // to another endpoint before this failure propagates. The
+                // closure is bound to its owning PdClient already — do NOT
+                // rebind it to $this (a TimestampOracle) via ->call($this):
+                // that is a PHP warning now and a fatal error in PHP 9.
+                if ($this->onTransportFailure instanceof \Closure) {
+                    ($this->onTransportFailure)();
+                }
             }
 
             $this->logger->error('TSO request failed; refusing to fabricate a local timestamp', [
