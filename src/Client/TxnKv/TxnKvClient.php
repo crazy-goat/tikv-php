@@ -288,6 +288,9 @@ final class TxnKvClient
 
     /**
      * @param array{pessimistic?: bool, priority?: int, enable1Pc?: bool, enableAsyncCommit?: bool} $options
+     *     `priority` maps onto the Kvrpcpb CommandPri enum: 0 = Normal
+     *     (default), 1 = Low, 2 = High. It is carried on the transaction's
+     *     prewrite, pessimistic-lock and commit RPCs (issue #441).
      */
     public function begin(array $options = []): Transaction
     {

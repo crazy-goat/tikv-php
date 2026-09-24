@@ -473,6 +473,8 @@ final class ConnectionFactory
                     ? $t['deleteRangeTimeoutMs'] : $timeoutConfig->deleteRangeTimeoutMs,
                 checksumTimeoutMs: isset($t['checksumTimeoutMs']) && is_int($t['checksumTimeoutMs'])
                     ? $t['checksumTimeoutMs'] : $timeoutConfig->checksumTimeoutMs,
+                ingestTimeoutMs: isset($t['ingestTimeoutMs']) && is_int($t['ingestTimeoutMs'])
+                    ? $t['ingestTimeoutMs'] : $timeoutConfig->ingestTimeoutMs,
             );
         }
 

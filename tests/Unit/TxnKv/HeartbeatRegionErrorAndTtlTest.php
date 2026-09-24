@@ -94,7 +94,7 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
         );
     }
 
-    private function createTransaction(): Transaction
+    private function createTransaction(int $priority = 0): Transaction
     {
         $lockResolver = new LockResolver(
             $this->grpc,
@@ -108,7 +108,7 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
             txnId: 'test-txn-1',
             startTs: 1000,
             pessimistic: false,
-            priority: 0,
+            priority: $priority,
             pdClient: $this->pdClient,
             grpc: $this->grpc,
             regionCache: $this->regionCache,
@@ -182,9 +182,9 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
         return $response;
     }
 
-    private function heartbeat(): int
+    private function heartbeat(int $priority = 0): int
     {
-        $txn = $this->createTransaction();
+        $txn = $this->createTransaction($priority);
         $txn->set('key1', 'value1');
 
         return $txn->heartbeat(10000);
@@ -318,5 +318,26 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
         self::assertSame(0, $this->metrics->getInvalidations('not_leader'));
         self::assertSame(0, $this->metrics->getInvalidations('region_error'));
         self::assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
+    }
+
+    /**
+     * The transaction's priority must also reach the TxnHeartBeat RPC
+     * Context (issue #441 follow-up), so a transaction's priority is
+     * consistent across its full RPC surface.
+     */
+    public function testHeartbeatCarriesPriorityOnContext(): void
+    {
+        $this->pdRegion = $this->makeRegion(withHintedPeer: false);
+        $this->mockGrpcResponses($this->okResponse(grantedTtl: 10000));
+
+        $this->heartbeat(priority: 2);
+
+        self::assertCount(1, $this->rpcCalls);
+        /** @var TxnHeartBeatRequest $request */
+        $request = $this->rpcCalls[0]['request'];
+        self::assertInstanceOf(TxnHeartBeatRequest::class, $request);
+        $context = $request->getContext();
+        self::assertNotNull($context);
+        self::assertSame(2, $context->getPriority());
     }
 }

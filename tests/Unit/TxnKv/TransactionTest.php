@@ -2675,6 +2675,106 @@ class TransactionTest extends TestCase
     }
 
     // ========================================================================
+    // priority → Kvrpcpb\Context (issue #441, DIV-05)
+    // ========================================================================
+
+    public function testPriorityIsCarriedOnPrewriteAndCommitContexts(): void
+    {
+        // The transaction's priority option must reach the RPC Context of
+        // the prewrite and commit requests (client-go SetPriority semantics).
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequests,
+            ): object {
+                if ($method === 'KvPrewrite' || $method === 'KvCommit') {
+                    $capturedRequests[$method] = $request;
+                }
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false, 'priority' => 2]);
+        $txn->set('key', 'v');
+        $txn->commit();
+
+        $this->assertArrayHasKey('KvPrewrite', $capturedRequests);
+        $this->assertArrayHasKey('KvCommit', $capturedRequests);
+        $prewriteRequest = $capturedRequests['KvPrewrite'];
+        $commitRequest = $capturedRequests['KvCommit'];
+        $this->assertInstanceOf(PrewriteRequest::class, $prewriteRequest);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\CommitRequest::class, $commitRequest);
+        $prewriteContext = $prewriteRequest->getContext();
+        $commitContext = $commitRequest->getContext();
+        $this->assertNotNull($prewriteContext);
+        $this->assertNotNull($commitContext);
+        $this->assertSame(2, $prewriteContext->getPriority());
+        $this->assertSame(2, $commitContext->getPriority());
+    }
+
+    public function testPriorityIsCarriedOnPessimisticLockContext(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $capturedRequest = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true, 'priority' => 1]);
+        $txn->set('key', 'v');
+        $txn->commit();
+
+        $this->assertNotNull($capturedRequest);
+        $this->assertInstanceOf(PessimisticLockRequest::class, $capturedRequest);
+        $context = $capturedRequest->getContext();
+        $this->assertNotNull($context);
+        $this->assertSame(1, $context->getPriority());
+    }
+
+    // ========================================================================
     // rollback()
     // ========================================================================
 
@@ -2717,6 +2817,59 @@ class TransactionTest extends TestCase
         $this->assertSame([], $txn->getWriteSet());
         $this->assertContains('KVPessimisticRollback', $methodSequence);
         $this->assertContains('KvBatchRollback', $methodSequence);
+    }
+
+    public function testPriorityIsCarriedOnRollbackContexts(): void
+    {
+        // The transaction's priority must also reach the Context of the
+        // rollback RPCs (PessimisticRollback + BatchRollback) so it is
+        // consistent across the transaction's full RPC surface.
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequests,
+            ): object {
+                if ($method === 'KVPessimisticRollback' || $method === 'KvBatchRollback') {
+                    $capturedRequests[$method] = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true, 'priority' => 1]);
+        $txn->set('k1', 'v1');
+        $txn->rollback();
+
+        $this->assertArrayHasKey('KVPessimisticRollback', $capturedRequests);
+        $this->assertArrayHasKey('KvBatchRollback', $capturedRequests);
+        $pessimisticRequest = $capturedRequests['KVPessimisticRollback'];
+        $batchRequest = $capturedRequests['KvBatchRollback'];
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest::class, $pessimisticRequest);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest::class, $batchRequest);
+        $pessimisticContext = $pessimisticRequest->getContext();
+        $batchContext = $batchRequest->getContext();
+        $this->assertNotNull($pessimisticContext);
+        $this->assertNotNull($batchContext);
+        $this->assertSame(1, $pessimisticContext->getPriority());
+        $this->assertSame(1, $batchContext->getPriority());
     }
 
     public function testRollbackWithNumericPrimaryKeySendsStringKeys(): void
