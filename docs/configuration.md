@@ -836,7 +836,7 @@ $options = [
         'batchWriteTimeoutMs' => 10000,  // default: 10000
         'scanTimeoutMs' => 20000,        // default: 20000
         'deleteRangeTimeoutMs' => 30000, // default: 30000
-        'checksumTimeoutMs' => 60000,    // default: 60000
+        'checksumTimeoutMs' => 30000,    // default: 30000
         'ingestTimeoutMs' => 60000,      // default: 60000 (SST ingest)
         'batchDeadlineMs' => 0,          // default: 0 (disabled) — wall-clock deadline
                                          // for batch fan-out dispatch+wait across all
