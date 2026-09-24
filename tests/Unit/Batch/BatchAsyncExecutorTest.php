@@ -49,6 +49,24 @@ class BatchAsyncExecutorTest extends TestCase
         $executor->executeParallel($calls);
     }
 
+    public function testExecuteParallelFailureCarriesSuccessfulPartialResults(): void
+    {
+        $executor = new BatchAsyncExecutor(new NullLogger());
+        $calls = [
+            1 => fn (): string => 'region-1',
+            2 => fn () => throw new TiKvException('region-2 failed'),
+            3 => fn (): string => 'region-3',
+        ];
+
+        try {
+            $executor->executeParallel($calls);
+            $this->fail('Expected BatchPartialFailureException');
+        } catch (BatchPartialFailureException $e) {
+            $this->assertSame([1 => 'region-1', 3 => 'region-3'], $e->getPartialResults());
+            $this->assertSame([2], array_keys($e->getRegionErrors()));
+        }
+    }
+
     public function testExecuteParallelWithAllFailure(): void
     {
         $executor = new BatchAsyncExecutor(new NullLogger());
@@ -67,7 +85,7 @@ class BatchAsyncExecutorTest extends TestCase
         }
     }
 
-    public function testExecuteParallelCancelsRemainingFuturesOnFailure(): void
+    public function testExecuteParallelRetainsPartialResultsAndWaitsForAllCallsOnFailure(): void
     {
         $this->requireGrpcExtension();
         $executor = new BatchAsyncExecutor(new NullLogger());
@@ -90,9 +108,15 @@ class BatchAsyncExecutorTest extends TestCase
             ]);
 
         $pendingCall = $this->createMock(Call::class);
-        $pendingCall->expects($this->never())
-            ->method('startBatch');
+        $pendingResponse = new RawGetResponse();
+        $pendingResponse->setValue('also-ok');
         $pendingCall->expects($this->once())
+            ->method('startBatch')
+            ->willReturn([
+                'status' => ['code' => 0, 'details' => 'OK'],
+                'message' => $pendingResponse->serializeToString(),
+            ]);
+        $pendingCall->expects($this->never())
             ->method('cancel');
 
         $calls = [
@@ -107,6 +131,11 @@ class BatchAsyncExecutorTest extends TestCase
         } catch (BatchPartialFailureException $e) {
             $this->assertCount(1, $e->getRegionErrors());
             $this->assertSame(3, $e->getTotalRegions());
+            $partialResults = $e->getPartialResults();
+            $this->assertInstanceOf(RawGetResponse::class, $partialResults[1]);
+            $this->assertInstanceOf(RawGetResponse::class, $partialResults[3]);
+            $this->assertSame('ok', $partialResults[1]->getValue());
+            $this->assertSame('also-ok', $partialResults[3]->getValue());
             $this->assertStringContainsString('1 of 3', $e->getMessage());
         }
     }
@@ -152,10 +181,14 @@ class BatchAsyncExecutorTest extends TestCase
         // Region 3: success (future returns OK)
 
         $okCall = $this->createMock(Call::class);
-        // Region 3 never reaches wait phase — the executor short-circuits
-        // (cancelAll + break) on the first wait-phase failure in region 2.
-        $okCall->expects($this->never())
-            ->method('startBatch');
+        $okResponse = new RawGetResponse();
+        $okResponse->setValue('region-3-ok');
+        $okCall->expects($this->once())
+            ->method('startBatch')
+            ->willReturn([
+                'status' => ['code' => 0, 'details' => 'OK'],
+                'message' => $okResponse->serializeToString(),
+            ]);
 
         $failingCall = $this->createMock(Call::class);
         $failingCall->expects($this->once())
@@ -181,6 +214,8 @@ class BatchAsyncExecutorTest extends TestCase
             $this->assertStringContainsString('dispatch failure', $errors[1]->getMessage());
             $this->assertStringContainsString('Unavailable', $errors[2]->getMessage());
             $this->assertSame(3, $e->getTotalRegions());
+            $this->assertInstanceOf(RawGetResponse::class, $e->getPartialResults()[3]);
+            $this->assertSame('region-3-ok', $e->getPartialResults()[3]->getValue());
             $this->assertStringContainsString('2 of 3', $e->getMessage());
         }
     }
@@ -198,10 +233,11 @@ class BatchAsyncExecutorTest extends TestCase
             ]);
 
         $failingCall2 = $this->createMock(Call::class);
-        // Region 2 is cancelled after region 1 fails in the wait phase —
-        // startBatch is never reached because the executor short-circuits.
-        $failingCall2->expects($this->never())
-            ->method('startBatch');
+        $failingCall2->expects($this->once())
+            ->method('startBatch')
+            ->willReturn([
+                'status' => ['code' => 2, 'details' => 'Unavailable'],
+            ]);
 
         $calls = [
             1 => fn(): GrpcFuture => new GrpcFuture($failingCall1, RawGetResponse::class),
@@ -213,9 +249,11 @@ class BatchAsyncExecutorTest extends TestCase
             $this->fail('Expected BatchPartialFailureException');
         } catch (BatchPartialFailureException $e) {
             $errors = $e->getRegionErrors();
-            $this->assertCount(1, $errors); // Only first failure collected, second is cancelled
+            $this->assertCount(2, $errors);
             $this->assertArrayHasKey(1, $errors);
+            $this->assertArrayHasKey(2, $errors);
             $this->assertStringContainsString('Unavailable', $errors[1]->getMessage());
+            $this->assertStringContainsString('Unavailable', $errors[2]->getMessage());
             $this->assertSame(2, $e->getTotalRegions());
         }
     }
