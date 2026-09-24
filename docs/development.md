@@ -57,9 +57,11 @@ Main entry point. Located at `src/Client/RawKv/RawKvClient.php`.
 - Request routing
 
 **Key Methods:**
-- `executeWithRetry()` - Core retry loop
-- `groupKeysByRegion()` - Batch operation routing
-- `calculatePrefixEndKey()` - Prefix scan helper
+- `get()` / `put()` / `delete()` / … - Public operations, each building a `RetryExecutor` via `createRetryExecutor()` and delegating to a `RawKv*` collaborator
+
+The retry loop lives in `RetryExecutor::execute()` (`src/Client/Retry/RetryExecutor.php`). Batch routing and prefix scans are delegated to dedicated collaborators:
+- `RegionGrouper::groupKeysByRegion()` - Batch operation routing
+- `RawKvSplitter::calculatePrefixEndKey()` - Prefix scan helper
 
 ### PdClient
 
@@ -108,7 +110,7 @@ In-memory region metadata cache. Located at `src/Client/Cache/RegionCache.php`.
 Located in `src/Client/Retry/`.
 
 **BackoffType** (`BackoffType.php`):
-- Defines retry strategies — fourteen cases (see `docs/architecture.md`
+- Defines retry strategies — see `docs/architecture.md`
   for the full list with base/cap backoff values): `None`, `ServerBusy`,
   `StaleCmd`, `RegionMiss`, `TiKvRpc`, `NotLeader`, `DiskFull`,
   `RegionNotInitialized`, `ReadIndexNotReady`, `ProposalInMergingMode`,
@@ -164,31 +166,35 @@ Add public method:
 public function myOperation(string $key): MyResult
 {
     $this->ensureOpen();
-    
-    return $this->executeWithRetry($key, function () use ($key): MyResult {
-        $region = $this->getRegionInfo($key);
-        $address = $this->resolveStoreAddress($region->leaderStoreId);
-        
-        $request = new RawMyOperationRequest();
-        $request->setContext(RegionContext::fromRegionInfo($region));
-        $request->setKey($key);
-        
-        /** @var RawMyOperationResponse $response */
-        $response = $this->grpc->call(
-            $address,
-            'tikvpb.Tikv',
-            'RawMyOperation',
-            $request,
-            RawMyOperationResponse::class
-        );
-        
-        RegionErrorHandler::check($response);
-        
-        return new MyResult(
-            data: $response->getData(),
-            // ... map response fields
-        );
-    });
+
+    return $this->createRetryExecutor()->execute(
+        $key,
+        function () use ($key): MyResult {
+            $region = $this->regionResolver->getRegionInfo($key);
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+
+            $request = new RawMyOperationRequest();
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setKey($key);
+
+            /** @var RawMyOperationResponse $response */
+            $response = $this->grpc->call(
+                $address,
+                'tikvpb.Tikv',
+                'RawMyOperation',
+                $request,
+                RawMyOperationResponse::class,
+                $this->timeoutConfig->readTimeoutMs,
+            );
+
+            RegionErrorHandler::check($response);
+
+            return new MyResult(
+                data: $response->getData(),
+                // ... map response fields
+            );
+        }
+    );
 }
 ```
 

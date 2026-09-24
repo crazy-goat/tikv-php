@@ -263,7 +263,10 @@ use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 $txnClient = TxnKvClient::create(['127.0.0.1:2379']);
 
 try {
-    // Pessimistic transaction (default) — acquires locks on write
+    // Pessimistic transaction (default). Note: pessimistic locks are
+    // currently acquired in a single batch at commit() time
+    // (TwoPhaseCommitter::pessimisticLockBatch()), not at set()/delete()
+    // time, so conflicts surface when you call commit().
     $txn = $txnClient->begin(['pessimistic' => true]);
     
     // Optimistic transaction — locks only on commit
@@ -332,11 +335,20 @@ try {
 
 | Feature | Pessimistic | Optimistic |
 |---------|-----------|------------|
-| Lock timing | On write (`set`/`delete`) | On commit (prewrite) |
-| Conflicts | Detected early | Detected at commit |
+| Lock timing | On `commit()`, before prewrite | On `commit()`, at prewrite |
+| Conflicts | Reported by `commit()` | Reported by `commit()` |
 | Best for | High contention | Low contention |
 | Default lock TTL | 30 seconds | 3 seconds |
 | Use case | Financial transfers | Caching, config |
+
+> **Note:** In the current implementation both modes acquire locks at
+> `commit()` time — pessimistic mode locks all keys in a single batch before
+> the prewrite (`TwoPhaseCommitter::pessimisticLockBatch()`), so conflicts
+> surface when you call `commit()` in either mode. Pessimistic mode's
+> advantage is not earlier detection: it is deterministic conflict resolution
+> via TiKV's lock ordering (a lock request either gets the lock or waits on
+> the winner), which avoids the optimistic path's abort-and-retry on lock
+> conflicts under high contention.
 
 ## Next Steps
 
