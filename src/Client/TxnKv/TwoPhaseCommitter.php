@@ -550,6 +550,9 @@ final readonly class TwoPhaseCommitter
         $commitTs = $state->getCommitTs() ?? $this->pdClient->getTimestamp();
         $state->setCommitTs($commitTs);
 
+        // Primary commit failures are not retried here: transport failures
+        // leave the outcome undetermined, and post-commit-point errors must
+        // never trigger transaction rollback.
         $this->commitKeys($allKeys, $state, $retryExecutor, $classifier);
     }
 
@@ -896,10 +899,6 @@ final readonly class TwoPhaseCommitter
             if ($locked !== null) {
                 $rawPrimary = $locked->getPrimaryLock();
                 $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                // Reached from commit()'s prewrite loop, which now runs
-                // inside a RetryExecutor (issue #213, TXN-08): the executor's
-                // handleNotLeader() owns NotLeader drops, so a NotLeader
-                // surfaced by the resolve propagates and is retried.
                 $this->lockResolver->resolveLock($lockPrimary, $locked);
                 throw new TxnRetryableException(
                     'Lock conflict during prewrite, resolved - retry',
@@ -1473,6 +1472,8 @@ final readonly class TwoPhaseCommitter
         if ($locked !== null) {
             $rawPrimary = $locked->getPrimaryLock();
             $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
+            // Active locks propagate a retryable exception; after they expire,
+            // retry rollback so the rollback RPC can be attempted again.
             $this->lockResolver->resolveLock($lockPrimary, $locked);
             throw new TxnRetryableException(
                 'Lock encountered during rollback, resolved - retry',
@@ -1751,14 +1752,14 @@ final readonly class TwoPhaseCommitter
 
                         $needRetry = false;
                         $lastRegionError = null;
-
                         if ($regionError instanceof RegionException) {
+                            $lastRegionError = $regionError;
+                            $needRetry = true;
                             $this->logger->warning('Region error during pessimistic lock, retrying', [
                                 'regionId' => $region->regionId,
                                 'attempt' => $attempt,
                                 'error' => $regionError->getMessage(),
                             ]);
-                            $lastRegionError = $regionError;
                         } else {
                             $errors = $response->getErrors();
 
@@ -1773,26 +1774,20 @@ final readonly class TwoPhaseCommitter
                                     if ($locked !== null) {
                                         $rawPrimary = $locked->getPrimaryLock();
                                         $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                                        // Charge the whole resolve (status RPCs + TTL wait)
-                                        // to this loop's budget (issue #470): pass the
-                                        // remaining time so the lock wait is capped by it,
-                                        // then add the wall time actually spent back into
-                                        // $elapsedMs — the wait used to be invisible to
-                                        // the budget and could stretch it past maxBackoffMs.
-                                        $resolveStartMs = (int) (microtime(true) * 1000);
-                                        // min 1 ms: 0 would select LockResolver's legacy
-                                        // uncapped-by-deadline branch exactly when the
-                                        // budget is most exhausted (issue #470).
-                                        // No RetryExecutor wraps this loop, so the
-                                        // resolve must drop NotLeader regions itself
-                                        // (issue #474 review round 3).
-                                        $this->lockResolver->resolveLock(
-                                            $lockPrimary,
-                                            $locked,
-                                            max(1, $this->maxBackoffMs - $elapsedMs),
-                                            notLeaderOwnedByRetryExecutor: false,
-                                        );
-                                        $elapsedMs += max(0, (int) (microtime(true) * 1000) - $resolveStartMs);
+                                        // This per-region lock loop performs bounded retries;
+                                        // NotLeader handling remains local. A live lock is not
+                                        // resolved; retry the request within this loop.
+                                        try {
+                                            $this->lockResolver->resolveLock(
+                                                $lockPrimary,
+                                                $locked,
+                                                notLeaderOwnedByRetryExecutor: false,
+                                            );
+                                        } catch (TxnRetryableException $e) {
+                                            if ($e->backoffType !== BackoffType::TxnLock) {
+                                                throw $e;
+                                            }
+                                        }
                                         $needRetry = true;
                                         break;
                                     }

@@ -20,6 +20,8 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -320,43 +322,38 @@ class LockResolverTest extends TestCase
 
         $this->mockGrpcCallsAndCaptureResolve(
             $this->makeCheckTxnStatusResponse(commitVersion: 0),
-            $this->makeCheckTxnStatusResponse(commitVersion: 0),
         );
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
 
+        $this->assertCount(1, $this->checkTxnStatusRequests, 'expired status requires one check');
         $this->assertCount(1, $this->resolveLockRequests, 'exactly one KvResolveLock call');
         $request = $this->resolveLockRequests[0];
         $this->assertSame(0, (int) $request->getCommitVersion(), 'rolled-back lock must carry commitVersion 0');
         $this->assertSame(self::LOCK_TS, (int) $request->getStartVersion());
     }
 
-    public function testResolveLockWithActiveLockWaitsThenRollsBack(): void
+    public function testResolveLockWithActiveLockThrowsRetryableWithoutResolving(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->region);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
-
-        // First check: lock still active (TTL 60 ms) → sleep → second check
-        // reports commitVersion 0 → rollback.
         $this->mockGrpcCallsAndCaptureResolve(
-            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 60),
-            $this->makeCheckTxnStatusResponse(commitVersion: 0),
+            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 30000),
         );
 
         $resolver = $this->createResolver();
-        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
 
-        $this->assertCount(2, $this->checkTxnStatusRequests, 'exactly two KvCheckTxnStatus calls');
-        $this->assertCount(1, $this->resolveLockRequests, 'exactly one KvResolveLock call');
-        $this->assertSame([
-            'KvCheckTxnStatus',
-            'KvCheckTxnStatus',
-            'KvResolveLock',
-        ], $this->callSequence);
-        $request = $this->resolveLockRequests[0];
-        $this->assertSame(0, (int) $request->getCommitVersion(), 'active lock must be rolled back, not committed');
-        $this->assertSame(self::LOCK_TS, (int) $request->getStartVersion());
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected active lock to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+        }
+
+        $this->assertCount(1, $this->checkTxnStatusRequests, 'a live lock requires one status check');
+        $this->assertSame(['KvCheckTxnStatus'], $this->callSequence);
+        $this->assertSame([], $this->resolveLockRequests, 'a live transaction must never be rolled back');
     }
 
     public function testResolveLockWithLockActionImmediatelyRollsBack(): void
@@ -364,20 +361,18 @@ class LockResolverTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->region);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        // The first check already reports the lock expired (Action::TTLExpireRollback,
-        // lockTtl 0 so no sleep), but resolveLock() still runs a second check in the
-        // commitTs === 0 branch before rolling back: two checks, one rollback.
+        // TiKV reports that the lock has expired; a single status check is
+        // sufficient before issuing the rollback resolution.
         $this->mockGrpcCallsAndCaptureResolve(
-            $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
             $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
         );
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
 
-        $this->assertCount(2, $this->checkTxnStatusRequests, 'exactly two KvCheckTxnStatus calls');
+        $this->assertCount(1, $this->checkTxnStatusRequests, 'exactly one KvCheckTxnStatus call');
         $this->assertCount(1, $this->resolveLockRequests, 'exactly one KvResolveLock call');
-        $this->assertSame(['KvCheckTxnStatus', 'KvCheckTxnStatus', 'KvResolveLock'], $this->callSequence);
+        $this->assertSame(['KvCheckTxnStatus', 'KvResolveLock'], $this->callSequence);
         $request = $this->resolveLockRequests[0];
         $this->assertSame(0, (int) $request->getCommitVersion(), 'expired lock must be rolled back, not committed');
         $this->assertSame(self::LOCK_TS, (int) $request->getStartVersion());
@@ -602,79 +597,29 @@ class LockResolverTest extends TestCase
     }
 
     // ========================================================================
-    // resolveLock() — lock-TTL wait capped by remaining retry deadline (#470)
+    // resolveLock() — live locks delegate backoff to the retry executor (#206)
     // ========================================================================
 
-    public function testResolveLockCapsTtlWaitByRemainingDeadline(): void
+    public function testResolveLockDoesNotSleepForLiveLockRegardlessOfDeadline(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->region);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
-
-        // A 20 s TTL (== the default maxBackoffMs cap) with only 100 ms of
-        // remaining operation budget: the wait must be capped at ~100 ms.
-        $this->grpc->expects($this->exactly(3))
-            ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 20000),
-                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
-                new ResolveLockResponse(),
-            );
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 20000),
+        );
 
         $resolver = $this->createResolver();
-
         $startMs = microtime(true) * 1000;
-        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 100);
-        $elapsedMs = (microtime(true) * 1000) - $startMs;
 
-        // Well below even one ServerBusy backoff jitter step (~1-2 s), so a
-        // regression to the uncapped 20 s sleep fails this loudly.
-        $this->assertLessThan(2500, $elapsedMs, 'Lock TTL wait must be capped by the remaining deadline');
-    }
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 100);
+            $this->fail('Expected live lock to throw retryable exception');
+        } catch (TxnRetryableException) {
+            $elapsedMs = (microtime(true) * 1000) - $startMs;
+            $this->assertLessThan(1000, $elapsedMs, 'LockResolver must not sleep for the TTL');
+        }
 
-    public function testResolveLockWithZeroRemainingDeadlineKeepsLegacyWait(): void
-    {
-        $this->regionCache->method('getByKey')->willReturn($this->region);
-        $this->pdClient->method('getStore')->willReturn($this->makeStore());
-
-        $this->grpc->expects($this->exactly(3))
-            ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 60),
-                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
-                new ResolveLockResponse(),
-            );
-
-        $resolver = $this->createResolver();
-
-        $startMs = microtime(true) * 1000;
-        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
-        $elapsedMs = (microtime(true) * 1000) - $startMs;
-
-        // usleep guarantees at least the requested time; allow scheduler slack.
-        $this->assertGreaterThanOrEqual(40, $elapsedMs, 'Default (0) must keep the full TTL wait');
-        $this->assertLessThan(2000, $elapsedMs, 'Sanity: one short bounded sleep');
-    }
-
-    public function testResolveLockWithRemainingAboveTtlWaitsFullTtl(): void
-    {
-        $this->regionCache->method('getByKey')->willReturn($this->region);
-        $this->pdClient->method('getStore')->willReturn($this->makeStore());
-
-        $this->grpc->expects($this->exactly(3))
-            ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 60),
-                $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 0),
-                new ResolveLockResponse(),
-            );
-
-        $resolver = $this->createResolver();
-
-        $startMs = microtime(true) * 1000;
-        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 5000);
-        $elapsedMs = (microtime(true) * 1000) - $startMs;
-
-        $this->assertGreaterThanOrEqual(40, $elapsedMs, 'A deadline above the TTL must not shorten the wait');
-        $this->assertLessThan(2000, $elapsedMs);
+        $this->assertSame(['KvCheckTxnStatus'], $this->callSequence);
+        $this->assertSame([], $this->resolveLockRequests);
     }
 }
