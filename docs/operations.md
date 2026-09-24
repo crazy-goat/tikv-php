@@ -1004,12 +1004,12 @@ an empty array is a no-op.
 **Operational notes:**
 
 - The SwitchMode fan-out to all stores, the `RawWrite` stream and the `Ingest`
-  RPC each use the ingest gRPC deadline, fixed at **60 s**
-  (`TimeoutConfig::ingestTimeoutMs`, default `60000`). It is **not**
-  configurable through `RawKvClient::create()` `options['timeout']` — that
-  array only maps `readTimeoutMs`, `writeTimeoutMs`, `batchReadTimeoutMs`,
+  RPC each use the ingest gRPC deadline (`TimeoutConfig::ingestTimeoutMs`,
+  default `60000`), configurable through `RawKvClient::create()`
+  `options['timeout']['ingestTimeoutMs']` (alongside the
+  `readTimeoutMs`, `writeTimeoutMs`, `batchReadTimeoutMs`,
   `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs` and
-  `checksumTimeoutMs` keys.
+  `checksumTimeoutMs` keys).
 - Keys that cannot be resolved to a region (region lookup returned nothing for
   them) are **silently dropped** from the import — no error is raised. Verify
   the imported key count if completeness matters.

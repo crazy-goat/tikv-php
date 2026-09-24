@@ -8,6 +8,7 @@ use CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
+use CrazyGoat\Proto\Kvrpcpb\Context;
 use CrazyGoat\Proto\Kvrpcpb\Deadlock;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\Mutation;
@@ -161,6 +162,21 @@ final readonly class TwoPhaseCommitter
     public function getPriority(): int
     {
         return $this->priority;
+    }
+
+    /**
+     * Build the RPC context for a transaction request, carrying the
+     * transaction's priority (issue #441). Mirrors client-go's SetPriority:
+     * the value maps directly onto the Kvrpcpb CommandPri enum
+     * (Normal = 0, Low = 1, High = 2) and is applied to the transaction's
+     * prewrite, pessimistic-lock and commit RPCs.
+     */
+    private function buildContext(RegionInfo $region): Context
+    {
+        $context = RegionContextFactory::fromRegionInfo($region);
+        $context->setPriority($this->priority);
+
+        return $context;
     }
 
     private function nowMs(): int
@@ -564,7 +580,7 @@ final readonly class TwoPhaseCommitter
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new PrewriteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+        $request->setContext($this->buildContext($region));
         $request->setMutations($mutations);
         $request->setPrimaryLock($primary);
         $request->setStartVersion($this->startTs);
@@ -877,7 +893,7 @@ final readonly class TwoPhaseCommitter
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new CommitRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+        $request->setContext($this->buildContext($region));
         $request->setStartVersion($this->startTs);
         $request->setKeys($keys);
         $request->setCommitVersion($commitTs);
@@ -1157,7 +1173,7 @@ final readonly class TwoPhaseCommitter
                     $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                     $request = new PessimisticLockRequest();
-                    $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                    $request->setContext($this->buildContext($region));
                     $request->setMutations($mutations);
                     $request->setPrimaryLock($primary);
                     $request->setStartVersion($this->startTs);

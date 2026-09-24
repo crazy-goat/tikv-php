@@ -137,6 +137,37 @@ class ConnectionFactoryTest extends TestCase
         );
     }
 
+    // ========================================================================
+    // options['timeout']['ingestTimeoutMs'] — SST ingest deadline (issue #185 row 5)
+    // ========================================================================
+
+    public function testTimeoutIngestTimeoutMsDefaultsToTimeoutConfigDefault(): void
+    {
+        $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
+
+        $this->assertSame(60000, $bundle->timeoutConfig->ingestTimeoutMs);
+    }
+
+    public function testTimeoutIngestTimeoutMsIsThreadedThrough(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['ingestTimeoutMs' => 45000]],
+        );
+
+        $this->assertSame(45000, $bundle->timeoutConfig->ingestTimeoutMs);
+    }
+
+    public function testTimeoutIngestTimeoutMsNonIntFallsBackToDefault(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['ingestTimeoutMs' => '45000']],
+        );
+
+        $this->assertSame(60000, $bundle->timeoutConfig->ingestTimeoutMs);
+    }
+
     /**
      * @param string[] $pdEndpoints
      * @param array<string, mixed> $options
