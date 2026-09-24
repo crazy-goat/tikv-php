@@ -431,4 +431,28 @@ class BatchAsyncExecutorTest extends TestCase
         $this->expectException(BatchDeadlineExceededException::class);
         $executor->executeParallel($calls, deadlineMs: 10);
     }
+
+    /**
+     * The capped/windowed executor must thread the deadline into every
+     * window (issue #185 row 6): with maxConcurrency 1 each callable is its
+     * own window, so the slow first dispatch exhausts the deadline and the
+     * second window must throw. Uses only plain-value callables, so it runs
+     * without ext-grpc.
+     */
+    public function testDeadlineExceededThroughExecuteParallelCapped(): void
+    {
+        $executor = new BatchAsyncExecutor(new NullLogger());
+
+        $calls = [
+            1 => function (): int {
+                usleep(20_000); // 20 ms of dispatch work
+
+                return 1;
+            },
+            2 => fn(): int => 2,
+        ];
+
+        $this->expectException(BatchDeadlineExceededException::class);
+        $executor->executeParallelCapped($calls, maxConcurrency: 1, deadlineMs: 10);
+    }
 }

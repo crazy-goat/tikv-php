@@ -165,7 +165,11 @@ final readonly class SstIngestor
         }
 
         try {
-            $this->createBatchExecutor()->executeParallelCapped($calls, $this->maxConcurrency);
+            $this->createBatchExecutor()->executeParallelCapped(
+                $calls,
+                $this->maxConcurrency,
+                $this->timeoutConfig->batchDeadlineMs,
+            );
         } catch (BatchPartialFailureException $e) {
             foreach ($e->getRegionErrors() as $storeId => $error) {
                 $this->logger->error('Failed to switch store to ' . $modeName . ' mode', [
