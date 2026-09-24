@@ -320,7 +320,6 @@ final class TxnKvClient
             $this->pdClient,
             $startTs,
             timeoutConfig: $this->timeoutConfig,
-            maxBackoffMs: $this->maxBackoffMs,
             logger: $this->logger,
         );
 

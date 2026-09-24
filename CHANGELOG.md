@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Lock resolution no longer rolls back a transaction while its lock TTL is still active; live locks trigger bounded retry backoff, and rollback resolution only proceeds after TiKV reports expiry. (#206)
+
+### Fixed
+
 - Commit-phase `KeyError` variants other than explicitly handled `retryable` and `abort` now fail closed with a `TiKvException` instead of silently marking the transaction committed. (#212)
 
 ## [v0.6.0] — 2026-09-24

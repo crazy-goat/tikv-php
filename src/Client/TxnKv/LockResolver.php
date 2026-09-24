@@ -22,6 +22,8 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -35,23 +37,22 @@ final readonly class LockResolver
         private PdClientInterface $pdClient,
         private int $callerStartTs,
         private TimeoutConfig $timeoutConfig = new TimeoutConfig(),
-        private int $maxBackoffMs = 20000,
         private LoggerInterface $logger = new NullLogger(),
     ) {
     }
 
     /**
      * Resolve a lock by checking the transaction's status and either
-     * committing it (if committed elsewhere) or rolling it back.
+     * committing it (if committed elsewhere), rolling it back after expiry,
+     * or throwing a retryable exception while the lock is still alive.
      *
      * @param string $primaryLock The primary key of the transaction (from LockInfo::getPrimaryLock()).
      *                            If the lock has no primary info (e.g. pessimistic), pass the locked key itself.
      * @param LockInfo $lock The lock information from the error response.
      * @param int $remainingDeadlineMs Remaining wall-clock budget (ms) of the calling
-     *                                 operation's retry deadline. When > 0, the lock-TTL
-     *                                 wait is capped by it so a single lock encounter
-     *                                 cannot push the operation past its deadline
-     *                                 (issue #470); 0 keeps the legacy maxBackoffMs-only cap.
+     *                                 operation's retry deadline. Retained for API
+     *                                 compatibility; lock wait/backoff is owned by the
+     *                                 caller's RetryExecutor (issue #206).
      * @param bool $notLeaderOwnedByRetryExecutor Whether a RetryExecutor owns NotLeader
      *                                            handling around this resolveLock() call
      *                                            (see RegionErrorHandler::check()). Call
@@ -106,27 +107,23 @@ final readonly class LockResolver
 
             $ttl = $status['lockTtl'] ?? 0;
             if ($ttl > 0) {
-                // The wait used to be charged to no budget (issue #470): cap
-                // it by the caller's remaining retry deadline when provided.
-                $deadlineCap = $remainingDeadlineMs > 0 ? $remainingDeadlineMs : $this->maxBackoffMs;
-                $sleepMs = min($ttl, $deadlineCap);
-                $this->logger->debug('Lock still active, waiting', [
+                // Do not sleep here or resolve a still-live transaction's lock.
+                // The caller's RetryExecutor owns bounded backoff and will
+                // retry the original operation (issue #206).
+                $this->logger->debug('Lock still active, retrying operation', [
                     'key' => KeyRedactor::redact((string) $lock->getKey()),
                     'ttl' => $ttl,
-                    'sleepMs' => $sleepMs,
                     'remainingDeadlineMs' => $remainingDeadlineMs,
                 ]);
-                usleep($sleepMs * 1000);
+                throw new TxnRetryableException(
+                    'Lock is still active; retrying operation',
+                    BackoffType::TxnLock,
+                );
             }
 
-            $status = $this->checkTxnStatus($primaryLock, $lockTs, $notLeaderOwnedByRetryExecutor);
-            $commitTs = $status['commitTs'] ?? null;
-
-            if ($commitTs !== null && $commitTs > 0) {
-                $this->resolveLockCommitted($lock, $lockTs, $commitTs);
-            } else {
-                $this->resolveLockRolledBack($lock, $lockTs);
-            }
+            // The status check reported no commit and no live lock, so TiKV
+            // has expired or rolled back the transaction and resolution is safe.
+            $this->resolveLockRolledBack($lock, $lockTs);
         } else {
             $this->resolveLockRolledBack($lock, $lockTs);
         }
