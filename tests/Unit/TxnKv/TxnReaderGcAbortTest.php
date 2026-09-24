@@ -223,10 +223,10 @@ final class TxnReaderGcAbortTest extends TestCase
 
     public function testBatchGetThrowsTypedGcExceptionOnAbort(): void
     {
-        // batchGet() is reached without a RetryExecutor owner, so the GC
-        // abort must be thrown from TxnReader itself. Without handling, an
-        // aborted region's keys silently resolved to null AND were cached
-        // into the transaction's read set.
+        // The retry executor owns transient batch-read errors, but GC aborts
+        // are terminal and must be thrown from TxnReader itself. Without
+        // handling, an aborted region's keys silently resolved to null AND
+        // were cached into the transaction's read set.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
         $response = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();

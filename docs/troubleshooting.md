@@ -525,7 +525,7 @@ allowed to see it.
 ```
 TxnRetryableException: Lock encountered, resolved - retry
 ```
-Other real messages follow the same pattern: `Lock conflict during prewrite, resolved - retry`, `Lock encountered during scan, resolved - retry`, `Lock encountered during rollback, resolved - retry`, `Retryable error during rollback: <server string>`.
+Other real messages follow the same pattern: `Lock conflict during prewrite, resolved - retry`, `Lock encountered during BatchGet, resolved - retry`, `Lock encountered during Scan, resolved - retry`, `Lock encountered during rollback, resolved - retry`, `Retryable error during rollback: <server string>`.
 
 **What it means:** The operation hit another transaction's lock, resolved it
 (checking expiry / pushing forward), and expects the caller's retry loop to
