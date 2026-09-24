@@ -7,12 +7,14 @@ namespace CrazyGoat\TiKV\Client\Exception;
 final class BatchPartialFailureException extends TiKvException
 {
     /**
-     * @param array<int, TiKvException> $regionErrors regionId => exception
-     * @param int $totalRegions Total number of regions in batch
+     * @param array<int, TiKvException> $regionErrors call index => exception
+     * @param int $totalRegions Total number of calls in the batch
+     * @param array<int, mixed> $partialResults Successful region results keyed by call index
      */
     public function __construct(
         private readonly array $regionErrors,
         private readonly int $totalRegions,
+        private readonly array $partialResults = [],
     ) {
         /** @var TiKvException|false $firstError */
         $firstError = $regionErrors === []
@@ -29,7 +31,7 @@ final class BatchPartialFailureException extends TiKvException
     }
 
     /**
-     * The error of the minimum region index — the first error the
+     * The error of the minimum call index — the first error the
      * sequential loop would have thrown.
      *
      * Call sites that fan out per-region RPCs but must preserve the
@@ -69,5 +71,16 @@ final class BatchPartialFailureException extends TiKvException
     public function getTotalRegions(): int
     {
         return $this->totalRegions;
+    }
+
+    /**
+     * Results from regions/sub-batches that completed successfully.
+     * Callers can use these to make progress or report partial completion.
+     *
+     * @return array<int, mixed>
+     */
+    public function getPartialResults(): array
+    {
+        return $this->partialResults;
     }
 }

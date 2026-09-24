@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- RawKV batch failures now preserve successful sub-batch results in `BatchPartialFailureException::getPartialResults()` and wait for every in-flight request before reporting partial failure, instead of discarding successes after the first response error. (#262)
 - Transactional `scan()` now resolves per-pair locks and retries the region scan instead of returning a truncated range with an empty-key row. Other per-pair `KeyError` variants fail closed. (#211)
 - Transactional `batchGet()` now resolves per-pair locks and retries the regional read; response-level and other per-pair `KeyError` variants fail as exceptions instead of being returned as missing values. (#210)
 - Pessimistic transactions retain per-key read timestamps and perform a prewrite constraint check, so an intervening commit is reported as a conflict instead of silently overwriting a read-modify-write update. (#209)

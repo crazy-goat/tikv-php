@@ -40,14 +40,15 @@ final readonly class BatchAsyncExecutor
      *   - Wait phase: each value is awaited in declaration order and results
      *     collected. Because every send has already been issued, server-side
      *     latencies for distinct regions overlap with each other.
-     *   - Cancel phase: on the first wait-phase failure, the loop short-
-     *     circuits and every still-unfinished future is cancelled to avoid
-     *     leaking completion-queue/channel resources.
+     *   - Partial failures: TiKvException failures are accumulated while the
+     *     executor continues awaiting the other dispatched calls. The final
+     *     {@see BatchPartialFailureException} carries both the failures and
+     *     results from successful calls. Deadline and unexpected throwable
+     *     exits still cancel unfinished futures.
      *
-     * Errors raised during the dispatch phase are accumulated; on the first
-     * wait-phase failure the executor stops awaiting further callables;
-     * either kind of failure is reported via
-     * {@see BatchPartialFailureException}.
+     * Errors raised during dispatch and wait phases are accumulated and
+     * reported via {@see BatchPartialFailureException} after all calls have
+     * been observed.
      *
      * @param array<int, callable(): mixed> $regionCalls regionId => callable
      *                                                   returning GrpcFuture,
@@ -140,10 +141,9 @@ final readonly class BatchAsyncExecutor
                         'regionId' => $regionId,
                         'error' => $e->getMessage(),
                     ]);
-                    // Cancel any remaining un-waited futures so their pending
-                    // gRPC calls do not leak completion-queue/channel resources.
-                    $this->cancelAll($futures);
-                    break;
+                    // Continue awaiting other in-flight calls so the partial
+                    // failure can report every success and every failed
+                    // sub-batch instead of discarding completed work.
                 }
             }
         } catch (\Throwable $e) {
@@ -157,7 +157,7 @@ final readonly class BatchAsyncExecutor
         }
 
         if ($errors !== []) {
-            throw new BatchPartialFailureException($errors, $totalRegions);
+            throw new BatchPartialFailureException($errors, $totalRegions, $results);
         }
 
         $this->logger->debug('Parallel batch execution completed', [
