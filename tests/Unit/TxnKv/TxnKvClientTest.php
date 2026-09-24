@@ -8,6 +8,7 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
@@ -30,6 +31,30 @@ class TxnKvClientTest extends TestCase
         $client = new TxnKvClient($pdClient, $grpc);
 
         $this->assertInstanceOf(TxnKvClient::class, $client);
+    }
+
+    public function testGetMetricsReturnsInjectedInstance(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $client = new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+            metrics: $metrics,
+        );
+
+        $this->assertSame($metrics, $client->getMetrics());
+    }
+
+    public function testCreatePassesMetricsOptionToClient(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $client = TxnKvClient::create(
+            ['pd:2379'],
+            options: ['metrics' => $metrics],
+        );
+
+        $this->assertSame($metrics, $client->getMetrics());
+        $client->close();
     }
 
     public function testCloseThrowsOnBeginAfterClose(): void

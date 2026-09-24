@@ -778,10 +778,10 @@ final class PrometheusMetrics implements MetricsInterface
             ->observe($durationMs, ['operation' => $operation, 'success' => $success ? '1' : '0']);
     }
 
-    public function retryAttempted(string $operation): void
+    public function retryAttempted(string $backoffType): void
     {
-        $this->counter('retries_total', 'Retryable errors retried', ['operation'])
-            ->inc(['operation' => $operation]);
+        $this->counter('retries_total', 'Retryable errors retried', ['backoff_type'])
+            ->inc(['backoff_type' => $backoffType]);
     }
 
     public function regionCacheHit(string $operation): void
@@ -834,8 +834,8 @@ $metrics = new InMemoryMetrics();
 $client = RawKvClient::create(pdEndpoints: ['127.0.0.1:2379'], options: ['metrics' => $metrics]);
 // ... run operations ...
 
-echo $metrics->getMeanLatencyMs('get');   // mean latency of completed get() RPCs
-echo $metrics->getRetries('scan');        // retries observed for scan operations
+echo $metrics->getMeanLatencyMs('tikvpb.Tikv/RawGet'); // mean latency of completed RawGet RPCs
+echo $metrics->getRetries('NotLeader');                 // retries tagged with the backoff type
 ```
 
 ### Health Checks

@@ -1063,11 +1063,15 @@ The library emits the following counter tags:
 | `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
 | `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader region error (`RegionErrorHandler`), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on other retryable errors, or post-resolve cleanup in `LockResolver`. Invalidating an ID that is not cached emits nothing. |
 
-Reasons are mutually exclusive per drop; a NotLeader response whose hinted
+Reasons are mutually exclusive per drop; the current source emits
+`'region_error'`, `'not_leader'`, `'retry_region_error'`, and `'lock_resolve'`
+when those paths actually remove a region. A NotLeader response whose hinted
 peer is still valid only switches the cached leader and emits nothing.
-NotLeader drops are owned exclusively by the retry loop's leader handling —
-`RegionErrorHandler::check()` deliberately leaves a NotLeader region cached
-so that handler can switch-or-drop it.
+At executor-owned call sites, NotLeader drops are owned exclusively by the
+retry loop's leader handling: `RegionErrorHandler::check()` leaves the region
+cached so it can switch to a valid hint. Call sites without a surrounding
+retry executor pass `notLeaderOwnedByRetryExecutor: false` and self-invalidate
+with the same `'not_leader'` reason.
 
 `InMemoryMetrics` ships the same counters in-process, suitable for tests
 and benchmarks — see `getRpcStarted()`, `getRpcSucceeded()`, `getRetries()`,

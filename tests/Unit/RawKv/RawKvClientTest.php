@@ -227,15 +227,13 @@ class RawKvClientTest extends TestCase
     public function testCreateAcceptsMetricsOption(): void
     {
         $metrics = new InMemoryMetrics();
-        // The create() factory requires real gRPC; we use mocking via the constructor instead.
-        $client = new RawKvClient(
-            $this->createMock(PdClientInterface::class),
-            $this->createMock(GrpcClientInterface::class),
-            $this->createMock(RegionCacheInterface::class),
-            metrics: $metrics,
+        $client = RawKvClient::create(
+            ['pd:2379'],
+            options: ['metrics' => $metrics],
         );
 
         $this->assertSame($metrics, $client->getMetrics());
+        $client->close();
     }
 
     // ========================================================================

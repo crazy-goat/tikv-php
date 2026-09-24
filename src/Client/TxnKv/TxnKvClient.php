@@ -114,7 +114,6 @@ final class TxnKvClient
 
     private bool $closed = false;
     private readonly RegionResolver $regionResolver;
-    private readonly MetricsInterface $metrics;
     /** Wall-clock deadline (ms) handed to every Transaction this client begins. */
     private readonly int $retryDeadlineMs;
     /** Per-instance default service ID for service safe-point registrations. */
@@ -156,6 +155,7 @@ final class TxnKvClient
             retryDeadlineMs: self::resolveRetryDeadline($options),
             safePointCache: $safePointCache,
             replicaReadPolicy: self::resolveReplicaReadPolicy($options),
+            metrics: $bundle->metrics,
         );
     }
 
@@ -180,13 +180,14 @@ final class TxnKvClient
         private readonly ?SafePointCache $safePointCache = null,
         /** Read preference applied to every transaction's reads (issue #421). */
         private readonly ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
+        /** Metrics backend used by region resolution, retries, and transactions. */
+        private readonly MetricsInterface $metrics = new NoOpMetrics(),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->serviceId = self::SERVICE_ID_PREFIX . '-' . substr(md5(uniqid('svc', true)), 0, 8);
-        $this->metrics = new NoOpMetrics();
         if ($this->regionCache instanceof RegionCache) {
             // Issue #474: regionInvalidated() is emitted from inside
             // RegionCache::invalidate() — give a user-supplied RegionCache

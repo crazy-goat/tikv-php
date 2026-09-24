@@ -412,14 +412,17 @@ Issue #474 (regionInvalidated()) settled three rules worth reusing:
    mutator: `attachMetricsIfAbsent()` assigns only when the backend is null;
    client constructors call it on the promoted readonly property — mutation,
    not rebinding.
-3. **One sole owner per metric reason.** NotLeader region errors flow through
-   BOTH RegionErrorHandler::check() and RetryExecutor::handleNotLeader(); if
-   both invalidate, each attempt double-counts and — worse — check() drops the
-   region before handleNotLeader can switchLeader() to a still-valid hint.
-   check() now skips NotLeader oneofs entirely; handleNotLeader is the only
-   code path that invalidates with 'not_leader'. Gate any choke-point emission
-   on an actual state change (`removeById(): bool`) so retry storms count one
-   real drop instead of one per attempt.
+3. **One sole owner per metric reason per call site.** At executor-owned
+   sites, NotLeader region errors flow through BOTH
+   `RegionErrorHandler::check()` and `RetryExecutor::handleNotLeader()`; if
+   both invalidate, each attempt double-counts and — worse — check() drops
+   the region before handleNotLeader can switchLeader() to a still-valid
+   hint. `check()` therefore skips NotLeader oneofs there, while
+   `handleNotLeader()` owns the actual drop. Non-executor call sites pass
+   `notLeaderOwnedByRetryExecutor: false` and self-invalidate with
+   `'not_leader'` instead. Gate any choke-point emission on an actual state
+   change (`removeById(): bool`) so retry storms count one real drop instead of
+   one per attempt.
 
 ## Wrapping a formerly-direct call site in RetryExecutor flips its NotLeader ownership — and mocks must answer getByKey()
 

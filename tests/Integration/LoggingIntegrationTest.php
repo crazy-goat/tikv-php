@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Integration;
 
+use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
@@ -15,9 +16,11 @@ use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Google\Protobuf\Internal\Message;
 use Monolog\Handler\TestHandler;
@@ -102,7 +105,15 @@ class LoggingIntegrationTest extends TestCase
     public function testRetryLogsWarningWithMonolog(): void
     {
         $cache = new RegionCache(logger: $this->logger);
-        $client = new RawKvClient($this->pdClient, $this->grpc, $cache, 20000, $this->logger);
+        $metrics = new InMemoryMetrics();
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $cache,
+            20000,
+            $this->logger,
+            metrics: $metrics,
+        );
 
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
@@ -120,14 +131,53 @@ class LoggingIntegrationTest extends TestCase
         $result = $client->get('retrykey');
 
         $this->assertSame('recovered', $result);
+        $this->assertGreaterThan(0, $metrics->getCacheMisses('region_resolution'));
+        $this->assertGreaterThan(0, $metrics->getRetries('EpochNotMatch'));
         $this->assertTrue($this->testHandler->hasWarningThatContains('Retrying operation'));
         $this->assertTrue($this->testHandler->hasInfoThatContains('Invalidated region on retry'));
+    }
+
+    public function testTxnRetryMetricsAreInjected(): void
+    {
+        $this->pdClient->method('getTimestamp')->willReturn(1000);
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new GetResponse();
+        $response->setValue('transaction-value');
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new TiKvException('EpochNotMatch')),
+                $response,
+            );
+
+        $metrics = new InMemoryMetrics();
+        $client = new TxnKvClient(
+            $this->pdClient,
+            $this->grpc,
+            metrics: $metrics,
+        );
+        $txn = $client->begin(['pessimistic' => false]);
+
+        $this->assertSame('transaction-value', $txn->get('txn-metric-key'));
+        $this->assertGreaterThan(0, $metrics->getCacheMisses('region_resolution'));
+        $this->assertGreaterThan(0, $metrics->getRetries('EpochNotMatch'));
+        $txn->rollback();
     }
 
     public function testScanLogsRetryWarning(): void
     {
         $cache = new RegionCache(logger: $this->logger);
-        $client = new RawKvClient($this->pdClient, $this->grpc, $cache, 20000, $this->logger);
+        $metrics = new InMemoryMetrics();
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $cache,
+            20000,
+            $this->logger,
+            metrics: $metrics,
+        );
 
         $region = $this->defaultRegion();
         $this->pdClient->method('scanRegions')->willReturn([$region]);
@@ -151,6 +201,8 @@ class LoggingIntegrationTest extends TestCase
 
         $this->assertCount(1, $result);
         $this->assertSame('found', $result[0]['key']);
+        $this->assertGreaterThan(0, $metrics->getCacheMisses('region_resolution'));
+        $this->assertGreaterThan(0, $metrics->getRetries('EpochNotMatch'));
         $this->assertTrue($this->testHandler->hasWarningThatContains('Retrying operation'));
     }
 
@@ -161,7 +213,15 @@ class LoggingIntegrationTest extends TestCase
         }
 
         $cache = new RegionCache(logger: $this->logger);
-        $client = new RawKvClient($this->pdClient, $this->grpc, $cache, 20000, $this->logger);
+        $metrics = new InMemoryMetrics();
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $cache,
+            20000,
+            $this->logger,
+            metrics: $metrics,
+        );
 
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
@@ -189,6 +249,7 @@ class LoggingIntegrationTest extends TestCase
 
         $client->deleteRange('a', 'z');
 
+        $this->assertGreaterThan(0, $metrics->getRetries('EpochNotMatch'));
         $this->assertTrue($this->testHandler->hasWarningThatContains('Retrying operation'));
     }
 
