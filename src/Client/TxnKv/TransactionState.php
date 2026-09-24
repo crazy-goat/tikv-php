@@ -182,7 +182,14 @@ final class TransactionState
 
     public function addPendingLockKey(string $key): void
     {
-        $this->pendingLockKeys[] = $key;
+        if (!in_array($key, $this->pendingLockKeys, true)) {
+            $this->pendingLockKeys[] = $key;
+        }
+    }
+
+    public function hasPendingLockKey(string $key): bool
+    {
+        return in_array($key, $this->pendingLockKeys, true);
     }
 
     public function clearPendingLockKeys(): void

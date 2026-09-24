@@ -10,7 +10,9 @@ use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\PessimisticAction;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
@@ -170,6 +172,62 @@ class OnePhaseAsyncCommitTest extends TestCase
         $this->assertTrue($this->prewriteRequests[0]->getTryOnePc());
         $this->assertFalse($this->prewriteRequests[0]->getUseAsyncCommit());
         $this->assertSame(self::START_TS + 1, (int) $this->prewriteRequests[0]->getMinCommitTs());
+    }
+
+    public function testPessimisticPrewriteDefersConstraintCheckForBufferedWrites(): void
+    {
+        $this->stubRegionLookup([$this->makeRegion(1, '', '')]);
+
+        $response = new PrewriteResponse();
+        $this->pdClient->method('getTimestamp')->willReturnOnConsecutiveCalls(1200, 1400);
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+            ?object $request = null,
+        ) use ($response): object {
+            if ($request instanceof PessimisticLockRequest) {
+                return new \CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse();
+            }
+            if ($request instanceof PrewriteRequest) {
+                $this->prewriteRequests[] = $request;
+            }
+            return match ($method) {
+                'KvPrewrite' => $response,
+                'KvCommit' => new CommitResponse(),
+                'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            };
+        });
+
+        $txn = new Transaction(
+            txnId: 'test-txn-pessimistic-constraint',
+            startTs: self::START_TS,
+            pessimistic: true,
+            priority: 0,
+            pdClient: $this->pdClient,
+            grpc: $this->grpc,
+            regionCache: $this->regionCache,
+            lockResolver: new LockResolver(
+                $this->grpc,
+                $this->regionResolver,
+                $this->regionCache,
+                $this->pdClient,
+                self::START_TS,
+            ),
+            regionResolver: $this->regionResolver,
+        );
+
+        $txn->set('k1', 'stale-value');
+        $txn->commit();
+
+        self::assertCount(1, $this->prewriteRequests);
+        self::assertSame(
+            [PessimisticAction::DO_CONSTRAINT_CHECK],
+            iterator_to_array($this->prewriteRequests[0]->getPessimisticActions()),
+        );
+        self::assertSame(1200, (int) $this->prewriteRequests[0]->getForUpdateTs());
+        self::assertSame(TransactionStatus::Committed, $txn->getStatus());
     }
 
     public function testOnePhaseCommitDeclinedFallsBackToTwoPhase(): void

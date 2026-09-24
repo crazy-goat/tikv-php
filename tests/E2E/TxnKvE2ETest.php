@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use PHPUnit\Framework\TestCase;
@@ -399,6 +400,37 @@ class TxnKvE2ETest extends TestCase
         $readTxn = $this->testClient->begin(['pessimistic' => false]);
         $this->assertSame('pessimistic-value', $readTxn->get($key));
         $readTxn->rollback();
+    }
+
+    public function testPessimisticReadModifyWriteDetectsInterveningCommit(): void
+    {
+        $key = $this->uniqueKey('txn-pess-rmw-conflict');
+        $this->keysToCleanup[] = $key;
+
+        $setup = $this->testClient->begin(['pessimistic' => false]);
+        $setup->set($key, '0');
+        $setup->commit();
+
+        $staleWriter = $this->testClient->begin(['pessimistic' => true]);
+        $staleValue = (int) $staleWriter->get($key);
+
+        $concurrentWriter = $this->testClient->begin(['pessimistic' => true]);
+        $concurrentValue = (int) $concurrentWriter->get($key);
+        $concurrentWriter->set($key, (string) ($concurrentValue + 1));
+        $concurrentWriter->commit();
+
+        $staleWriter->set($key, (string) ($staleValue + 1));
+        try {
+            $staleWriter->commit();
+            $this->fail('A stale pessimistic read-modify-write must conflict');
+        } catch (TransactionConflictException) {
+            $this->assertSame(TransactionStatus::Active, $staleWriter->getStatus());
+        }
+        $staleWriter->rollback();
+
+        $verify = $this->testClient->begin(['pessimistic' => false]);
+        $this->assertSame('1', $verify->get($key));
+        $verify->rollback();
     }
 
     public function testPessimisticRollback(): void

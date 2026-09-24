@@ -91,6 +91,8 @@ final class Transaction
         private readonly bool $enable1Pc = false,
         /** Whether this transaction may use async commit (issue #419). */
         private readonly bool $enableAsyncCommit = false,
+        /** @var array<string, int> TSO reads used by pessimistic read-modify-write keys. */
+        private array $readTsByKey = [],
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -191,6 +193,10 @@ final class Transaction
     {
         $this->state->ensureActive();
 
+        if ($this->pessimistic && !$this->state->hasWriteSetKey($key)) {
+            $this->readTsByKey[$key] = $this->pdClient->getTimestamp();
+        }
+
         return $this->reader->get(
             $key,
             $this->state,
@@ -215,6 +221,13 @@ final class Transaction
     {
         $this->state->ensureActive();
 
+        if ($this->pessimistic && $keys !== []) {
+            $timestamp = $this->pdClient->getTimestamp();
+            foreach ($keys as $key) {
+                $this->readTsByKey[(string) $key] = $timestamp;
+            }
+        }
+
         return $this->reader->batchGet(
             $keys,
             $this->state,
@@ -235,6 +248,13 @@ final class Transaction
     {
         $this->state->ensureActive();
 
+        if ($this->pessimistic) {
+            $timestamp = $this->pdClient->getTimestamp();
+            foreach ($this->state->getWriteKeys() as $key) {
+                $this->readTsByKey[$key] ??= $timestamp;
+            }
+        }
+
         return $this->reader->scan(
             $startKey,
             $endKey,
@@ -252,6 +272,7 @@ final class Transaction
 
     /**
      * @throws InvalidStateException
+     * @throws TiKvException if the pessimistic transaction cannot obtain a write timestamp
      */
     public function set(string $key, string $value): void
     {
@@ -259,6 +280,10 @@ final class Transaction
 
         if ($this->pessimistic) {
             $this->state->addPendingLockKey($key);
+            $this->state->updateMaxForUpdateTs(
+                $this->readTsByKey[$key] ?? $this->pdClient->getTimestamp(),
+            );
+            unset($this->readTsByKey[$key]);
         }
 
         $this->state->setWrite($key, $value);
@@ -266,6 +291,7 @@ final class Transaction
 
     /**
      * @throws InvalidStateException
+     * @throws TiKvException if the pessimistic transaction cannot obtain a write timestamp
      */
     public function delete(string $key): void
     {
@@ -273,6 +299,10 @@ final class Transaction
 
         if ($this->pessimistic) {
             $this->state->addPendingLockKey($key);
+            $this->state->updateMaxForUpdateTs(
+                $this->readTsByKey[$key] ?? $this->pdClient->getTimestamp(),
+            );
+            unset($this->readTsByKey[$key]);
         }
 
         $this->state->setWrite($key, null);

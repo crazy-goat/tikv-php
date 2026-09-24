@@ -263,10 +263,10 @@ use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 $txnClient = TxnKvClient::create(['127.0.0.1:2379']);
 
 try {
-    // Pessimistic transaction (default). Note: pessimistic locks are
-    // currently acquired in a single batch at commit() time
-    // (TwoPhaseCommitter::pessimisticLockBatch()), not at set()/delete()
-    // time, so conflicts surface when you call commit().
+    // Pessimistic transaction (default). Writes remain buffered until commit,
+    // but the timestamp of the preceding read (or write, if there was no read)
+    // is retained and checked by TiKV at lock/prewrite time. An intervening
+    // commit is reported as a conflict instead of being silently overwritten.
     $txn = $txnClient->begin(['pessimistic' => true]);
     
     // Optimistic transaction — locks only on commit
@@ -335,20 +335,23 @@ try {
 
 | Feature | Pessimistic | Optimistic |
 |---------|-----------|------------|
-| Lock timing | On `commit()`, before prewrite | On `commit()`, at prewrite |
+| Lock timing | Physical lock on `commit()`; conflict timestamp captured at read/write | Constraint check at prewrite |
 | Conflicts | Reported by `commit()` | Reported by `commit()` |
 | Best for | High contention | Low contention |
 | Default lock TTL | 30 seconds | 3 seconds |
 | Use case | Financial transfers | Caching, config |
 
-> **Note:** In the current implementation both modes acquire locks at
-> `commit()` time — pessimistic mode locks all keys in a single batch before
-> the prewrite (`TwoPhaseCommitter::pessimisticLockBatch()`), so conflicts
-> surface when you call `commit()` in either mode. Pessimistic mode's
-> advantage is not earlier detection: it is deterministic conflict resolution
-> via TiKV's lock ordering (a lock request either gets the lock or waits on
-> the winner), which avoids the optimistic path's abort-and-retry on lock
-> conflicts under high contention.
+> **Note:** writes are still buffered and physical pessimistic locks are
+> acquired in a batch by `commit()`. For read-modify-write safety, the client
+> captures a per-key `for_update_ts` when a pessimistic read occurs and
+> carries it through the corresponding write; if another transaction commits after that read, TiKV
+> rejects the lock/prewrite instead of allowing a lost update. Writes with no
+> preceding read use a timestamp captured when the write is staged. The client
+> also requests `DO_CONSTRAINT_CHECK` during prewrite for deferred keys, which
+> makes TiKV check for writes newer than the transaction's start timestamp.
+> Conflicts therefore still surface at `commit()` (there is no early lock RPC
+> from `set()`/`delete()`); callers should treat a conflict as a failed
+> transaction and retry the full read-modify-write operation.
 
 ## Next Steps
 
