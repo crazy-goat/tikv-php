@@ -31,6 +31,8 @@ use PHPUnit\Framework\TestCase;
  */
 class OnePhaseAsyncCommitTest extends TestCase
 {
+    use MockGrpcCallAsyncShim;
+
     private const START_TS = 1000;
 
     private PdClientInterface&MockObject $pdClient;
@@ -47,6 +49,7 @@ class OnePhaseAsyncCommitTest extends TestCase
     {
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($this->grpc);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
         $this->prewriteRequests = [];

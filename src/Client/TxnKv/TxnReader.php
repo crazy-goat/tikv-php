@@ -11,13 +11,17 @@ use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
@@ -284,30 +288,84 @@ final readonly class TxnReader
             $grouped[$regionId]['keys'][] = $key;
         }
 
+        // Fan out all per-region KvBatchGet RPCs (issue #291): every send is
+        // issued before any response is awaited, so the regions' read
+        // latencies overlap. Responses are awaited in dispatch order, so the
+        // first failing region throws the same exception the sequential loop
+        // aborted with.
+        $regionCalls = [];
         foreach ($grouped as $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
-            $target = RegionContextFactory::resolveTarget(
-                $region,
-                $this->replicaReadPolicy,
-                $this->regionResolver->getStore(...),
+
+            $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetForRegionAsync($region, $regionKeys);
+        }
+
+        $batchExecutor = new BatchAsyncExecutor();
+        try {
+            $regionResults = $batchExecutor->executeParallel(
+                $regionCalls,
+                $this->timeoutConfig->batchDeadlineMs,
             );
-            $address = $this->regionResolver->resolveStoreAddress($target->storeId);
+        } catch (BatchPartialFailureException $e) {
+            // batchGetFromTiKV() is reached from Transaction::batchGet()
+            // with no RetryExecutor owner... preserve the sequential
+            // first-abort exception semantics (issue #291).
+            throw $e->getFirstRegionError();
+        }
 
-            $request = new BatchGetRequest();
-            $request->setContext($target->context);
-            $request->setKeys($regionKeys);
-            $request->setVersion($this->startTs);
+        foreach ($regionResults as $response) {
+            assert($response instanceof BatchGetResponse);
+            foreach ($response->getPairs() as $pair) {
+                $results[$pair->getKey()] = $pair->getValue();
+            }
+        }
 
+        foreach ($keys as $key) {
+            if (!array_key_exists($key, $results)) {
+                $results[$key] = null;
+            }
+            $state->setReadValue($key, $results[$key]);
+        }
+
+        return $results;
+    }
+
+    /**
+     * Issue (eagerly send) one region's KvBatchGet without waiting for the
+     * response (issue #291); the returned future's wait phase runs the
+     * region-error check and GC-abort mapping.
+     *
+     * @param string[] $regionKeys
+     */
+    private function batchGetForRegionAsync(
+        RegionInfo $region,
+        array $regionKeys,
+    ): CheckedGrpcFuture {
+        $target = RegionContextFactory::resolveTarget(
+            $region,
+            $this->replicaReadPolicy,
+            $this->regionResolver->getStore(...),
+        );
+        $address = $this->regionResolver->resolveStoreAddress($target->storeId);
+
+        $request = new BatchGetRequest();
+        $request->setContext($target->context);
+        $request->setKeys($regionKeys);
+        $request->setVersion($this->startTs);
+
+        $future = $this->grpc->callAsync(
+            $address,
+            'tikvpb.Tikv',
+            'KvBatchGet',
+            $request,
+            BatchGetResponse::class,
+            $this->timeoutMs('batch_read'),
+        );
+
+        return CheckedGrpcFuture::fromCallable(function () use ($future, $region) {
             /** @var BatchGetResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvBatchGet',
-                $request,
-                BatchGetResponse::class,
-                $this->timeoutMs('batch_read'),
-            );
+            $response = $future->wait();
             // batchGetFromTiKV() is reached from Transaction::batchGet()
             // with no RetryExecutor owner, so no handleNotLeader() would
             // drop a NotLeader-carrying region — check() must
@@ -329,19 +387,8 @@ final readonly class TxnReader
                 throw self::gcExceptionFromAbort($error->getAbort());
             }
 
-            foreach ($response->getPairs() as $pair) {
-                $results[$pair->getKey()] = $pair->getValue();
-            }
-        }
-
-        foreach ($keys as $key) {
-            if (!array_key_exists($key, $results)) {
-                $results[$key] = null;
-            }
-            $state->setReadValue($key, $results[$key]);
-        }
-
-        return $results;
+            return $response;
+        }, $future);
     }
 
     /**

@@ -48,6 +48,8 @@ use Psr\Log\NullLogger;
  */
 final class LockTtlScalingTest extends TestCase
 {
+    use MockGrpcCallAsyncShim;
+
     private InMemoryMetrics $metrics;
 
     private RegionCache $regionCache;
@@ -71,6 +73,7 @@ final class LockTtlScalingTest extends TestCase
         $this->regionCache = new RegionCache(metrics: $this->metrics);
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($this->grpc);
         $this->prewriteRequests = [];
         $this->heartbeatRequests = [];
         $this->nowMs = 0;

@@ -45,6 +45,8 @@ use PHPUnit\Framework\TestCase;
 
 class TransactionTest extends TestCase
 {
+    use MockGrpcCallAsyncShim;
+
     private PdClientInterface&MockObject $pdClient;
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
@@ -67,6 +69,7 @@ class TransactionTest extends TestCase
 
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($this->grpc);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
 
         $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
@@ -2329,7 +2332,7 @@ class TransactionTest extends TestCase
     }
 
     /**
-     * Issue #326 (TEST-06): the commitTs === null guard in commitForRegion()
+     * Issue #326 (TEST-06): the commitTs === null guard in commitForRegionAsync()
      * is defense-in-depth for direct TwoPhaseCommitter users — exercise it
      * directly via reflection (commit() always sets a commitTs first).
      */
@@ -2351,7 +2354,7 @@ class TransactionTest extends TestCase
         $state = new TransactionState();
         $state->setWrite('k1', 'v1'); // commitTs deliberately never set
 
-        $method = new \ReflectionMethod(\CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter::class, 'commitForRegion');
+        $method = new \ReflectionMethod(\CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter::class, 'commitForRegionAsync');
 
         $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('commitTs must be set before committing');
@@ -3876,6 +3879,7 @@ class TransactionTest extends TestCase
 
         // Set up grpc mock first so Transaction captures it.
         $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($this->grpc);
         $this->grpc->method('call')
             ->willReturnCallback(function (
                 string $addr,
