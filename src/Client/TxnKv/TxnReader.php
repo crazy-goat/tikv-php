@@ -33,6 +33,7 @@ use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -135,30 +136,8 @@ final readonly class TxnReader
                 }
 
                 $error = $response->getError();
-                if ($error !== null) {
-                    $locked = $error->getLocked();
-                    if ($locked !== null) {
-                        $rawPrimary = $locked->getPrimaryLock();
-                        $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $key);
-                        $this->lockResolver->resolveLock($lockPrimary, $locked);
-                        throw new TxnRetryableException('Lock encountered, resolved - retry', BackoffType::TxnLock);
-                    }
-
-                    $retryable = $error->getRetryable();
-                    if ($retryable !== '') {
-                        throw new \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException($retryable);
-                    }
-
-                    // GC has passed this transaction's start timestamp — the
-                    // server names it in the abort field ("GC life time is
-                    // shorter than transaction duration"). Throw the typed,
-                    // non-retryable GC exception; the previous fall-through
-                    // here returned the response as-if-successful and the
-                    // caller read an empty value (issue #422).
-                    $abort = $error->getAbort();
-                    if ($abort !== '') {
-                        throw $this->gcExceptionFromAbort($abort);
-                    }
+                if ($error instanceof KeyError) {
+                    $this->handleReadKeyError($error, $key, 'Get');
                 }
 
                 if ($response->getNotFound()) {
@@ -413,26 +392,25 @@ final readonly class TxnReader
         return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $regionKeys) {
             /** @var BatchGetResponse $response */
             $response = $future->wait();
-            // The wait-boundary RetryExecutor owns retries for batchGet, but
-            // the response check still self-invalidates NotLeader so a valid
-            // leader hint is not lost (issue #474 review).
+            // The wait-boundary RetryExecutor is the sole NotLeader owner
+            // for this response (issue #474).
             RegionErrorHandler::check(
                 $response,
                 $this->regionCache,
                 $region->regionId,
-                notLeaderOwnedByRetryExecutor: false,
+                notLeaderOwnedByRetryExecutor: true,
             );
 
             $error = $response->getError();
             if ($error instanceof KeyError) {
-                $this->handleBatchGetKeyError($error, $regionKeys[0] ?? '');
+                $this->handleReadKeyError($error, $regionKeys[0] ?? '', 'BatchGet');
             }
 
             foreach ($response->getPairs() as $index => $pair) {
                 $pairError = $pair->getError();
                 if ($pairError instanceof KeyError) {
                     $fallbackKey = is_int($index) ? ($regionKeys[$index] ?? $pair->getKey()) : $pair->getKey();
-                    $this->handleBatchGetKeyError($pairError, $fallbackKey);
+                    $this->handleReadKeyError($pairError, $fallbackKey, 'BatchGet');
                 }
             }
 
@@ -441,12 +419,15 @@ final readonly class TxnReader
     }
 
     /**
-     * Handle a batch-read KeyError without translating it to an absent key.
-     * A live lock resolves then triggers a retry of the original region batch;
-     * every other variant fails closed.
+     * Handle a transactional read KeyError consistently across get, batchGet,
+     * and scan. A live lock resolves then requests a retry of the same read;
+     * retryable conflicts, GC aborts, and unknown variants fail closed.
      */
-    private function handleBatchGetKeyError(KeyError $error, string $fallbackKey): never
-    {
+    private function handleReadKeyError(
+        KeyError $error,
+        string $fallbackKey,
+        string $operation,
+    ): never {
         $locked = $error->getLocked();
         if ($locked !== null) {
             $rawPrimary = $locked->getPrimaryLock();
@@ -454,10 +435,15 @@ final readonly class TxnReader
                 ? $rawPrimary
                 : ($locked->getKey() !== '' ? $locked->getKey() : $fallbackKey);
             $this->lockResolver->resolveLock($primary, $locked);
-            throw new TxnRetryableException(
-                'Lock encountered during batchGet, resolved - retry',
-                BackoffType::TxnLock,
-            );
+            $lockMessage = $operation === 'Get'
+                ? 'Lock encountered, resolved - retry'
+                : sprintf('Lock encountered during %s, resolved - retry', $operation);
+            throw new TxnRetryableException($lockMessage, BackoffType::TxnLock);
+        }
+
+        $retryable = $error->getRetryable();
+        if ($retryable !== '') {
+            throw new TransactionConflictException($retryable);
         }
 
         $abort = $error->getAbort();
@@ -465,34 +451,9 @@ final readonly class TxnReader
             throw self::gcExceptionFromAbort($abort);
         }
 
-        throw new TiKvException('BatchGet failed: ' . KeyErrorDescriber::describe($error));
-    }
-
-    /**
-     * Handle a ScanResponse or error-only KvPair KeyError without emitting a
-     * malformed result row. Locked keys resolve and restart this scan chunk.
-     */
-    private function handleScanKeyError(KeyError $error, string $fallbackKey): never
-    {
-        $locked = $error->getLocked();
-        if ($locked !== null) {
-            $rawPrimary = $locked->getPrimaryLock();
-            $primary = $rawPrimary !== ''
-                ? $rawPrimary
-                : ($locked->getKey() !== '' ? $locked->getKey() : $fallbackKey);
-            $this->lockResolver->resolveLock($primary, $locked);
-            throw new TxnRetryableException(
-                'Lock encountered during scan, resolved - retry',
-                BackoffType::TxnLock,
-            );
-        }
-
-        $abort = $error->getAbort();
-        if ($abort !== '') {
-            throw self::gcExceptionFromAbort($abort);
-        }
-
-        throw new TiKvException('Scan failed: ' . KeyErrorDescriber::describe($error));
+        throw new TiKvException(
+            sprintf('%s failed: %s', $operation, KeyErrorDescriber::describe($error)),
+        );
     }
 
     /**
@@ -578,14 +539,14 @@ final readonly class TxnReader
 
                 $error = $response->getError();
                 if ($error instanceof KeyError) {
-                    $this->handleScanKeyError($error, $cursorStart);
+                    $this->handleReadKeyError($error, $cursorStart, 'Scan');
                 }
 
                 $subResults = [];
                 foreach ($response->getPairs() as $pair) {
                     $pairError = $pair->getError();
                     if ($pairError instanceof KeyError) {
-                        $this->handleScanKeyError($pairError, $pair->getKey());
+                        $this->handleReadKeyError($pairError, $pair->getKey(), 'Scan');
                     }
                     $subResults[] = [
                         'key' => $pair->getKey(),

@@ -32,8 +32,8 @@ final class RegionErrorHandler
      *   Invalidating here too would double-count the metric and break
      *   valid-hint leader switching, so NotLeader oneofs are left cached.
      * - false: no retry executor owns this site (e.g. commit()'s primary-key
-     *   commit, pessimisticLockBatch(), Transaction::batchGet()), so check()
-     *   self-invalidates with reason 'not_leader' before throwing — the same
+     *   commit or pessimisticLockBatch()), so check() self-invalidates with
+     *   reason 'not_leader' before throwing — the same
      *   recovery master's unconditional invalidate() provided; without it a
      *   stale entry would survive up to TTL (~600s) and keep resolving to
      *   the moved leader.

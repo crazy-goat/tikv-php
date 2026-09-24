@@ -1730,6 +1730,124 @@ class TransactionTest extends TestCase
         );
     }
 
+    public function testBatchGetLockedResponseErrorResolvesLockAndRetries(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $locked = new LockInfo();
+        $locked->setKey('k1');
+        $locked->setPrimaryLock('k1');
+        $locked->setLockVersion(2000);
+        $keyError = new KeyError();
+        $keyError->setLocked($locked);
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $errorResponse->setError($keyError);
+
+        $successPair = new KvPair();
+        $successPair->setKey('k1');
+        $successPair->setValue('after-response-lock');
+        $successResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $successResponse->setPairs([$successPair]);
+        $statusResponse = new CheckTxnStatusResponse();
+        $statusResponse->setCommitVersion(3000);
+
+        $batchCalls = 0;
+        $methods = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchCalls,
+                &$methods,
+                $errorResponse,
+                $successResponse,
+                $statusResponse,
+            ): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvBatchGet' => ++$batchCalls === 1 ? $errorResponse : $successResponse,
+                    'KvCheckTxnStatus' => $statusResponse,
+                    'KvResolveLock' => new ResolveLockResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $result = $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+
+        $this->assertSame(['k1' => 'after-response-lock'], $result);
+        $this->assertSame(2, $batchCalls);
+        $this->assertSame(
+            ['KvBatchGet', 'KvCheckTxnStatus', 'KvResolveLock', 'KvBatchGet'],
+            $methods,
+        );
+    }
+
+    public function testBatchGetNotLeaderUsesRetryExecutorLeaderHint(): void
+    {
+        $oldRegion = $this->makeRegion(1, '', 'z');
+        $newRegion = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 2,
+            leaderStoreId: 2,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'z',
+        );
+        $this->pdClient->method('scanRegions')->willReturn([$oldRegion]);
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($oldRegion, $newRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->expects($this->never())->method('invalidate');
+        $this->regionCache->expects($this->once())->method('switchLeader')->willReturn(true);
+        $this->pdClient->method('getStore')->willReturnCallback(
+            static function (int $storeId): Store {
+                $store = new Store();
+                $store->setId($storeId);
+                $store->setAddress('127.0.0.1:2016' . $storeId);
+                return $store;
+            },
+        );
+
+        $leader = new \CrazyGoat\Proto\Metapb\Peer();
+        $leader->setId(2);
+        $leader->setStoreId(2);
+        $notLeader = new \CrazyGoat\Proto\Errorpb\NotLeader();
+        $notLeader->setRegionId(1);
+        $notLeader->setLeader($leader);
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setMessage('not leader');
+        $regionError->setNotLeader($notLeader);
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $errorResponse->setRegionError($regionError);
+
+        $successPair = new KvPair();
+        $successPair->setKey('k1');
+        $successPair->setValue('v1');
+        $successResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $successResponse->setPairs([$successPair]);
+
+        $addresses = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $address) use (&$addresses, $errorResponse, $successResponse): object {
+                $addresses[] = $address;
+                return count($addresses) === 1 ? $errorResponse : $successResponse;
+            },
+        );
+
+        $result = $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+
+        $this->assertSame(['k1' => 'v1'], $result);
+        $this->assertSame(['127.0.0.1:20161', '127.0.0.1:20162'], $addresses);
+    }
+
     public function testBatchGetRejectsUnhandledPairKeyError(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);

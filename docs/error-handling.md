@@ -59,9 +59,10 @@ project-wide exception work).
 > the seventeen classes above.
 
 `TiKvException` itself is also thrown **directly** — no more specific subclass —
-at seventeen `throw new TiKvException(...)` statements across fifteen call sites
-(some inside shared private helpers), so a `catch` on any single subclass will
-not match these; only a bare `catch (TiKvException $e)` does. Several are
+at nineteen `throw new TiKvException(...)` statements across multiple call
+sites (some inside shared private helpers), so a `catch` on any single
+subclass will not match these; only a bare `catch (TiKvException $e)` does.
+Several are
 fail-closed defense-in-depth paths that are unreachable unless a collaborator's
 contract changes (noted per row):
 
@@ -78,6 +79,7 @@ contract changes (noted per row):
 | `TwoPhaseCommitter` prewrite (reachable via `Transaction::commit()`) | `KvPrewrite` reported a `KeyError`: `deadlock` → `DeadlockException` (key/hash/lockTs); `locked` → resolves the lock then `TxnRetryableException`; `conflict` / `retryable` / `abort` and `already_exist` / `assertion_failed` / `primary_mismatch` / `txn_not_found` / `commit_ts_too_large` → `TransactionConflictException`; any other variant (`commit_ts_expired`, `txn_lock_not_found`, …) → the base class with the variant named, via `KeyErrorDescriber`. Fail-closed (issue #214): before that fix, unhandled variants fell out of the loop and prewrite was treated as successful, so `KvCommit` ran against keys that held no lock. Since issue #213, prewrite runs inside the shared retry executor with the transaction classifier: region errors (`NotLeader`, `EpochNotMatch`, `RegionNotFound`, `ServerIsBusy`) and a resolved `locked` conflict are auto-retried (the region is re-resolved on each attempt), while `DeadlockException`, `TransactionConflictException` and unrecognised variants are fatal and escape `commit()`. | `Deadlock detected during prewrite` / `Lock conflict during prewrite, resolved - retry` / `Write conflict during prewrite` / `Prewrite failed: <variant>` |
 | `TwoPhaseCommitter` pessimistic lock (reachable via `Transaction::commit()` on a pessimistic transaction, before prewrite) | `KvPessimisticLock` reported a `KeyError`: `deadlock` → `DeadlockException`; `locked` → resolves the lock then `TxnRetryableException`; `conflict` / `retryable` / `abort` → `TransactionConflictException`; any other variant → the base class with the variant named, via `KeyErrorDescriber` (fail-closed, issue #454). | `Pessimistic lock failed: <variant>` |
 | `TxnReader::batchGetFromTiKV()` (private) | Defense in depth: `RegionResolver::batchResolveRegions()` left a `batchGet()` key without a region. Unreachable unless the resolver contract changes (issue #244); a silent skip would read back as `null`. | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
+| `TxnReader::handleReadKeyError()` (private; reached by `get()`, `batchGet()`, and `scan()`) | An unrecognised transactional read `KeyError` variant is fail-closed rather than treated as a missing value. Locks are resolved and retried separately; retryable errors become `TransactionConflictException`; GC aborts become `TxnAbortedByGcException`. | `Get failed: <variant>` / `BatchGet failed: <variant>` / `Scan failed: <variant>` |
 | `RegionResolver::batchResolveRegions()` | PD returned regions that do not cover one of the requested keys. Fail-closed: a silently dropped key would be lost from the batch. | `PD could not resolve the region for key %s; refusing to silently drop it from the batch` (key redacted) |
 | `RegionGrouper::groupKeysByRegionBatch()` | Defense in depth: a batch key was left without a region by the resolver. Unreachable unless the resolver contract changes (issue #244). | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
 | `RegionGrouper::groupItemsByRegion()` | Defense in depth: a batch item was left without a region by the resolver. Unreachable unless the resolver contract changes (issue #244). | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
@@ -243,7 +245,7 @@ addresses on the RPC path just the same.
 | `__construct` | `InvalidArgumentException` | `retryDeadlineMs < 0` |
 | `getTxnId()` / `getStartTs()` / `getCommitTs()` / `getStatus()` / `isPessimistic()` / `getPriority()` / `getWriteSet()` / `getReadSet()` | — | State getters, nothing thrown |
 | `get(string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `RegionException`, `GrpcException` | Locks resolved inline; a lock hit surfaces as `TxnRetryableException` (subclass of `TiKvException`) consumed by the retry executor |
-| `batchGet(array)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `RegionException`, `GrpcException` | No retry executor wraps this path — errors propagate directly |
+| `batchGet(array)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `RegionException`, `GrpcException` | Per-region reads use the shared retry executor; locked keys are resolved and the read is retried before a terminal error is exposed |
 | `scan(string, string, int $limit = 0)` | `InvalidArgumentException`, `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `RegionException`, `GrpcException` | Limit normalized/rejected ('Scan limit must be 0 or greater', max 10240) |
 | `set(string, string)` | `InvalidStateException` | Buffers the write locally; no I/O |
 | `delete(string)` | `InvalidStateException` | Buffers the delete locally; no I/O |
