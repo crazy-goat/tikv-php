@@ -24,7 +24,8 @@ use PHPUnit\Framework\TestCase;
 /**
  * End-to-end tests for TxnKV client requiring running TiKV cluster.
  *
- * Run with: docker-compose --profile test up --build php-test
+ * Run with: make test-e2e (or select the E2E-TxnKV suite in the V1 Compose
+ * override; the default php-test command runs E2E-RawKV).
  */
 class TxnKvE2ETest extends TestCase
 {

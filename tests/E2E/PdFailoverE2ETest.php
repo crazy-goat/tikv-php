@@ -27,10 +27,13 @@ use PHPUnit\Framework\TestCase;
  * TiKV store addresses PD advertises, e.g. `tikv1:20160`, only resolve
  * there):
  *
- *   make up
- *   docker compose run --rm --no-deps -v /var/run/docker.sock:/var/run/docker.sock \
+ *   docker compose -f docker-compose.yml -f docker-compose.txnkv.yml up -d \
+ *     pd tikv1 tikv2 tikv3
+ *   docker compose -f docker-compose.yml -f docker-compose.txnkv.yml run --rm \
+ *     --no-deps -v /var/run/docker.sock:/var/run/docker.sock \
  *     -e PD_ENDPOINTS=pd:2379 php-client \
- *     vendor/bin/phpunit tests/E2E/PdFailoverE2ETest.php
+ *     vendor/bin/phpunit --testsuite E2E-TxnKV \
+ *       --filter PdFailoverE2ETest
  *
  * The test self-skips when neither the CLI nor a mounted socket is
  * available (e.g. the plain `make test-e2e` run).

@@ -48,10 +48,12 @@ Before you start developing, ensure you have:
    composer install
    ```
 
-5. **Start TiKV cluster** (for E2E tests):
+5. **Optional: start TiKV for a manual E2E run**:
    ```bash
    make up
    ```
+   The `make test-e2e` target manages its own temporary cluster; use this
+   command only when running one suite manually.
 
 6. **Verify everything works**:
    ```bash
@@ -109,10 +111,12 @@ make test-unit      # Unit tests only (fast)
 make test-e2e       # E2E tests (requires TiKV)
 ```
 
-Expected output:
+Expected output includes a non-zero Unit and E2E test count (the exact count
+changes as E2E coverage is added):
+
 ```
-OK (21 tests, 45 assertions)  # Unit tests
-OK (141 tests, 312 assertions) # E2E tests
+OK (... tests, ... assertions)  # Unit tests
+OK (... tests, ... assertions) # E2E tests
 ```
 
 ### 4. Explore the Codebase
@@ -346,17 +350,22 @@ class MyFeatureTest extends TestCase
 
 ### E2E Tests
 
-E2E tests require a running TiKV cluster:
+E2E tests use Docker and switch between two cluster modes. The
+`make test-e2e` runner manages that lifecycle (and removes its temporary
+volumes on exit), so a separate `make up` is not required for the full run:
 
 ```bash
-# Start TiKV
-make up
-
-# Run E2E tests
+# Run RawKV E2E, then switch to V1 and run TxnKV E2E
 make test-e2e
 
-# Or manually
-vendor/bin/phpunit --testsuite E2E
+# Or manually run the RawKV suite inside the Compose network
+# (start the default V1TTL cluster first)
+make up
+docker-compose run --rm php-client \
+  vendor/bin/phpunit --testsuite E2E-RawKV --no-coverage
+
+# TxnKV uses the V1 cluster override and is run by make test-e2e
+# (do not point the TxnKV container at a V1TTL cluster)
 ```
 
 Writing E2E tests:
