@@ -10,11 +10,12 @@ Complete guide to configuring the TiKV PHP Client for development and production
 4. [TLS/SSL Configuration](#tlsssl-configuration)
 5. [Logging](#logging)
 6. [Replica Reads](#replica-reads)
-7. [Fast Commit Modes (TxnKV)](#fast-commit-modes-txnkv)
-8. [Retry and Backoff](#retry-and-backoff)
-9. [Caching](#caching)
-10. [Timeouts](#timeouts)
-10. [Production Configuration](#production-configuration)
+7. [Batch Commands Multiplexing (Experimental)](#batch-commands-multiplexing-experimental)
+8. [Fast Commit Modes (TxnKV)](#fast-commit-modes-txnkv)
+9. [Retry and Backoff](#retry-and-backoff)
+10. [Caching](#caching)
+11. [Timeouts](#timeouts)
+12. [Production Configuration](#production-configuration)
 
 ## Basic Configuration
 
@@ -97,6 +98,10 @@ $options = [
     // ReplicaReadPolicy controlling which peer serves read requests.
     // Default: leader-only (unchanged behaviour). See "Replica Reads".
     'replicaRead' => new ReplicaReadPolicy(ReplicaReadMode::PreferLeader),
+    // Experimental BatchCommands stream multiplexing for the RawKV batch
+    // fan-outs (issue #418). Must be a boolean, default false. See
+    // "Batch Commands Multiplexing" below.
+    'batchCommands' => false,
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
         'clientCertFile' => '/path/to/client.crt',
@@ -587,6 +592,57 @@ Details:
 // Stale read: allow any replica with a sufficiently fresh safe_ts
 $policy = new ReplicaReadPolicy(ReplicaReadMode::Mixed, staleRead: true);
 ```
+
+## Batch Commands Multiplexing (Experimental)
+
+**Status: experimental, off by default** (issue #418). Enable with
+`options['batchCommands'] => true` on `RawKvClient::create()`.
+
+TiKV exposes a bidirectional streaming RPC,
+`rpc BatchCommands(stream BatchCommandsRequest) returns (stream
+BatchCommandsResponse)`, that packs many per-region requests into one wire
+message and answers them possibly out of order, correlating each response by
+`request_id` (tikv/rfcs `0004-batch-client-messages.md`; client-go uses it
+by default). Amortising HTTP/2 framing and gRPC message overhead over many
+operations reduces TiKV's gRPC CPU and per-operation latency at high QPS.
+
+When the flag is on, the RawKV batch fan-outs — `batchGet()`, `batchPut()`
+and `batchDelete()` — collect their per-region sub-requests within one
+fan-out and multiplex every operation representable in the
+`BatchCommandsRequest.Request` oneof (the raw KV read/write family:
+`RawGet`, `RawPut`, `RawDelete`, `RawScan`, `RawBatchGet`, `RawBatchPut`,
+`RawBatchDelete`, plus the txn single-read family) into **one round trip per
+store address** instead of one unary RPC per sub-batch. Responses are
+correlated by `request_id`, tolerating out-of-order delivery, and one open
+stream per store address is reused across round trips.
+
+Automatic fallback to the existing unary fan-out (with its full
+retry/region-error semantics) happens when:
+
+- the operation type is absent from the BatchCommands oneof
+  (`RawCompareAndSwap`, `RawGetKeyTTL`, `RawChecksum`, `KvGC`, `KvImport`,
+  and every other unary RPC outside the map above);
+- the multiplexed response carries a region error — those entries are
+  re-dispatched on the unary path, whose retry executor invalidates the
+  region cache and re-resolves on every attempt;
+- the stream layer fails (peer closed the stream, drain deadline expired).
+
+Properties and limitations of the current implementation:
+
+- One stream per store address is opened lazily on a channel from the
+  existing `GrpcClient` pool and carries a fixed 60 s lifetime deadline; a
+  stream that fails is discarded and re-opened on the next round trip.
+- The PHP client is synchronous: there is no background receive loop. The
+  multiplexing window is a single fan-out (the issue's "per-request-cycle
+  batching window" scope) — interleaved single-key traffic from unrelated
+  call sites is NOT multiplexed; that would require an event loop the
+  library does not have.
+- TxnKV fan-outs (prewrite/commit/lock) and the range operations
+  (`deleteRange`, `scan`, `batchScan`) are not multiplexed this cycle.
+- The flag must be a boolean; anything else throws
+  `InvalidArgumentException`. Keep it `false` unless benchmarking shows a
+  win for your workload — the unary fan-out remains the default and the
+  byte-identical behavior when the flag is off.
 
 ## Fast Commit Modes (TxnKV)
 

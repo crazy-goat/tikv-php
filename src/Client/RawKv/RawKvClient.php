@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\RawKv;
 
 use Closure;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsMultiplexer;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
@@ -19,6 +20,7 @@ use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Grpc\GrpcBatchCommandsTransport;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -127,6 +129,19 @@ final class RawKvClient
      */
     public const OPT_MAX_SCAN_ROWS = 'maxScanRows';
 
+    /**
+     * options[] key for the experimental BatchCommands multiplexing
+     * (issue #418, GAP-04). When true, the RawKV batch fan-outs
+     * (batchGet/batchPut/batchDelete) multiplex their per-region
+     * sub-requests over one bidirectional BatchCommands stream per store
+     * address instead of issuing one unary RPC per sub-batch; operations
+     * not representable in the BatchCommands oneof, region errors and
+     * transport failures automatically fall back to the unary path. Must
+     * be a boolean, default false — the stream path is experimental this
+     * cycle and the unary fan-out remains the default.
+     */
+    public const OPT_BATCH_COMMANDS = 'batchCommands';
+
     /** Default bound on in-flight requests for fanned-out batch and range operations. */
     public const DEFAULT_MAX_CONCURRENCY = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY;
 
@@ -180,6 +195,7 @@ final class RawKvClient
             maxConcurrency: self::resolveMaxConcurrency($options),
             replicaReadPolicy: self::resolveReplicaReadPolicy($options),
             maxScanRows: self::resolveMaxScanRows($options),
+            batchCommands: self::resolveBatchCommands($options),
         );
     }
 
@@ -212,6 +228,7 @@ final class RawKvClient
         /** Read preference applied to every read issued by this client (issue #421). */
         private readonly ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
         int $maxScanRows = self::DEFAULT_MAX_SCAN_ROWS,
+        bool $batchCommands = false,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -266,6 +283,12 @@ final class RawKvClient
             $this->slowLogConfig,
             $this->replicaReadPolicy,
             $this->maxConcurrency,
+            // Experimental BatchCommands multiplexing (issue #418): only
+            // wired when the flag is on; the stream pool lives with the
+            // transport and reuses the GrpcClient's pooled channels.
+            $batchCommands ? new BatchCommandsMultiplexer(
+                GrpcBatchCommandsTransport::forClient($grpc),
+            ) : null,
         );
         $this->scanner = $scanner ?? new RawKvScanner(
             $pdClient,
@@ -464,6 +487,30 @@ final class RawKvClient
         }
 
         return $maxConcurrency;
+    }
+
+    /**
+     * Resolve options['batchCommands'] (see OPT_BATCH_COMMANDS) for
+     * create(): the experimental BatchCommands stream multiplexing flag
+     * (issue #418). Must be a boolean, default false.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveBatchCommands(array $options): bool
+    {
+        if (!array_key_exists(self::OPT_BATCH_COMMANDS, $options)) {
+            return false;
+        }
+
+        $batchCommands = $options[self::OPT_BATCH_COMMANDS];
+        if (!is_bool($batchCommands)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['batchCommands'] must be a boolean, %s given",
+                get_debug_type($batchCommands),
+            ));
+        }
+
+        return $batchCommands;
     }
 
     /**

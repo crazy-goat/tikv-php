@@ -16,6 +16,7 @@
             <exclude>tests/Unit/Batch/BatchAsyncExecutorTest.php</exclude>
             <exclude>tests/Unit/Batch/CheckedGrpcFutureTest.php</exclude>
             <exclude>tests/Unit/RawKv/SstIngestorTest.php</exclude>
+            <exclude>tests/Unit/RawKv/RawKvBatchBatchCommandsGrpcTest.php</exclude>
         </testsuite>
         <testsuite name="Grpc">
             <!-- The gRPC-dependent classes live here (they mock \Grpc\Call and
@@ -36,6 +37,7 @@
             <file>tests/Unit/Batch/CheckedGrpcFutureTest.php</file>
             <file>tests/Unit/Batch/CheckedGrpcFutureRetryableDispatchTest.php</file>
             <file>tests/Unit/Batch/ParallelRangeOpsCapTest.php</file>
+            <file>tests/Unit/RawKv/RawKvBatchBatchCommandsGrpcTest.php</file>
             <file>tests/Unit/RawKv/SstIngestorTest.php</file>
         </testsuite>
         <testsuite name="Integration">

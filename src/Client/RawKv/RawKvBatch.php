@@ -12,9 +12,12 @@ use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsEntry;
+use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsMultiplexer;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -51,6 +54,16 @@ final readonly class RawKvBatch
          * and the fan-out is dispatched in windows of at most this size.
          */
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
+        /**
+         * Optional BatchCommands multiplexer (issue #418, experimental): when
+         * non-null, batch fan-out sub-requests representable in the
+         * BatchCommands oneof are multiplexed over one Bidirectional
+         * BatchCommands stream per store address instead of issuing one
+         * unary RPC per sub-batch. Non-representable operations, region
+         * errors and transport failures automatically fall back to the
+         * unary path. Null (the default) keeps the pure unary fan-out.
+         */
+        private ?BatchCommandsMultiplexer $batchCommands = null,
     ) {
     }
 
@@ -69,6 +82,8 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCommandsEntry> $entries */
+        $entries = [];
         foreach ($keysByRegion as $regionData) {
             $subBatches = RawKvSplitter::splitIntoBatches(
                 $regionData['keys'],
@@ -82,20 +97,35 @@ final readonly class RawKvBatch
                     $retryExecutor,
                     $columnFamily,
                 );
+                if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
+                    $entries[] = $this->batchGetEntry($regionData['region'], $subBatch, $columnFamily);
+                }
             }
         }
 
-        $regionResults = $batchExecutor->executeParallelCapped(
-            $regionCalls,
-            $this->maxConcurrency,
-            $this->timeoutConfig->batchDeadlineMs,
-        );
+        $multiplexed = [];
+        $fallbackCalls = $this->tryMultiplex($entries, $regionCalls, $multiplexed, 'batch_read');
 
         $results = [];
-        foreach ($regionResults as $response) {
+        foreach ($multiplexed as $response) {
             assert($response instanceof RawBatchGetResponse);
             foreach ($response->getPairs() as $pair) {
                 $results[$pair->getKey()] = $pair->getValue();
+            }
+        }
+
+        if ($fallbackCalls !== []) {
+            $regionResults = $batchExecutor->executeParallelCapped(
+                $fallbackCalls,
+                $this->maxConcurrency,
+                $this->timeoutConfig->batchDeadlineMs,
+            );
+
+            foreach ($regionResults as $response) {
+                assert($response instanceof RawBatchGetResponse);
+                foreach ($response->getPairs() as $pair) {
+                    $results[$pair->getKey()] = $pair->getValue();
+                }
             }
         }
 
@@ -167,6 +197,8 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCommandsEntry> $entries */
+        $entries = [];
         foreach ($pairsByRegion as $regionData) {
             $regionPairs = $regionData['pairs'];
             $regionTtls = $regionData['ttls'] ?? [];
@@ -188,14 +220,28 @@ final readonly class RawKvBatch
                     $forCas,
                     $columnFamily,
                 );
+                if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
+                    $entries[] = $this->batchPutEntry(
+                        $regionData['region'],
+                        $subBatch['pairs'],
+                        $batchTtl,
+                        $forCas,
+                        $columnFamily,
+                    );
+                }
             }
         }
 
-        $batchExecutor->executeParallelCapped(
-            $regionCalls,
-            $this->maxConcurrency,
-            $this->timeoutConfig->batchDeadlineMs,
-        );
+        $multiplexed = [];
+        $fallbackCalls = $this->tryMultiplex($entries, $regionCalls, $multiplexed, 'batch_write');
+
+        if ($fallbackCalls !== []) {
+            $batchExecutor->executeParallelCapped(
+                $fallbackCalls,
+                $this->maxConcurrency,
+                $this->timeoutConfig->batchDeadlineMs,
+            );
+        }
     }
 
     /**
@@ -216,6 +262,8 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCommandsEntry> $entries */
+        $entries = [];
         foreach ($keysByRegion as $regionData) {
             $subBatches = RawKvSplitter::splitIntoBatches(
                 $regionData['keys'],
@@ -230,14 +278,22 @@ final readonly class RawKvBatch
                     $forCas,
                     $columnFamily,
                 );
+                if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
+                    $entries[] = $this->batchDeleteEntry($regionData['region'], $subBatch, $forCas, $columnFamily);
+                }
             }
         }
 
-        $batchExecutor->executeParallelCapped(
-            $regionCalls,
-            $this->maxConcurrency,
-            $this->timeoutConfig->batchDeadlineMs,
-        );
+        $multiplexed = [];
+        $fallbackCalls = $this->tryMultiplex($entries, $regionCalls, $multiplexed, 'batch_write');
+
+        if ($fallbackCalls !== []) {
+            $batchExecutor->executeParallelCapped(
+                $fallbackCalls,
+                $this->maxConcurrency,
+                $this->timeoutConfig->batchDeadlineMs,
+            );
+        }
     }
 
     // ========================================================================
@@ -384,6 +440,165 @@ final readonly class RawKvBatch
             'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
             default => null,
         };
+    }
+
+    // ========================================================================
+    // BatchCommands multiplexing (issue #418, experimental, behind
+    // options['batchCommands']). The helpers below build the per-sub-batch
+    // unary requests exactly as the async dispatch methods do, and run one
+    // multiplexed round trip per store before anything falls back to the
+    // unary fan-out above.
+    // ========================================================================
+
+    /**
+     * Attempt one multiplexed BatchCommands round trip for the given
+     * entries. Entries answered on the stream have their inner response
+     * message stored into $responses (keyed by entry key); entries that are
+     * not representable in the BatchCommands oneof, whose response carried a
+     * region error, or whose entire dispatch failed at the transport layer
+     * are returned as the subset of $regionCalls to run on the existing
+     * unary path (with its RetryExecutor semantics intact).
+     *
+     * @param array<int, BatchCommandsEntry> $entries fan-out entry key => entry
+     * @param array<int, callable(): mixed> $regionCalls matching region calls
+     * @param array<int, Message> $responses multiplexed inner responses (output)
+     * @param string $opType 'batch_read' or 'batch_write' (timeout selection)
+     * @return array<int, callable(): mixed> region calls still to run unary
+     */
+    private function tryMultiplex(
+        array $entries,
+        array $regionCalls,
+        array &$responses,
+        string $opType,
+    ): array {
+        if (!$this->batchCommands instanceof BatchCommandsMultiplexer || $entries === []) {
+            return $regionCalls;
+        }
+
+        try {
+            $outcome = $this->batchCommands->dispatch($entries, $this->timeoutMs($opType) ?? 0);
+        } catch (\Throwable $e) {
+            // Any stream-layer failure falls back to the full unary fan-out:
+            // the raw batch operations are idempotent, so re-running the
+            // entries that may already have been answered is safe.
+            $this->logger->info('BatchCommands dispatch failed, falling back to unary fan-out', [
+                'operation' => $opType,
+                'error' => $e->getMessage(),
+            ]);
+            return $regionCalls;
+        }
+
+        $fallback = [];
+        foreach ($entries as $key => $entry) {
+            if (isset($outcome->fallbackKeys[$key])) {
+                $fallback[$key] = $regionCalls[$key];
+                continue;
+            }
+
+            $response = $outcome->responses[$key] ?? null;
+            if ($response === null) {
+                $fallback[$key] = $regionCalls[$key];
+                continue;
+            }
+
+            try {
+                RegionErrorHandler::check($response);
+            } catch (RegionException) {
+                // Region error on the multiplexed response: recover on the
+                // unary path, whose retry wrapper invalidates the region
+                // cache and re-resolves on every attempt (issue #183).
+                $fallback[$key] = $regionCalls[$key];
+                continue;
+            }
+
+            $responses[$key] = $response;
+        }
+
+        return $fallback;
+    }
+
+    /**
+     * @param string[] $keys
+     */
+    private function batchGetEntry(RegionInfo $region, array $keys, string $columnFamily): BatchCommandsEntry
+    {
+        // Same replica-read target selection as
+        // executeBatchGetForRegionAsync() — batchGet is a read, batchPut/
+        // batchDelete are writes and always target the leader (issue #421).
+        $target = RegionContextFactory::resolveTarget(
+            $region,
+            $this->replicaReadPolicy,
+            $this->regionResolver->getStore(...),
+        );
+
+        $request = new RawBatchGetRequest();
+        $request->setContext($target->context);
+        $request->setKeys($keys);
+        if ($columnFamily !== '') {
+            $request->setCf($columnFamily);
+        }
+
+        return new BatchCommandsEntry(
+            $this->regionResolver->resolveStoreAddress($target->storeId),
+            $request,
+        );
+    }
+
+    /**
+     * @param KvPair[] $pairs
+     * @param int|int[] $ttl per-key TTL array or a scalar TTL for every pair
+     */
+    private function batchPutEntry(
+        RegionInfo $region,
+        array $pairs,
+        int|array $ttl,
+        bool $forCas,
+        string $columnFamily,
+    ): BatchCommandsEntry {
+        $request = new RawBatchPutRequest();
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+        $request->setPairs($pairs);
+        if (is_array($ttl)) {
+            $request->setTtls($ttl);
+        } elseif ($ttl > 0) {
+            $request->setTtls(array_fill(0, count($pairs), $ttl));
+        }
+        if ($forCas) {
+            $request->setForCas(true);
+        }
+        if ($columnFamily !== '') {
+            $request->setCf($columnFamily);
+        }
+
+        return new BatchCommandsEntry(
+            $this->regionResolver->resolveStoreAddress($region->leaderStoreId),
+            $request,
+        );
+    }
+
+    /**
+     * @param string[] $keys
+     */
+    private function batchDeleteEntry(
+        RegionInfo $region,
+        array $keys,
+        bool $forCas,
+        string $columnFamily,
+    ): BatchCommandsEntry {
+        $request = new RawBatchDeleteRequest();
+        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+        $request->setKeys($keys);
+        if ($forCas) {
+            $request->setForCas(true);
+        }
+        if ($columnFamily !== '') {
+            $request->setCf($columnFamily);
+        }
+
+        return new BatchCommandsEntry(
+            $this->regionResolver->resolveStoreAddress($region->leaderStoreId),
+            $request,
+        );
     }
 
     // ========================================================================

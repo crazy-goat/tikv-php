@@ -284,6 +284,7 @@ Return RegionInfo
 - Request/response serialization
 - TLS configuration
 - Connection pooling (via persistent channels)
+- BatchCommands stream multiplexing (experimental, issue #418 — see below)
 
 **Design Patterns**:
 - **Connection Pool**: Reuses gRPC channels by address
@@ -304,6 +305,34 @@ class GrpcClient
     }
 }
 ```
+
+**BatchCommands Multiplexing (experimental, off by default)**: the RawKV
+batch fan-outs can multiplex their per-region sub-requests over one
+bidirectional `BatchCommands` stream per store address
+(`/tikvpb.Tikv/BatchCommands`). The pieces, under
+`src/Client/Batch/BatchCommands/` and `src/Client/Grpc/`:
+
+```
+RawKvBatch (flag on)
+    │  builds BatchCommandsEntry per sub-batch (address + unary request)
+    ▼
+BatchCommandsMultiplexer ── assigns request_ids, groups by store address,
+    │                        filters ops absent from the Request oneof →
+    │                        fallback entries
+    ▼
+GrpcBatchCommandsTransport ── per-address stream pool
+    │
+    ▼
+BatchCommandsConnection ── ext-grpc Call::startBatch: SEND_MESSAGE, then
+                            RECV batches until BatchCommandsCorrelator has
+                            every request_id (out-of-order tolerated)
+```
+
+Because the client is synchronous, the multiplexing window is a single
+fan-out (one `BatchCommandsRequest` per store per window) — not a general
+event-loop multiplexer. Region errors and stream failures fall back to the
+unary fan-out whose `RetryExecutor` semantics are preserved. Full details
+and limitations: `docs/configuration.md` → "Batch Commands Multiplexing".
 
 ### 6. RegionCache
 
