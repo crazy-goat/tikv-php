@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pessimistic transactions retain per-key read timestamps and perform a prewrite constraint check, so an intervening commit is reported as a conflict instead of silently overwriting a read-modify-write update. (#209)
 - Transaction commits now fail closed if region resolution does not assign every mutation or produces no commit regions, rather than silently reporting a partial or empty commit as successful. (#208)
 - Lock resolution no longer rolls back a transaction while its lock TTL is still active; live locks trigger bounded retry backoff, and rollback resolution only proceeds after TiKV reports expiry. (#206)
 

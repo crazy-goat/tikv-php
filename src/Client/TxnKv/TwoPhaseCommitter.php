@@ -741,11 +741,13 @@ final readonly class TwoPhaseCommitter
         if ($this->pessimistic) {
             $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->startTs;
             $request->setForUpdateTs($forUpdateTs);
-            // lock_ttl already carries PESSIMISTIC_LOCK_TTL_MS for the
-            // pessimistic path (see commit()).
+            // A lock may not have been acquired yet because the transaction
+            // buffers writes until commit. DO_CONSTRAINT_CHECK asks TiKV to
+            // enforce the start_ts write-conflict check during prewrite rather
+            // than treating the key as already protected by a lock.
             $actions = [];
             foreach ($mutations as $mutation) {
-                $actions[] = PessimisticAction::DO_PESSIMISTIC_CHECK;
+                $actions[] = PessimisticAction::DO_CONSTRAINT_CHECK;
             }
             $request->setPessimisticActions($actions);
         }
@@ -1631,23 +1633,13 @@ final readonly class TwoPhaseCommitter
             $keysByRegion = $this->groupStringsByRegion($pendingKeys);
             $pendingKeys = [];
 
-            // One for_update_ts per locking pass (issue #420, GAP-06):
-            // hoisting the TSO call out of the per-region loop saves one
-            // PD round trip per additional region. Using the same
-            // for_update_ts across regions is safe — TiKV only compares
-            // it against lock timestamps, and updateMaxForUpdateTs()
-            // tracks the maximum. Retries still refresh it below.
-            //
-            // Deliberate deviation from the sequential loop (issue #291
-            // review): ALL first-attempt fan-out dispatches of this pass
-            // use this pass's ORIGINAL $forUpdateTs, even though a
-            // sequential per-region loop would have refreshed it after
-            // each group's retry. The value is monotonic per transaction
-            // and updateMaxForUpdateTs() records the max, so no lock can
-            // be stamped with an out-of-order timestamp; the fan-out's
-            // uniform-timestamp sends are therefore equivalent from
-            // TiKV's point of view.
-            $forUpdateTs = $this->pdClient->getTimestamp();
+            // A write's for_update_ts is captured by Transaction::set/delete
+            // before its value is staged. Reuse that timestamp so a commit
+            // after that point conflicts at lock acquisition, rather than
+            // silently overwriting the value the caller derived. Fall back
+            // to a fresh TSO only for direct committer users without a write
+            // timestamp. Share it across this region pass as before.
+            $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->pdClient->getTimestamp();
             $state->updateMaxForUpdateTs($forUpdateTs);
 
             // Dispatch every region's FIRST pessimistic-lock attempt in

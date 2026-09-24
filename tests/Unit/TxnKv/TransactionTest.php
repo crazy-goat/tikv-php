@@ -129,6 +129,33 @@ class TransactionTest extends TestCase
         ], $txn->getWriteSet());
     }
 
+    private function getTransactionState(Transaction $transaction): TransactionState
+    {
+        $stateProperty = new \ReflectionProperty(Transaction::class, 'state');
+        /** @var TransactionState $state */
+        $state = $stateProperty->getValue($transaction);
+
+        return $state;
+    }
+
+    public function testPessimisticSetCapturesForUpdateTimestampWhenWriteIsBuffered(): void
+    {
+        $this->pdClient->expects($this->exactly(4))
+            ->method('getTimestamp')
+            ->willReturnOnConsecutiveCalls(1200, 1250, 1275, 1300);
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('key1', 'value1');
+        $txn->set('key1', 'updated');
+        $txn->delete('key1');
+        $txn->delete('key2');
+
+        $txnState = $this->getTransactionState($txn);
+
+        $this->assertSame(1300, $txnState->getMaxForUpdateTs());
+        $this->assertSame(['key1', 'key2'], $txnState->getPendingLockKeys());
+    }
+
     public function testDeleteAddsNullToWriteSet(): void
     {
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1341,7 +1368,7 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getTimestamp')
             ->willReturnCallback(static function () use (&$tsCalls): int {
                 ++$tsCalls;
-                return 3000 * $tsCalls; // lock pass: 3000, commit ts: 6000
+                return 3000 * $tsCalls; // writes, lock pass reuses last, commit ts
             });
 
         $lockResponse = new PessimisticLockResponse();
@@ -1354,15 +1381,18 @@ class TransactionTest extends TestCase
                 string $addr,
                 string $svc,
                 string $method,
-                \CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest
-                |\CrazyGoat\Proto\Kvrpcpb\PrewriteRequest
-                |\CrazyGoat\Proto\Kvrpcpb\CommitRequest $request,
+                mixed $request,
             ) use (
                 &$forUpdateTsList,
                 $lockResponse,
                 $prewriteResponse,
                 $commitResponse,
             ): object {
+                if ($method === 'KvGet') {
+                    $response = new GetResponse();
+                    $response->setNotFound(true);
+                    return $response;
+                }
                 if ($method === 'KvPessimisticLock' && $request instanceof PessimisticLockRequest) {
                     $forUpdateTsList[] = $request->getForUpdateTs();
                     return $lockResponse;
@@ -1375,28 +1405,30 @@ class TransactionTest extends TestCase
             });
 
         $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->get('k1');
         $txn->set('k1', 'v1');
+        $txn->get('k2');
         $txn->set('k2', 'v2');
         $txn->commit();
 
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
-        $this->assertSame(6000, $txn->getCommitTs());
-        // One TSO call for the whole locking pass + one for the commit ts.
-        $this->assertSame(2, $tsCalls);
+        $this->assertSame(9000, $txn->getCommitTs());
+        // Each read captures its read timestamp; each lock uses the most
+        // recent read timestamp, shared by the lock pass.
+        $this->assertSame(3, $tsCalls);
         $this->assertCount(2, $forUpdateTsList, 'both regions were locked');
-        $this->assertSame([3000, 3000], $forUpdateTsList, 'one for_update_ts shared by the locking pass');
+        $this->assertSame([6000, 6000], $forUpdateTsList, 'the read timestamp is shared by the locking pass');
     }
 
     /**
      * Issue #292 (PERF-05): a pessimistic commit spanning five regions must
-     * make exactly two PdClient::getTimestamp() calls — one for_update_ts
-     * covering the whole locking pass and one commit ts. Before the TSO was
-     * hoisted out of the per-region loop this was six or more.
+     * make one PdClient::getTimestamp() call per buffered write plus one
+     * commit timestamp. The locking pass reuses the latest captured timestamp.
      *
      * The spy counts at the PdClientInterface boundary, so it also pins the
      * caller contract independently of the TimestampOracle pool.
      */
-    public function testCommitPessimisticLockFiveRegionsMakesExactlyTwoTsoCalls(): void
+    public function testCommitPessimisticLockFiveRegionsUsesCapturedWriteTs(): void
     {
         $regions = [
             $this->makeRegion(1, '', 'k2'),
@@ -1413,7 +1445,7 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getTimestamp')
             ->willReturnCallback(static function () use (&$tsCalls): int {
                 ++$tsCalls;
-                return 3000 * $tsCalls; // lock pass: 3000, commit ts: 6000
+                return 3000 * $tsCalls; // buffered writes, lock pass reuses last, commit ts
             });
 
         $lockResponse = new PessimisticLockResponse();
@@ -1458,9 +1490,9 @@ class TransactionTest extends TestCase
         $txn->commit();
 
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
-        $this->assertSame(2, $tsCalls, 'one for_update_ts + one commit ts for five regions');
+        $this->assertSame(6, $tsCalls, 'five writes capture timestamps and one commit timestamp is allocated');
         $this->assertSame(5, $lockRpcCount, 'each region is locked exactly once');
-        $this->assertSame([3000, 3000, 3000, 3000, 3000], $forUpdateTsList);
+        $this->assertSame([15000, 15000, 15000, 15000, 15000], $forUpdateTsList);
     }
 
     public function testCommitPessimisticLockBudgetExhaustedThrowsLockWaitTimeout(): void
