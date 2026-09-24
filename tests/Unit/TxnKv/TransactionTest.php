@@ -1955,6 +1955,33 @@ class TransactionTest extends TestCase
     }
 
     /**
+     * Issue #325 (TEST-05): the `Conflict` branch of `handlePrewriteErrors()`
+     * must map a KeyError carrying a WriteConflict to a typed
+     * TransactionConflictException and abort before commit — a silent success
+     * here would be a lost update.
+     */
+    public function testCommitPrewriteConflictThrowsTransactionConflictAndSkipsCommit(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setConflict(new \CrazyGoat\Proto\Kvrpcpb\WriteConflict());
+
+        $methodSequence = [];
+        $this->stubPrewriteError($methodSequence, $keyError);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('Write conflict during prewrite', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPrewrite'], $methodSequence);
+    }
+
+    /**
      * Issue #214 (TXN-09): any KeyError variant not explicitly mapped (here
      * `commit_ts_expired`) must fail closed with the base TiKvException and
      * must never be treated as a successful prewrite.
