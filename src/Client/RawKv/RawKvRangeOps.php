@@ -86,7 +86,11 @@ final readonly class RawKvRangeOps
             );
         }
 
-        $this->createBatchExecutor()->executeParallelCapped($calls, $this->maxConcurrency);
+        $this->createBatchExecutor()->executeParallelCapped(
+            $calls,
+            $this->maxConcurrency,
+            $this->timeoutConfig->batchDeadlineMs,
+        );
     }
 
     public function deletePrefix(string $prefix, string $columnFamily = ''): void
@@ -125,7 +129,11 @@ final readonly class RawKvRangeOps
             );
         }
 
-        $responses = $this->createBatchExecutor()->executeParallelCapped($calls, $this->maxConcurrency);
+        $responses = $this->createBatchExecutor()->executeParallelCapped(
+            $calls,
+            $this->maxConcurrency,
+            $this->timeoutConfig->batchDeadlineMs,
+        );
 
         $mergedChecksum = 0;
         $mergedTotalKvs = 0;

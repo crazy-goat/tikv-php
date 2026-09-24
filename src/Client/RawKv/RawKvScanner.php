@@ -468,7 +468,11 @@ final readonly class RawKvScanner
             }
 
             try {
-                $responses = $this->createBatchExecutor()->executeParallelCapped($calls, $this->maxConcurrency);
+                $responses = $this->createBatchExecutor()->executeParallelCapped(
+                    $calls,
+                    $this->maxConcurrency,
+                    $this->timeoutConfig->batchDeadlineMs,
+                );
             } catch (TiKvException) {
                 return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
             }
@@ -597,7 +601,11 @@ final readonly class RawKvScanner
             );
         }
 
-        $executed = $this->createBatchExecutor()->executeParallelCapped($calls, $this->maxConcurrency);
+        $executed = $this->createBatchExecutor()->executeParallelCapped(
+            $calls,
+            $this->maxConcurrency,
+            $this->timeoutConfig->batchDeadlineMs,
+        );
 
         ksort($executed);
 

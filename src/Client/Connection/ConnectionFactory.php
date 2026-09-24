@@ -475,6 +475,8 @@ final class ConnectionFactory
                     ? $t['checksumTimeoutMs'] : $timeoutConfig->checksumTimeoutMs,
                 ingestTimeoutMs: isset($t['ingestTimeoutMs']) && is_int($t['ingestTimeoutMs'])
                     ? $t['ingestTimeoutMs'] : $timeoutConfig->ingestTimeoutMs,
+                batchDeadlineMs: isset($t['batchDeadlineMs']) && is_int($t['batchDeadlineMs'])
+                    ? $t['batchDeadlineMs'] : $timeoutConfig->batchDeadlineMs,
             );
         }
 

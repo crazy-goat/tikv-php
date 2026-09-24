@@ -85,7 +85,11 @@ final readonly class RawKvBatch
             }
         }
 
-        $regionResults = $batchExecutor->executeParallelCapped($regionCalls, $this->maxConcurrency);
+        $regionResults = $batchExecutor->executeParallelCapped(
+            $regionCalls,
+            $this->maxConcurrency,
+            $this->timeoutConfig->batchDeadlineMs,
+        );
 
         $results = [];
         foreach ($regionResults as $response) {
@@ -187,7 +191,11 @@ final readonly class RawKvBatch
             }
         }
 
-        $batchExecutor->executeParallelCapped($regionCalls, $this->maxConcurrency);
+        $batchExecutor->executeParallelCapped(
+            $regionCalls,
+            $this->maxConcurrency,
+            $this->timeoutConfig->batchDeadlineMs,
+        );
     }
 
     /**
@@ -225,7 +233,11 @@ final readonly class RawKvBatch
             }
         }
 
-        $batchExecutor->executeParallelCapped($regionCalls, $this->maxConcurrency);
+        $batchExecutor->executeParallelCapped(
+            $regionCalls,
+            $this->maxConcurrency,
+            $this->timeoutConfig->batchDeadlineMs,
+        );
     }
 
     // ========================================================================

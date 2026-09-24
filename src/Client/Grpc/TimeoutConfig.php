@@ -15,6 +15,7 @@ final readonly class TimeoutConfig
         public int $deleteRangeTimeoutMs = 30000,
         public int $checksumTimeoutMs = 30000,
         public int $ingestTimeoutMs = 60000,
+        public int $batchDeadlineMs = 0,
     ) {
     }
 }

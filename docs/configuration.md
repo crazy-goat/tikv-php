@@ -838,6 +838,11 @@ $options = [
         'deleteRangeTimeoutMs' => 30000, // default: 30000
         'checksumTimeoutMs' => 60000,    // default: 60000
         'ingestTimeoutMs' => 60000,      // default: 60000 (SST ingest)
+        'batchDeadlineMs' => 0,          // default: 0 (disabled) — wall-clock deadline
+                                         // for batch fan-out dispatch+wait across all
+                                         // regions; exceeding it throws
+                                         // BatchDeadlineExceededException after
+                                         // cancelling in-flight futures
     ],
 ];
 

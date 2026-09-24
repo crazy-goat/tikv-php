@@ -168,6 +168,37 @@ class ConnectionFactoryTest extends TestCase
         $this->assertSame(60000, $bundle->timeoutConfig->ingestTimeoutMs);
     }
 
+    // ========================================================================
+    // options['timeout']['batchDeadlineMs'] — batch fan-out deadline (issue #185 row 6)
+    // ========================================================================
+
+    public function testTimeoutBatchDeadlineMsDefaultsToZeroDisabled(): void
+    {
+        $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
+
+        $this->assertSame(0, $bundle->timeoutConfig->batchDeadlineMs);
+    }
+
+    public function testTimeoutBatchDeadlineMsIsThreadedThrough(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['batchDeadlineMs' => 2500]],
+        );
+
+        $this->assertSame(2500, $bundle->timeoutConfig->batchDeadlineMs);
+    }
+
+    public function testTimeoutBatchDeadlineMsNonIntFallsBackToDefault(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['batchDeadlineMs' => '2500']],
+        );
+
+        $this->assertSame(0, $bundle->timeoutConfig->batchDeadlineMs);
+    }
+
     /**
      * @param string[] $pdEndpoints
      * @param array<string, mixed> $options
