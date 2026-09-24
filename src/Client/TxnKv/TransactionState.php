@@ -22,8 +22,19 @@ final class TransactionState
     /** @var array<string, ?string> key => value read (for read-set tracking) */
     private array $readSet = [];
 
-    /** @var string[] keys pending pessimistic lock (batched at commit time) */
+    /** @var string[] keys pending a deferred pessimistic lock pass */
     private array $pendingLockKeys = [];
+
+    /** @var string[] keys for which a pessimistic lock request was attempted */
+    private array $pessimisticLockAttempts = [];
+
+    /** @var string[] keys whose pessimistic lock was acknowledged by TiKV */
+    private array $pessimisticLocks = [];
+
+    private ?string $pessimisticPrimaryKey = null;
+    private bool $pessimisticWriteFailed = false;
+    private bool $commitStarted = false;
+    private bool $rollbackStarted = false;
 
     private ?int $commitTs = null;
     private TransactionStatus $status = TransactionStatus::Active;
@@ -46,6 +57,56 @@ final class TransactionState
         if ($this->status !== TransactionStatus::Active) {
             throw new InvalidStateException('Transaction is not active');
         }
+    }
+
+    public function ensureWritable(): void
+    {
+        $this->ensureActive();
+        if ($this->pessimisticWriteFailed) {
+            throw new InvalidStateException(
+                'Pessimistic write failed; rollback the transaction before continuing',
+            );
+        }
+        if ($this->commitStarted) {
+            throw new InvalidStateException(
+                'Transaction commit has started; rollback before changing writes',
+            );
+        }
+        if ($this->rollbackStarted) {
+            throw new InvalidStateException(
+                'Transaction rollback has started; no further writes are allowed',
+            );
+        }
+    }
+
+    public function ensureCommitAllowed(): void
+    {
+        $this->ensureActive();
+        if ($this->pessimisticWriteFailed) {
+            throw new InvalidStateException(
+                'Pessimistic write failed; rollback the transaction before committing',
+            );
+        }
+        if ($this->rollbackStarted) {
+            throw new InvalidStateException(
+                'Transaction rollback has started; commit is no longer allowed',
+            );
+        }
+    }
+
+    public function markPessimisticWriteFailed(): void
+    {
+        $this->pessimisticWriteFailed = true;
+    }
+
+    public function markCommitStarted(): void
+    {
+        $this->commitStarted = true;
+    }
+
+    public function markRollbackStarted(): void
+    {
+        $this->rollbackStarted = true;
     }
 
     public function close(): void
@@ -195,6 +256,72 @@ final class TransactionState
     public function clearPendingLockKeys(): void
     {
         $this->pendingLockKeys = [];
+    }
+
+    // -- Pessimistic lock tracking -------------------------------------------------
+
+    public function addPessimisticLockAttempt(string $key): void
+    {
+        if (!in_array($key, $this->pessimisticLockAttempts, true)) {
+            $this->pessimisticLockAttempts[] = $key;
+        }
+    }
+
+    /**
+     * @param string[] $keys
+     */
+    public function markPessimisticLocksAcquired(array $keys): void
+    {
+        foreach ($keys as $key) {
+            $this->addPessimisticLockAttempt($key);
+            if (!in_array($key, $this->pessimisticLocks, true)) {
+                $this->pessimisticLocks[] = $key;
+            }
+        }
+    }
+
+    public function hasPessimisticLock(string $key): bool
+    {
+        return in_array($key, $this->pessimisticLocks, true);
+    }
+
+    public function hasAcknowledgedPessimisticLocks(): bool
+    {
+        return $this->pessimisticLocks !== [];
+    }
+
+    public function hasPessimisticLockActivity(): bool
+    {
+        return $this->pendingLockKeys !== []
+            || $this->pessimisticLockAttempts !== []
+            || $this->pessimisticLocks !== [];
+    }
+
+    /**
+     * Return every key that may have acquired a server-side lock and therefore
+     * must be considered by rollback. This includes attempted keys because a
+     * transport failure or a cancelled fan-out future can hide a successful
+     * server-side lock.
+     *
+     * @return string[]
+     */
+    public function getPessimisticLockKeys(): array
+    {
+        return array_values(array_unique(array_merge(
+            $this->pessimisticLockAttempts,
+            $this->pessimisticLocks,
+            $this->pendingLockKeys,
+        )));
+    }
+
+    public function setPessimisticPrimaryKey(string $key): void
+    {
+        $this->pessimisticPrimaryKey ??= $key;
+    }
+
+    public function getPessimisticPrimaryKey(): ?string
+    {
+        return $this->pessimisticPrimaryKey;
     }
 
     // -- For Update TS ------------------------------------------------------------

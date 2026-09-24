@@ -152,7 +152,7 @@ final class TxnKvClient
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self;
     
     // Transaction lifecycle
-    public function begin(array $options = []): Transaction;  // options: pessimistic (bool), priority (int), enable1Pc (bool), enableAsyncCommit (bool)
+    public function begin(array $options = []): Transaction;  // options: pessimistic (bool), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool)
     public function close(): void;
 }
 
@@ -163,7 +163,7 @@ final class Transaction
     public function batchGet(array $keys): array;
     public function scan(string $startKey, string $endKey, int $limit = 0): array;
     
-    // Write operations (buffered until commit)
+    // Write operations (values buffered; pessimistic locks may be eager)
     public function set(string $key, string $value): void;
     public function delete(string $key): void;
     
@@ -199,10 +199,10 @@ Optimistic Transaction                   Pessimistic Transaction
            │                                       │
 ┌──────────▼───────────┐                ┌──────────▼───────────┐
 │  commit()             │                │  commit()              │
-│  1. Prewrite all keys │                │  1. Prewrite all keys  │
-│     (lock + data)     │                │     (data only)       │
-│  2. commitTs = TSO   │                │  2. commitTs = TSO    │
-│  3. Commit all keys   │                │  3. Commit all keys   │
+│  1. Prewrite all keys │                │  1. Locks already held│
+│     (lock + data)     │                │  2. Prewrite all keys  │
+│  2. commitTs = TSO    │                │  3. commitTs = TSO    │
+│  3. Commit all keys   │                │  4. Commit all keys   │
 └──────────┬───────────┘                └──────────┬───────────┘
            │                                       │
 ┌──────────▼───────────┐                ┌──────────▼───────────┐

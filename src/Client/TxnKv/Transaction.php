@@ -93,6 +93,8 @@ final class Transaction
         private readonly bool $enableAsyncCommit = false,
         /** @var array<string, int> TSO reads used by pessimistic read-modify-write keys. */
         private array $readTsByKey = [],
+        /** Whether pessimistic set/delete acquire their lock before returning. */
+        private readonly bool $eagerPessimisticLocks = true,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -198,7 +200,7 @@ final class Transaction
      */
     public function get(string $key): ?string
     {
-        $this->state->ensureActive();
+        $this->state->ensureWritable();
 
         if ($this->pessimistic && !$this->state->hasWriteSetKey($key)) {
             $this->readTsByKey[$key] = $this->pdClient->getTimestamp();
@@ -226,7 +228,7 @@ final class Transaction
      */
     public function batchGet(array $keys): array
     {
-        $this->state->ensureActive();
+        $this->state->ensureWritable();
 
         if ($this->pessimistic && $keys !== []) {
             $timestamp = $this->pdClient->getTimestamp();
@@ -253,7 +255,7 @@ final class Transaction
      */
     public function scan(string $startKey, string $endKey, int $limit = 0): array
     {
-        $this->state->ensureActive();
+        $this->state->ensureWritable();
 
         if ($this->pessimistic) {
             $timestamp = $this->pdClient->getTimestamp();
@@ -278,40 +280,79 @@ final class Transaction
     // ---------------------------------------------------------------
 
     /**
+     * Prepare a pessimistic write. The value remains buffered, but in the
+     * default eager mode the physical lock is acquired before this method
+     * returns. Deferred mode is retained as an explicit compatibility path.
+     */
+    private function preparePessimisticWrite(string $key): void
+    {
+        if (!$this->pessimistic) {
+            return;
+        }
+
+        if ($this->eagerPessimisticLocks && $this->state->hasPessimisticLock($key)) {
+            unset($this->readTsByKey[$key]);
+            return;
+        }
+
+        $forUpdateTs = $this->readTsByKey[$key] ?? $this->pdClient->getTimestamp();
+        if ($this->eagerPessimisticLocks) {
+            $this->state->setPessimisticPrimaryKey($key);
+            try {
+                $this->committer->lockKeys([$key], $this->state, $forUpdateTs, $key);
+            } catch (\Throwable $failure) {
+                // A failed eager statement makes the transaction unusable;
+                // otherwise a later write could inherit a primary key that
+                // was never locked. Best-effort rollback also releases a
+                // lock whose response may have been lost in transport.
+                $this->state->markPessimisticWriteFailed();
+                try {
+                    $this->committer->rollback(
+                        $this->state,
+                        $this->retryExecutor(),
+                        $this->classifyError(...),
+                    );
+                } catch (\Throwable $cleanupFailure) {
+                    // Keep the transaction active-but-unwritable so the
+                    // caller (or the destructor) can retry rollback; do
+                    // not claim cleanup succeeded when the RPC failed.
+                    $this->logger->error('Pessimistic lock failure cleanup failed', [
+                        'txnId' => $this->txnId,
+                        'exception' => $cleanupFailure,
+                    ]);
+                }
+
+                throw $failure;
+            }
+        } else {
+            $this->state->addPendingLockKey($key);
+            $this->state->updateMaxForUpdateTs($forUpdateTs);
+        }
+
+        unset($this->readTsByKey[$key]);
+    }
+
+    /**
      * @throws InvalidStateException
-     * @throws TiKvException if the pessimistic transaction cannot obtain a write timestamp
+     * @throws TiKvException if the pessimistic transaction cannot obtain a
+     *         write timestamp or acquire its lock
      */
     public function set(string $key, string $value): void
     {
-        $this->state->ensureActive();
-
-        if ($this->pessimistic) {
-            $this->state->addPendingLockKey($key);
-            $this->state->updateMaxForUpdateTs(
-                $this->readTsByKey[$key] ?? $this->pdClient->getTimestamp(),
-            );
-            unset($this->readTsByKey[$key]);
-        }
-
+        $this->state->ensureWritable();
+        $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, $value);
     }
 
     /**
      * @throws InvalidStateException
-     * @throws TiKvException if the pessimistic transaction cannot obtain a write timestamp
+     * @throws TiKvException if the pessimistic transaction cannot obtain a
+     *         write timestamp or acquire its lock
      */
     public function delete(string $key): void
     {
-        $this->state->ensureActive();
-
-        if ($this->pessimistic) {
-            $this->state->addPendingLockKey($key);
-            $this->state->updateMaxForUpdateTs(
-                $this->readTsByKey[$key] ?? $this->pdClient->getTimestamp(),
-            );
-            unset($this->readTsByKey[$key]);
-        }
-
+        $this->state->ensureWritable();
+        $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, null);
     }
 
@@ -331,9 +372,22 @@ final class Transaction
      */
     public function commit(): void
     {
-        $this->state->ensureActive();
+        $this->state->ensureCommitAllowed();
+        $this->state->markCommitStarted();
 
         if ($this->state->isEmptyWriteSet()) {
+            if ($this->state->hasPessimisticLockActivity()) {
+                // A failed eager set/delete may have acquired a server-side
+                // lock before its response was lost. Do not report an empty
+                // commit as success while such a lock is outstanding.
+                $this->committer->rollback(
+                    $this->state,
+                    $this->retryExecutor(),
+                    $this->classifyError(...),
+                );
+                return;
+            }
+
             $this->state->setStatus(TransactionStatus::Committed);
             $this->state->close();
             return;
@@ -357,8 +411,9 @@ final class Transaction
     public function rollback(): void
     {
         $this->state->ensureActive();
+        $this->state->markRollbackStarted();
 
-        if ($this->state->isEmptyWriteSet()) {
+        if ($this->state->isEmptyWriteSet() && !$this->state->hasPessimisticLockActivity()) {
             $this->state->setStatus(TransactionStatus::RolledBack);
             $this->state->close();
             return;
@@ -401,7 +456,7 @@ final class Transaction
      */
     public function heartbeat(int $adviseLockTtlMs = 10000): int
     {
-        $this->state->ensureActive();
+        $this->state->ensureWritable();
 
         $primary = $this->state->getPrimaryKey();
 
