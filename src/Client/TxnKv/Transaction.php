@@ -109,6 +109,13 @@ final class Transaction
             lockResolver: $this->lockResolver,
             regionCache: $this->regionCache,
             replicaReadPolicy: $this->replicaReadPolicy,
+            maxBackoffMs: $this->maxBackoffMs,
+            retryDeadlineMs: $this->retryDeadlineMs,
+            serverBusyBudgetMs: self::DEFAULT_SERVER_BUSY_BUDGET_MS,
+            metrics: $this->metrics,
+            logger: $this->logger,
+            retryExecutor: $this->retryExecutor(),
+            classifier: $this->classifyError(...),
         );
 
         $this->committer = new TwoPhaseCommitter(
