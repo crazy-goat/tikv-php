@@ -19,6 +19,8 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
@@ -42,6 +44,7 @@ final readonly class RawKvRangeOps
         private ?SlowLogConfig $slowLogConfig = null,
         private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
+        private MetricsInterface $metrics = new NoOpMetrics(),
     ) {
     }
 
@@ -339,6 +342,7 @@ final readonly class RawKvRangeOps
             $this->regionResolver,
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
+            metrics: $this->metrics,
         );
     }
 

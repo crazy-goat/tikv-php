@@ -17,6 +17,8 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
@@ -73,6 +75,7 @@ final readonly class RawKvScanner
          * are a test seam, not a production knob.
          */
         private int $scanPageSize = self::MAX_SCAN_LIMIT,
+        private MetricsInterface $metrics = new NoOpMetrics(),
     ) {
         if ($this->maxScanRows < 1) {
             throw new InvalidArgumentException('maxScanRows must be >= 1');
@@ -1223,6 +1226,7 @@ final readonly class RawKvScanner
             $this->regionResolver,
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
+            metrics: $this->metrics,
         );
     }
 

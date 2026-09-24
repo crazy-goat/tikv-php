@@ -187,6 +187,7 @@ final class RawKvClient
             logger: $bundle->logger,
             timeoutConfig: $bundle->timeoutConfig,
             slowLogConfig: $bundle->slowLogConfig,
+            metrics: $bundle->metrics,
             allowedStoreHosts: $bundle->allowedStoreHosts,
             storeHostPolicy: $bundle->storeHostPolicy,
             pdEndpoints: $bundle->pdEndpoints,
@@ -304,6 +305,7 @@ final class RawKvClient
             $this->maxConcurrency,
             $this->replicaReadPolicy,
             $maxScanRows,
+            metrics: $metrics,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -317,6 +319,7 @@ final class RawKvClient
             $this->slowLogConfig,
             $this->retryDeadlineMs,
             $this->maxConcurrency,
+            metrics: $metrics,
         );
         $this->ingestor = new SstIngestor(
             $grpc,

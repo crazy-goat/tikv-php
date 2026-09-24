@@ -12,7 +12,9 @@ namespace CrazyGoat\TiKV\Client\Observability;
  * library guarantees a no-op default via {@see NoOpMetrics} so callers
  * who do not opt in pay zero cost.
  *
- * Counters are tagged by an operation type (e.g. "get", "put", "scan").
+ * RPC and region-cache counters are tagged by operation; retry counters are
+ * tagged by the {@see \CrazyGoat\TiKV\Client\Retry\BackoffType} case name
+ * (e.g. "NotLeader", "ServerBusy"), and invalidations use their reason.
  * Implementations are free to bucket tags however they wish.
  *
  * @see NoOpMetrics for the default zero-cost implementation.
@@ -37,10 +39,11 @@ interface MetricsInterface
     public function rpcCompleted(string $operation, float $durationMs, bool $success): void;
 
     /**
-     * Increment the retry count for a given operation type.
+     * Increment the retry count for a given backoff type.
      *
      * Called by RetryExecutor every time a retryable error is observed
-     * and the operation is scheduled for another attempt.
+     * and the operation is scheduled for another attempt. $operation is the
+     * BackoffType case name, not the public client operation name.
      */
     public function retryAttempted(string $operation): void;
 
@@ -73,17 +76,15 @@ interface MetricsInterface
      *                           RegionErrorHandler::check()
      * - 'not_leader':         a NotLeader response forced an invalidation in
      *                           RetryExecutor::handleNotLeader() (hint peer
-     *                           unknown or no hint) — the sole owner of
-     *                           NotLeader drops at executor-owned call sites;
-     *                           there RegionErrorHandler::check() deliberately
-     *                           leaves NotLeader regions cached so
-     *                           handleNotLeader can switch-or-drop. At txn call
-     *                           sites with NO enclosing retry executor,
+     *                           unknown or no hint) at executor-owned call
+     *                           sites; there RegionErrorHandler::check()
+     *                           deliberately leaves NotLeader regions cached
+     *                           so handleNotLeader can switch-or-drop. At
+     *                           call sites with no enclosing retry executor,
      *                           check($…, notLeaderOwnedByRetryExecutor: false)
-     *                           DOES invalidate with reason 'not_leader'
-     *                           (pessimistic lock batch,
-     *                           primary-region commit, batchGetFromTiKV),
-     *                           mirroring the CHANGELOG wording.
+     *                           self-invalidates with the same reason
+     *                           (pessimistic lock, primary-region commit, and
+     *                           lock-resolution paths).
      * - 'retry_region_error': RetryExecutor invalidated before scheduling the
      *                           next attempt on a retryable error
      * - 'lock_resolve':       LockResolver dropped the region after resolving
