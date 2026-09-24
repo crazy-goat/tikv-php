@@ -97,7 +97,7 @@ services:
       - PD_ENDPOINTS=pd:2379
     profiles:
       - test
-    command: vendor/bin/phpunit --testsuite E2E --testdox
+    command: vendor/bin/phpunit --testsuite E2E-RawKV --testdox --no-coverage
 
 volumes:
   pd-data:

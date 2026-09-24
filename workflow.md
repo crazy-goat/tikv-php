@@ -299,19 +299,22 @@ composer test:unit
 # Run gRPC unit tests (needs PHP grpc extension; skips are failures)
 composer test:grpc
 
-# Run E2E tests (requires TiKV cluster - start with `make up`)
+# Run both E2E suites, switching from the V1TTL RawKV cluster to the
+# V1 TxnKV cluster (requires TiKV/Docker)
 make test-e2e
-# or directly:
-composer test:e2e
+# Or run only the RawKV suite inside the Compose network:
+docker-compose run --rm php-client composer test:e2e
 ```
 
-> **Note:** E2E tests require a running TiKV cluster. Start it with:
-> ```bash
-> make up
-> ```
-> This starts PD + 3 TiKV nodes on ports 2379, 20160, 20161, 20162.
-> Stop with `make down`. If tests are interrupted or state is corrupted,
-> run `make clean` (containers + volumes) and `make up` again.
+> **Note:** `make test-e2e` manages the E2E cluster lifecycle: it runs
+> `E2E-RawKV` against the V1TTL Compose profile, switches to the V1 profile,
+> then runs `E2E-TxnKV`, and removes the temporary volumes on exit. A separate
+> `make up` is only needed for a manual, single-suite run.
+> `docker-compose run --rm php-client composer test:e2e` runs only RawKV
+> against the default V1TTL profile.
+> The PD + 3 TiKV nodes use ports 2379, 20160, 20161, 20162. If a manual
+> cluster is left in a bad state, run `make clean` (containers + volumes)
+> and `make up` again.
 
 > **Note:** `composer test:grpc` runs the `Grpc` testsuite, which exercises
 > real gRPC connections and requires the `grpc` PHP extension
@@ -610,7 +613,7 @@ git push origin fix/<NUMBER>-<description>
 composer lint
 composer test:unit
 composer test:grpc    # needs grpc PHP extension
-make test-e2e         # requires `make up` (TiKV cluster)
+make test-e2e         # starts/stops the temporary E2E cluster automatically
 
 # 6. Update CHANGELOG.md
 
@@ -688,17 +691,18 @@ with rationale / numbered findings list / coder report with biggest problem
   ```
 - Code review via subagent runs locally – the subagent has access to
   read/write/edit/bash tools. Give it clear instructions on what to check.
-- E2E tests require Docker. Use `make up` to start TiKV and `make down`
-  to stop it. If state gets corrupted: `make clean && make up`.
+- E2E tests require Docker. `make test-e2e` manages the temporary RawKV/TxnKV
+  cluster switch; use `make up`/`make down` only for a manual single-suite
+  cluster. If a manual cluster is corrupted: `make clean && make up`.
 
 ### Useful make targets
 
 | Command | Description |
 |---------|-------------|
 | `make install` | Install PHP dependencies |
-| `make test` | Run all tests (unit + E2E) |
+| `make test` | Run all tests (unit + both E2E suites) |
 | `make test-unit` | Run unit tests only (no TiKV needed) |
-| `make test-e2e` | Run E2E tests (requires TiKV cluster) |
+| `make test-e2e` | Run RawKV then TxnKV E2E suites (requires TiKV/Docker) |
 | `make up` | Start TiKV cluster (PD + tikv1/2/3) |
 | `make down` | Stop TiKV cluster |
 | `make clean` | Destroy everything (containers + volumes) |
@@ -718,7 +722,7 @@ with rationale / numbered findings list / coder report with biggest problem
 | `composer phpstan` | Static analysis (level 9) |
 | `composer rector` | Rector dry-run |
 | `composer rector:fix` | Apply Rector rules |
-| `composer test` | Run PHPUnit (all tests) |
+| `composer test` | Run PHPUnit with all configured suites; use `make test` for cluster-mode-safe orchestration |
 | `composer test:unit` | Run unit tests only |
 | `composer test:grpc` | Run gRPC unit tests (needs grpc extension) |
-| `composer test:e2e` | Run E2E tests only (requires TiKV cluster) |
+| `composer test:e2e` | Run the RawKV E2E suite only (requires the V1TTL cluster) |

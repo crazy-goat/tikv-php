@@ -40,4 +40,4 @@ COPY . .
 RUN composer dump-autoload
 
 # Run tests by default
-CMD ["vendor/bin/phpunit", "--testsuite", "E2E", "--testdox"]
+CMD ["vendor/bin/phpunit", "--testsuite", "E2E-RawKV", "--testdox", "--no-coverage"]

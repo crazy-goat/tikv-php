@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- E2E commands and container defaults now select the real `E2E-RawKV` / `E2E-TxnKV` suites, disable coverage for standalone runs, and document that `make test-e2e` orchestrates the required cluster-mode switch. (#369)
 - The `metrics` option now reaches both `RawKvClient` and `TxnKvClient`, including their region resolution, retry executors, caches, and transactions; `getMetrics()` returns the injected backend and observability documentation now lists the actual callback tags. (#368)
 - Transactional reads now share consistent handling for response-level and per-pair `KeyError` values across `get()`, `batchGet()`, and `scan()`, including lock retry, typed conflicts, GC aborts, and fail-closed unknown variants. (#263)
 - RawKV batch failures now preserve successful sub-batch results in `BatchPartialFailureException::getPartialResults()` and wait for every in-flight request before reporting partial failure, instead of discarding successes after the first response error. (#262)
