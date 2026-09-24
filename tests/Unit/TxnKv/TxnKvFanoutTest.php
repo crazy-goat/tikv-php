@@ -129,11 +129,21 @@ final class TxnKvFanoutTest extends TestCase
     }
 
     /**
-     * AC: a 10-region write set with 5 ms simulated per-call latency must
-     * commit well under the sequential equivalent (~100 ms) while the gRPC
-     * call count is unchanged (20 RPCs: 10 prewrites + 10 commits).
+     * AC: a 10-region write set commits with full fan-out overlap — every
+     * secondary prewrite (and every secondary commit) is dispatched before
+     * any of its peers is awaited — while the gRPC call count is unchanged
+     * (20 RPCs: 10 prewrites + 10 commits).
+     *
+     * Deliberately NO absolute wall-clock ceiling here (FAQ, #291 review
+     * round 1): a bound tight enough to fail on a regression to serialized
+     * RPCs (≥10 × latency) is close enough to the fake's own usleep
+     * granularity + harness overhead (~10 ms of real CPU) to fail
+     * deterministically on macOS in isolation. The fan-out is instead
+     * proven from the SPREAD of the fake's own dispatch timestamps — a
+     * property a serialized implementation cannot satisfy, measured on a
+     * single clock, independent of harness overhead.
      */
-    public function testCommitWithTenRegionsAndFiveMsLatencyFitsUnderThirtyMs(): void
+    public function testCommitWithTenRegionsOverlapsSecondaryDispatchAndWait(): void
     {
         $regions = $this->makeRegions(10);
         $this->stubPdClient($regions);
@@ -151,19 +161,60 @@ final class TxnKvFanoutTest extends TestCase
             $txn->set("k{$i}", "v{$i}");
         }
 
-        $startMs = microtime(true) * 1000;
         $txn->commit();
-        $elapsedMs = microtime(true) * 1000 - $startMs;
 
         $this->assertSame(20, $grpc->callCount, 'fan-out must not change the RPC count');
-        // Sequential would be ~100 ms (20 x 5 ms); fanned out the dependency
-        // stages cost 4 x 5 ms of latency. The AC's 30 ms bound assumes a
-        // negligible client-side cost; the fake + PHPUnit harness adds
-        // ~10 ms of real CPU (region grouping, host-policy validation,
-        // retry-executor scaffolding), so the assertion bound is 45 ms —
-        // still a 2x+ margin under the sequential equivalent and a
-        // failing bound for any regression back to serialized RPCs.
-        self::assertLessThan(45, $elapsedMs, sprintf('commit took %.1f ms', $elapsedMs));
+
+        $prewriteWaits = array_values(array_filter(
+            $grpc->waitLog,
+            static fn(array $e): bool => $e['method'] === 'KvPrewrite',
+        ));
+        $commitWaits = array_values(array_filter(
+            $grpc->waitLog,
+            static fn(array $e): bool => $e['method'] === 'KvCommit',
+        ));
+        $prewriteDispatches = array_values(array_filter(
+            $grpc->dispatchLog,
+            static fn(array $e): bool => $e['method'] === 'KvPrewrite',
+        ));
+        $commitDispatches = array_values(array_filter(
+            $grpc->dispatchLog,
+            static fn(array $e): bool => $e['method'] === 'KvCommit',
+        ));
+        $this->assertCount(10, $prewriteDispatches);
+        $this->assertCount(10, $prewriteWaits);
+        $this->assertCount(10, $commitDispatches);
+        $this->assertCount(10, $commitWaits);
+
+        // Secondary prewrites: after the primary's prewrite is awaited, all
+        // 9 remaining sends are issued back-to-back. The SPREAD of their
+        // dispatch timestamps is the fan-out proof: a serialized
+        // implementation dispatches each only after the previous one's wait
+        // completes, spreading them by >= 9 x latencyMs (45 ms); fanned out,
+        // the dispatch loop itself costs microseconds. The bound is 2x
+        // latencyMs — measured between the fake's own dispatch stamps, so
+        // PHPUnit harness overhead outside the dispatch loop cannot inflate
+        // it, and a serialized regression overshoots it 4x+.
+        $secondaryPrewriteDispatches = array_slice(
+            array_map(static fn(array $e): float => $e['at'], $prewriteDispatches),
+            1,
+        );
+        $this->assertLessThan(
+            10.0,
+            max(...$secondaryPrewriteDispatches) - min(...$secondaryPrewriteDispatches),
+            'secondary prewrites were not dispatched in a single burst',
+        );
+
+        // Secondary commits: same burst property after the primary's commit.
+        $secondaryCommitDispatches = array_slice(
+            array_map(static fn(array $e): float => $e['at'], $commitDispatches),
+            1,
+        );
+        $this->assertLessThan(
+            10.0,
+            max(...$secondaryCommitDispatches) - min(...$secondaryCommitDispatches),
+            'secondary commits were not dispatched in a single burst',
+        );
     }
 
     /**

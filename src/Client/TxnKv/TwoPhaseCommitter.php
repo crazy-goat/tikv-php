@@ -1096,6 +1096,15 @@ final readonly class TwoPhaseCommitter
         }
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
+        // Note on exception semantics (issue #291 review): with
+        // batchDeadlineMs > 0 a BatchDeadlineExceededException can escape
+        // commit() AFTER the status was already set to Committed above —
+        // the secondary commits were dispatched but not all awaited within
+        // the deadline. This is deliberate: the primary is durably
+        // committed (the commit point), so the data is durable either way;
+        // leftover secondary locks are resolved by readers. Do NOT catch it
+        // here and do NOT change the status — the deadline defaults to
+        // 0 (disabled).
         $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
     }
 
@@ -1612,6 +1621,16 @@ final readonly class TwoPhaseCommitter
             // for_update_ts across regions is safe — TiKV only compares
             // it against lock timestamps, and updateMaxForUpdateTs()
             // tracks the maximum. Retries still refresh it below.
+            //
+            // Deliberate deviation from the sequential loop (issue #291
+            // review): ALL first-attempt fan-out dispatches of this pass
+            // use this pass's ORIGINAL $forUpdateTs, even though a
+            // sequential per-region loop would have refreshed it after
+            // each group's retry. The value is monotonic per transaction
+            // and updateMaxForUpdateTs() records the max, so no lock can
+            // be stamped with an out-of-order timestamp; the fan-out's
+            // uniform-timestamp sends are therefore equivalent from
+            // TiKV's point of view.
             $forUpdateTs = $this->pdClient->getTimestamp();
             $state->updateMaxForUpdateTs($forUpdateTs);
 
@@ -1629,255 +1648,290 @@ final readonly class TwoPhaseCommitter
                 $isFirstLock,
             );
 
-            foreach ($keysByRegion as $groupIndex => $regionData) {
-                $region = $regionData['region'];
-                $regionKeys = $regionData['keys'];
-                $mutations = $mutationsByGroup[$groupIndex];
+            try {
+                foreach ($keysByRegion as $groupIndex => $regionData) {
+                    $region = $regionData['region'];
+                    $regionKeys = $regionData['keys'];
+                    $mutations = $mutationsByGroup[$groupIndex];
 
-                $elapsedMs = 0;
-                $attempt = 0;
-                $needRetry = false;
-                $lastRegionError = null;
-                $regroup = false;
-                do {
-                    $attempt++;
-                    // First attempt uses the region already supplied by
-                    // groupStringsByRegion() (and the future dispatched in
-                    // the fan-out above). On retries (issue #500) the
-                    // region must be re-resolved: a region captured before
-                    // the loop can be stale by the time it is retried
-                    // (EpochNotMatch / NotLeader) — the same stale-capture
-                    // class as the scan retry fix (#267, GRPC-08). On a
-                    // region error RegionErrorHandler::check() has already
-                    // invalidated the cache entry, so this re-resolve
-                    // reaches PD and picks up the new epoch / leader
-                    // instead of replaying the stale one until the budget
-                    // runs out. If the re-resolved region no longer
-                    // covers the whole key group (a split happened since
-                    // grouping, issue #503), the group is re-grouped
-                    // against the fresh region layout instead of
-                    // retrying a request the server will keep rejecting
-                    // with region errors until the budget runs out — the
-                    // same recovery idea as the scan re-clipping in #267.
-                    if ($attempt > 1) {
-                        $region = $this->regionResolver->getRegionInfo($regionKeys[0]);
-                        if (!$this->regionCoversAllKeys($region, $regionKeys)) {
-                            if (count($regroups) >= self::PESSIMISTIC_LOCK_MAX_REGROUPS) {
-                                throw $lastRegionError ?? new RegionException(
-                                    'pessimistic lock',
-                                    'Region split repeatedly invalidated the lock group',
-                                );
-                            }
-                            $regroups[] = true;
-                            $regroup = true;
-                            break;
-                        }
-                    }
-
-                    $regionError = null;
-                    try {
-                        if ($attempt === 1) {
-                            // Response from the future dispatched in the
-                            // fan-out above (issue #291).
-                            /** @var PessimisticLockResponse $response */
-                            $response = $firstAttempts[$groupIndex]->wait();
-                        } else {
-                            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-                            $request = $this->buildPessimisticLockRequest(
-                                $region,
-                                $mutations,
-                                $primary,
-                                $forUpdateTs,
-                                $isFirstLock,
-                            );
-
-                            $this->logger->debug('PessimisticLock', [
-                                'regionId' => $region->regionId,
-                                'keyCount' => count($regionKeys),
-                                'attempt' => $attempt,
-                                'forUpdateTs' => $forUpdateTs,
-                            ]);
-
-                            /** @var PessimisticLockResponse $response */
-                            $response = $this->grpc->call(
-                                $address,
-                                'tikvpb.Tikv',
-                                'KvPessimisticLock',
-                                $request,
-                                PessimisticLockResponse::class,
-                                $this->timeoutMs('write'),
-                            );
-                        }
-
-                        // No RetryExecutor wraps this loop, so no handleNotLeader()
-                        // would drop a NotLeader-carrying region — check() must
-                        // self-invalidate (issue #474 review). The thrown
-                        // RegionException is caught below and retried (issue #500).
-                        RegionErrorHandler::check(
-                            $response,
-                            $this->regionCache,
-                            $region->regionId,
-                            notLeaderOwnedByRetryExecutor: false,
-                        );
-                    } catch (RegionException $caught) {
-                        $regionError = $caught;
-                    }
-
+                    $elapsedMs = 0;
+                    $attempt = 0;
                     $needRetry = false;
                     $lastRegionError = null;
-
-                    if ($regionError instanceof RegionException) {
-                        $this->logger->warning('Region error during pessimistic lock, retrying', [
-                            'regionId' => $region->regionId,
-                            'attempt' => $attempt,
-                            'error' => $regionError->getMessage(),
-                        ]);
-                        $lastRegionError = $regionError;
-                    } else {
-                        $errors = $response->getErrors();
-
-                        if (count($errors) > 0) {
-                            foreach ($errors as $keyError) {
-                                $deadlock = $keyError->getDeadlock();
-                                if ($deadlock !== null) {
-                                    $this->throwDeadlock($deadlock, 'Deadlock detected during pessimistic lock');
-                                }
-
-                                $locked = $keyError->getLocked();
-                                if ($locked !== null) {
-                                    $rawPrimary = $locked->getPrimaryLock();
-                                    $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                                    // Charge the whole resolve (status RPCs + TTL wait)
-                                    // to this loop's budget (issue #470): pass the
-                                    // remaining time so the lock wait is capped by it,
-                                    // then add the wall time actually spent back into
-                                    // $elapsedMs — the wait used to be invisible to
-                                    // the budget and could stretch it past maxBackoffMs.
-                                    $resolveStartMs = (int) (microtime(true) * 1000);
-                                    // min 1 ms: 0 would select LockResolver's legacy
-                                    // uncapped-by-deadline branch exactly when the
-                                    // budget is most exhausted (issue #470).
-                                    // No RetryExecutor wraps this loop, so the
-                                    // resolve must drop NotLeader regions itself
-                                    // (issue #474 review round 3).
-                                    $this->lockResolver->resolveLock(
-                                        $lockPrimary,
-                                        $locked,
-                                        max(1, $this->maxBackoffMs - $elapsedMs),
-                                        notLeaderOwnedByRetryExecutor: false,
-                                    );
-                                    $elapsedMs += max(0, (int) (microtime(true) * 1000) - $resolveStartMs);
-                                    $needRetry = true;
-                                    break;
-                                }
-
-                                $conflict = $keyError->getConflict();
-                                if ($conflict !== null) {
-                                    throw new TransactionConflictException(
-                                        'Write conflict during pessimistic lock',
+                    $regroup = false;
+                    do {
+                        $attempt++;
+                        // First attempt uses the region already supplied by
+                        // groupStringsByRegion() (and the future dispatched in
+                        // the fan-out above). On retries (issue #500) the
+                        // region must be re-resolved: a region captured before
+                        // the loop can be stale by the time it is retried
+                        // (EpochNotMatch / NotLeader) — the same stale-capture
+                        // class as the scan retry fix (#267, GRPC-08). On a
+                        // region error RegionErrorHandler::check() has already
+                        // invalidated the cache entry, so this re-resolve
+                        // reaches PD and picks up the new epoch / leader
+                        // instead of replaying the stale one until the budget
+                        // runs out. If the re-resolved region no longer
+                        // covers the whole key group (a split happened since
+                        // grouping, issue #503), the group is re-grouped
+                        // against the fresh region layout instead of
+                        // retrying a request the server will keep rejecting
+                        // with region errors until the budget runs out — the
+                        // same recovery idea as the scan re-clipping in #267.
+                        if ($attempt > 1) {
+                            $region = $this->regionResolver->getRegionInfo($regionKeys[0]);
+                            if (!$this->regionCoversAllKeys($region, $regionKeys)) {
+                                if (count($regroups) >= self::PESSIMISTIC_LOCK_MAX_REGROUPS) {
+                                    throw $lastRegionError ?? new RegionException(
+                                        'pessimistic lock',
+                                        'Region split repeatedly invalidated the lock group',
                                     );
                                 }
-
-                                $retryable = $keyError->getRetryable();
-                                if ($retryable !== '') {
-                                    throw new TransactionConflictException(
-                                        'Pessimistic lock failed: retryable: ' . $retryable,
-                                    );
-                                }
-
-                                $abort = $keyError->getAbort();
-                                if ($abort !== '') {
-                                    throw new TransactionConflictException(
-                                        'Pessimistic lock failed: abort: ' . $abort,
-                                    );
-                                }
-
-                                // Fail closed (issue #454): a KeyError variant
-                                // other than deadlock/locked/conflict must never
-                                // leave this loop as if every lock was acquired,
-                                // or the transaction would proceed to prewrite
-                                // keys it does not hold a lock on. Mirrors the
-                                // #214 handling of unrecognised prewrite variants.
-                                throw new TiKvException(
-                                    'Pessimistic lock failed: ' . KeyErrorDescriber::describe($keyError),
-                                );
+                                $regroups[] = true;
+                                $regroup = true;
+                                break;
                             }
                         }
-                    }
 
-                    if (!$needRetry && !$lastRegionError instanceof \CrazyGoat\TiKV\Client\Exception\RegionException) {
-                        break;
-                    }
+                        $regionError = null;
+                        try {
+                            if ($attempt === 1) {
+                                // Response from the future dispatched in the
+                                // fan-out above (issue #291).
+                                /** @var PessimisticLockResponse $response */
+                                $response = $firstAttempts[$groupIndex]->wait();
+                            } else {
+                                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-                    $delayMs = min(
-                        self::PESSIMISTIC_LOCK_RETRY_DELAY_MS * (1 << min($attempt, 6)),
-                        10000,
-                    );
+                                $request = $this->buildPessimisticLockRequest(
+                                    $region,
+                                    $mutations,
+                                    $primary,
+                                    $forUpdateTs,
+                                    $isFirstLock,
+                                );
 
-                    $remainingMs = $this->maxBackoffMs - $elapsedMs;
-                    if ($remainingMs <= 0) {
-                        $this->logger->warning('Pessimistic lock retry budget exhausted', [
+                                $this->logger->debug('PessimisticLock', [
+                                    'regionId' => $region->regionId,
+                                    'keyCount' => count($regionKeys),
+                                    'attempt' => $attempt,
+                                    'forUpdateTs' => $forUpdateTs,
+                                ]);
+
+                                /** @var PessimisticLockResponse $response */
+                                $response = $this->grpc->call(
+                                    $address,
+                                    'tikvpb.Tikv',
+                                    'KvPessimisticLock',
+                                    $request,
+                                    PessimisticLockResponse::class,
+                                    $this->timeoutMs('write'),
+                                );
+                            }
+
+                            // No RetryExecutor wraps this loop, so no handleNotLeader()
+                            // would drop a NotLeader-carrying region — check() must
+                            // self-invalidate (issue #474 review). The thrown
+                            // RegionException is caught below and retried (issue #500).
+                            RegionErrorHandler::check(
+                                $response,
+                                $this->regionCache,
+                                $region->regionId,
+                                notLeaderOwnedByRetryExecutor: false,
+                            );
+                        } catch (RegionException $caught) {
+                            $regionError = $caught;
+                        }
+
+                        $needRetry = false;
+                        $lastRegionError = null;
+
+                        if ($regionError instanceof RegionException) {
+                            $this->logger->warning('Region error during pessimistic lock, retrying', [
+                                'regionId' => $region->regionId,
+                                'attempt' => $attempt,
+                                'error' => $regionError->getMessage(),
+                            ]);
+                            $lastRegionError = $regionError;
+                        } else {
+                            $errors = $response->getErrors();
+
+                            if (count($errors) > 0) {
+                                foreach ($errors as $keyError) {
+                                    $deadlock = $keyError->getDeadlock();
+                                    if ($deadlock !== null) {
+                                        $this->throwDeadlock($deadlock, 'Deadlock detected during pessimistic lock');
+                                    }
+
+                                    $locked = $keyError->getLocked();
+                                    if ($locked !== null) {
+                                        $rawPrimary = $locked->getPrimaryLock();
+                                        $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
+                                        // Charge the whole resolve (status RPCs + TTL wait)
+                                        // to this loop's budget (issue #470): pass the
+                                        // remaining time so the lock wait is capped by it,
+                                        // then add the wall time actually spent back into
+                                        // $elapsedMs — the wait used to be invisible to
+                                        // the budget and could stretch it past maxBackoffMs.
+                                        $resolveStartMs = (int) (microtime(true) * 1000);
+                                        // min 1 ms: 0 would select LockResolver's legacy
+                                        // uncapped-by-deadline branch exactly when the
+                                        // budget is most exhausted (issue #470).
+                                        // No RetryExecutor wraps this loop, so the
+                                        // resolve must drop NotLeader regions itself
+                                        // (issue #474 review round 3).
+                                        $this->lockResolver->resolveLock(
+                                            $lockPrimary,
+                                            $locked,
+                                            max(1, $this->maxBackoffMs - $elapsedMs),
+                                            notLeaderOwnedByRetryExecutor: false,
+                                        );
+                                        $elapsedMs += max(0, (int) (microtime(true) * 1000) - $resolveStartMs);
+                                        $needRetry = true;
+                                        break;
+                                    }
+
+                                    $conflict = $keyError->getConflict();
+                                    if ($conflict !== null) {
+                                        throw new TransactionConflictException(
+                                            'Write conflict during pessimistic lock',
+                                        );
+                                    }
+
+                                    $retryable = $keyError->getRetryable();
+                                    if ($retryable !== '') {
+                                        throw new TransactionConflictException(
+                                            'Pessimistic lock failed: retryable: ' . $retryable,
+                                        );
+                                    }
+
+                                    $abort = $keyError->getAbort();
+                                    if ($abort !== '') {
+                                        throw new TransactionConflictException(
+                                            'Pessimistic lock failed: abort: ' . $abort,
+                                        );
+                                    }
+
+                                    // Fail closed (issue #454): a KeyError variant
+                                    // other than deadlock/locked/conflict must never
+                                    // leave this loop as if every lock was acquired,
+                                    // or the transaction would proceed to prewrite
+                                    // keys it does not hold a lock on. Mirrors the
+                                    // #214 handling of unrecognised prewrite variants.
+                                    throw new TiKvException(
+                                        'Pessimistic lock failed: ' . KeyErrorDescriber::describe($keyError),
+                                    );
+                                }
+                            }
+                        }
+
+                        $hasRegionError = $lastRegionError instanceof \CrazyGoat\TiKV\Client\Exception\RegionException;
+                        if (!$needRetry && !$hasRegionError) {
+                            break;
+                        }
+
+                        $delayMs = min(
+                            self::PESSIMISTIC_LOCK_RETRY_DELAY_MS * (1 << min($attempt, 6)),
+                            10000,
+                        );
+
+                        $remainingMs = $this->maxBackoffMs - $elapsedMs;
+                        if ($remainingMs <= 0) {
+                            $this->logger->warning('Pessimistic lock retry budget exhausted', [
+                                'elapsedMs' => $elapsedMs,
+                            ]);
+                            break;
+                        }
+                        $delayMs = min($delayMs, $remainingMs);
+
+                        $this->logger->debug('Pessimistic lock conflict, retrying', [
+                            'attempt' => $attempt,
+                            'delayMs' => $delayMs,
                             'elapsedMs' => $elapsedMs,
                         ]);
+                        usleep($delayMs * 1000);
+                        $elapsedMs += $delayMs;
+
+                        $forUpdateTs = $this->pdClient->getTimestamp();
+                        $state->updateMaxForUpdateTs($forUpdateTs);
+                    } while ($elapsedMs < $this->maxBackoffMs);
+
+                    if ($regroup) {
+                        // The re-resolved region does not cover the whole key
+                        // group (a split happened since grouping, issue #503):
+                        // re-group this group's keys together with all
+                        // not-yet-processed groups' keys against the fresh
+                        // region layout and continue. Keys of groups that
+                        // already locked successfully are NOT re-locked — the
+                        // pessimistic lock for this startTs is already held on
+                        // them, and this group's keys were never confirmed
+                        // locked (the attempt ended in a region error), so
+                        // re-sending them is safe.
+                        $regroupKeys = $regionKeys;
+                        foreach ($keysByRegion as $laterIndex => $laterData) {
+                            if ($laterIndex > $groupIndex) {
+                                $regroupKeys = array_merge($regroupKeys, $laterData['keys']);
+                            }
+                        }
+                        $pendingKeys = array_values(array_unique($regroupKeys));
+                        $this->logger->debug('Pessimistic lock re-grouping keys after region split', [
+                            'regionId' => $region->regionId,
+                            'keyCount' => count($pendingKeys),
+                        ]);
+                        // The regroup abandons the not-yet-awaited
+                        // first-attempt futures of the later groups; cancel
+                        // them before the re-dispatch below (same rationale
+                        // as the catch above).
+                        $this->cancelUnawaitedFirstAttempts($firstAttempts);
                         break;
                     }
-                    $delayMs = min($delayMs, $remainingMs);
 
-                    $this->logger->debug('Pessimistic lock conflict, retrying', [
-                        'attempt' => $attempt,
-                        'delayMs' => $delayMs,
-                        'elapsedMs' => $elapsedMs,
-                    ]);
-                    usleep($delayMs * 1000);
-                    $elapsedMs += $delayMs;
-
-                    $forUpdateTs = $this->pdClient->getTimestamp();
-                    $state->updateMaxForUpdateTs($forUpdateTs);
-                } while ($elapsedMs < $this->maxBackoffMs);
-
-                if ($regroup) {
-                    // The re-resolved region does not cover the whole key
-                    // group (a split happened since grouping, issue #503):
-                    // re-group this group's keys together with all
-                    // not-yet-processed groups' keys against the fresh
-                    // region layout and continue. Keys of groups that
-                    // already locked successfully are NOT re-locked — the
-                    // pessimistic lock for this startTs is already held on
-                    // them, and this group's keys were never confirmed
-                    // locked (the attempt ended in a region error), so
-                    // re-sending them is safe.
-                    $regroupKeys = $regionKeys;
-                    foreach ($keysByRegion as $laterIndex => $laterData) {
-                        if ($laterIndex > $groupIndex) {
-                            $regroupKeys = array_merge($regroupKeys, $laterData['keys']);
-                        }
+                    // A lock that could not be acquired within the configured wait
+                    // budget must fail the transaction instead of silently continuing
+                    // to prewrite without a lock (issue #219, TXN-14).
+                    if ($lastRegionError instanceof \CrazyGoat\TiKV\Client\Exception\RegionException) {
+                        // The budget ran out while region errors kept coming — the
+                        // region failure is the reason the lock was never acquired,
+                        // so surface it rather than a lock timeout (issue #500).
+                        throw $lastRegionError;
                     }
-                    $pendingKeys = array_values(array_unique($regroupKeys));
-                    $this->logger->debug('Pessimistic lock re-grouping keys after region split', [
-                        'regionId' => $region->regionId,
-                        'keyCount' => count($pendingKeys),
-                    ]);
-                    break;
-                }
+                    if ($needRetry) {
+                        throw new LockWaitTimeoutException(
+                            $regionKeys[0] ?? '',
+                            $this->maxBackoffMs,
+                        );
+                    }
 
-                // A lock that could not be acquired within the configured wait
-                // budget must fail the transaction instead of silently continuing
-                // to prewrite without a lock (issue #219, TXN-14).
-                if ($lastRegionError instanceof \CrazyGoat\TiKV\Client\Exception\RegionException) {
-                    // The budget ran out while region errors kept coming — the
-                    // region failure is the reason the lock was never acquired,
-                    // so surface it rather than a lock timeout (issue #500).
-                    throw $lastRegionError;
+                    $isFirstLock = false;
                 }
-                if ($needRetry) {
-                    throw new LockWaitTimeoutException(
-                        $regionKeys[0] ?? '',
-                        $this->maxBackoffMs,
-                    );
-                }
+            } catch (\Throwable $e) {
+                // A first-attempt throw (deadlock / conflict / retryable /
+                // abort / region-error-after-budget / lock timeout) abandons
+                // the not-yet-awaited fan-out futures of the remaining
+                // groups. Cancel them so the orphan-lock window closes
+                // immediately: cancelled-but-applied locks are still covered
+                // by pessimisticRollbackAll() / lock TTL, but cancelling
+                // shrinks the race (issue #291 review).
+                $this->cancelUnawaitedFirstAttempts($firstAttempts);
+                throw $e;
+            }
+        }
+    }
 
-                $isFirstLock = false;
+    /**
+     * Best-effort cancellation of the first-attempt fan-out futures that
+     * were never awaited (issue #291 review). Completed futures are skipped;
+     * cancellation of a pending future prevents the response from surfacing
+     * unobserved after the caller has already moved on.
+     *
+     * @param array<int, GrpcFuture> $firstAttempts
+     */
+    private function cancelUnawaitedFirstAttempts(array $firstAttempts): void
+    {
+        foreach ($firstAttempts as $future) {
+            if (!$future->isCompleted()) {
+                $future->cancel();
             }
         }
     }
