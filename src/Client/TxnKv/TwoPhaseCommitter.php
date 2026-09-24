@@ -247,6 +247,15 @@ final readonly class TwoPhaseCommitter
         $prewriteStartedAtMs = $this->nowMs();
         $primaryLockWritten = false;
         $keysByRegion = $this->groupMutationsByRegion($mutations);
+        $groupedMutationCount = 0;
+        foreach ($keysByRegion as $regionData) {
+            $groupedMutationCount += count($regionData['mutations']);
+        }
+        if ($groupedMutationCount !== count($mutations)) {
+            throw new InvalidStateException(
+                'Not all transaction mutations were assigned to a region; refusing to report commit success',
+            );
+        }
         $allKeys = $state->getWriteKeys();
 
         // One-phase commit (issue #419): a single-region, small transaction
@@ -351,10 +360,9 @@ final readonly class TwoPhaseCommitter
         ): array {
             $group = $primaryGroup;
             if ($group === null) {
-                // No region group owns the primary key (pathological
-                // grouping): run nothing, mirroring the old loop where
-                // no iteration would set the primary result.
-                return ['minCommitTs' => 0, 'onePcCommitTs' => 0];
+                throw new InvalidStateException(
+                    'No region resolved for the primary mutation; refusing to report commit success',
+                );
             }
 
             $useOnePc = $group['isPrimary'] && $onePc;
@@ -1000,7 +1008,9 @@ final readonly class TwoPhaseCommitter
         $keysByRegion = $this->groupStringsByRegion($keys);
 
         if ($keysByRegion === []) {
-            return;
+            throw new InvalidStateException(
+                'No regions resolved for a non-empty commit key set; refusing to report success',
+            );
         }
 
         $primary = $state->getPrimaryKey();

@@ -2020,10 +2020,42 @@ class TransactionTest extends TestCase
     }
 
     /**
-     * Issue #214 (TXN-09): any KeyError variant not explicitly mapped (here
-     * `commit_ts_expired`) must fail closed with the base TiKvException and
-     * must never be treated as a successful prewrite.
+     * Issue #208: if region resolution returns no region, the transaction
+     * must fail before sending a prewrite or reporting Committed.
      */
+    public function testCommitWithNoRegionsFailsClosedBeforeReportingCommitted(): void
+    {
+        $this->pdClient->method('scanRegions')->willReturn([]);
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $methodSequence = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methodSequence): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException) {
+            // A missing region must never be reported as a successful commit.
+        }
+
+        $this->assertNotSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame([], $methodSequence, 'no prewrite or commit RPC may be sent without a resolved region');
+    }
+
     public function testCommitPrewriteUnrecognisedVariantThrowsAndSkipsCommit(): void
     {
         $keyError = new KeyError();
