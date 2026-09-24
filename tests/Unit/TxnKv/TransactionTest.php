@@ -472,6 +472,67 @@ class TransactionTest extends TestCase
         return $response;
     }
 
+    public function testScanLockedPairResolvesLockRetriesAndReturnsNoMalformedRow(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $locked = new LockInfo();
+        $locked->setKey('k2');
+        $locked->setPrimaryLock('k2');
+        $locked->setLockVersion(2000);
+        $keyError = new KeyError();
+        $keyError->setLocked($locked);
+        $errorPair = new KvPair();
+        $errorPair->setError($keyError);
+        $errorResponse = new ScanResponse();
+        $errorResponse->setPairs([
+            $this->makeScanResponse(['k1' => 'v1'])->getPairs()[0],
+            $errorPair,
+        ]);
+
+        $successResponse = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
+        $statusResponse = new CheckTxnStatusResponse();
+        $statusResponse->setCommitVersion(3000);
+
+        $scanCalls = 0;
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+        ) use (
+            &$scanCalls,
+            &$methods,
+            $errorResponse,
+            $successResponse,
+            $statusResponse,
+        ): object {
+            $methods[] = $method;
+            return match ($method) {
+                'KvScan' => ++$scanCalls === 1 ? $errorResponse : $successResponse,
+                'KvCheckTxnStatus' => $statusResponse,
+                'KvResolveLock' => new ResolveLockResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            };
+        });
+
+        $result = $this->createTransaction(['pessimistic' => false])->scan('', 'z');
+
+        $this->assertSame([
+            ['key' => 'k1', 'value' => 'v1'],
+            ['key' => 'k2', 'value' => 'v2'],
+        ], $result);
+        $this->assertSame(2, $scanCalls);
+        $this->assertSame(['KvScan', 'KvCheckTxnStatus', 'KvResolveLock', 'KvScan'], $methods);
+        $this->assertNotSame('', $result[0]['key']);
+    }
+
     public function testScanWithLimitZeroUsesMaxScanLimit(): void
     {
         $region = $this->makeRegion(1, '', '');

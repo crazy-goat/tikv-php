@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Transactional `scan()` now resolves per-pair locks and retries the region scan instead of returning a truncated range with an empty-key row. Other per-pair `KeyError` variants fail closed. (#211)
 - Transactional `batchGet()` now resolves per-pair locks and retries the regional read; response-level and other per-pair `KeyError` variants fail as exceptions instead of being returned as missing values. (#210)
 - Pessimistic transactions retain per-key read timestamps and perform a prewrite constraint check, so an intervening commit is reported as a conflict instead of silently overwriting a read-modify-write update. (#209)
-- Transactional `batchGet()` now resolves per-pair locks and retries the regional read; response-level and other per-pair `KeyError` variants fail as exceptions instead of being returned as missing values. (#210)
 - Transaction commits now fail closed if region resolution does not assign every mutation or produces no commit regions, rather than silently reporting a partial or empty commit as successful. (#208)
 - Lock resolution no longer rolls back a transaction while its lock TTL is still active; live locks trigger bounded retry backoff, and rollback resolution only proceeds after TiKV reports expiry. (#206)
 
