@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.6.0] — 2026-09-24
+
 ### Changed
 
 - **[PERF-04]**: TxnKV two-phase-commit RPCs are now fanned out across regions instead of issued sequentially — `TwoPhaseCommitter` reuses the `BatchAsyncExecutor`/`GrpcFuture` dispatch-then-wait pattern for prewrite, secondary commits, `batchRollback`, `pessimisticRollbackAll` and the pessimistic-lock first attempts, and `TxnReader::batchGetFromTiKV` dispatches all per-region `KvBatchGet` calls before awaiting any. Commit latency for an R-region transaction drops from `R×RTT_prewrite + RTT_tso + R×RTT_commit` to roughly `RTT_prewrite + RTT_tso + 2×RTT_commit` (10-region transaction at 5 ms/call: ~100 ms → ~30 ms in the test harness; gRPC call count unchanged). All 2PC ordering invariants are preserved: the primary lock is durably prewritten before secondary locks (client-go's rule; async-commit keeps its deliberate primary-last barrier), the primary commit is acknowledged before secondary commits dispatch, secondary commit failures stay logged-and-swallowed with status Committed, and error reporting surfaces the same exception the sequential loop would have thrown first (`BatchPartialFailureException::getFirstRegionError()` now selects the lowest region index, making that contract hold regardless of which region fails in the dispatch phase). In-flight futures are cancelled on every escape path (non-`TiKvException` waits, pessimistic first-attempt throw/regroup), and pessimistic-lock retries remain sequential by design. (#291)
