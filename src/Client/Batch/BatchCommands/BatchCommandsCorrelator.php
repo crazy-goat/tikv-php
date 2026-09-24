@@ -31,19 +31,28 @@ final class BatchCommandsCorrelator
      *        message, or null when the stream was closed (half-close or
      *        transport failure)
      * @param int $deadlineMs wall-clock deadline for the whole drain in
-     *        milliseconds; 0 disables the deadline
+     *        milliseconds; 0 disables the deadline, a negative value is rejected
      * @return list<BatchCommandsResponse> wire responses in arrival order
      *         (may be out of request_id order; each carries its own
      *         request_ids)
      *
      * @throws BatchCommandsStreamException when the stream closes before all
      *         ids are answered, or when the deadline expires
+     * @throws \InvalidArgumentException when $deadlineMs is negative (a
+     *         negative value would silently disable the deadline and allow
+     *         an unbounded drain loop)
      */
     public static function drain(
         array $pendingIds,
         callable $recv,
         int $deadlineMs = 0,
     ): array {
+        if ($deadlineMs < 0) {
+            throw new \InvalidArgumentException(sprintf(
+                '$deadlineMs must be >= 0 (0 disables the deadline), got %d',
+                $deadlineMs,
+            ));
+        }
         $remaining = array_fill_keys($pendingIds, true);
         $received = [];
 

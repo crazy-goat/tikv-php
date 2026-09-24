@@ -24,7 +24,9 @@ use Grpc\Timeval;
  * The stream carries a fixed lifetime deadline (started at open) so that a
  * silently dead store cannot block a RECV batch forever: once the deadline
  * fires, recv() yields null (or startBatch fails) and the transport
- * discards the stream, falling back to unary calls.
+ * discards the stream, falling back to unary calls. The deadline is
+ * measured from stream OPEN, not per exchange — every later exchange on
+ * the same stream gets the remaining budget under the fixed 60 s cap.
  *
  * Not unit-testable without ext-grpc (constructs Grpc\Call directly — same
  * rule as RawKvBatch's async helpers); the protocol logic around it is.
@@ -84,15 +86,29 @@ final class BatchCommandsConnection implements BatchCommandsStreamInterface
                 \Grpc\OP_RECV_MESSAGE => true,
             ];
         $event = $this->call->startBatch($batch);
-        $this->initialMetadataReceived = true;
 
         $payload = (array) $event;
         $raw = $payload['message'] ?? null;
 
         if (!is_string($raw) || $raw === '') {
-            // Stream closed / deadline fired — no message on the wire.
-            return null;
+            if (!$this->initialMetadataReceived) {
+                // Defensive: a server may split the HEADERS and first-message
+                // frames, so the metadata-only completion above says nothing
+                // about the stream. Retry once message-only before concluding
+                // the stream is closed.
+                $event = $this->call->startBatch([\Grpc\OP_RECV_MESSAGE => true]);
+                $payload = (array) $event;
+                $raw = $payload['message'] ?? null;
+                if (!is_string($raw) || $raw === '') {
+                    return null;
+                }
+            } else {
+                // Stream closed / deadline fired — no message on the wire.
+                return null;
+            }
         }
+
+        $this->initialMetadataReceived = true;
 
         /** @var BatchCommandsResponse */
         return GrpcResponseParser::deserialize($event, BatchCommandsResponse::class);

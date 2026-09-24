@@ -479,8 +479,9 @@ final readonly class RawKvBatch
             $outcome = $this->batchCommands->dispatch($entries, $this->timeoutMs($opType) ?? 0);
         } catch (\Throwable $e) {
             // Any stream-layer failure falls back to the full unary fan-out:
-            // the raw batch operations are idempotent, so re-running the
-            // entries that may already have been answered is safe.
+            // raw batch operations are idempotent, EXCEPT that a re-run
+            // batchPut re-extends per-key TTLs (absolute-from-now), so
+            // entries that were already answered get a fresh TTL.
             $this->logger->info('BatchCommands dispatch failed, falling back to unary fan-out', [
                 'operation' => $opType,
                 'error' => $e->getMessage(),

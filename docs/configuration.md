@@ -631,7 +631,13 @@ Properties and limitations of the current implementation:
 
 - One stream per store address is opened lazily on a channel from the
   existing `GrpcClient` pool and carries a fixed 60 s lifetime deadline; a
-  stream that fails is discarded and re-opened on the next round trip.
+  stream that fails is discarded and re-opened on the next round trip. The
+  deadline is measured from stream OPEN, not from each exchange, so later
+  round trips on an aging stream get a shrinking remaining budget.
+- The raw batch operations are idempotent, so the unary fallback after a
+  stream failure is safe to re-run — EXCEPT a re-run `batchPut` extends the
+  per-key TTLs it sets (they are absolute-from-now), so entries that were
+  already answered come back with a fresh TTL.
 - The PHP client is synchronous: there is no background receive loop. The
   multiplexing window is a single fan-out (the issue's "per-request-cycle
   batching window" scope) — interleaved single-key traffic from unrelated

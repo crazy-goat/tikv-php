@@ -15,6 +15,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Tikvpb\BatchCommandsRequest;
+use CrazyGoat\TiKV\Client\Exception\BatchCommandsStreamException;
 use Google\Protobuf\Internal\Message;
 
 /**
@@ -70,7 +71,7 @@ final class BatchCommandsMultiplexer
      * @param array<array-key, BatchCommandsEntry> $entries fan-out entry key => entry
      * @param int $timeoutMs wall-clock deadline per store round trip in ms; 0 disables it
      *
-     * @throws \CrazyGoat\TiKV\Client\Exception\BatchCommandsStreamException on stream
+     * @throws BatchCommandsStreamException on stream
      *         failure (the caller falls back to the unary path)
      */
     public function dispatch(array $entries, int $timeoutMs = 0): BatchCommandsDispatchResult
@@ -122,7 +123,7 @@ final class BatchCommandsMultiplexer
                     $id = $ids[$i] ?? null;
                     $key = is_int($id) || is_string($id) ? ($keyById[(int) $id] ?? null) : null;
                     if ($key === null) {
-                        throw new \CrazyGoat\TiKV\Client\Exception\BatchCommandsStreamException(
+                        throw new BatchCommandsStreamException(
                             'BatchCommands response carries a request_id that was not sent on this dispatch',
                         );
                     }

@@ -112,4 +112,18 @@ final class BatchCommandsCorrelatorTest extends TestCase
             1,
         );
     }
+
+    public function testDrainRejectsNegativeDeadline(): void
+    {
+        // A negative deadline would be treated as "no deadline" by the
+        // loop, allowing an unbounded drain — it must be rejected outright.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('$deadlineMs must be >= 0');
+
+        BatchCommandsCorrelator::drain(
+            [1],
+            static fn (): \CrazyGoat\Proto\Tikvpb\BatchCommandsResponse => self::wireResponse([1 => 'a']),
+            -5,
+        );
+    }
 }
