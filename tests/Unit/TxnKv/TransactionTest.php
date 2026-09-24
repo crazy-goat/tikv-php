@@ -2819,6 +2819,59 @@ class TransactionTest extends TestCase
         $this->assertContains('KvBatchRollback', $methodSequence);
     }
 
+    public function testPriorityIsCarriedOnRollbackContexts(): void
+    {
+        // The transaction's priority must also reach the Context of the
+        // rollback RPCs (PessimisticRollback + BatchRollback) so it is
+        // consistent across the transaction's full RPC surface.
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequests,
+            ): object {
+                if ($method === 'KVPessimisticRollback' || $method === 'KvBatchRollback') {
+                    $capturedRequests[$method] = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true, 'priority' => 1]);
+        $txn->set('k1', 'v1');
+        $txn->rollback();
+
+        $this->assertArrayHasKey('KVPessimisticRollback', $capturedRequests);
+        $this->assertArrayHasKey('KvBatchRollback', $capturedRequests);
+        $pessimisticRequest = $capturedRequests['KVPessimisticRollback'];
+        $batchRequest = $capturedRequests['KvBatchRollback'];
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest::class, $pessimisticRequest);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest::class, $batchRequest);
+        $pessimisticContext = $pessimisticRequest->getContext();
+        $batchContext = $batchRequest->getContext();
+        $this->assertNotNull($pessimisticContext);
+        $this->assertNotNull($batchContext);
+        $this->assertSame(1, $pessimisticContext->getPriority());
+        $this->assertSame(1, $batchContext->getPriority());
+    }
+
     public function testRollbackWithNumericPrimaryKeySendsStringKeys(): void
     {
         // The first written key becomes the primary key; a numeric-string

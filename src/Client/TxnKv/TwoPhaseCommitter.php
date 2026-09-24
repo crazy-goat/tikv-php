@@ -168,8 +168,10 @@ final readonly class TwoPhaseCommitter
      * Build the RPC context for a transaction request, carrying the
      * transaction's priority (issue #441). Mirrors client-go's SetPriority:
      * the value maps directly onto the Kvrpcpb CommandPri enum
-     * (Normal = 0, Low = 1, High = 2) and is applied to the transaction's
-     * prewrite, pessimistic-lock and commit RPCs.
+     * (Normal = 0, Low = 1, High = 2) and is applied to all transactional
+     * RPCs: prewrite, pessimistic-lock, commit, heartbeat (TxnHeartBeat)
+     * and rollback (BatchRollback, PessimisticRollback). The value is
+     * passed through without validation.
      */
     private function buildContext(RegionInfo $region): Context
     {
@@ -488,7 +490,7 @@ final readonly class TwoPhaseCommitter
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new TxnHeartBeatRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setContext($this->buildContext($region));
             $request->setPrimaryLock($primary);
             $request->setStartVersion($this->startTs);
             $request->setAdviseLockTtl($adviseLockTtlMs);
@@ -993,7 +995,7 @@ final readonly class TwoPhaseCommitter
                         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                         $request = new BatchRollbackRequest();
-                        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                        $request->setContext($this->buildContext($region));
                         $request->setStartVersion($this->startTs);
                         $request->setKeys($regionKeys);
 
@@ -1438,7 +1440,7 @@ final readonly class TwoPhaseCommitter
                         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                         $request = new PessimisticRollbackRequest();
-                        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                        $request->setContext($this->buildContext($region));
                         $request->setStartVersion($this->startTs);
                         $request->setForUpdateTs($forUpdateTs);
                         $request->setKeys($regionKeys);
