@@ -95,7 +95,7 @@ The TiKV PHP Client is a high-performance client library for TiKV's RawKV and Tx
 
 **Key Design Patterns**:
 - **Factory Pattern**: `RawKvClient::create()` for easy instantiation
-- **Template Method**: `executeWithRetry()` for consistent retry logic
+- **Composition**: `RawKvClient` builds a `RetryExecutor` per operation (`createRetryExecutor()`) and delegates the retry loop to it
 - **Strategy Pattern**: Error classification for different backoff strategies
 
 **Public Interface**:
@@ -371,7 +371,7 @@ Transaction encounters lock on key
 
 ### 8. Retry System
 
-**Location**: `src/Client/Retry/BackoffType.php`, `RawKvClient::executeWithRetry()`
+**Location**: `src/Client/Retry/` — `RetryExecutor` runs the loop; `RawKvClient::createRetryExecutor()` builds one per operation
 
 **Responsibilities**:
 - Classify errors
@@ -426,19 +426,23 @@ enum BackoffType
           │
           ▼
 ┌─────────────────────┐
-│  executeWithRetry() │  Start retry loop
+│  RawKvCrud::get()   │  Builds the operation closure
+│  RetryExecutor::    │  and starts the retry loop
+│    execute()        │
 └─────────┬───────────┘
           │
           ▼
 ┌─────────────────────┐
-│   getRegionInfo()   │  Get region for key
+│ RegionResolver::    │  Get region for key
+│  getRegionInfo()    │
 │   • Check cache     │
 │   • Query PD if miss│
 └─────────┬───────────┘
           │
           ▼
 ┌─────────────────────┐
-│ resolveStoreAddress()│ Get TiKV node address
+│ RegionResolver::    │  Get TiKV node address
+│ resolveStoreAddress │
 │   • Check store cache │
 │   • Query PD if miss  │
 └─────────┬───────────┘

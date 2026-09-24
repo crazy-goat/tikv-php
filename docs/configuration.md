@@ -740,24 +740,53 @@ see issue #269).
 
 ### Custom Retry (Advanced)
 
-For custom retry logic, extend the client:
+`RawKvClient` is `final` and its retry loop cannot be customised by
+subclassing — there is no `classifyError()` hook on the client and no
+`BackoffType::Custom` case. The supported extension point is the optional
+`$classifier` callable accepted by `RetryExecutor::execute()`
+(`src/Client/Retry/RetryExecutor.php`): it receives the caught
+`TiKvException` and returns a `BackoffType` (see
+`src/Client/Retry/BackoffType.php` for the fourteen valid cases) or `null`
+to fall through to the built-in classification — and if that also returns
+`null`, the error is fatal and the exception is rethrown. Note that a
+`NotLeader` error is classified before your classifier is consulted.
+
+To use it you must construct the `RetryExecutor` yourself and invoke your
+operation through it, rather than going through `RawKvClient`'s methods:
 
 ```php
-use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 
-class CustomRawKvClient extends RawKvClient
-{
-    protected function classifyError(TiKvException $e): ?BackoffType
-    {
-        // Add custom error classification
+$executor = new RetryExecutor(
+    maxBackoffMs: 20000,
+    serverBusyBudgetMs: 60000,
+    regionCache: $regionCache,
+    grpc: $grpc,
+    regionResolver: $regionResolver,
+    logger: $logger,
+);
+
+$result = $executor->execute(
+    $key,
+    function () use ($key): string {
+        // your RawKV RPC call
+        return $value;
+    },
+    classifier: function (TiKvException $e): ?BackoffType {
         if (str_contains($e->getMessage(), 'CustomError')) {
-            return BackoffType::Custom;
+            return BackoffType::StaleCmd; // pick a real BackoffType case
         }
-        return parent::classifyError($e);
-    }
-}
+        return null; // fall through to the built-in ErrorClassifier
+    },
+);
 ```
+
+Note that `maxAttempts` (default 30) and `deadlineMs` (default 30000,
+`0` disables) are constructor parameters of `RetryExecutor` and are **not**
+settable through `RawKvClient::create()` options — `create()` only exposes
+`retryDeadlineMs` (see the [Automatic Retry](#automatic-retry) section
+above); `maxBackoffMs` and `serverBusyBudgetMs` are likewise constructor
+arguments of `RawKvClient`, not `create()` options.
 
 ## Caching
 
