@@ -469,6 +469,33 @@ final readonly class TxnReader
     }
 
     /**
+     * Handle a ScanResponse or error-only KvPair KeyError without emitting a
+     * malformed result row. Locked keys resolve and restart this scan chunk.
+     */
+    private function handleScanKeyError(KeyError $error, string $fallbackKey): never
+    {
+        $locked = $error->getLocked();
+        if ($locked !== null) {
+            $rawPrimary = $locked->getPrimaryLock();
+            $primary = $rawPrimary !== ''
+                ? $rawPrimary
+                : ($locked->getKey() !== '' ? $locked->getKey() : $fallbackKey);
+            $this->lockResolver->resolveLock($primary, $locked);
+            throw new TxnRetryableException(
+                'Lock encountered during scan, resolved - retry',
+                BackoffType::TxnLock,
+            );
+        }
+
+        $abort = $error->getAbort();
+        if ($abort !== '') {
+            throw self::gcExceptionFromAbort($abort);
+        }
+
+        throw new TiKvException('Scan failed: ' . KeyErrorDescriber::describe($error));
+    }
+
+    /**
      * Scan one clipped sub-range, continuing past regions that were split
      * after the outer region enumeration so no part of the range is dropped.
      *
@@ -550,29 +577,16 @@ final readonly class TxnReader
                 }
 
                 $error = $response->getError();
-                if ($error !== null) {
-                    $locked = $error->getLocked();
-                    if ($locked !== null) {
-                        $rawPrimary = $locked->getPrimaryLock();
-                        $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                        $this->lockResolver->resolveLock($lockPrimary, $locked);
-                        throw new TxnRetryableException(
-                            'Lock encountered during scan, resolved - retry',
-                            BackoffType::TxnLock,
-                        );
-                    }
-
-                    // Same GC abort mapping as get(): a scan crossing many
-                    // regions is the most likely long-running read to have
-                    // its start timestamp passed by GC mid-scan.
-                    $abort = $error->getAbort();
-                    if ($abort !== '') {
-                        throw $this->gcExceptionFromAbort($abort);
-                    }
+                if ($error instanceof KeyError) {
+                    $this->handleScanKeyError($error, $cursorStart);
                 }
 
                 $subResults = [];
                 foreach ($response->getPairs() as $pair) {
+                    $pairError = $pair->getError();
+                    if ($pairError instanceof KeyError) {
+                        $this->handleScanKeyError($pairError, $pair->getKey());
+                    }
                     $subResults[] = [
                         'key' => $pair->getKey(),
                         'value' => $pair->getValue(),
