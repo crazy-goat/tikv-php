@@ -872,8 +872,8 @@ cluster in import mode — see the [DOC-24] section in `docs/operations.md`.
 ## Doc enum/const lists drift — regenerate them from code, never hand-write
 
 Hand-written doc lists of enum cases drift: the docs described invented
-`BackoffType::Fast/Medium/Slow` cases while the real enum has fourteen
-different cases (issue #375). When documenting an enum or constant table,
+`BackoffType::Fast/Medium/Slow` cases while the real enum has its own,
+growing case list (issue #375). When documenting an enum or constant table,
 copy the cases and values straight from the source file (`baseMs()` /
 `capMs()` values) and link to the file as the source of truth, rather than
 paraphrasing. Related trap: `docs/configuration.md`'s custom-classifier

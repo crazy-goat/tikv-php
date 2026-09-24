@@ -746,7 +746,7 @@ subclassing — there is no `classifyError()` hook on the client and no
 `$classifier` callable accepted by `RetryExecutor::execute()`
 (`src/Client/Retry/RetryExecutor.php`): it receives the caught
 `TiKvException` and returns a `BackoffType` (see
-`src/Client/Retry/BackoffType.php` for the fourteen valid cases) or `null`
+`src/Client/Retry/BackoffType.php` for the full case list) or `null`
 to fall through to the built-in classification — and if that also returns
 `null`, the error is fatal and the exception is rethrown. Note that a
 `NotLeader` error is classified before your classifier is consulted.

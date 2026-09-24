@@ -379,8 +379,8 @@ Transaction encounters lock on key
 - Track retry budgets
 - Handle special cases (ServerBusy)
 
-**Backoff Types** — `src/Client/Retry/BackoffType.php` declares fourteen
-cases (no fabricated `Fast`/`Medium`/`Slow` buckets); base and cap below
+**Backoff Types** — `src/Client/Retry/BackoffType.php` declares the
+authoritative case list (no fabricated `Fast`/`Medium`/`Slow` buckets); base and cap below
 come from `BackoffType::baseMs()` / `BackoffType::capMs()`:
 
 ```php

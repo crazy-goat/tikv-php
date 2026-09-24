@@ -110,7 +110,7 @@ In-memory region metadata cache. Located at `src/Client/Cache/RegionCache.php`.
 Located in `src/Client/Retry/`.
 
 **BackoffType** (`BackoffType.php`):
-- Defines retry strategies — fourteen cases (see `docs/architecture.md`
+- Defines retry strategies — see `docs/architecture.md`
   for the full list with base/cap backoff values): `None`, `ServerBusy`,
   `StaleCmd`, `RegionMiss`, `TiKvRpc`, `NotLeader`, `DiskFull`,
   `RegionNotInitialized`, `ReadIndexNotReady`, `ProposalInMergingMode`,
