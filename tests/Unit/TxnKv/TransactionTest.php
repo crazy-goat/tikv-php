@@ -1818,6 +1818,41 @@ class TransactionTest extends TestCase
     }
 
     /**
+     * Stub the region/PD dependencies and make KvPrewrite succeed while
+     * KvCommit answers with the given (failing) CommitResponse — the commit
+     * phase counterpart of {@see stubPrewriteError()} (issue #326).
+     *
+     * @param list<string> $methodSequence Collected RPC method names, by ref.
+     */
+    private function stubCommitError(array &$methodSequence, CommitResponse $commitResponse): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$methodSequence,
+                $commitResponse,
+            ): object {
+                $methodSequence[] = $method;
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+    }
+
+    /**
      * Stub the region/PD dependencies and make KvPessimisticLock answer with
      * a response containing the given failing KeyErrors, in order. Every
      * other RPC method (KvPrewrite, KvCommit) throws, so a test proves the
@@ -2223,6 +2258,156 @@ class TransactionTest extends TestCase
         // No rollback of the committed transaction may be attempted — not
         // even via __destruct().
         $this->assertNotContains('KvBatchRollback', $methodSequence);
+    }
+
+    /**
+     * Issue #326 (TEST-06): a KeyError returned by the PRIMARY region's
+     * KvCommit must propagate as a TransactionConflictException — the
+     * transaction's fate is undecided and the caller must know the commit
+     * failed. The status must not read Committed.
+     */
+    public function testCommitKeyErrorRetryableOnPrimaryThrowsTransactionConflict(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setRetryable('commit ts expired');
+
+        $commitResponse = new CommitResponse();
+        $commitResponse->setError($keyError);
+
+        $methodSequence = [];
+        $this->stubCommitError($methodSequence, $commitResponse);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('commit ts expired', $e->getMessage());
+        }
+
+        $this->assertNotSame(
+            TransactionStatus::Committed,
+            $txn->getStatus(),
+            'a failed primary commit must not mark the transaction committed',
+        );
+        $this->assertSame(['KvPrewrite', 'KvCommit'], $methodSequence);
+    }
+
+    /**
+     * Issue #326 (TEST-06): the Abort branch of handleCommitError() must also
+     * surface as a TransactionConflictException, never as a silent success.
+     */
+    public function testCommitKeyErrorAbortOnPrimaryThrowsTransactionConflict(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setAbort('txn abort');
+
+        $commitResponse = new CommitResponse();
+        $commitResponse->setError($keyError);
+
+        $methodSequence = [];
+        $this->stubCommitError($methodSequence, $commitResponse);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('txn abort', $e->getMessage());
+        }
+
+        $this->assertNotSame(
+            TransactionStatus::Committed,
+            $txn->getStatus(),
+            'a failed primary commit must not mark the transaction committed',
+        );
+        $this->assertSame(['KvPrewrite', 'KvCommit'], $methodSequence);
+    }
+
+    /**
+     * Issue #326 (TEST-06): the commitTs === null guard in commitForRegion()
+     * is defense-in-depth for direct TwoPhaseCommitter users — exercise it
+     * directly via reflection (commit() always sets a commitTs first).
+     */
+    public function testCommitForRegionWithoutCommitTsThrowsInvalidState(): void
+    {
+        $committer = new \CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter(
+            startTs: 1000,
+            pessimistic: false,
+            priority: 0,
+            pdClient: $this->pdClient,
+            grpc: $this->grpc,
+            regionCache: $this->regionCache,
+            regionResolver: $this->regionResolver,
+            lockResolver: $this->lockResolver,
+            timeoutConfig: new \CrazyGoat\TiKV\Client\Grpc\TimeoutConfig(),
+            maxBackoffMs: 20000,
+        );
+
+        $state = new TransactionState();
+        $state->setWrite('k1', 'v1'); // commitTs deliberately never set
+
+        $method = new \ReflectionMethod(\CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter::class, 'commitForRegion');
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('commitTs must be set before committing');
+        $method->invoke($committer, $this->testRegion, ['k1'], $state);
+    }
+
+    /**
+     * Issue #326 (TEST-06): commitKeys() must never silently promote an
+     * arbitrary region to primary when the transaction's primary key is
+     * missing from the resolved region groups — that would break the
+     * primary-first invariant. The guard is unreachable through commit()
+     * (every write-set key is resolved or the grouper throws, issue #244),
+     * so it is exercised directly on commitKeys() via reflection with a
+     * state whose primary ('other') is absent from the committed keys.
+     */
+    public function testCommitKeysWithoutPrimaryKeyInResolvedRegionsFailsClosed(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $committer = new \CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter(
+            startTs: 1000,
+            pessimistic: false,
+            priority: 0,
+            pdClient: $this->pdClient,
+            grpc: $this->grpc,
+            regionCache: $this->regionCache,
+            regionResolver: $this->regionResolver,
+            lockResolver: $this->lockResolver,
+            timeoutConfig: new \CrazyGoat\TiKV\Client\Grpc\TimeoutConfig(),
+            maxBackoffMs: 20000,
+        );
+
+        $state = new TransactionState();
+        $state->setWrite('other', 'v'); // primary, NOT among the committed keys
+        $state->setCommitTs(2000);
+
+        $retryExecutor = new \CrazyGoat\TiKV\Client\Retry\RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 60000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: $this->regionResolver,
+            logger: new \Psr\Log\NullLogger(),
+        );
+
+        $method = new \ReflectionMethod(\CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter::class, 'commitKeys');
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('refusing to commit an arbitrary region as primary');
+        $method->invoke($committer, ['k1'], $state, $retryExecutor, static fn (): ?BackoffType => null);
     }
 
     public function testRollbackAfterCommitThrows(): void

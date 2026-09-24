@@ -763,7 +763,19 @@ final readonly class TwoPhaseCommitter
             }
         }
 
-        $primaryRegionId ??= array_key_first($keysByRegion);
+        // Fail closed (issue #326): reaching this point without finding the
+        // primary key in any resolved region group means the primary was
+        // dropped or the caller passed a key list without it. Committing an
+        // arbitrary region first "as if" it were the primary would break the
+        // primary-first invariant above; throw instead of silently promoting
+        // a random region to primary.
+        if ($primaryRegionId === null) {
+            throw new InvalidStateException(sprintf(
+                'Primary key %s was not found in any resolved region group;'
+                . ' refusing to commit an arbitrary region as primary',
+                KeyRedactor::redact($primary),
+            ));
+        }
 
         // Commit the primary first. Failures here are fatal: do not retry.
         // No RetryExecutor wraps this call, so commitForRegion must handle
