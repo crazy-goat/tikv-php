@@ -79,6 +79,13 @@ final class TxnKvClient
     public const OPT_ENABLE_ASYNC_COMMIT = 'enableAsyncCommit';
 
     /**
+     * options[] key controlling when pessimistic write locks are acquired.
+     * true (default) acquires the physical lock inside set()/delete(); false
+     * preserves the legacy deferred lock-at-commit behaviour.
+     */
+    public const OPT_EAGER_PESSIMISTIC_LOCKS = 'eagerPessimisticLocks';
+
+    /**
      * options[] key for the maximum staleness (ms) of the low-resolution
      * TSO timestamp cache (issue #420, GAP-06). Used only by
      * staleness-tolerant consumers (lock resolution `current_ts`);
@@ -288,7 +295,13 @@ final class TxnKvClient
     }
 
     /**
-     * @param array{pessimistic?: bool, priority?: int, enable1Pc?: bool, enableAsyncCommit?: bool} $options
+     * @param array{
+     *     pessimistic?: bool,
+     *     priority?: int,
+     *     enable1Pc?: bool,
+     *     enableAsyncCommit?: bool,
+     *     eagerPessimisticLocks?: bool,
+     * } $options
      *     `priority` maps onto the Kvrpcpb CommandPri enum: 0 = Normal
      *     (default), 1 = Low, 2 = High. It is carried on the transaction's
      *     prewrite, pessimistic-lock and commit RPCs (issue #441).
@@ -301,6 +314,7 @@ final class TxnKvClient
         $priority = (int) ($options['priority'] ?? 0);
         $enable1Pc = $this->resolveEnableFlag($options, self::OPT_ENABLE_1PC);
         $enableAsyncCommit = $this->resolveEnableFlag($options, self::OPT_ENABLE_ASYNC_COMMIT);
+        $eagerPessimisticLocks = $this->resolveEagerPessimisticLocks($options);
 
         $startTs = $this->pdClient->getTimestamp();
 
@@ -312,6 +326,7 @@ final class TxnKvClient
             'txnId' => $txnId,
             'startTs' => $startTs,
             'pessimistic' => $pessimistic,
+            'eagerPessimisticLocks' => $eagerPessimisticLocks,
         ]);
 
         $lockResolver = new LockResolver(
@@ -342,6 +357,7 @@ final class TxnKvClient
             replicaReadPolicy: $this->replicaReadPolicy,
             enable1Pc: $enable1Pc,
             enableAsyncCommit: $enableAsyncCommit,
+            eagerPessimisticLocks: $eagerPessimisticLocks,
         );
     }
 
@@ -362,6 +378,31 @@ final class TxnKvClient
             throw new InvalidArgumentException(sprintf(
                 "options['%s'] must be a bool, %s given",
                 $key,
+                get_debug_type($value),
+            ));
+        }
+
+        return $value;
+    }
+
+    /**
+     * Resolve the eager pessimistic-lock compatibility switch. The default
+     * follows the official clients; false retains the pre-#437 deferred
+     * lock-at-commit behaviour.
+     *
+     * @param array<string, mixed> $options
+     */
+    private function resolveEagerPessimisticLocks(array $options): bool
+    {
+        if (!array_key_exists(self::OPT_EAGER_PESSIMISTIC_LOCKS, $options)) {
+            return true;
+        }
+
+        $value = $options[self::OPT_EAGER_PESSIMISTIC_LOCKS];
+        if (!is_bool($value)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be a bool, %s given",
+                self::OPT_EAGER_PESSIMISTIC_LOCKS,
                 get_debug_type($value),
             ));
         }

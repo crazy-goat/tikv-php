@@ -84,7 +84,14 @@ class TransactionTest extends TestCase
     }
 
     /**
-     * @param array{txnId?: string, startTs?: int, pessimistic?: bool, priority?: int, maxBackoffMs?: int} $options
+     * @param array{
+     *     txnId?: string,
+     *     startTs?: int,
+     *     pessimistic?: bool,
+     *     priority?: int,
+     *     maxBackoffMs?: int,
+     *     eagerPessimisticLocks?: bool,
+     * } $options
      */
     private function createTransaction(array $options = []): Transaction
     {
@@ -99,6 +106,9 @@ class TransactionTest extends TestCase
             lockResolver: $this->lockResolver,
             regionResolver: $this->regionResolver,
             maxBackoffMs: $options['maxBackoffMs'] ?? 20000,
+            // Existing tests cover the legacy commit-time pass; eager-lock
+            // regressions opt in explicitly below.
+            eagerPessimisticLocks: $options['eagerPessimisticLocks'] ?? false,
         );
     }
 
@@ -154,6 +164,397 @@ class TransactionTest extends TestCase
 
         $this->assertSame(1300, $txnState->getMaxForUpdateTs());
         $this->assertSame(['key1', 'key2'], $txnState->getPendingLockKeys());
+    }
+
+    public function testDeferredLockFailureCannotBeCommittedWithoutRetry(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturn(1200);
+
+        $keyError = new KeyError();
+        $keyError->setConflict(new \CrazyGoat\Proto\Kvrpcpb\WriteConflict());
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors([$keyError]);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'KvPessimisticLock' => $lockResponse,
+                'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => false,
+        ]);
+        $txn->set('key', 'value');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException) {
+            $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        }
+
+        try {
+            $txn->commit();
+            $this->fail('A failed deferred lock pass must not be committed again');
+        } catch (InvalidStateException $e) {
+            $this->assertStringContainsString('rollback', $e->getMessage());
+        }
+
+        $txn->rollback();
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+    }
+
+    public function testFailedCommitFreezesWritesUntilRollback(): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $prewriteError = new KeyError();
+        $prewriteError->setRetryable('simulated prewrite failure');
+        $prewriteResponse = new PrewriteResponse();
+        $prewriteResponse->setErrors([$prewriteError]);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'KvPrewrite' => $prewriteResponse,
+                'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key', 'value');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException) {
+            $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        }
+
+        try {
+            $txn->set('other', 'value');
+            $this->fail('Writes must be frozen after commit starts');
+        } catch (InvalidStateException $e) {
+            $this->assertStringContainsString('commit', $e->getMessage());
+        }
+
+        $txn->rollback();
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+    }
+
+    public function testPessimisticSetAcquiresLockBeforeReturning(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturnOnConsecutiveCalls(1200, 1300);
+
+        $methods = [];
+        $lockRequests = [];
+        $prewriteRequests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $addr,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$methods,
+                &$lockRequests,
+                &$prewriteRequests,
+            ): object {
+                $methods[] = $method;
+                if ($method === 'KvPessimisticLock') {
+                    $lockRequests[] = $request;
+                    return new PessimisticLockResponse();
+                }
+                if ($method === 'KvPrewrite') {
+                    $prewriteRequests[] = $request;
+                    return new PrewriteResponse();
+                }
+
+                return match ($method) {
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => true,
+        ]);
+        $txn->set('key', 'value');
+
+        $this->assertSame(['KvPessimisticLock'], $methods);
+        $this->assertSame(['key' => 'value'], $txn->getWriteSet());
+        $this->assertCount(1, $lockRequests);
+        $this->assertInstanceOf(PessimisticLockRequest::class, $lockRequests[0]);
+        $this->assertTrue($lockRequests[0]->getIsFirstLock());
+
+        $txn->commit();
+
+        $this->assertSame(
+            ['KvPessimisticLock', 'KvPrewrite', 'KvCommit'],
+            $methods,
+            'commit must not issue a second pessimistic-lock pass',
+        );
+        $this->assertCount(1, $lockRequests);
+        $this->assertCount(1, $prewriteRequests);
+        $this->assertInstanceOf(PrewriteRequest::class, $prewriteRequests[0]);
+        $this->assertSame(
+            [\CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\PessimisticAction::DO_CONSTRAINT_CHECK],
+            iterator_to_array($prewriteRequests[0]->getPessimisticActions()),
+        );
+    }
+
+    public function testEagerPessimisticLocksSharePrimaryAndPerPassTimestamp(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturnOnConsecutiveCalls(1200, 1250, 1300);
+
+        $lockRequests = [];
+        $prewriteRequests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $addr,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$lockRequests,
+                &$prewriteRequests,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $lockRequests[] = $request;
+                    return new PessimisticLockResponse();
+                }
+                if ($method === 'KvPrewrite') {
+                    $prewriteRequests[] = $request;
+                    return new PrewriteResponse();
+                }
+
+                return match ($method) {
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => true,
+        ]);
+        $txn->set('a', 'one');
+        $txn->set('b', 'two');
+
+        $this->assertCount(2, $lockRequests);
+        $this->assertInstanceOf(PessimisticLockRequest::class, $lockRequests[0]);
+        $this->assertInstanceOf(PessimisticLockRequest::class, $lockRequests[1]);
+        $this->assertSame('a', $lockRequests[0]->getPrimaryLock());
+        $this->assertSame('a', $lockRequests[1]->getPrimaryLock());
+        $this->assertTrue($lockRequests[0]->getIsFirstLock());
+        $this->assertFalse($lockRequests[1]->getIsFirstLock());
+        $this->assertSame(1200, $lockRequests[0]->getForUpdateTs());
+        $this->assertSame(1250, $lockRequests[1]->getForUpdateTs());
+
+        $txn->commit();
+
+        $this->assertCount(1, $prewriteRequests);
+        $this->assertInstanceOf(PrewriteRequest::class, $prewriteRequests[0]);
+        $this->assertSame(1250, $prewriteRequests[0]->getForUpdateTs());
+    }
+
+    public function testPessimisticDeleteAcquiresLockBeforeReturning(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturn(1200);
+
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $addr, string $service, string $method) use (&$methods): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => true,
+        ]);
+        $txn->delete('key');
+
+        $this->assertSame(['KvPessimisticLock'], $methods);
+        $this->assertSame(['key' => null], $txn->getWriteSet());
+        $txn->rollback();
+    }
+
+    public function testPessimisticLockConflictSurfacesFromSetAndRollbackReleasesAttempt(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturn(1200);
+
+        $conflict = new \CrazyGoat\Proto\Kvrpcpb\WriteConflict();
+        $keyError = new KeyError();
+        $keyError->setConflict($conflict);
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors([$keyError]);
+
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $addr, string $service, string $method) use (&$methods, $lockResponse): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => true,
+        ]);
+
+        try {
+            $txn->set('key', 'value');
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('Write conflict during pessimistic lock', $e->getMessage());
+        }
+
+        $this->assertSame(['KvPessimisticLock', 'KVPessimisticRollback'], $methods);
+        $this->assertSame([], $txn->getWriteSet());
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertNotContains('KvPrewrite', $methods);
+        $this->assertNotContains('KvCommit', $methods);
+    }
+
+    public function testFailedEagerLockCleanupCanBeRetried(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturn(1200);
+
+        $keyError = new KeyError();
+        $keyError->setConflict(new \CrazyGoat\Proto\Kvrpcpb\WriteConflict());
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors([$keyError]);
+        $rollbackCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $addr,
+                string $service,
+                string $method,
+            ) use (
+                &$rollbackCalls,
+                $lockResponse,
+            ): object {
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KVPessimisticRollback' => $rollbackCalls++ === 0
+                        ? throw new TiKvException('cleanup unavailable')
+                        : new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => true,
+        ]);
+
+        try {
+            $txn->set('key', 'value');
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException) {
+            $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        }
+
+        try {
+            $txn->set('other', 'value');
+            $this->fail('A failed eager statement must not be continuable');
+        } catch (InvalidStateException $e) {
+            $this->assertStringContainsString('rollback', $e->getMessage());
+        }
+
+        $txn->rollback();
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+    }
+
+    public function testPessimisticLockWaitTimeoutSurfacesFromSet(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $lockInfo = new LockInfo();
+        $lockInfo->setKey('key');
+        $lockInfo->setPrimaryLock('key');
+        $lockInfo->setLockVersion(2000);
+        $keyError = new KeyError();
+        $keyError->setLocked($lockInfo);
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setErrors([$keyError]);
+
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $addr, string $service, string $method) use (&$methods, $lockResponse): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvCheckTxnStatus' => new CheckTxnStatusResponse(),
+                    'KvResolveLock' => new ResolveLockResponse(),
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => true,
+            'maxBackoffMs' => 100,
+        ]);
+
+        try {
+            $txn->set('key', 'value');
+            $this->fail('Expected LockWaitTimeoutException was not thrown');
+        } catch (LockWaitTimeoutException $e) {
+            $this->assertSame('key', $e->getKey());
+            $this->assertSame(100, $e->getTimeoutMs());
+        }
+
+        $this->assertNotContains('KvPrewrite', $methods);
+        $this->assertNotContains('KvCommit', $methods);
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
     }
 
     public function testDeleteAddsNullToWriteSet(): void
@@ -4461,7 +4862,7 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($freshRegion);
         $this->pdClient->method('scanRegions')->willReturn([$staleRegion]);
-        $this->pdClient->method('getTimestamp')->willReturn(3000);
+        $this->pdClient->method('getTimestamp')->willReturnOnConsecutiveCalls(3000, 4000);
 
         $regionError = new \CrazyGoat\Proto\Errorpb\Error();
         $regionError->setMessage('EpochNotMatch');
@@ -4501,6 +4902,10 @@ class TransactionTest extends TestCase
         // The transaction must commit — the region error was retried, not fatal.
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
         $this->assertCount(2, $lockRequests);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $lockRequests[0]);
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest::class, $lockRequests[1]);
+        $this->assertSame(3000, $lockRequests[0]->getForUpdateTs());
+        $this->assertSame(3000, $lockRequests[1]->getForUpdateTs());
 
         // The retried request must carry the FRESH epoch (version 5), not the
         // stale one captured before the loop (the #267 stale-capture class).
@@ -5330,6 +5735,62 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
         $this->pdClient->method('getTimestamp')->willReturn(3000);
+    }
+
+    public function testFailedRollbackIsRetryableButBlocksWritesAndCommit(): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $keyError = new KeyError();
+        $keyError->setAbort('simulated rollback failure');
+        $errorResponse->setError($keyError);
+        $rollbackCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $addr,
+                string $service,
+                string $method,
+            ) use (
+                &$rollbackCalls,
+                $errorResponse,
+            ): object {
+                if ($method !== 'KvBatchRollback') {
+                    throw new \RuntimeException("Unexpected method: $method");
+                }
+
+                return $rollbackCalls++ === 0
+                    ? $errorResponse
+                    : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key', 'value');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException) {
+            $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        }
+
+        try {
+            $txn->set('other', 'value');
+            $this->fail('Writes must be blocked after rollback starts');
+        } catch (InvalidStateException $e) {
+            $this->assertStringContainsString('rollback', $e->getMessage());
+        }
+
+        try {
+            $txn->commit();
+            $this->fail('Commit must be blocked after rollback starts');
+        } catch (InvalidStateException $e) {
+            $this->assertStringContainsString('rollback', $e->getMessage());
+        }
+
+        $txn->rollback();
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
     }
 
     public function testRollbackEncounteringLockResolvesItAndRetries(): void

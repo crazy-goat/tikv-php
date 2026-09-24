@@ -326,7 +326,9 @@ try {
     echo "Transfer committed!\n";
     
 } catch (Exception $e) {
-    $txn->rollback();
+    if ($txn->getStatus() === \CrazyGoat\TiKV\Client\TxnKv\TransactionStatus::Active) {
+        $txn->rollback();
+    }
     echo "Transfer rolled back: " . $e->getMessage() . "\n";
 }
 ```
@@ -335,23 +337,25 @@ try {
 
 | Feature | Pessimistic | Optimistic |
 |---------|-----------|------------|
-| Lock timing | Physical lock on `commit()`; conflict timestamp captured at read/write | Constraint check at prewrite |
-| Conflicts | Reported by `commit()` | Reported by `commit()` |
+| Lock timing | Physical lock during each `set()` / `delete()` (default) | Constraint check at prewrite |
+| Conflicts | Reported by the write call, or by `commit()` for deferred compatibility mode | Reported by `commit()` |
 | Best for | High contention | Low contention |
 | Default lock TTL | 30 seconds | 3 seconds |
 | Use case | Financial transfers | Caching, config |
 
-> **Note:** writes are still buffered and physical pessimistic locks are
-> acquired in a batch by `commit()`. For read-modify-write safety, the client
-> captures a per-key `for_update_ts` when a pessimistic read occurs and
-> carries it through the corresponding write; if another transaction commits after that read, TiKV
-> rejects the lock/prewrite instead of allowing a lost update. Writes with no
-> preceding read use a timestamp captured when the write is staged. The client
-> also requests `DO_CONSTRAINT_CHECK` during prewrite for deferred keys, which
-> makes TiKV check for writes newer than the transaction's start timestamp.
-> Conflicts therefore still surface at `commit()` (there is no early lock RPC
-> from `set()`/`delete()`); callers should treat a conflict as a failed
-> transaction and retry the full read-modify-write operation.
+> **Note:** values remain buffered until `commit()`, but the default eager
+> pessimistic mode acquires each key's physical lock before `set()` or
+> `delete()` returns. A conflict, deadlock, or wait timeout therefore surfaces
+> at the write call. A failed eager lock statement triggers best-effort
+> cleanup before the exception is rethrown; if cleanup itself fails, the
+> transaction remains active but unwritable so the caller can retry
+> `rollback()`. A preceding pessimistic read's per-key `for_update_ts`
+> is reused by the corresponding write, and prewrite keeps
+> `DO_CONSTRAINT_CHECK` as a safety net for an intervening commit. For legacy
+> applications that require the old behavior, pass
+> `begin(['eagerPessimisticLocks' => false])`; that compatibility mode defers
+> the lock pass to `commit()`. In either mode, callers should treat a conflict
+> as a failed transaction and retry the full read-modify-write operation.
 
 ## Next Steps
 

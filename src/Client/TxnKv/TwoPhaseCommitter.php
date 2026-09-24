@@ -228,7 +228,7 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): void {
-        $primary = $state->getPrimaryKey();
+        $primary = $state->getPessimisticPrimaryKey() ?? $state->getPrimaryKey();
 
         if ($this->pessimistic) {
             $this->pessimisticLockBatch($primary, $state);
@@ -741,10 +741,9 @@ final readonly class TwoPhaseCommitter
         if ($this->pessimistic) {
             $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->startTs;
             $request->setForUpdateTs($forUpdateTs);
-            // A lock may not have been acquired yet because the transaction
-            // buffers writes until commit. DO_CONSTRAINT_CHECK asks TiKV to
-            // enforce the start_ts write-conflict check during prewrite rather
-            // than treating the key as already protected by a lock.
+            // Keep the deferred safety net for both eager and compatibility
+            // modes: it detects an intervening commit between a read and the
+            // physical lock/prewrite (issue #209).
             $actions = [];
             foreach ($mutations as $mutation) {
                 $actions[] = PessimisticAction::DO_CONSTRAINT_CHECK;
@@ -1607,18 +1606,85 @@ final readonly class TwoPhaseCommitter
         return [$firstAttempts, $mutationsByGroup];
     }
 
+    /**
+     * Acquire pessimistic locks for an eager write operation.
+     *
+     * This is intentionally synchronous: Transaction::set()/delete() call it
+     * before staging the value, so lock conflicts surface at the write call.
+     * The lower-level region fan-out and wait loop remains shared with the
+     * deferred commit path.
+     *
+     * @param string[] $keys
+     */
+    public function lockKeys(
+        array $keys,
+        TransactionState $state,
+        int $forUpdateTs,
+        string $primary,
+    ): void {
+        $keys = array_values(array_unique($keys));
+        if ($keys === []) {
+            return;
+        }
+
+        $primary = $state->getPessimisticPrimaryKey() ?? $primary;
+        $state->setPessimisticPrimaryKey($primary);
+        $state->updateMaxForUpdateTs($forUpdateTs);
+        try {
+            $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs);
+        } catch (\Throwable $failure) {
+            $state->markPessimisticWriteFailed();
+            throw $failure;
+        }
+    }
+
     private function pessimisticLockBatch(
         string $primary,
         TransactionState $state,
     ): void {
         $keys = array_values(array_unique($state->getPendingLockKeys()));
         $state->clearPendingLockKeys();
+        $keys = array_values(array_filter(
+            $keys,
+            static fn (string $key): bool => !$state->hasPessimisticLock($key),
+        ));
 
         if ($keys === []) {
             return;
         }
 
-        $isFirstLock = true;
+        foreach ($keys as $key) {
+            $state->addPessimisticLockAttempt($key);
+        }
+
+        $primary = $state->getPessimisticPrimaryKey() ?? $primary;
+        try {
+            $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->pdClient->getTimestamp();
+            $state->updateMaxForUpdateTs($forUpdateTs);
+            $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs);
+        } catch (\Throwable $failure) {
+            $state->markPessimisticWriteFailed();
+            throw $failure;
+        }
+    }
+
+    /**
+     * @param string[] $keys
+     */
+    private function lockKeysInternal(
+        array $keys,
+        TransactionState $state,
+        string $primary,
+        int $forUpdateTs,
+    ): void {
+        foreach ($keys as $key) {
+            $state->addPessimisticLockAttempt($key);
+        }
+
+        // The first successful lock request in the transaction is the only
+        // one that carries is_first_lock. Derive it from acknowledged locks,
+        // not from the caller's local state, so eager calls share one flag.
+        $isFirstLock = !$state->hasAcknowledgedPessimisticLocks();
         $pendingKeys = $keys;
         // Each re-group restores a full retry budget for the re-grouped
         // keys; without a cap a pathological repeated split/region-error
@@ -1633,13 +1699,11 @@ final readonly class TwoPhaseCommitter
             $keysByRegion = $this->groupStringsByRegion($pendingKeys);
             $pendingKeys = [];
 
-            // A write's for_update_ts is captured by Transaction::set/delete
-            // before its value is staged. Reuse that timestamp so a commit
-            // after that point conflicts at lock acquisition, rather than
-            // silently overwriting the value the caller derived. Fall back
-            // to a fresh TSO only for direct committer users without a write
-            // timestamp. Share it across this region pass as before.
-            $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->pdClient->getTimestamp();
+            // The caller supplies the timestamp for this logical locking
+            // pass. Keep it stable across region retries so a read-derived
+            // timestamp cannot be silently advanced past an intervening
+            // commit; the transaction-wide maximum is still used later for
+            // prewrite and rollback.
             $state->updateMaxForUpdateTs($forUpdateTs);
 
             // Dispatch every region's FIRST pessimistic-lock attempt in
@@ -1855,8 +1919,11 @@ final readonly class TwoPhaseCommitter
                         usleep($delayMs * 1000);
                         $elapsedMs += $delayMs;
 
-                        $forUpdateTs = $this->pdClient->getTimestamp();
-                        $state->updateMaxForUpdateTs($forUpdateTs);
+                        // Keep the original for_update_ts for this logical
+                        // statement. Advancing it after waiting would let a
+                        // stale read-modify-write value pass the later
+                        // prewrite constraint check; the caller must retry the
+                        // statement to obtain a new read timestamp.
                     } while ($elapsedMs < $this->maxBackoffMs);
 
                     if ($regroup) {
@@ -1905,9 +1972,16 @@ final readonly class TwoPhaseCommitter
                         );
                     }
 
+                    $state->markPessimisticLocksAcquired($regionKeys);
                     $isFirstLock = false;
                 }
             } catch (\Throwable $e) {
+                // A failed lock pass leaves the transaction without a
+                // complete pessimistic lock set. Mark it unwritable even in
+                // deferred compatibility mode; otherwise a later commit()
+                // could see an empty pending list and proceed to prewrite
+                // without retrying the failed keys.
+                $state->markPessimisticWriteFailed();
                 // A first-attempt throw (deadlock / conflict / retryable /
                 // abort / region-error-after-budget / lock timeout) abandons
                 // the not-yet-awaited fan-out futures of the remaining
@@ -1963,7 +2037,10 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): void {
-        $pessimisticKeys = $state->getWriteKeys();
+        $pessimisticKeys = array_values(array_unique(array_merge(
+            $state->getPessimisticLockKeys(),
+            $state->getWriteKeys(),
+        )));
         if ($pessimisticKeys === []) {
             return;
         }

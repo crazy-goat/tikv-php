@@ -179,6 +179,12 @@ $client->ingest(['k1' => 'v1', 'k2' => 'v2'], ttl: 3600);
 
 ### Transactions (TxnKV)
 
+Pessimistic transactions acquire each key's physical lock during the
+`set()`/`delete()` call by default; the value is still buffered until
+`commit()`. Lock conflicts, deadlocks, and wait timeouts therefore surface at
+the write call. Applications that need the legacy deferred pass can use
+`begin(['eagerPessimisticLocks' => false])`.
+
 Optimistic transactions take write locks during prewrite. The prewrite lock
 TTL scales with the write-set size — **3000 ms + 10 ms per mutation, capped at
 120000 ms** — so a large multi-region prewrite cannot outlive its own locks

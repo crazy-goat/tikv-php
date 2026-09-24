@@ -420,17 +420,187 @@ class TxnKvE2ETest extends TestCase
         $concurrentWriter->set($key, (string) ($concurrentValue + 1));
         $concurrentWriter->commit();
 
-        $staleWriter->set($key, (string) ($staleValue + 1));
         try {
-            $staleWriter->commit();
-            $this->fail('A stale pessimistic read-modify-write must conflict');
+            $staleWriter->set($key, (string) ($staleValue + 1));
+            $this->fail('A stale pessimistic read-modify-write must conflict at set()');
         } catch (TransactionConflictException) {
-            $this->assertSame(TransactionStatus::Active, $staleWriter->getStatus());
+            $this->assertSame(TransactionStatus::RolledBack, $staleWriter->getStatus());
         }
-        $staleWriter->rollback();
 
         $verify = $this->testClient->begin(['pessimistic' => false]);
         $this->assertSame('1', $verify->get($key));
+        $verify->rollback();
+    }
+
+    public function testPessimisticWritesSerializeBeforeCommit(): void
+    {
+        if (!function_exists('proc_open')) {
+            $this->markTestSkipped('proc_open is required for the concurrency test');
+        }
+
+        $key = $this->uniqueKey('txn-pess-serialize');
+        $this->keysToCleanup[] = $key;
+
+        $setup = $this->testClient->begin(['pessimistic' => false]);
+        $setup->set($key, 'initial');
+        $setup->commit();
+
+        $holder = $this->testClient->begin(['pessimistic' => true]);
+        $holder->set($key, 'holder');
+
+        $pdEndpoints = getenv('PD_ENDPOINTS') ?: 'pd:2379';
+        $environment = getenv();
+        $environment['PD_ENDPOINTS'] = $pdEndpoints;
+        $projectRoot = dirname(__DIR__, 2);
+        $environment['TXKV_TEST_AUTOLOAD'] = $projectRoot . '/vendor/autoload.php';
+        $environment['TXKV_TEST_KEY'] = $key;
+        $childScript = <<<'PHP'
+require (string) getenv('TXKV_TEST_AUTOLOAD');
+try {
+    $logger = new class extends \Psr\Log\AbstractLogger {
+        public function log($level, string|\Stringable $message, array $context = []): void
+        {
+            if ((string) $message === 'PessimisticLock') {
+                fwrite(STDOUT, "locking\n");
+                fflush(STDOUT);
+            }
+        }
+    };
+    $client = \CrazyGoat\TiKV\Client\TxnKv\TxnKvClient::create(
+        explode(',', (string) getenv('PD_ENDPOINTS')),
+        $logger,
+    );
+    try {
+        $txn = $client->begin(['pessimistic' => true]);
+        fwrite(STDOUT, "set-start\n");
+        fflush(STDOUT);
+        try {
+            $txn->set((string) getenv('TXKV_TEST_KEY'), 'child');
+            fwrite(STDOUT, "set-returned\n");
+            fflush(STDOUT);
+            $txn->commit();
+            fwrite(STDOUT, "success\n");
+        } catch (\CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException) {
+            // A waiter may observe a write conflict when the holder rolls
+            // back; that is still a valid serialized outcome. The important
+            // assertion is that set() did not complete before release.
+            fwrite(STDOUT, "conflict\n");
+        }
+    } finally {
+        $client->close();
+    }
+} catch (\Throwable $e) {
+    fwrite(STDERR, $e->getMessage());
+    exit(1);
+}
+PHP;
+
+        $process = null;
+        $pipes = [];
+        try {
+            $process = proc_open(
+                [PHP_BINARY, '-r', $childScript],
+                [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes,
+                $projectRoot,
+                $environment,
+            );
+            $this->assertIsResource($process);
+            $this->assertIsResource($pipes[1]);
+            $this->assertIsResource($pipes[2]);
+            stream_set_blocking($pipes[1], false);
+
+            $observedOutput = '';
+            $deadline = microtime(true) + 10.0;
+            while (microtime(true) < $deadline) {
+                $read = [$pipes[1]];
+                $write = null;
+                $except = null;
+                if (stream_select($read, $write, $except, 0, 100000) > 0) {
+                    $chunk = stream_get_contents($pipes[1]);
+                    if (is_string($chunk) && $chunk !== '') {
+                        $observedOutput .= $chunk;
+                    }
+                }
+                if (
+                    str_contains($observedOutput, "set-start\n")
+                    && str_contains($observedOutput, "locking\n")
+                ) {
+                    break;
+                }
+                $status = proc_get_status($process);
+                if (!$status['running']) {
+                    break;
+                }
+            }
+            $this->assertStringContainsString("set-start\n", $observedOutput);
+            $this->assertStringContainsString("locking\n", $observedOutput);
+
+            $waitOutput = $observedOutput;
+            $waitDeadline = microtime(true) + 0.3;
+            do {
+                $chunk = stream_get_contents($pipes[1]);
+                if (is_string($chunk) && $chunk !== '') {
+                    $waitOutput .= $chunk;
+                }
+                usleep(10000);
+                $status = proc_get_status($process);
+            } while ($status['running'] && microtime(true) < $waitDeadline);
+            $this->assertStringNotContainsString(
+                "set-returned\n",
+                $waitOutput,
+                'set() returned before the holder released its lock',
+            );
+            $this->assertTrue(
+                $status['running'],
+                'The competing set() completed before the holder released its lock',
+            );
+
+            $holder->rollback();
+            $childOutput = $waitOutput;
+            $deadline = microtime(true) + 15.0;
+            do {
+                $chunk = stream_get_contents($pipes[1]);
+                if (is_string($chunk) && $chunk !== '') {
+                    $childOutput .= $chunk;
+                }
+                usleep(50000);
+                $status = proc_get_status($process);
+            } while ($status['running'] && microtime(true) < $deadline);
+
+            $this->assertFalse($status['running'], 'The competing transaction did not finish after rollback');
+            $childOutput .= (string) stream_get_contents($pipes[1]);
+            $this->assertSame(0, $status['exitcode'], stream_get_contents($pipes[2]));
+            $this->assertTrue(
+                str_contains($childOutput, 'success') || str_contains($childOutput, 'conflict'),
+                'The competing transaction ended with an unexpected result: ' . $childOutput,
+            );
+        } finally {
+            try {
+                if ($holder->isPessimistic() && $holder->getStatus() === TransactionStatus::Active) {
+                    $holder->rollback();
+                }
+            } finally {
+                foreach ($pipes as $pipe) {
+                    if (is_resource($pipe)) {
+                        fclose($pipe);
+                    }
+                }
+                if (is_resource($process)) {
+                    $status = proc_get_status($process);
+                    if ($status['running']) {
+                        proc_terminate($process);
+                    }
+                    proc_close($process);
+                }
+            }
+        }
+
+        $verify = $this->testClient->begin(['pessimistic' => false]);
+        $this->assertSame(
+            str_contains($childOutput, 'success') ? 'child' : 'initial',
+            $verify->get($key),
+        );
         $verify->rollback();
     }
 

@@ -57,6 +57,44 @@ class TxnKvClientTest extends TestCase
         $client->close();
     }
 
+    public function testBeginRejectsNonBoolEagerPessimisticLocks(): void
+    {
+        $client = new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['eagerPessimisticLocks'] must be a bool");
+        $client->begin(['eagerPessimisticLocks' => 'yes']); // @phpstan-ignore argument.type
+    }
+
+    public function testBeginDefaultsToEagerPessimisticLocks(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $client = new TxnKvClient($pdClient, $this->createMock(GrpcClientInterface::class));
+
+        $txn = $client->begin();
+        $property = new \ReflectionProperty(Transaction::class, 'eagerPessimisticLocks');
+
+        $this->assertTrue($property->getValue($txn));
+        $txn->rollback();
+    }
+
+    public function testBeginCanDisableEagerPessimisticLocks(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $client = new TxnKvClient($pdClient, $this->createMock(GrpcClientInterface::class));
+
+        $txn = $client->begin(['eagerPessimisticLocks' => false]);
+        $property = new \ReflectionProperty(Transaction::class, 'eagerPessimisticLocks');
+
+        $this->assertFalse($property->getValue($txn));
+        $txn->rollback();
+    }
+
     public function testCloseThrowsOnBeginAfterClose(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);

@@ -216,6 +216,7 @@ class OnePhaseAsyncCommitTest extends TestCase
                 self::START_TS,
             ),
             regionResolver: $this->regionResolver,
+            eagerPessimisticLocks: false,
         );
 
         $txn->set('k1', 'stale-value');
