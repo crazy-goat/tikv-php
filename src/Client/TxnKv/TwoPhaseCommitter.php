@@ -1268,6 +1268,11 @@ final readonly class TwoPhaseCommitter
         if ($abort !== '') {
             throw new TransactionConflictException($abort);
         }
+
+        // A commit response carrying any other KeyError is not a successful
+        // commit. Until a variant has an explicit, safe recovery path, fail
+        // closed rather than marking the transaction committed.
+        throw new TiKvException('Commit failed: ' . KeyErrorDescriber::describe($error));
     }
 
     // ---------------------------------------------------------------

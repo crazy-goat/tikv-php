@@ -2299,6 +2299,35 @@ class TransactionTest extends TestCase
     }
 
     /**
+     * Issue #212: an unrecognised commit KeyError must fail closed and never
+     * mark the transaction committed.
+     */
+    public function testCommitUnknownKeyErrorOnPrimaryFailsClosed(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setTxnNotFound(new \CrazyGoat\Proto\Kvrpcpb\TxnNotFound());
+
+        $commitResponse = new CommitResponse();
+        $commitResponse->setError($keyError);
+
+        $methodSequence = [];
+        $this->stubCommitError($methodSequence, $commitResponse);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame('Commit failed: TxnNotFound', $e->getMessage());
+        }
+
+        $this->assertNotSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(['KvPrewrite', 'KvCommit'], $methodSequence);
+    }
+
+    /**
      * Issue #326 (TEST-06): the Abort branch of handleCommitError() must also
      * surface as a TransactionConflictException, never as a silent success.
      */

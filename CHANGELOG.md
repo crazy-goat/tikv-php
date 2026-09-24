@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Commit-phase `KeyError` variants other than explicitly handled `retryable` and `abort` now fail closed with a `TiKvException` instead of silently marking the transaction committed. (#212)
+
 ## [v0.6.0] — 2026-09-24
 
 ### Changed
