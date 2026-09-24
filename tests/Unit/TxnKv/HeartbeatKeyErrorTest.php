@@ -41,6 +41,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class HeartbeatKeyErrorTest extends TestCase
 {
+    use MockGrpcCallAsyncShim;
+
     private PdClientInterface&MockObject $pdClient;
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
@@ -61,6 +63,7 @@ final class HeartbeatKeyErrorTest extends TestCase
 
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($this->grpc);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
 
         $store = new Store();

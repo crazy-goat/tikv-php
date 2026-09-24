@@ -118,11 +118,16 @@ final readonly class CheckedGrpcFuture
      *
      * @param callable(): self $dispatch Issues exactly one fresh attempt
      *        (re-resolving the region) and returns its checked future.
+     * @param callable|null $classifier Optional retry classifier forwarded to
+     *        the executor (issue #291): the TxnKv prewrite/commit paths rely
+     *        on a caller-provided classifier for TxnRetryableException —
+     *        without it the default classification treats them as fatal.
      */
     public static function fromRetryableDispatch(
         callable $dispatch,
         RetryExecutor $retryExecutor,
         string $key,
+        ?callable $classifier = null,
     ): self {
         $first = null;
         $eagerError = null;
@@ -162,7 +167,7 @@ final readonly class CheckedGrpcFuture
         return new self(
             inner: $firstInner,
             hasInnerFuture: $firstInner instanceof GrpcFuture,
-            waiter: static fn(): mixed => $retryExecutor->execute($key, $operation),
+            waiter: static fn(): mixed => $retryExecutor->execute($key, $operation, $classifier),
         );
     }
 

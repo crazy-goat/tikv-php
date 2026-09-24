@@ -30,6 +30,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class TxnReaderGcAbortTest extends TestCase
 {
+    use MockGrpcCallAsyncShim;
+
     private PdClientInterface&\PHPUnit\Framework\MockObject\MockObject $pdClient;
     private GrpcClientInterface&\PHPUnit\Framework\MockObject\MockObject $grpc;
     private RegionCacheInterface&\PHPUnit\Framework\MockObject\MockObject $regionCache;
@@ -50,6 +52,7 @@ final class TxnReaderGcAbortTest extends TestCase
 
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($this->grpc);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
 
         $store = new Store();

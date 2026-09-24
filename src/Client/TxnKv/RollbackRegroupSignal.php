@@ -18,4 +18,19 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
  */
 final class RollbackRegroupSignal extends \RuntimeException
 {
+    /**
+     * @param string $groupFirstKey First key of the group that raised the
+     *                              signal. With the #291 parallel fan-out
+     *                              the catch site no longer knows which
+     *                              group signalled from loop state, so the
+     *                              group is identified by its first key
+     *                              (group first keys are distinct — the
+     *                              groups partition the key list).
+     */
+    public function __construct(
+        string $message,
+        public readonly string $groupFirstKey = '',
+    ) {
+        parent::__construct($message);
+    }
 }

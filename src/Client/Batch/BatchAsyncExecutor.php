@@ -114,36 +114,46 @@ final readonly class BatchAsyncExecutor
         // failure the loop short-circuits and cancels remaining in-flight
         // futures to prevent gRPC channel/completion-queue leaks.
         $results = [];
-        foreach ($futures as $regionId => $future) {
-            if ($deadlineMs > 0) {
-                $elapsedMs = (int) (microtime(true) * 1000) - $startTimeMs;
-                if ($elapsedMs >= $deadlineMs) {
-                    $this->logger->error('Batch deadline exhausted during wait', [
+        try {
+            foreach ($futures as $regionId => $future) {
+                if ($deadlineMs > 0) {
+                    $elapsedMs = (int) (microtime(true) * 1000) - $startTimeMs;
+                    if ($elapsedMs >= $deadlineMs) {
+                        $this->logger->error('Batch deadline exhausted during wait', [
+                            'regionId' => $regionId,
+                            'elapsedMs' => $elapsedMs,
+                            'deadlineMs' => $deadlineMs,
+                        ]);
+                        $this->cancelAll($futures);
+                        throw new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
+                            'pendingRegions' => array_keys(array_diff_key($futures, $results, $errors)),
+                        ]);
+                    }
+                }
+
+                try {
+                    $results[$regionId] = $this->awaitValue($future);
+                    $this->logger->debug('Region completed successfully', ['regionId' => $regionId]);
+                } catch (TiKvException $e) {
+                    $errors[$regionId] = $e;
+                    $this->logger->warning('Region failed', [
                         'regionId' => $regionId,
-                        'elapsedMs' => $elapsedMs,
-                        'deadlineMs' => $deadlineMs,
+                        'error' => $e->getMessage(),
                     ]);
+                    // Cancel any remaining un-waited futures so their pending
+                    // gRPC calls do not leak completion-queue/channel resources.
                     $this->cancelAll($futures);
-                    throw new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
-                        'pendingRegions' => array_keys(array_diff_key($futures, $results, $errors)),
-                    ]);
+                    break;
                 }
             }
-
-            try {
-                $results[$regionId] = $this->awaitValue($future);
-                $this->logger->debug('Region completed successfully', ['regionId' => $regionId]);
-            } catch (TiKvException $e) {
-                $errors[$regionId] = $e;
-                $this->logger->warning('Region failed', [
-                    'regionId' => $regionId,
-                    'error' => $e->getMessage(),
-                ]);
-                // Cancel any remaining un-waited futures so their pending
-                // gRPC calls do not leak completion-queue/channel resources.
-                $this->cancelAll($futures);
-                break;
-            }
+        } catch (\Throwable $e) {
+            // A non-TiKvException escape (e.g. RollbackRegroupSignal, which
+            // deliberately extends \RuntimeException so it bypasses the
+            // TiKvException handling above) must still cancel the in-flight
+            // futures before propagating. cancelAll() is best-effort and
+            // safe to run twice.
+            $this->cancelAll($futures);
+            throw $e;
         }
 
         if ($errors !== []) {

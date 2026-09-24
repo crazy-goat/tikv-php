@@ -32,6 +32,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class CommitPrewriteKeyCoverageTest extends TestCase
 {
+    use MockGrpcCallAsyncShim;
+
     private PdClientInterface&MockObject $pdClient;
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
@@ -42,6 +44,7 @@ final class CommitPrewriteKeyCoverageTest extends TestCase
     {
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($this->grpc);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
 
         $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);

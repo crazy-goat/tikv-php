@@ -42,6 +42,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class HeartbeatRegionErrorAndTtlTest extends TestCase
 {
+    use MockGrpcCallAsyncShim;
+
     private InMemoryMetrics $metrics;
 
     private RegionCache $regionCache;
@@ -64,6 +66,7 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
 
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($this->grpc);
 
         $store1 = new Store();
         $store1->setId(1);
