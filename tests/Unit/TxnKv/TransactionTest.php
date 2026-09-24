@@ -1606,6 +1606,107 @@ class TransactionTest extends TestCase
         $this->assertSame([], $txn->batchGet([]));
     }
 
+    public function testBatchGetLockedPairResolvesLockAndRetriesInsteadOfReturningNull(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $locked = new LockInfo();
+        $locked->setKey('k1');
+        $locked->setPrimaryLock('k1');
+        $locked->setLockVersion(2000);
+        $keyError = new KeyError();
+        $keyError->setLocked($locked);
+        $errorPair = new KvPair();
+        $errorPair->setError($keyError);
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $errorResponse->setPairs([$errorPair]);
+
+        $successPair = new KvPair();
+        $successPair->setKey('k1');
+        $successPair->setValue('after-lock');
+        $successResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $successResponse->setPairs([$successPair]);
+        $statusResponse = new CheckTxnStatusResponse();
+        $statusResponse->setCommitVersion(3000);
+
+        $batchCalls = 0;
+        $methods = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchCalls,
+                &$methods,
+                $errorResponse,
+                $successResponse,
+                $statusResponse,
+            ): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvBatchGet' => ++$batchCalls === 1 ? $errorResponse : $successResponse,
+                    'KvCheckTxnStatus' => $statusResponse,
+                    'KvResolveLock' => new ResolveLockResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $result = $txn->batchGet(['k1']);
+
+        $this->assertSame(['k1' => 'after-lock'], $result);
+        $this->assertSame(2, $batchCalls);
+        $this->assertSame(
+            ['KvBatchGet', 'KvCheckTxnStatus', 'KvResolveLock', 'KvBatchGet'],
+            $methods,
+        );
+    }
+
+    public function testBatchGetRejectsUnhandledPairKeyError(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $keyError = new KeyError();
+        $keyError->setTxnNotFound(new \CrazyGoat\Proto\Kvrpcpb\TxnNotFound());
+        $pair = new KvPair();
+        $pair->setError($keyError);
+        $response = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $response->setPairs([$pair]);
+        $this->grpc->method('call')->willReturn($response);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('BatchGet failed: TxnNotFound');
+        $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+    }
+
+    public function testBatchGetRejectsResponseLevelKeyError(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $keyError = new KeyError();
+        $keyError->setTxnNotFound(new \CrazyGoat\Proto\Kvrpcpb\TxnNotFound());
+        $response = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $response->setError($keyError);
+        $this->grpc->method('call')->willReturn($response);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('BatchGet failed: TxnNotFound');
+        $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+    }
+
     public function testBatchGetAcceptsNumericKeysFromArrayKeys(): void
     {
         // PHP coerces integer-like string keys ("12345", "0") to int when

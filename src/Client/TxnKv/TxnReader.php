@@ -21,7 +21,10 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
@@ -33,6 +36,8 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 /**
  * Read-only operations for a single transaction.
@@ -59,6 +64,13 @@ final readonly class TxnReader
         private RegionCacheInterface $regionCache,
         /** Read preference for reads (issue #421); commits always target the leader. */
         private ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
+        private int $maxBackoffMs = 20000,
+        private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
+        private int $serverBusyBudgetMs = 60000,
+        private MetricsInterface $metrics = new NoOpMetrics(),
+        private LoggerInterface $logger = new NullLogger(),
+        private ?RetryExecutor $retryExecutor = null,
+        private ?\Closure $classifier = null,
     ) {
     }
 
@@ -298,7 +310,9 @@ final readonly class TxnReader
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
 
-            $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetForRegionAsync($region, $regionKeys);
+            $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetForRegionWithRetry(
+                $regionKeys,
+            );
         }
 
         $batchExecutor = new BatchAsyncExecutor();
@@ -308,9 +322,9 @@ final readonly class TxnReader
                 $this->timeoutConfig->batchDeadlineMs,
             );
         } catch (BatchPartialFailureException $e) {
-            // batchGetFromTiKV() is reached from Transaction::batchGet()
-            // with no RetryExecutor owner... preserve the sequential
-            // first-abort exception semantics (issue #291).
+            // The future-level RetryExecutor has already applied each
+            // region's retry budget; unwrap the aggregate to preserve the
+            // historical first-failing-region exception surface (issue #291).
             throw $e->getFirstRegionError();
         }
 
@@ -329,6 +343,39 @@ final readonly class TxnReader
         }
 
         return $results;
+    }
+
+    /**
+     * Eagerly dispatch the first regional request and retry its wait phase
+     * when response-borne errors require lock resolution (issue #210).
+     *
+     * @param string[] $regionKeys
+     */
+    private function batchGetForRegionWithRetry(
+        array $regionKeys,
+    ): CheckedGrpcFuture {
+        $firstKey = $regionKeys[0] ?? '';
+        $retryExecutor = $this->retryExecutor ?? new RetryExecutor(
+            $this->maxBackoffMs,
+            $this->serverBusyBudgetMs,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            $this->logger,
+            deadlineMs: $this->retryDeadlineMs,
+            metrics: $this->metrics,
+        );
+        $classifier = $this->classifier ?? static fn (TiKvException $e): ?BackoffType => null;
+
+        return CheckedGrpcFuture::fromRetryableDispatch(
+            fn (): CheckedGrpcFuture => $this->batchGetForRegionAsync(
+                $this->regionResolver->getRegionInfo($firstKey),
+                $regionKeys,
+            ),
+            $retryExecutor,
+            $firstKey,
+            $classifier,
+        );
     }
 
     /**
@@ -363,13 +410,12 @@ final readonly class TxnReader
             $this->timeoutMs('batch_read'),
         );
 
-        return CheckedGrpcFuture::fromCallable(function () use ($future, $region) {
+        return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $regionKeys) {
             /** @var BatchGetResponse $response */
             $response = $future->wait();
-            // batchGetFromTiKV() is reached from Transaction::batchGet()
-            // with no RetryExecutor owner, so no handleNotLeader() would
-            // drop a NotLeader-carrying region — check() must
-            // self-invalidate (issue #474 review).
+            // The wait-boundary RetryExecutor owns retries for batchGet, but
+            // the response check still self-invalidates NotLeader so a valid
+            // leader hint is not lost (issue #474 review).
             RegionErrorHandler::check(
                 $response,
                 $this->regionCache,
@@ -377,18 +423,49 @@ final readonly class TxnReader
                 notLeaderOwnedByRetryExecutor: false,
             );
 
-            // GC abort handling (issue #422): without this, a start
-            // timestamp GC has passed yields an empty pair list and every
-            // key of the region silently resolves to null below — and is
-            // cached into the read set, so even a caller-level retry within
-            // the same transaction keeps reading null.
             $error = $response->getError();
             if ($error instanceof KeyError) {
-                throw self::gcExceptionFromAbort($error->getAbort());
+                $this->handleBatchGetKeyError($error, $regionKeys[0] ?? '');
+            }
+
+            foreach ($response->getPairs() as $index => $pair) {
+                $pairError = $pair->getError();
+                if ($pairError instanceof KeyError) {
+                    $fallbackKey = is_int($index) ? ($regionKeys[$index] ?? $pair->getKey()) : $pair->getKey();
+                    $this->handleBatchGetKeyError($pairError, $fallbackKey);
+                }
             }
 
             return $response;
         }, $future);
+    }
+
+    /**
+     * Handle a batch-read KeyError without translating it to an absent key.
+     * A live lock resolves then triggers a retry of the original region batch;
+     * every other variant fails closed.
+     */
+    private function handleBatchGetKeyError(KeyError $error, string $fallbackKey): never
+    {
+        $locked = $error->getLocked();
+        if ($locked !== null) {
+            $rawPrimary = $locked->getPrimaryLock();
+            $primary = $rawPrimary !== ''
+                ? $rawPrimary
+                : ($locked->getKey() !== '' ? $locked->getKey() : $fallbackKey);
+            $this->lockResolver->resolveLock($primary, $locked);
+            throw new TxnRetryableException(
+                'Lock encountered during batchGet, resolved - retry',
+                BackoffType::TxnLock,
+            );
+        }
+
+        $abort = $error->getAbort();
+        if ($abort !== '') {
+            throw self::gcExceptionFromAbort($abort);
+        }
+
+        throw new TiKvException('BatchGet failed: ' . KeyErrorDescriber::describe($error));
     }
 
     /**
