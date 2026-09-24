@@ -231,13 +231,7 @@ final readonly class TwoPhaseCommitter
         $primary = $state->getPrimaryKey();
 
         if ($this->pessimistic) {
-            $retryExecutor->execute(
-                $primary,
-                function () use ($primary, $state): void {
-                    $this->pessimisticLockBatch($primary, $state);
-                },
-                $classifier,
-            );
+            $this->pessimisticLockBatch($primary, $state);
         }
 
         $mutations = $this->buildMutations($state);
@@ -1758,14 +1752,14 @@ final readonly class TwoPhaseCommitter
 
                         $needRetry = false;
                         $lastRegionError = null;
-
                         if ($regionError instanceof RegionException) {
+                            $lastRegionError = $regionError;
+                            $needRetry = true;
                             $this->logger->warning('Region error during pessimistic lock, retrying', [
                                 'regionId' => $region->regionId,
                                 'attempt' => $attempt,
                                 'error' => $regionError->getMessage(),
                             ]);
-                            $lastRegionError = $regionError;
                         } else {
                             $errors = $response->getErrors();
 

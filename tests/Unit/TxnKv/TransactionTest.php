@@ -5047,7 +5047,7 @@ class TransactionTest extends TestCase
         // The lock was resolved between the two rollback attempts: rollback,
         // then CheckTxnStatus + ResolveLock, then the successful retry.
         $this->assertSame(
-            ['KvBatchRollback', 'KvCheckTxnStatus', 'KvCheckTxnStatus', 'KvResolveLock', 'KvBatchRollback'],
+            ['KvBatchRollback', 'KvCheckTxnStatus', 'KvResolveLock', 'KvBatchRollback'],
             $methods,
         );
     }
