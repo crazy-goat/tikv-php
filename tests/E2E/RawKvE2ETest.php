@@ -621,6 +621,59 @@ class RawKvE2ETest extends TestCase
         $this->assertContains('rev-inc-a', $keys, 'endKey should be inclusive in reverse scan');
     }
 
+    public function testReverseScanDocumentationSnippetsReturnRows(): void
+    {
+        // The two snippets from docs/operations.md "Reverse Scan", verbatim.
+        // They shipped with the bounds the wrong way round, which silently
+        // returned an empty array — see issue #370.
+        $logs = [
+            'log:2024-01-15T10:30:00' => 'first',
+            'log:2024-01-15T10:31:11' => 'second',
+            'log:2024-01-15T10:31:12' => 'third',
+        ];
+        $this->putAndTrack($logs);
+
+        $results = $this->testClient->reverseScan('log;', 'log:', limit: 10);
+        $this->assertNotEmpty($results, 'docs snippet 1 must return rows');
+        $this->assertSame(
+            ['log:2024-01-15T10:31:12', 'log:2024-01-15T10:31:11', 'log:2024-01-15T10:30:00'],
+            array_values(array_intersect(
+                array_column($results, 'key'),
+                array_keys($logs),
+            )),
+            'docs snippet 1 must return the seeded rows newest first',
+        );
+
+        $messages = [
+            'msg:user:123:2024-01-15T10:31:10' => 'a',
+            'msg:user:123:2024-01-15T10:31:11' => 'b',
+            'msg:user:123:2024-01-15T10:31:12' => 'c',
+        ];
+        $this->putAndTrack($messages);
+
+        $newest = 'msg:user:123:2024-01-15T10:31:12';
+        $results = $this->testClient->reverseScan($newest . "\x00", 'msg:user:123:', limit: 5);
+        $this->assertNotEmpty($results, 'docs snippet 2 must return rows');
+        $this->assertSame(
+            [
+                'msg:user:123:2024-01-15T10:31:12',
+                'msg:user:123:2024-01-15T10:31:11',
+                'msg:user:123:2024-01-15T10:31:10',
+            ],
+            array_values(array_intersect(
+                array_column($results, 'key'),
+                array_keys($messages),
+            )),
+            'the "\x00" suffix makes the upper bound inclusive of $newest',
+        );
+
+        // The same call with the bounds the other way round is the footgun
+        // documented above the snippets: the upper bound sorts BELOW the
+        // lower bound, so every region is clipped away and the call succeeds
+        // with zero rows instead of raising.
+        $this->assertSame([], $this->testClient->reverseScan('log:', 'log;', limit: 10));
+    }
+
     public function testReverseScanWithLimit(): void
     {
         $pairs = ['rev-lim-a' => 'va', 'rev-lim-b' => 'vb', 'rev-lim-c' => 'vc'];

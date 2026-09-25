@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The two reverse-scan examples in `docs/operations.md` had their bounds the wrong way round (`startKey` is the exclusive **upper** bound and `endKey` the inclusive **lower** bound, so the range was empty): both calls returned zero rows without an error while the surrounding prose was correct. The snippets now use the byte-bump prefix idiom (`'log;', 'log:'`) and the `"\x00"`-suffix idiom for an inclusive upper bound, name the bound each argument carries inline, and the placeholder snippet and `README.md` were reworded so the first argument is no longer presented as the lower one. An E2E test runs both snippets against seeded data and asserts the inverted order still returns `[]`. (#370)
 - `RegionCache` now keeps an ID-keyed entry map, ordered start-key treap, insertion-ordered LRU, and expiry heap, removing packed-array/index shifts and linear LRU scans from inserts and eviction while preserving overlap, TTL, and metrics semantics. (#289)
 - Pessimistic transactions now acquire physical locks in `set()`/`delete()` by default, surface lock conflicts at the write call, and release attempted locks during rollback; `eagerPessimisticLocks => false` retains the legacy deferred pass. (#437)
 - E2E commands and container defaults now select the real `E2E-RawKV` / `E2E-TxnKV` suites, disable coverage for standalone runs, and document that `make test-e2e` orchestrates the required cluster-mode switch. (#369)
