@@ -50,7 +50,7 @@ informational only.
 The library requires PHP >= 8.2; CI runs unit tests on 8.2, 8.3 and 8.4
 (lint and gRPC tests on 8.4 only).
 
-## RegionCache superseded-range removal emits no `regionInvalidated` metric, and an O(n) scan per `put()` is accepted
+## RegionCache superseded-range removal emits no `regionInvalidated` metric; ordered writes use a treap
 
 Two review decisions on the #238 fix (REG-07) that should not be "corrected" later:
 
@@ -59,15 +59,12 @@ Two review decisions on the #238 fix (REG-07) that should not be "corrected" lat
    update, not an error invalidation — the `invalidate()` / "single emission
    point" rule from issue #474 covers error-driven drops only. Emitting here
    would double-count eviction-style reasons.
-2. **The overlap scan is a sorted left/right walk from the insert position,
-   not a full O(n) loop over `entries`.** Because the cache maintains a
-   sorted, non-overlapping invariant, every overlapping entry must be
-   adjacent to `findInsertPosition($startKey)`: the walk goes right while the
-   entry's `startKey < $endKey` and left while the entry's `endKey >
-   $startKey`, stopping at the first merely-touching entry on each side —
-   O(log n + k) per `put()` (first review accepted an O(n) scan; commit
-   bbb4ec8 replaced it after the invariant was verified). Only revisit if
-   profiling shows `put()` on a full cache is hot.
+2. **Ordered lookup and overlap removal use a start-key treap, while entries
+   are stored by region ID.** A lower-bound/predecessor walk and ordered
+   overlap removal are O((k + 1) log n), without packed-array splices or
+   full identity-index shifts. LRU recency is an insertion-ordered hash and TTL
+   cleanup uses a lazy expiry heap, so eviction and periodic sweeps do not
+   scan the complete cache.
 
 ## Tests are delegated / E2E needs Docker
 

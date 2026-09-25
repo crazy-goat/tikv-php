@@ -348,11 +348,17 @@ and limitations: `docs/configuration.md` → "Batch Commands Multiplexing".
 ```php
 class RegionCache
 {
-    private array $cache = [];  // regionId → RegionEntry
-    
-    private array $keyIndex = [];  // key → regionId (for quick lookup)
+    private array $entriesById = [];       // regionId → RegionEntry
+    private ?RegionBoundaryNode $boundaryRoot = null; // start-key treap
+    private array $lruOrder = [];           // oldest insertion order → true
+    private array $expiryHeap = [];          // min-heap by expiresAt
 }
 ```
+
+`getByKey()` uses the treap's predecessor lookup rather than an exact-key
+hash, because the query key lies inside a half-open region range. Overlap
+replacement walks only the affected ordered range; TTL cleanup pops only due
+heap records.
 
 **Invalidation Strategy**:
 - **EpochNotMatch**: Invalidate specific region
@@ -713,7 +719,10 @@ $client->batchGet($keys);  // 3 concurrent sends, responses collected in order
 
 ### 3. Region Cache
 
-**Strategy**: In-memory caching with TTL-based invalidation.
+**Strategy**: In-memory caching with TTL-based invalidation. Entries are
+stored by region ID, while a start-key treap provides ordered predecessor and
+range operations; LRU recency uses insertion order and expiry uses a min-heap.
+This avoids packed-array splices and full identity/LRU scans during writes.
 
 **Benefits**:
 - Avoid PD queries (network round-trip)
