@@ -2,13 +2,15 @@
 
 [![Tests](https://github.com/crazy-goat/tikv-php/actions/workflows/tests.yml/badge.svg)](https://github.com/crazy-goat/tikv-php/actions/workflows/tests.yml)
 
-PHP client for TiKV RawKV API using gRPC extension.
+PHP client for TiKV's RawKV and TxnKV APIs, using the gRPC extension.
 
 ## Requirements
 
 - PHP >= 8.2
 - gRPC extension
-- TiKV cluster with RawKV enabled
+- TiKV cluster — default (V1) mode for TxnKV, or `[storage] enable-ttl = true`
+  for RawKV TTL. The two are mutually exclusive; see
+  [Transactions (TxnKV)](#transactions-txnkv).
 
 ## Quick Start
 
@@ -182,36 +184,218 @@ $client->ingest(['k1' => 'v1', 'k2' => 'v2'], ttl: 3600);
 
 ### Transactions (TxnKV)
 
-Pessimistic transactions acquire each key's physical lock during the
-`set()`/`delete()` call by default; the value is still buffered until
-`commit()`. Lock conflicts, deadlocks, and wait timeouts therefore surface at
-the write call. Applications that need the legacy deferred pass can use
-`begin(['eagerPessimisticLocks' => false])`.
+`TxnKvClient` speaks TiKV's TxnKV API: snapshot reads and two-phase commit
+across an arbitrary set of keys, in one cluster, with no application-level
+locking.
 
-Optimistic transactions take write locks during prewrite. The prewrite lock
-TTL scales with the write-set size — **3000 ms + 10 ms per mutation, capped at
-120000 ms** — so a large multi-region prewrite cannot outlive its own locks
-(an expired lock is rolled back by concurrent readers and the commit fails).
-While the prewrite loop runs, the client automatically heartbeats the primary
-lock once half of the computed TTL has elapsed (single-region 1PC commits are
-exempt, and a lock can only be extended between region prewrites).
+**Use TxnKV when** a read-modify-write must be atomic across more than one
+key, or when several reads inside one operation must observe a single
+consistent snapshot. **Stay on RawKV when** each key is independent — RawKV
+has no transaction machinery to pay for, and the per-key atomic operations
+(`compareAndSwap`, `putIfAbsent`, which need `setAtomicForCAS(true)`) cover the
+single-key case.
+
+> **Cluster mode is exclusive.** TxnKV needs a cluster in default (V1) mode —
+> `enable-ttl` must **not** be set, see `tikv-v1.toml`. A cluster started with
+> `enable-ttl = true` runs in V1TTL mode, which serves RawKV with TTL but
+> **rejects** transactional requests. One cluster serves one of the two.
+
+#### Lifecycle
+
+```php
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+
+$txnClient = TxnKvClient::create(['127.0.0.1:2379']);   // same options as RawKvClient
+
+$txn = $txnClient->begin([          // pessimistic by default
+    'pessimistic' => true,          // false = optimistic (locks at commit)
+    'priority'    => 0,             // 0 Normal (default), 1 Low, 2 High
+]);
+
+$txn->set('account:1', '100');
+$txn->commit();                     // prewrite + commit; or $txn->rollback()
+
+$txnClient->close();
+```
+
+A committed or rolled-back `Transaction` is closed and cannot be reused — a
+second `commit()` throws `InvalidStateException`. Start a new one instead.
+
+`TxnKvClient::create()` accepts the same `tls`, `timeout` and `metrics`
+options as `RawKvClient`, plus `retryDeadlineMs` (the wall-clock bound on one
+transaction's internal retry loop, default
+`Transaction::DEFAULT_RETRY_DEADLINE_MS`), `gcSafePointValidation`,
+`replicaRead`, `enable1Pc`, `enableAsyncCommit` and `tsoPoolSize`.
+
+#### Reads and writes
+
+```php
+$value  = $txn->get('account:1');                        // ?string
+$values = $txn->batchGet(['account:1', 'account:2']);    // array<string, ?string>
+$rows   = $txn->scan('account:', 'account;', limit: 100); // array<array{key, value}>
+
+$txn->set('account:1', '100');
+$txn->delete('account:2');
+```
+
+Reads are **snapshot reads at `startTs`** and observe your own buffered
+writes, so `get()` after `set()` returns the new value without a round trip.
+They do *not* see other transactions' uncommitted data.
+
+> `Transaction::scan()` differs from `RawKvClient::scan()`: `limit: 0` means
+> "up to 10240 rows", not "the whole range" — a transactional scan does not
+> page internally. Pass an explicit `limit` when you need one.
+
+#### Optimistic vs pessimistic
+
+`pessimistic` defaults to **true**.
+
+| | Pessimistic (default) | Optimistic |
+|---|---|---|
+| Lock timing | physical lock during each `set()` / `delete()` | lock acquired during prewrite at `commit()` |
+| Where a conflict surfaces | the write call, or `commit()` for the deferred mode | `commit()` |
+| Lock TTL | fixed 30 s | `3000 ms + 10 ms` per write-set mutation, capped at `120000 ms` |
+| Fits | contended writes (transfers, counters) | low contention (config, caching) |
+
+The value stays buffered until `commit()` in both modes. In default eager
+pessimistic mode the physical lock is taken before `set()` or `delete()`
+returns, so a conflict, deadlock or wait timeout raises there. A preceding
+pessimistic read's per-key `for_update_ts` is reused by the matching write, and
+prewrite keeps `DO_CONSTRAINT_CHECK` as a safety net. The legacy deferred pass
+is available as `begin(['eagerPessimisticLocks' => false])`, which moves the
+lock pass to `commit()`.
+
+#### Isolation, timestamps and status
+
+Snapshot isolation at `startTs`, a timestamp from PD's TSO. A transaction sees
+the database as of `startTs` plus its own writes; it never observes a partial
+commit.
+
+```php
+$txn->getTxnId();       // string, unique per transaction
+$txn->getStartTs();     // int, the snapshot timestamp
+$txn->getCommitTs();    // ?int, null until commit() succeeds
+$txn->getStatus();      // TransactionStatus::{Active, Committed, RolledBack, Undetermined}
+$txn->isPessimistic();  // bool
+$txn->getPriority();    // int
+$txn->getWriteSet();    // array<string, ?string>, buffered writes
+$txn->getReadSet();     // array<string, ?string>, resolved reads
+```
+
+`Undetermined` means the primary commit RPC failed at the transport level: the
+commit may already have been applied. Never roll back such a transaction —
+resolve it out of band (for example by re-checking the primary key).
+
+#### Failure and retry
+
+Retrying a transaction means starting a **new** one. A conflict leaves the old
+`startTs` already behind, so re-running the same object cannot succeed.
+
+| Exception | What to do |
+|---|---|
+| `TransactionConflictException` | discard, **new transaction** |
+| `DeadlockException` | discard, **new transaction** |
+| `LockWaitTimeoutException` | discard, **new transaction** |
+| `TxnRetryableException` | escapes only when the internal retry budget ran out — **new transaction** |
+| `TxnAbortedByGcException` | the `startTs` is behind the cluster's GC safe point. **New transaction**; for reads that must outlive `gc_life_time`, call `TxnKvClient::holdGcSafePoint()` first |
+| `UndeterminedCommitException` | outcome unknown — do **not** roll back, resolve out of band |
+| `RegionException`, `GrpcException`, `RetryBudgetExhaustedException` | already retried internally; retry only if the operation is idempotent |
+| `InvalidStateException`, `InvalidArgumentException` | programming or lifecycle error — never retry |
+
+The full table, with accessors and the reasoning per row, is in
+[Error Handling](docs/error-handling.md#caller-retryability).
+
+#### Long-running transactions
 
 A transaction that stays open between operations keeps its locks only for the
-granted TTL, so it must extend them itself with `Transaction::heartbeat()`
-before the last granted TTL elapses (10 s is a safe default):
+granted TTL, and **heartbeats are not automatic between your own calls** — the
+client only heartbeats the primary lock on its own while the prewrite loop
+runs. Call `Transaction::heartbeat()` before the previously granted TTL
+elapses (10 s is a safe default); it returns the TTL TiKV actually granted.
 
 ```php
 $txn = $txnClient->begin();
-
 $txn->set('account:1', '100');
 
-// ... a long computation or external call ...
+// ... a long computation or an external call ...
 
-$txn->heartbeat(10000); // extend the primary lock TTL by ~10 s
+$grantedTtlMs = $txn->heartbeat(10000);
 
 $txn->set('account:2', '0');
 $txn->commit();
 ```
+
+#### Abandoned transactions
+
+`Transaction::__destruct()` rolls back a transaction that is still `Active`.
+That is a safety net, not a mechanism to rely on: destruction order at
+`shutdown` is not guaranteed, the rollback is a network RPC, and a failure is
+only logged. Always `commit()` or `rollback()` in your own code.
+
+#### Complete example
+
+This is `examples/txn.php` — run it verbatim against a TxnKV cluster:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.txnkv.yml down -v
+docker compose -f docker-compose.yml -f docker-compose.txnkv.yml up -d pd tikv1
+php examples/txn.php
+```
+
+```php
+use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+
+/**
+ * Move $amount from one account to another atomically, retrying on conflict.
+ *
+ * The retry has to build a NEW transaction: the failed one holds a
+ * startTs that has already lost the race, so re-running the same object can
+ * never succeed.
+ */
+function transfer(TxnKvClient $client, string $from, string $to, int $amount): void
+{
+    for ($attempt = 1; ; $attempt++) {
+        $txn = $client->begin(); // pessimistic by default
+        try {
+            $fromBalance = (int) $txn->get($from);
+            $toBalance = (int) $txn->get($to);
+
+            if ($fromBalance < $amount) {
+                throw new RuntimeException("Insufficient funds in {$from}");
+            }
+
+            $txn->set($from, (string) ($fromBalance - $amount));
+            $txn->set($to, (string) ($toBalance + $amount));
+            $txn->commit();
+
+            return;
+        } catch (TransactionConflictException | DeadlockException | LockWaitTimeoutException | TxnRetryableException $e) {
+            if ($txn->getStatus() === TransactionStatus::Active) {
+                $txn->rollback();
+            }
+            if ($attempt >= 5) {
+                throw $e;
+            }
+            echo "  Conflict on attempt {$attempt} ({$e->getMessage()}), retrying...\n";
+            usleep(50_000 * $attempt);
+        } catch (Throwable $e) {
+            if ($txn->getStatus() === TransactionStatus::Active) {
+                $txn->rollback();
+            }
+            throw $e;
+        }
+    }
+}
+```
+
+The `getStatus() === Active` guard matters: after an undetermined commit the
+transaction is closed, and calling `rollback()` on it would throw a second
+exception over the first.
 
 ### TLS/SSL Configuration
 
@@ -360,6 +544,13 @@ try {
 ### Data Integrity
 - ✅ **Checksum** — CRC64-XOR checksum over key range with `ChecksumResult`
 
+### Transactions
+- ✅ **TxnKvClient / Transaction** — ACID transactions with snapshot reads and two-phase commit
+- ✅ **Pessimistic & Optimistic** — pessimistic locks by default; lock heartbeat for long transactions
+- ✅ **Conflict retry** — typed `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`
+- ✅ **GC safe points** — `holdGcSafePoint()` / `releaseGcSafePoint()` for reads that outlive `gc_life_time`
+- ✅ **Replica reads** — `options['replicaRead']` for follower reads inside a transaction
+
 ### Infrastructure
 - ✅ **PD Region Discovery** — With RegionEpoch support
 - ✅ **Region Routing** — Direct to correct TiKV node
@@ -402,6 +593,15 @@ src/
 │   │   └── Dto/                     # Region DTOs (RegionInfo, PeerInfo)
 │   ├── Retry/
 │   │   └── BackoffType.php          # Retry backoff strategies
+│   ├── TxnKv/
+│   │   ├── TxnKvClient.php          # Transactional client (create/begin)
+│   │   ├── Transaction.php          # Transaction (get/set/commit/rollback)
+│   │   ├── TxnReader.php            # Snapshot reads at startTs
+│   │   ├── TwoPhaseCommitter.php    # Prewrite, commit, locks, heartbeat
+│   │   ├── LockResolver.php         # Conflict/lock resolution
+│   │   ├── TransactionState.php     # Mutable transaction state machine
+│   │   ├── TransactionStatus.php    # Active/Committed/RolledBack/Undetermined
+│   │   └── Exception/               # Conflict, deadlock, lock-wait, GC, undetermined
 │   └── Tls/
 │       ├── TlsConfig.php            # TLS configuration
 │       └── TlsConfigBuilder.php     # TLS builder
@@ -418,6 +618,7 @@ examples/
 ├── basic.php                        # Basic CRUD example
 ├── batch.php                        # Batch operations example
 ├── scan.php                         # Scanning examples
+├── txn.php                          # Transactions with conflict retry
 ├── ttl.php                          # TTL operations example
 ├── atomic.php                       # Atomic operations example
 ├── tls.php                          # TLS configuration example
@@ -449,6 +650,7 @@ See the `examples/` directory for complete working examples:
 - **basic.php** — Basic CRUD operations
 - **batch.php** — Batch operations with parallel execution
 - **scan.php** — Range scanning and prefix scanning
+- **txn.php** — Transactions: transfer, snapshot reads, rollback, conflict retry
 - **ttl.php** — Time-to-live operations
 - **atomic.php** — Compare-and-swap and put-if-absent
 - **tls.php** — TLS/SSL configuration
@@ -460,6 +662,10 @@ make up  # Start TiKV cluster first
 php examples/basic.php
 ```
 
+> `examples/txn.php` needs a cluster in default (V1) mode, so use
+> `docker-compose.txnkv.yml` and start from fresh volumes — TiKV refuses to
+> disable TTL on a cluster that was bootstrapped with it.
+
 ## Documentation
 
 - **[Getting Started](docs/getting-started.md)** — Installation, setup, and your first TiKV operations
@@ -468,6 +674,12 @@ php examples/basic.php
 - **[Advanced Features](docs/advanced.md)** — Production-ready patterns and optimization
 - **[Error Handling](docs/error-handling.md)** — Exception hierarchy, per-operation exceptions and retryability
 - **[Troubleshooting](docs/troubleshooting.md)** — Common issues and solutions
+
+For TxnKV, this README's [Transactions](#transactions-txnkv) section is the
+entry point; `docs/error-handling.md` carries the full per-exception
+retryability matrix and
+`[Transaction Operations](docs/error-handling.md#transaction-operations)`
+covers where each transactional exception originates.
 
 ## Configuration
 
