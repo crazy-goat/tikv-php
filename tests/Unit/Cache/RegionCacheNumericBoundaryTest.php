@@ -118,6 +118,65 @@ final class RegionCacheNumericBoundaryTest extends TestCase
         self::assertSame(3, $cache->getByKey('1e3')?->regionId);
     }
 
+    /**
+     * Issue #261's step 4/6: with the keyspace split at "100", the lookup of
+     * "99" must be answered by the region that actually contains it.
+     *
+     * Bytewise "99" > "100" ('9' = 0x39 > '1' = 0x31), so ["100", +inf) is the
+     * region that owns it and ["", "100") is not. A numeric comparison picked
+     * the predecessor by 100 <= 99, landed on ["", "100"), and then let it
+     * through the end check because "99" >= "100" also reads false
+     * numerically — the cache served a region that does not contain the key,
+     * which is the silent `not_found`/`KeyNotInRegion` churn of the issue.
+     */
+    public function testGetByKeyRoutes99ToTheRegionThatContainsIt(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->region(1, '', '100'));
+        $cache->put($this->region(2, '100', ''));
+
+        self::assertSame(2, $cache->getByKey('99')?->regionId);
+        // The neighbouring boundaries still route where they belong: a leading
+        // '0' sorts before the split, and the split key itself is region 2's
+        // inclusive start.
+        self::assertSame(1, $cache->getByKey('099')?->regionId);
+        self::assertSame(2, $cache->getByKey('100')?->regionId);
+    }
+
+    /**
+     * The same "99" against a cache holding ONLY ["100", +inf).
+     *
+     * The cache is a partial view of the keyspace: it knows one region, and
+     * "99" is inside that region bytewise, so the byte-ordered predecessor
+     * walk must find it. A numeric walk compares 100 <= 99, finds no
+     * predecessor, and answers a miss — the false-negative side of the same
+     * bug class, which costs a PD round trip on every lookup of a key the
+     * client already has.
+     *
+     * NOTE: issue #261's acceptance criteria word this case as
+     * "getByKey('99') returns null (a miss) for a cached region ['100', '')".
+     * That expectation is inverted: bytewise "99" is *inside* ["100", +inf),
+     * so returning the region is the correct answer and returning null is the
+     * behaviour from before #321 (PR #462) — not from before #186, which is
+     * what this docblock used to claim. #321 already routed the
+     * `RegionCache` predecessor walk through `strcmp()`, and it is an ancestor
+     * of #186, so the numeric `getByKey()` that answered a miss here was
+     * already gone when #186 landed. Verified against `aaadc4c^` (7017c28):
+     * that tree's numeric `binarySearch()` returns null for this case and
+     * serves the WRONG region (`["", "100")`) in the two-region case above,
+     * while `2ad8236^` (a4f898b, the tip before #186) answers both correctly.
+     * Pinning null here would lock the bug in. The wrong-region case above is
+     * the one the criteria are really after. The same deviation is recorded in
+     * docs/helpers/decisions.md.
+     */
+    public function testGetByKeyServes99FromTheOnlyCachedRegion(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->region(1, '100', ''));
+
+        self::assertSame(1, $cache->getByKey('99')?->regionId);
+    }
+
     public function testGetByKeyAgreesWithAStrcmpReferenceForEveryDecimalKey(): void
     {
         // The issue's own differential check (step 3): decimal keys in

@@ -450,8 +450,139 @@ final class RegionRangeClipperTest extends TestCase
     }
 
     // ========================================================================
+    // Issue #261's acceptance vectors: boundaries "100", "99", "0100", "1e3"
+    //
+    // Byte-sorted, these five regions read
+    //   '' < '0100' < '100' < '1e3' < '99'
+    // ('0' = 0x30 < '1' = 0x31 < '9' = 0x39, and '1e3' > '100' because 'e' =
+    // 0x65 > '0' = 0x30). Read as NUMBERS the same boundaries collapse
+    // instead: 0100 == 100, and 99 < 100 < 1e3 == 1000 — the opposite order.
+    // Every sub-range below is therefore non-empty bytewise while at least one
+    // of them is empty or inverted numerically, which is the only shape on
+    // which the two orders disagree.
+    // ========================================================================
+
+    /**
+     * The five-region layout ['', '0100') ['0100', '100') ['100', '1e3')
+     * ['1e3', '99') ['99', '').
+     *
+     * @return list<RegionInfo>
+     */
+    private function fourBoundaryLayout(): array
+    {
+        return [
+            $this->region('', '0100', regionId: 1),
+            $this->region('0100', '100', regionId: 2),
+            $this->region('100', '1e3', regionId: 3),
+            $this->region('1e3', '99', regionId: 4),
+            $this->region('99', '', regionId: 5),
+        ];
+    }
+
+    public function testClipForwardYieldsEverySubRangeOfTheFourBoundaryLayout(): void
+    {
+        // Clipped forward from '0' to +infinity, so each region contributes
+        // exactly its own byte-order share. Numerically PHP reads
+        // '0100' >= '100' (100 >= 100) and '1e3' >= '99' (1000 >= 99), so the
+        // pre-fix clipper silently dropped regions 2 and 4: a deleteRange() or
+        // scan over this layout then reported success while never touching
+        // them.
+        $results = iterator_to_array($this->clipper->clipForward($this->fourBoundaryLayout(), '0', ''));
+
+        $this->assertSame(
+            [
+                [1, '0', '0100'],
+                [2, '0100', '100'],
+                [3, '100', '1e3'],
+                [4, '1e3', '99'],
+                [5, '99', ''],
+            ],
+            $this->shape($results),
+        );
+    }
+
+    public function testClipForwardSubRangeStartingAt1e3KeepsThe99Region(): void
+    {
+        // ['1e3', +inf) starts inside region 4 and continues into the
+        // unbounded region 5. Numerically the clipper thought '1e3' >= '99'
+        // (1000 >= 99) and returned region 4's inverted sub-range
+        // ['1e3', '99') as empty, so the scan lost region 4 entirely.
+        $results = iterator_to_array($this->clipper->clipForward($this->fourBoundaryLayout(), '1e3', ''));
+
+        $this->assertSame(
+            [
+                [4, '1e3', '99'],
+                [5, '99', ''],
+            ],
+            $this->shape($results),
+        );
+    }
+
+    public function testClipReverseClipsTheFourBoundaryLayoutInDescendingOrder(): void
+    {
+        // A reverse scan over ('0100', '1000'] walks the byte-sorted layout
+        // downwards: region 3 ['100', '1e3') up to '1000' and region 2
+        // ['0100', '100') below it. The requested range is valid in BOTH
+        // orders ('0100' < '1000' bytewise, 100 < 1000 numerically), so every
+        // difference below is a genuine mis-clip and not an artefact of a range
+        // that only exists in one order.
+        $results = iterator_to_array($this->clipper->clipReverse(
+            array_reverse($this->fourBoundaryLayout()),
+            '1000',
+            '0100',
+        ));
+
+        $this->assertSame(
+            [
+                [3, '1000', '100'],
+                [2, '100', '0100'],
+            ],
+            $this->shape($results),
+        );
+    }
+
+    public function testClipReverseFindsTheRangeThatOnlyExistsBytewise(): void
+    {
+        // ('1e3', '99'] is a valid bytewise range — '1e3' < '99' — that PHP's
+        // numeric order declares empty (99 < 1000), so the pre-fix clipper
+        // yielded NOTHING at all for a legitimate reverse scan. Its single
+        // byte-order share is region 4 ['1e3', '99'): region 5 starts exactly
+        // at the exclusive upper bound '99' and regions 3/2 end at or below
+        // '1e3', so none of them may contribute.
+        $results = iterator_to_array($this->clipper->clipReverse(
+            array_reverse($this->fourBoundaryLayout()),
+            '99',
+            '1e3',
+        ));
+
+        $this->assertSame(
+            [
+                [4, '99', '1e3'],
+            ],
+            $this->shape($results),
+        );
+    }
+
+    // ========================================================================
     // Helper
     // ========================================================================
+
+    /**
+     * Reduce clipped sub-ranges to [regionId, start, end] triples so the
+     * expectations above read as one table.
+     *
+     * @param array<int, array{RegionInfo, string, string}> $results
+     * @return list<array{int, string, string}>
+     */
+    private function shape(array $results): array
+    {
+        $shape = [];
+        foreach ($results as [$region, $start, $end]) {
+            $shape[] = [$region->regionId, $start, $end];
+        }
+
+        return $shape;
+    }
 
     private function region(string $startKey, string $endKey, int $regionId = 1): RegionInfo
     {

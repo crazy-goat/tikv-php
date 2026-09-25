@@ -103,8 +103,17 @@ final readonly class RegionResolver
      * fails closed and throws naming the first unresolvable key — callers
      * that group keys via {@see RegionGrouper} get the same guarantee.
      *
+     * The returned map inherits PHP's array-key semantics: a canonical
+     * decimal-integer key is returned under its `int` form, every other key
+     * form stays a `string` key — including a canonical decimal that overflows
+     * a PHP int (`'9223372036854775808'`). `$resolved['1000']` still finds the
+     * entry stored as int 1000, because PHP casts a lookup the same way. Hence
+     * `array-key`, not `string` (issue #261; see
+     * {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::batchGet()} for the full
+     * rule).
+     *
      * @param string[] $keys
-     * @return array<string, RegionInfo> key => region mapping
+     * @return array<array-key, RegionInfo> key => region mapping
      * @throws TiKvException when any key cannot be mapped to a region
      */
     public function batchResolveRegions(array $keys): array
@@ -149,9 +158,13 @@ final readonly class RegionResolver
     /**
      * Assign keys to regions using binary search on sorted region boundaries.
      *
+     * `$result[$key] = $region` is keyed by the raw TiKV key, so the map
+     * inherits PHP's array-key coercion (issue #261; see
+     * {@see batchResolveRegions()}).
+     *
      * @param string[] $keys
      * @param RegionInfo[] $regions regions sorted by startKey
-     * @return array<string, RegionInfo>
+     * @return array<array-key, RegionInfo>
      */
     private function assignKeysToRegions(array $keys, array $regions): array
     {

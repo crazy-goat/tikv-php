@@ -194,6 +194,87 @@ class ScanIteratorTest extends TestCase
     }
 
     // ========================================================================
+    // Numeric-string bounds (issue #261): currentStartKey and endKey are both
+    // decimal strings, so PHP's own `>=` compares them as NUMBERS while TiKV
+    // (and this iterator) orders keys bytewise.
+    // ========================================================================
+
+    public function testNumericRangeThatIsOnlyValidBytewiseIsStillScanned(): void
+    {
+        // ['20', '3') is a valid bytewise range — '2' = 0x32 < '3' = 0x33 —
+        // that PHP reads as 20 >= 3, i.e. empty. A numeric termination check
+        // exhausts the iterator before the first page is requested, so a scan
+        // over this range returns nothing at all (silent data loss).
+        $scanFn = fn(): array => [
+            ['key' => '20', 'value' => 'v20'],
+            ['key' => '25', 'value' => 'v25'],
+        ];
+
+        $iterator = new ScanIterator($scanFn, '20', '3', 10);
+
+        $this->assertSame(['20' => 'v20', '25' => 'v25'], iterator_to_array($iterator));
+    }
+
+    public function testNumericRangeThatIsOnlyEmptyBytewiseTerminatesWithoutScanning(): void
+    {
+        // The mirror image: ['9', '11') is empty bytewise ('9' = 0x39 >
+        // '1' = 0x31) but non-empty numerically (9 < 11). A numeric
+        // termination check therefore issues the scan, and the caller gets
+        // rows from outside the range it asked for — and a byte-order
+        // consumer that paginates with the same assumption never stops.
+        $scanFn = function (): never {
+            $this->fail('scan must not be called for a bytewise-empty range');
+        };
+
+        $iterator = new ScanIterator($scanFn, '9', '11', 10);
+
+        $this->assertFalse($iterator->valid());
+        $this->assertSame([], iterator_to_array($iterator));
+    }
+
+    public function testNumericPaginationStopsAtTheByteOrderEndKey(): void
+    {
+        // Two pages over ['20', '3'). This case is NOT redundant with the two
+        // above: it discriminates on the *initial* termination check, which the
+        // first case also exercises, and it additionally pins the two-page
+        // pagination shape (2 calls, 3 rows, short final page).
+        //
+        // Measured, both halves: a numeric termination check makes this test
+        // fail with `[]` instead of the three rows, because
+        // `KeyOrder::gte('20', '3')` must be false ('2' = 0x32 < '3' = 0x33)
+        // while `'20' >= '3'` is numerically true. What it does NOT
+        // discriminate is the *continuation* cursor: KeyOrder::successor()
+        // appends the NUL byte, so the cursor is "25\x00" / "2z\x00" and PHP's
+        // `>=` falls back to a byte comparison (a non-numeric string is never
+        // compared numerically), agreeing with strcmp() on both. The second
+        // page is therefore requested because the cursor sorts before '3', and
+        // the short final page is what ends the iteration here.
+        $calls = 0;
+        $scanFn = function (string $startKey) use (&$calls): array {
+            ++$calls;
+
+            return match ($startKey) {
+                '20' => [
+                    ['key' => '20', 'value' => 'v20'],
+                    ['key' => '25', 'value' => 'v25'],
+                ],
+                "25\x00" => [
+                    ['key' => '2z', 'value' => 'v2z'],
+                ],
+                default => [],
+            };
+        };
+
+        $iterator = new ScanIterator($scanFn, '20', '3', 2);
+
+        $this->assertSame(
+            ['20' => 'v20', '25' => 'v25', '2z' => 'v2z'],
+            iterator_to_array($iterator),
+        );
+        $this->assertSame(2, $calls);
+    }
+
+    // ========================================================================
     // Validation
     // ========================================================================
 

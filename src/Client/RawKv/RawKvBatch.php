@@ -70,8 +70,17 @@ final readonly class RawKvBatch
     }
 
     /**
+     * The returned map inherits PHP's array-key semantics: a canonical
+     * decimal-integer key is returned under its `int` form, every other key
+     * form stays a `string` key — including a canonical decimal that overflows
+     * a PHP int (`'9223372036854775808'`), which no int key can denote.
+     * `$results['1000']` still finds the entry stored as int 1000, because PHP
+     * casts a lookup the same way. Hence `array-key`, not `string` (issue #261;
+     * see {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::batchGet()} for
+     * the full rule).
+     *
      * @param string[] $keys
-     * @return array<string, ?string>
+     * @return array<array-key, ?string>
      */
     public function batchGet(array $keys, RetryExecutor $retryExecutor, string $columnFamily = ''): array
     {

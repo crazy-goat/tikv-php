@@ -91,7 +91,15 @@ final class Transaction
         private readonly bool $enable1Pc = false,
         /** Whether this transaction may use async commit (issue #419). */
         private readonly bool $enableAsyncCommit = false,
-        /** @var array<string, int> TSO reads used by pessimistic read-modify-write keys. */
+        /**
+         * TSO reads used by pessimistic read-modify-write keys. Keyed by the
+         * raw TiKV key, so it inherits PHP's array-key coercion exactly like
+         * the write and read sets do (issue #261): `'1000'` is stored as int
+         * 1000, and every `$this->readTsByKey[$key]` lookup is a string lookup
+         * that PHP casts the same way, so the map is lossless.
+         *
+         * @var array<array-key, int>
+         */
         private array $readTsByKey = [],
         /** Whether pessimistic set/delete acquire their lock before returning. */
         private readonly bool $eagerPessimisticLocks = true,
@@ -172,7 +180,16 @@ final class Transaction
     }
 
     /**
-     * @return array<string, ?string>
+     * The returned map inherits PHP's array-key semantics: a canonical
+     * decimal-integer key is returned under its `int` form, every other key
+     * form stays a `string` key — including a canonical decimal that overflows
+     * a PHP int (`'9223372036854775808'`). `$writeSet['1000']` still finds the
+     * entry stored as int 1000, because PHP casts a lookup the same way. Hence
+     * `array-key`, not `string` (issue #261; see
+     * {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::batchGet()} for the full
+     * rule).
+     *
+     * @return array<array-key, ?string>
      */
     public function getWriteSet(): array
     {
@@ -180,7 +197,10 @@ final class Transaction
     }
 
     /**
-     * @return array<string, ?string>
+     * The read set has the same shape as the write set and the same coercion
+     * (issue #261; see {@see getWriteSet()}).
+     *
+     * @return array<array-key, ?string>
      */
     public function getReadSet(): array
     {
@@ -215,10 +235,19 @@ final class Transaction
     }
 
     /**
+     * The returned map inherits PHP's array-key semantics: a canonical
+     * decimal-integer key is returned under its `int` form, every other key
+     * form stays a `string` key — including a canonical decimal that overflows
+     * a PHP int (`'9223372036854775808'`), which no int key can denote.
+     * `$results['1000']` still finds the entry stored as int 1000, because PHP
+     * casts a lookup the same way. Hence `array-key`, not `string` (issue #261;
+     * see {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::batchGet()} for
+     * the full rule).
+     *
      * @param array<array-key, string|int> $keys Keys may be ints when built via
      *                                           array_keys() on a map with
      *                                           numeric-string keys (issue #322)
-     * @return array<string, ?string>
+     * @return array<array-key, ?string>
      *
      * @throws InvalidStateException
      * @throws TiKvException

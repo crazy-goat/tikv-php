@@ -746,10 +746,22 @@ final class RawKvClient
     // ========================================================================
 
     /**
+     * The returned map inherits PHP's array-key semantics: only a canonical
+     * decimal-integer key (`'12345'`, `'0'`, `'-5'`) **that also fits in a PHP
+     * int** is returned under its `int` form. Every other key form stays a
+     * `string` key — leading zeros `'01000'`, `'1e3'`, `'+1000'`, `'-0'`,
+     * non-numeric, and equally a canonical decimal that overflows, such as
+     * `'9223372036854775808'` (PHP_INT_MAX + 1), which a 20-digit TiKV key
+     * (big-int IDs, nanosecond epochs) can be. PHP casts a string lookup the
+     * same way, so every entry remains addressable by the exact bytes that
+     * were requested — `$results['1000']` finds the entry stored as int 1000.
+     * The key type is therefore `array-key`, not `string` (issue #261; the full
+     * rule is in `docs/helpers/faq.md`).
+     *
      * @param array<array-key, string|int> $keys Keys may be ints when built via
      *                                           array_keys() on a map with
      *                                           numeric-string keys (issue #322)
-     * @return array<string, ?string>
+     * @return array<array-key, ?string>
      *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
