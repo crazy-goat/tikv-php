@@ -122,6 +122,52 @@ same decimal-key `TypeError` already fixed by #322 — grep the source and
 `git log -S` the cited lines before implementing an audit finding (see the
 duplication entry below).
 
+## The same array-key rule applies to every READ/WRITE map keyed by a TiKV key
+
+`batchGet()` takes a **list** of keys and returns a **map**, and the map is
+built with `$ordered[$key] = ...` (`RawKvBatch::batchGet()`,
+`TxnReader::batchGetFromTiKV()`), so the coercion is unavoidable: a canonical
+decimal key ('1000', '0', '-5') comes back under its `int` form. That is why
+the four `batchGet()` docblocks declare `array<array-key, ?string>` and not
+`array<string, ?string>` (issue #261) — `array<string, ?string>` is false at
+runtime for those keys. One caveat the write-side entry above does not spell
+out for the READ map: the coercion also requires the value to **fit in a PHP
+int**, so a canonical decimal that overflows stays a `string` key —
+`'9223372036854775808'` (PHP_INT_MAX + 1) and `'-9223372036854775809'` do,
+while `'-9223372036854775808'` (PHP_INT_MIN) does. A 20-digit TiKV key
+(big-int IDs, nanosecond epochs) therefore comes back as a `string` even
+though it is canonical decimal.
+
+The rule is lossless, so nothing misfiles: PHP casts a string *lookup* the same
+way, `$result['1000']` resolves the entry stored as int 1000, and the
+non-canonical forms ('01000', '1e3') stay string keys with their own entries.
+What a consumer must still do is cast a `foreach` key before handing it to a
+`string`-typed parameter, exactly as the write-side entry above says.
+
+Every map this client builds with a **TiKV key as the array key** inherits the
+rule, so all of them declare `array-key`:
+
+- `RawKvClient::batchGet()`, `RawKvBatch::batchGet()`,
+  `Transaction::batchGet()` and `TxnReader::batchGet()` (the canonical
+  paragraph, with the full rule, lives on `RawKvClient::batchGet()`);
+- `Transaction::getWriteSet()` / `TransactionState::getWriteSet()` and
+  `Transaction::getReadSet()` / `TransactionState::getReadSet()` — same shape,
+  so read-your-writes and a write-set consumer see the same int keys;
+- `TransactionState::setWriteSet()`, whose parameter is key-keyed too;
+- `RegionResolver::batchResolveRegions()` — a **public** map, even more exposed
+  than `RawKvBatch::batchGet()`. Its `RegionGrouper` consumers look the region
+  up with the original key bytes (`$resolved[$key]`), so the coercion is
+  invisible to them, but the map is public and its declaration used to say
+  `array<string, RegionInfo>`.
+
+`Transaction::$readTsByKey` (private) is the same shape and is declared
+`array-key` for the same reason, but it never leaves the object, so it is a
+correctness-of-the-declaration fix only, not an API change.
+
+Pinned by `tests/Unit/RawKv/RawKvBatchArrayKeyTest.php` (the BatchCommands
+multiplexer is the ext-grpc-free transport seam) and
+`tests/Unit/TxnKv/TxnReaderArrayKeyTest.php`.
+
 ## There is no pre-push hook in this repo
 
 Lint is only enforced in CI. Run `composer lint` locally before pushing to

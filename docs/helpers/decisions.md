@@ -137,3 +137,29 @@ numeric-boundary vectors of #232 are now pinned as regression tests in
 clip, and the `deleteRange("20", "300")` / `('3', '9')` shapes). When adding a
 region-routing test, do not reuse alphabetic boundaries: pick boundaries whose
 first byte disagrees with their numeric value, or the test cannot fail.
+## Issue #261's inverted region-cache acceptance criterion is not implemented on purpose (issue #261)
+
+Issue #261's acceptance criteria ask for `RegionCache::getByKey("99")` to
+return `null` (a miss) for a cached region `["100", "")`. That expectation is
+inverted, and `tests/Unit/Cache/RegionCacheNumericBoundaryTest.php` pins the
+*correct* answer (the region) instead — both in the wrong-region case
+(`testGetByKeyRoutes99ToTheRegionThatContainsIt()`, which is what the criteria
+are really after: the pre-fix cache served `["", "100")`, a region that does
+not contain `"99"`) and in the partial-cache case
+(`testGetByKeyServes99FromTheOnlyCachedRegion()`). Bytewise `"99" > "100"`
+(`'9'` = 0x39 > `'1'` = 0x31), so `"99"` is *inside* `["100", +inf)`: the cache
+is a partial view of the keyspace, the byte-ordered predecessor walk must find
+the one region it holds, and a `null` here would be a false negative that costs
+a PD round trip on every lookup of a key the client already has. Do not
+"fix" the test to match the issue text.
+
+One attribution trap worth recording, because it is the kind of thing a
+docblock gets wrong silently: the null-returning behaviour is **not**
+"pre-#186". The numeric `RegionCache` predecessor walk was replaced by **#321
+(PR #462, commit `aaadc4c`)**, which is an *ancestor* of #186 (`2ad8236`), so
+the numeric `getByKey()` was already gone when #186 landed. Verified with
+`git worktree add` probes against `aaadc4c^` (7017c28) and `2ad8236^`
+(a4f898b): the former returns `null` for the partial-cache case and the wrong
+region (1) for the two-region case, the latter answers both correctly. Write
+the revision you actually measured, and `git log -S` it before claiming a
+"pre-#N" behaviour.

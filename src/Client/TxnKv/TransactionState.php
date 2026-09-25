@@ -16,10 +16,10 @@ use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
  */
 final class TransactionState
 {
-    /** @var array<string, ?string> key => value. null value means delete */
+    /** @var array<array-key, ?string> key => value. null value means delete */
     private array $writeSet = [];
 
-    /** @var array<string, ?string> key => value read (for read-set tracking) */
+    /** @var array<array-key, ?string> key => value read (for read-set tracking) */
     private array $readSet = [];
 
     /** @var string[] keys pending a deferred pessimistic lock pass */
@@ -146,7 +146,16 @@ final class TransactionState
     // -- Write Set ----------------------------------------------------------------
 
     /**
-     * @return array<string, ?string>
+     * The returned map inherits PHP's array-key semantics: a canonical
+     * decimal-integer key is returned under its `int` form, every other key
+     * form stays a `string` key — including a canonical decimal that overflows
+     * a PHP int (`'9223372036854775808'`). `$writeSet['1000']` still finds the
+     * entry stored as int 1000, because PHP casts a lookup the same way. Hence
+     * `array-key`, not `string` (issue #261; see
+     * {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::batchGet()} for the full
+     * rule).
+     *
+     * @return array<array-key, ?string>
      */
     public function getWriteSet(): array
     {
@@ -154,7 +163,10 @@ final class TransactionState
     }
 
     /**
-     * @param array<string, ?string> $writeSet
+     * @param array<array-key, ?string> $writeSet TiKV keys are byte strings, so
+     *        the same canonical-decimal coercion as {@see getWriteSet()} applies
+     *        here: a caller that hands back a `getWriteSet()` result must not
+     *        be rejected by a narrower `string`-keyed declaration (issue #261).
      */
     public function setWriteSet(array $writeSet): void
     {
@@ -214,7 +226,11 @@ final class TransactionState
     // -- Read Set -----------------------------------------------------------------
 
     /**
-     * @return array<string, ?string>
+     * The read set is the same shape as the write set and is built the same way,
+     * so it inherits the same PHP array-key coercion (issue #261; see
+     * {@see getWriteSet()}).
+     *
+     * @return array<array-key, ?string>
      */
     public function getReadSet(): array
     {

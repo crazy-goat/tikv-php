@@ -119,7 +119,7 @@ $values = $client->batchGet(['key1', 'key2', 'key3']);
 **Parameters:**
 - `keys` (string[]): Array of keys to retrieve
 
-**Returns:** `array<string, ?string>` - Associative array of key => value (null for missing keys)
+**Returns:** `array<array-key, ?string>` - Associative array of key => value (null for missing keys). Keys come back under PHP's array-key semantics: a canonical decimal-integer key (`'1000'`, `'0'`, `'-5'`) is returned as an `int` key, everything else (and a canonical decimal beyond `PHP_INT_MAX`) stays a `string` key. The lookup is lossless — `$values['1000']` finds the entry stored as int 1000 — so cast a `foreach` key with `(string)` before passing it to a `string`-typed parameter. See [`helpers/faq.md`](helpers/faq.md).
 
 **Throws:** [`BatchPartialFailureException`](error-handling.md) if any region's sub-batch fails. The call is read-only, so a full retry is always safe. Note that **no results are returned** on partial failure — keys served by regions that succeeded are discarded and must be fetched again.
 

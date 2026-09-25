@@ -231,7 +231,7 @@ transaction's internal retry loop, default
 
 ```php
 $value  = $txn->get('account:1');                        // ?string
-$values = $txn->batchGet(['account:1', 'account:2']);    // array<string, ?string>
+$values = $txn->batchGet(['account:1', 'account:2']);    // array<array-key, ?string>
 $rows   = $txn->scan('account:', 'account;', limit: 100); // array<array{key, value}>
 
 $txn->set('account:1', '100');
@@ -278,9 +278,17 @@ $txn->getCommitTs();    // ?int, null until commit() succeeds
 $txn->getStatus();      // TransactionStatus::{Active, Committed, RolledBack, Undetermined}
 $txn->isPessimistic();  // bool
 $txn->getPriority();    // int
-$txn->getWriteSet();    // array<string, ?string>, buffered writes
-$txn->getReadSet();     // array<string, ?string>, resolved reads
+$txn->getWriteSet();    // array<array-key, ?string>, buffered writes
+$txn->getReadSet();     // array<array-key, ?string>, resolved reads
 ```
+
+`getWriteSet()`, `getReadSet()` and `batchGet()` return a **map**, and PHP
+coerces a canonical decimal-integer key such as `'1000'`, `'0'` or `'-5'` to
+its `int` array-key form — so a `foreach` key can be an `int` even though you
+passed a `string`. The lookup is lossless (`$values['1000']` finds the entry
+stored as int 1000); a key beyond `PHP_INT_MAX` stays a `string`. Cast a
+`foreach` key with `(string)` before handing it to a `string`-typed parameter.
+See [`docs/helpers/faq.md`](docs/helpers/faq.md).
 
 `Undetermined` means the primary commit RPC failed at the transport level: the
 commit may already have been applied. Never roll back such a transaction —
