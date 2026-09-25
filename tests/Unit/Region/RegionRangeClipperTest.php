@@ -317,6 +317,139 @@ final class RegionRangeClipperTest extends TestCase
     }
 
     // ========================================================================
+    // Numeric-boundary vectors (issue #232)
+    //
+    // The vectors above use 'a'/'m'/'z', ASCII from the middle of the byte
+    // range, where PHP's numeric-string comparison and byte order happen to
+    // agree — which is why the whole class of bug went undetected. The
+    // boundaries below are decimal strings, so the two orderings disagree.
+    // ========================================================================
+
+    public function testClipForwardYieldsThreeSubRangesForNumericBoundaries(): void
+    {
+        // The issue #232 vector: three regions byte-sorted as
+        // '' < '1000' < '999' ('1' = 0x31 < '9' = 0x39), clipped forward
+        // from '0' to +infinity. Pre-fix region 2 was dropped without a
+        // trace, because PHP read '1000' >= '999' as 1000 >= 999 and called
+        // its sub-range empty — a deleteRange() over this layout then
+        // reported success without ever touching region 2.
+        $regions = [
+            $this->region('', '1000', regionId: 1),
+            $this->region('1000', '999', regionId: 2),
+            $this->region('999', '', regionId: 3),
+        ];
+        $results = iterator_to_array($this->clipper->clipForward($regions, '0', ''));
+
+        $this->assertCount(3, $results);
+
+        // '0' > '' so region 1 is clipped forward to its start: ['0', '1000').
+        [$r1, $s1, $e1] = $results[0];
+        $this->assertSame(1, $r1->regionId);
+        $this->assertSame('0', $s1);
+        $this->assertSame('1000', $e1);
+
+        // '0' < '1000' bytewise, so region 2 keeps its own bounds. The range
+        // is non-empty: '1000' < '999' ('1' < '9'), the byte order that PHP
+        // inverts.
+        [$r2, $s2, $e2] = $results[1];
+        $this->assertSame(2, $r2->regionId);
+        $this->assertSame('1000', $s2);
+        $this->assertSame('999', $e2);
+
+        // The unbounded last region is clipped only at its start; '' stays +infinity.
+        [$r3, $s3, $e3] = $results[2];
+        $this->assertSame(3, $r3->regionId);
+        $this->assertSame('999', $s3);
+        $this->assertSame('', $e3);
+    }
+
+    public function testClipForwardKeepsEveryRegionOfTheNumericLayoutWhenClippedToASubRange(): void
+    {
+        // The six-region layout of issue #232 — byte-sorted as
+        // '' < '1000' < '2000' < '30' < '400' < '999', numerically
+        // backwards from '2000' on — clipped forward to ['100', '9995').
+        // Every region contributes exactly one sub-range, and they are
+        // contiguous, i.e. no region is skipped in the middle.
+        $regions = [
+            $this->region('', '1000', regionId: 1),
+            $this->region('1000', '2000', regionId: 2),
+            $this->region('2000', '30', regionId: 3),
+            $this->region('30', '400', regionId: 4),
+            $this->region('400', '999', regionId: 5),
+            $this->region('999', '', regionId: 6),
+        ];
+        $results = iterator_to_array($this->clipper->clipForward($regions, '100', '9995'));
+
+        //   region      sub-range        why
+        //   1 ["", "1000")    ['100', '1000')   '100' is inside it
+        //   2 ['1000', "2000") ['1000', '2000') '100' < '1000' bytewise
+        //   3 ['2000', '30')  ['2000', '30')    '2000' < '30' bytewise ('2' < '3'),
+        //                                        so this sub-range is valid although
+        //                                        2000 > 30 numerically — pre-fix PHP
+        //                                        dropped it
+        //   4 ['30', '400')   ['30', '400')     fully inside the request
+        //   5 ['400', '999')  ['400', '999')    fully inside the request
+        //   6 ['999', '')     ['999', '9995')   unbounded end clipped to the request
+        $expected = [
+            [1, '100', '1000'],
+            [2, '1000', '2000'],
+            [3, '2000', '30'],
+            [4, '30', '400'],
+            [5, '400', '999'],
+            [6, '999', '9995'],
+        ];
+
+        $this->assertCount(count($expected), $results);
+        foreach ($expected as $index => [$regionId, $start, $end]) {
+            [$region, $actualStart, $actualEnd] = $results[$index];
+            $this->assertSame($regionId, $region->regionId);
+            $this->assertSame($start, $actualStart);
+            $this->assertSame($end, $actualEnd);
+        }
+    }
+
+    public function testClipForwardKeepsTheDeleteRangeStartKeyInAnUnboundedRegion(): void
+    {
+        // deleteRange("20", "300") against the single region ["100", "").
+        // Bytewise '20' > '100' ('2' = 0x32 > '1' = 0x31), so the request
+        // starts inside the region and the clipped range must start at '20'.
+        // Pre-fix PHP compared 20 > 100 and kept the region's own start key,
+        // so the delete silently began at '100' and every key in
+        // ['20', '100') — '250', '299' — was never deleted.
+        $results = iterator_to_array($this->clipper->clipForward(
+            [$this->region('100', '', regionId: 1)],
+            '20',
+            '300',
+        ));
+
+        $this->assertCount(1, $results);
+        [$region, $start, $end] = $results[0];
+        $this->assertSame(1, $region->regionId);
+        $this->assertSame('20', $start);
+        $this->assertSame('300', $end);
+    }
+
+    public function testClipForwardYieldsOnlyTheRegionThatContainsTheNumericRange(): void
+    {
+        // Request ['3', '9') over ["", "20") and ['20', ""). '3' > '20' and
+        // '9' > '20' bytewise ('3' = 0x33 > '2' = 0x32), so the whole range
+        // sits in the second region: the first must be skipped, not yielded
+        // with inverted bounds. PHP reads 3 < 20 and 9 < 20 and routes the
+        // range to the first region instead.
+        $regions = [
+            $this->region('', '20', regionId: 1),
+            $this->region('20', '', regionId: 2),
+        ];
+        $results = iterator_to_array($this->clipper->clipForward($regions, '3', '9'));
+
+        $this->assertCount(1, $results);
+        [$region, $start, $end] = $results[0];
+        $this->assertSame(2, $region->regionId);
+        $this->assertSame('3', $start);
+        $this->assertSame('9', $end);
+    }
+
+    // ========================================================================
     // Helper
     // ========================================================================
 
