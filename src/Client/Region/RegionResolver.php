@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -122,11 +123,11 @@ final readonly class RegionResolver
         // region whose startKey >= end. Passing the maximum key verbatim
         // excluded the region that begins exactly at the maximum key, so
         // that key found no region and was silently dropped from the batch
-        // (issue #244). Appending "\x00" yields the smallest key strictly
-        // greater than $maxKey, making the scan inclusive of the region
-        // owning the maximum key (client-go resolves the last key
+        // (issue #244). KeyOrder::successor() yields the smallest key
+        // strictly greater than $maxKey, making the scan inclusive of the
+        // region owning the maximum key (client-go resolves the last key
         // inclusively).
-        $regions = $this->pdClient->scanRegions($minKey, $maxKey . "\x00");
+        $regions = $this->pdClient->scanRegions($minKey, KeyOrder::successor($maxKey));
 
         foreach ($regions as $region) {
             $this->regionCache->put($region);
@@ -184,7 +185,7 @@ final readonly class RegionResolver
             $mid = (int) (($left + $right) / 2);
             $region = $regions[$mid];
 
-            if (strcmp($region->startKey, $key) <= 0) {
+            if (KeyOrder::lte($region->startKey, $key)) {
                 $result = $region;
                 $left = $mid + 1;
             } else {
@@ -192,7 +193,7 @@ final readonly class RegionResolver
             }
         }
 
-        if ($result !== null && $result->endKey !== '' && strcmp($key, $result->endKey) >= 0) {
+        if ($result !== null && $result->endKey !== '' && KeyOrder::gte($key, $result->endKey)) {
             return null;
         }
 

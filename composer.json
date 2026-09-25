@@ -33,7 +33,8 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "CrazyGoat\\TiKV\\Tests\\": "tests/"
+            "CrazyGoat\\TiKV\\Tests\\": "tests/",
+            "CrazyGoat\\TiKV\\Phpstan\\": "phpstan/"
         }
     },
     "scripts": {

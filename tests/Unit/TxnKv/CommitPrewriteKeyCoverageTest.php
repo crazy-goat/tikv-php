@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -162,7 +163,7 @@ final class CommitPrewriteKeyCoverageTest extends TestCase
         // commit()'s prewrite loop re-resolves the region inside the retry
         // closure (issue #213), so the mocked cache must answer the lookup.
         $this->regionCache->method('getByKey')->willReturnCallback(
-            static fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
         );
 
         [$txn, $getRequests] = $this->makeTransactionAndCaptureRpcs();

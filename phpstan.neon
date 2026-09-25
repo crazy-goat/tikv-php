@@ -17,3 +17,35 @@ parameters:
             identifier: method.alreadyNarrowedType
             paths:
                 - tests
+        # The only test of the custom rule below (issue #186) is this
+        # whitelist: the fixture holds the comparison shapes the rule must
+        # report, and reportUnmatched turns "the rule stopped firing" into a
+        # failed run (ignore.unmatched) instead of a silent pass. Scoped to the
+        # fixture path, so the same comparison anywhere else is still an error.
+        -
+            identifier: tikv.keyOrder.relationOnStrings
+            path: tests/Unit/Phpstan/KeyOrderRuleFixture.php
+            reportUnmatched: true
+        # The fixture compares '20' < '100' to document that PHP reads the two
+        # as the numbers 20 and 100, which phpstan's own constant folding
+        # concludes for itself. reportUnmatched is off here (unlike the entry
+        # above) so a phpstan version that stops folding it cannot break the
+        # build.
+        -
+            identifier: smaller.alwaysTrue
+            path: tests/Unit/Phpstan/KeyOrderRuleFixture.php
+            reportUnmatched: false
+
+services:
+    # Issue #186: PHP compares two strings numerically when both are numeric
+    # strings, while TiKV orders keys bytewise. Every key comparison goes
+    # through CrazyGoat\TiKV\Client\Util\KeyOrder; this rule keeps it that way.
+    #
+    # Registering the rule under BOTH services (with the phpstan.rules.rule
+    # tag) and rules would instantiate it twice and report every finding
+    # twice — `rules:` only accepts plain class names, so the tagged service
+    # below is the single registration point.
+    -
+        class: CrazyGoat\TiKV\Phpstan\KeyOrderComparisonRule
+        tags:
+            - phpstan.rules.rule

@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Tests\Unit\Batch\FakeBatchCommandsTransport;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -66,7 +67,7 @@ final class RawKvBatchBatchCommandsGrpcTest extends TestCase
             2 => $this->region(2, 'm', ''),
         ];
         $this->regionCache->method('getByKey')->willReturnCallback(
-            static fn (string $key): RegionInfo => $key < 'm' ? $regions[1] : $regions[2],
+            static fn (string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $regions[1] : $regions[2],
         );
         $this->pdClient->method('scanRegions')->willReturn(array_values($regions));
         $store = new Store();

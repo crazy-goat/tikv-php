@@ -88,3 +88,37 @@ guard to per-row without accepting that cost. A useful side effect to keep:
 the loop can only continue while accumulated rows are below `maxScanRows`, so
 the guard also bounds the page count — even a server that ignores the
 continuation cursor cannot make `scan(limit: 0)` loop forever.
+
+## All key ordering goes through `Client\Util\KeyOrder`, enforced by a PHPStan rule (issue #186)
+
+TiKV orders keys by unsigned byte value, PHP 8 compares two numeric strings
+numerically — so a bare `<`/`>` on keys silently means the wrong thing for
+`"20"` vs `"100"`. Every key comparison in `src/Client` therefore goes through
+`CrazyGoat\TiKV\Client\Util\KeyOrder` (`cmp`/`lt`/`lte`/`gt`/`gte`/`eq`/
+`inRange`/`successor`), including the former `strcmp()` sites and the
+`$key . "\x00"` successor trick, which exists so that idiom is documented in
+one place. `CrazyGoat\TiKV\Phpstan\KeyOrderComparisonRule` (registered once in
+`phpstan.neon`) reports `<`, `<=`, `>`, `>=` between two key-like strings, so
+the decision is machine-enforced, not a review convention. The rule is
+deliberately narrow: both operands must be typed `string` (an `int|string` call
+index stays comparable) and both must read like a key — a key-like
+variable/property *name* (`$startKey`, `$region->endKey`) or a string literal,
+because `$key < 'z'` is how keys are compared in practice. It is **both**
+operands, not either: with `||` a literal operand makes every `$message < 'z'`
+a finding. Two residual blind spots are deliberate: a function-call result and
+an array element carry no name to narrow on (`$key < self::limitKey()`,
+`$key < $bounds[0]`). Widening further means flagging every call site, which
+is why the rule subscribes to `Node\Expr\BinaryOp` (not `Node\Expr`, which
+would run it on every expression in every analysed file) and filters by
+`instanceof`.
+
+Two operational notes. Do not register the rule under both `services:` and
+`rules:` in `phpstan.neon` — that instantiates it twice and reports every
+finding twice. And do not test it with a `RuleTestCase`: `PHPStan\Rules\Rule`
+is autoloadable only from phpstan.phar, which needs ext-phar, and CI's
+`unit-tests` job runs `php -n`. The rule is tested by `composer phpstan`
+itself: `tests/Unit/Phpstan/KeyOrderRuleFixture.php` contains the shapes it
+must report, and its `ignoreErrors` entry has `reportUnmatched: true`, so a
+rule that stopped firing fails the run with `ignore.unmatched`. When changing
+the rule, run `vendor/bin/phpstan clear-result-cache` first — the result cache
+is not keyed on custom-rule source.

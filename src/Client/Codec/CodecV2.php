@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\Codec;
 
 use CrazyGoat\Proto\Kvrpcpb\APIVersion;
 use CrazyGoat\TiKV\Client\Exception\KeyOutOfBoundsException;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 
 /**
  * API V2 key codec.
@@ -134,8 +135,8 @@ final readonly class CodecV2 implements CodecInterface
         $rawEnd = $this->rawEndKey();
         $prefix = $this->encodeKey('');
         if (
-            ($decodedStart !== '' && strcmp($decodedStart, $rawEnd) >= 0)
-            || ($decodedEnd !== '' && strcmp($decodedEnd, $prefix) <= 0)
+            ($decodedStart !== '' && KeyOrder::gte($decodedStart, $rawEnd))
+            || ($decodedEnd !== '' && KeyOrder::lte($decodedEnd, $prefix))
         ) {
             throw KeyOutOfBoundsException::forKey($encodedStart !== '' ? $encodedStart : $encodedEnd);
         }

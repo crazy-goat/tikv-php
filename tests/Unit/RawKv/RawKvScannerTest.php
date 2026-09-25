@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TxnReader;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -139,7 +140,7 @@ class RawKvScannerTest extends TestCase
     private static function findRegion(array $regions, string $key): ?RegionInfo
     {
         foreach ($regions as $region) {
-            if ($region->startKey <= $key && ($region->endKey === '' || $key < $region->endKey)) {
+            if (KeyOrder::inRange($key, $region->startKey, $region->endKey)) {
                 return $region;
             }
         }

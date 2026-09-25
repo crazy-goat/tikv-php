@@ -43,6 +43,7 @@ use CrazyGoat\TiKV\Client\RawKv\ScanIterator;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -1147,7 +1148,7 @@ class RawKvClientTest extends TestCase
 
         $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2]);
         $this->regionCache->method('getByKey')->willReturnCallback(
-            static fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         // The warm cache covers the whole range: no PD scanRegions() at all.
@@ -1208,7 +1209,7 @@ class RawKvClientTest extends TestCase
 
         $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2]);
         $this->regionCache->method('getByKey')->willReturnCallback(
-            static fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
@@ -1375,11 +1376,11 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2, $region3]);
         $this->regionCache->method('getByKey')->willReturnCallback(
             static function (string $key) use ($region1, $region2, $region3): RegionInfo {
-                if ($key < 'm') {
+                if (KeyOrder::lt($key, 'm')) {
                     return $region1;
                 }
 
-                return $key < 't' ? $region2 : $region3;
+                return KeyOrder::lt($key, 't') ? $region2 : $region3;
             },
         );
         $this->regionCache->method('put');
@@ -1507,11 +1508,11 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('getRegionsInRange')->willReturn([$region1, $region2, $region3]);
         $this->regionCache->method('getByKey')->willReturnCallback(
             static function (string $key) use ($region1, $region2, $region3): RegionInfo {
-                if ($key < 'm') {
+                if (KeyOrder::lt($key, 'm')) {
                     return $region1;
                 }
 
-                return $key < 't' ? $region2 : $region3;
+                return KeyOrder::lt($key, 't') ? $region2 : $region3;
             },
         );
         $this->regionCache->method('put');

@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
 use Psr\Log\LoggerInterface;
 
@@ -119,8 +120,9 @@ final readonly class RawKvScanner
     /**
      * Page a `limit: 0` forward scan to completion, advancing the cursor past
      * the last key of each full page (mirroring {@see ScanIterator}'s
-     * `lastKey . "\x00"` continuation) and stopping on the first short or
-     * empty page. Rows are buffered and guarded by {@see self::$maxScanRows}.
+     * {@see KeyOrder::successor()} continuation) and stopping on the first
+     * short or empty page. Rows are buffered and guarded by
+     * {@see self::$maxScanRows}.
      *
      * @return array<array{key: string, value: ?string}>
      */
@@ -164,9 +166,9 @@ final readonly class RawKvScanner
             }
 
             $lastKey = $page[count($page) - 1]['key'];
-            $cursor = $lastKey . "\x00";
+            $cursor = KeyOrder::successor($lastKey);
 
-            if ($endKey !== '' && strcmp($cursor, $endKey) >= 0) {
+            if ($endKey !== '' && KeyOrder::gte($cursor, $endKey)) {
                 break;
             }
         }
@@ -247,7 +249,7 @@ final readonly class RawKvScanner
             }
 
             $lastKey = $page[count($page) - 1]['key'];
-            if ($lastKey === '' || strcmp($lastKey, $upper) >= 0) {
+            if ($lastKey === '' || KeyOrder::gte($lastKey, $upper)) {
                 // Defensive: no forward progress would loop forever.
                 break;
             }
@@ -499,7 +501,7 @@ final readonly class RawKvScanner
                 if (
                     $index !== $segmentCount - 1
                     && $freshEnd !== ''
-                    && strcmp($freshEnd, $segmentEnd) < 0
+                    && KeyOrder::lt($freshEnd, $segmentEnd)
                 ) {
                     return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
                 }
@@ -526,8 +528,8 @@ final readonly class RawKvScanner
             $lastIndex === $segmentCount - 1
             && $remaining > 0
             && $lastFreshEnd !== ''
-            && strcmp($lastFreshEnd, $segments[$lastIndex][1]) > 0
-            && ($endKey === '' || strcmp($lastFreshEnd, $endKey) < 0)
+            && KeyOrder::gt($lastFreshEnd, $segments[$lastIndex][1])
+            && ($endKey === '' || KeyOrder::lt($lastFreshEnd, $endKey))
         ) {
             array_push(
                 $results,
@@ -720,7 +722,7 @@ final readonly class RawKvScanner
                 // Re-clip the sub-range against the freshly resolved region:
                 // after a split the fresh region is smaller, and TiKV rejects
                 // ranges that cross region boundaries.
-                $wireEndKey = $freshEndKey !== '' && ($endKey === '' || strcmp($freshEndKey, $endKey) < 0)
+                $wireEndKey = $freshEndKey !== '' && ($endKey === '' || KeyOrder::lt($freshEndKey, $endKey))
                     ? $freshEndKey
                     : $endKey;
 
@@ -785,8 +787,8 @@ final readonly class RawKvScanner
             // advanced; otherwise the whole sub-range was covered.
             if (
                 $freshEndKey === ''
-                || strcmp($freshEndKey, $cursorStart) <= 0
-                || ($endKey !== '' && strcmp($freshEndKey, $endKey) >= 0)
+                || KeyOrder::lte($freshEndKey, $cursorStart)
+                || ($endKey !== '' && KeyOrder::gte($freshEndKey, $endKey))
             ) {
                 break;
             }
@@ -845,7 +847,7 @@ final readonly class RawKvScanner
             // After a split the fresh region is smaller: clip the wire
             // start (upper) key down to the fresh region's end.
             $wireStartKey = $startKey;
-            if ($freshEndKey !== '' && strcmp($freshEndKey, $wireStartKey) < 0) {
+            if ($freshEndKey !== '' && KeyOrder::lt($freshEndKey, $wireStartKey)) {
                 $wireStartKey = $freshEndKey;
             }
 
@@ -897,7 +899,7 @@ final readonly class RawKvScanner
         // remainder [freshEndKey, startKey) belongs BEFORE this batch in the
         // reverse result order: scan it first, then trim the batch to the
         // remaining limit.
-        if ($freshEndKey === '' || strcmp($freshEndKey, $startKey) >= 0) {
+        if ($freshEndKey === '' || KeyOrder::gte($freshEndKey, $startKey)) {
             return $batch;
         }
 
@@ -988,7 +990,7 @@ final readonly class RawKvScanner
                     $freshEnd = $freshEnds[$index] ?? '';
                     $shrank = $index !== $segmentCount - 1
                         && $freshEnd !== ''
-                        && strcmp($freshEnd, $segment['end']) < 0;
+                        && KeyOrder::lt($freshEnd, $segment['end']);
 
                     if ($response->getRegionError() !== null || $shrank) {
                         // The region error or the shrink means the un-awaited
@@ -1036,8 +1038,8 @@ final readonly class RawKvScanner
                     // whole sub-range was covered by the dispatched segments.
                     if (
                         $cursorStart !== ''
-                        && strcmp($cursorStart, $segmentStart) > 0
-                        && ($endKey === '' || strcmp($cursorStart, $endKey) < 0)
+                        && KeyOrder::gt($cursorStart, $segmentStart)
+                        && ($endKey === '' || KeyOrder::lt($cursorStart, $endKey))
                     ) {
                         $rest = $this->executeScanForRegion(
                             $executor,
@@ -1113,7 +1115,7 @@ final readonly class RawKvScanner
                 // Clip the wire start (upper) key down to the fresh region's
                 // end after a split; the wire reads [endKey, startKey).
                 $wireStartKey = $startKey;
-                if ($freshEndKey !== '' && strcmp($freshEndKey, $wireStartKey) < 0) {
+                if ($freshEndKey !== '' && KeyOrder::lt($freshEndKey, $wireStartKey)) {
                     $wireStartKey = $freshEndKey;
                 }
                 $request = new RawScanRequest();
@@ -1126,7 +1128,7 @@ final readonly class RawKvScanner
             } else {
                 // Re-clip against the freshly resolved region: TiKV rejects
                 // ranges that cross region boundaries.
-                $wireEndKey = $freshEndKey !== '' && ($endKey === '' || strcmp($freshEndKey, $endKey) < 0)
+                $wireEndKey = $freshEndKey !== '' && ($endKey === '' || KeyOrder::lt($freshEndKey, $endKey))
                     ? $freshEndKey
                     : $endKey;
                 $request = new RawScanRequest();

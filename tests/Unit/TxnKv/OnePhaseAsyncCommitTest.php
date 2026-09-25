@@ -25,6 +25,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -87,7 +88,7 @@ class OnePhaseAsyncCommitTest extends TestCase
         $this->regionCache->method('getByKey')->willReturnCallback(
             static function (string $key) use ($regions): ?RegionInfo {
                 foreach ($regions as $region) {
-                    if ($region->startKey <= $key && ($region->endKey === '' || $key < $region->endKey)) {
+                    if (KeyOrder::inRange($key, $region->startKey, $region->endKey)) {
                         return $region;
                     }
                 }

@@ -29,6 +29,7 @@ use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
 use Grpc\Call;
 use Grpc\Timeval;
@@ -962,8 +963,7 @@ final readonly class RawKvBatch
      */
     private function keyInRegion(string $key, RegionInfo $region): bool
     {
-        return strcmp($key, $region->startKey) >= 0
-            && ($region->endKey === '' || strcmp($key, $region->endKey) < 0);
+        return KeyOrder::inRange($key, $region->startKey, $region->endKey);
     }
 
     /**

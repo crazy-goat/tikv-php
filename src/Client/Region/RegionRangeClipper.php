@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Region;
 
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 
 /**
  * Clips a user-specified [start, end) key range to the boundaries of each
@@ -35,12 +36,12 @@ final readonly class RegionRangeClipper
     public function clipForward(array $regions, string $startKey, string $endKey): \Generator
     {
         foreach ($regions as $region) {
-            $scanStart = strcmp($startKey, $region->startKey) > 0 ? $startKey : $region->startKey;
+            $scanStart = KeyOrder::gt($startKey, $region->startKey) ? $startKey : $region->startKey;
             $scanEnd = $endKey === ''
                 ? $region->endKey
-                : ($region->endKey !== '' && strcmp($endKey, $region->endKey) > 0 ? $region->endKey : $endKey);
+                : ($region->endKey !== '' && KeyOrder::gt($endKey, $region->endKey) ? $region->endKey : $endKey);
 
-            if (strcmp($scanStart, $scanEnd) >= 0 && $scanEnd !== '') {
+            if (KeyOrder::gte($scanStart, $scanEnd) && $scanEnd !== '') {
                 continue;
             }
 
@@ -62,12 +63,12 @@ final readonly class RegionRangeClipper
     public function clipReverse(array $regions, string $startKey, string $endKey): \Generator
     {
         foreach ($regions as $region) {
-            $scanStart = ($region->endKey === '' || strcmp($startKey, $region->endKey) < 0)
+            $scanStart = ($region->endKey === '' || KeyOrder::lt($startKey, $region->endKey))
                 ? $startKey
                 : $region->endKey;
-            $scanEnd = (strcmp($endKey, $region->startKey) > 0) ? $endKey : $region->startKey;
+            $scanEnd = (KeyOrder::gt($endKey, $region->startKey)) ? $endKey : $region->startKey;
 
-            if (strcmp($scanEnd, $scanStart) >= 0 && $scanEnd !== '') {
+            if (KeyOrder::gte($scanEnd, $scanStart) && $scanEnd !== '') {
                 continue;
             }
 

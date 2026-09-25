@@ -707,6 +707,10 @@ public function streamScan(string $prefix, callable $callback): void
 }
 ```
 
+> The `$lastKey . "\x00"` continuation is `KeyOrder::successor($lastKey)` in library code
+> (`CrazyGoat\TiKV\Client\Util\KeyOrder`, issue #186) — the same byte string, but
+> documented and unit-tested as the immediate successor of a key.
+
 ## Debugging
 
 ### Enable Verbose Logging

@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\Cache;
 
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -95,7 +96,7 @@ class RegionCache implements RegionCacheInterface
             return null;
         }
 
-        if ($entry->region->endKey !== '' && strcmp($key, $entry->region->endKey) >= 0) {
+        if ($entry->region->endKey !== '' && KeyOrder::gte($key, $entry->region->endKey)) {
             $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
             return null;
         }
@@ -129,13 +130,13 @@ class RegionCache implements RegionCacheInterface
                 return $regions;
             }
 
-            if ($endKey !== '' && strcmp($region->endKey, $endKey) >= 0) {
+            if ($endKey !== '' && KeyOrder::gte($region->endKey, $endKey)) {
                 return $regions;
             }
 
             // Require strictly forward progress: a non-advancing end key
             // means the cached layout is inconsistent, so defer to PD.
-            if (strcmp($region->endKey, $cursor) <= 0) {
+            if (KeyOrder::lte($region->endKey, $cursor)) {
                 return [];
             }
 
@@ -338,7 +339,7 @@ class RegionCache implements RegionCacheInterface
         $equal = $this->lowerBound($region->startKey);
         if (
             $equal instanceof RegionBoundaryNode
-            && strcmp($equal->startKey, $region->startKey) === 0
+            && KeyOrder::eq($equal->startKey, $region->startKey)
         ) {
             // A treap has one node per start key; newest-put-wins must remove
             // the old node even for an empty half-open range such as [a,a).
@@ -348,7 +349,7 @@ class RegionCache implements RegionCacheInterface
         $last = $this->lastBoundary;
         if (
             $last instanceof RegionBoundaryNode
-            && strcmp($region->startKey, $last->startKey) >= 0
+            && KeyOrder::gte($region->startKey, $last->startKey)
             && isset($this->entriesById[$last->regionId])
             && !$this->rangesOverlap($this->entriesById[$last->regionId]->region, $region)
         ) {
@@ -373,14 +374,14 @@ class RegionCache implements RegionCacheInterface
         while ($candidate instanceof RegionBoundaryNode) {
             $entry = $this->entriesById[$candidate->regionId] ?? null;
             if (!$entry instanceof RegionEntry) {
-                $candidate = $this->successor($candidate->startKey);
+                $candidate = $this->boundaryAfterKey($candidate->startKey);
                 continue;
             }
             if (!$this->rangesOverlap($entry->region, $region)) {
                 break;
             }
 
-            $next = $this->successor($candidate->startKey);
+            $next = $this->boundaryAfterKey($candidate->startKey);
             $this->logger->debug('Removing superseded overlapping region from cache', [
                 'regionId' => $candidate->regionId,
             ]);
@@ -391,7 +392,7 @@ class RegionCache implements RegionCacheInterface
 
     private function isEmptyRange(RegionInfo $region): bool
     {
-        return $region->endKey !== '' && strcmp($region->startKey, $region->endKey) >= 0;
+        return $region->endKey !== '' && KeyOrder::gte($region->startKey, $region->endKey);
     }
 
     private function rangesOverlap(RegionInfo $left, RegionInfo $right): bool
@@ -399,10 +400,10 @@ class RegionCache implements RegionCacheInterface
         if ($this->isEmptyRange($left) || $this->isEmptyRange($right)) {
             return false;
         }
-        if ($left->endKey !== '' && strcmp($left->endKey, $right->startKey) <= 0) {
+        if ($left->endKey !== '' && KeyOrder::lte($left->endKey, $right->startKey)) {
             return false;
         }
-        if ($right->endKey !== '' && strcmp($right->endKey, $left->startKey) <= 0) {
+        if ($right->endKey !== '' && KeyOrder::lte($right->endKey, $left->startKey)) {
             return false;
         }
 
@@ -485,7 +486,11 @@ class RegionCache implements RegionCacheInterface
     {
         $node = $this->boundaryRoot;
         while ($node instanceof RegionBoundaryNode) {
-            $comparison = strcmp($startKey, $node->startKey);
+            // One comparison per treap level: cmp() yields the three-way
+            // sign, so a treap walk costs one byte comparison per level
+            // instead of two (boundaryForStart() is the ordered-lookup hot
+            // path, and insertNode()/deleteNode() descend the same way).
+            $comparison = KeyOrder::cmp($startKey, $node->startKey);
             if ($comparison < 0) {
                 $node = $node->left;
             } elseif ($comparison > 0) {
@@ -506,7 +511,7 @@ class RegionCache implements RegionCacheInterface
 
         if (!$last instanceof RegionBoundaryNode) {
             $this->boundaryRoot = $node;
-        } elseif (strcmp($startKey, $last->startKey) > 0) {
+        } elseif (KeyOrder::gt($startKey, $last->startKey)) {
             // Sequential PD scans are the common write pattern. Attach the
             // new maximum directly to the rightmost node and bubble it up
             // through parent links instead of traversing the treap again.
@@ -523,7 +528,7 @@ class RegionCache implements RegionCacheInterface
 
         if (
             !$last instanceof RegionBoundaryNode
-            || strcmp($startKey, $last->startKey) > 0
+            || KeyOrder::gt($startKey, $last->startKey)
         ) {
             $this->lastBoundary = $node;
         }
@@ -551,7 +556,7 @@ class RegionCache implements RegionCacheInterface
             return $inserted;
         }
 
-        $comparison = strcmp($inserted->startKey, $node->startKey);
+        $comparison = KeyOrder::cmp($inserted->startKey, $node->startKey);
         if ($comparison < 0) {
             $node->left = $this->insertNode($node->left, $inserted);
             $node->left->parent = $node;
@@ -596,7 +601,7 @@ class RegionCache implements RegionCacheInterface
             return null;
         }
 
-        $comparison = strcmp($startKey, $node->startKey);
+        $comparison = KeyOrder::cmp($startKey, $node->startKey);
         if ($comparison < 0) {
             $node->left = $this->deleteNode($node->left, $startKey, $removedId);
             return $node;
@@ -694,7 +699,7 @@ class RegionCache implements RegionCacheInterface
         $node = $this->boundaryRoot;
         $result = null;
         while ($node instanceof RegionBoundaryNode) {
-            if (strcmp($node->startKey, $key) >= 0) {
+            if (KeyOrder::gte($node->startKey, $key)) {
                 $result = $node;
                 $node = $node->left;
             } else {
@@ -710,7 +715,7 @@ class RegionCache implements RegionCacheInterface
         $node = $this->boundaryRoot;
         $result = null;
         while ($node instanceof RegionBoundaryNode) {
-            if (strcmp($node->startKey, $key) <= 0) {
+            if (KeyOrder::lte($node->startKey, $key)) {
                 $result = $node;
                 $node = $node->right;
             } else {
@@ -726,7 +731,7 @@ class RegionCache implements RegionCacheInterface
         $node = $this->boundaryRoot;
         $result = null;
         while ($node instanceof RegionBoundaryNode) {
-            if (strcmp($node->startKey, $key) < 0) {
+            if (KeyOrder::lt($node->startKey, $key)) {
                 $result = $node;
                 $node = $node->right;
             } else {
@@ -737,12 +742,18 @@ class RegionCache implements RegionCacheInterface
         return $result;
     }
 
-    private function successor(string $key): ?RegionBoundaryNode
+    /**
+     * The lowest boundary node starting strictly after $key — the treap
+     * "ceiling". Named for what it returns (not `successor()`, which in
+     * {@see KeyOrder} means the *next key* and returns a string, the opposite
+     * direction and a different type).
+     */
+    private function boundaryAfterKey(string $key): ?RegionBoundaryNode
     {
         $node = $this->boundaryRoot;
         $result = null;
         while ($node instanceof RegionBoundaryNode) {
-            if (strcmp($node->startKey, $key) > 0) {
+            if (KeyOrder::gt($node->startKey, $key)) {
                 $result = $node;
                 $node = $node->left;
             } else {
