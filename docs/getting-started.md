@@ -248,6 +248,11 @@ This closes gRPC connections and releases resources.
 
 The client also supports ACID transactions via the TxnKV API. This is useful when you need strong consistency guarantees.
 
+> For the full picture — isolation and timestamps, optimistic vs pessimistic,
+> lock heartbeats, the per-exception retry verdicts and a runnable
+> retry-on-conflict example — see
+> [Transactions (TxnKV)](../README.md#transactions-txnkv) in the README.
+
 > **Prerequisite cluster mode.** TxnKV requires a TiKV cluster in default
 > (V1) mode — `enable-ttl` must **not** be set (see `tikv-v1.toml`). A
 > cluster with `enable-ttl = true` runs in V1TTL mode, which serves RawKV

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `README.md` gained a full **Transactions (TxnKV)** chapter: when to choose TxnKV over RawKV, the `create`/`begin`/`commit`/`rollback` lifecycle and every public `Transaction` method, the read-your-writes and snapshot-at-`startTs` semantics (including that `Transaction::scan()`'s `limit: 0` caps at `MAX_SCAN_LIMIT` rather than paging the whole range), an optimistic-vs-pessimistic comparison, `TransactionStatus` including `Undetermined`, a per-exception retry table, long-transaction heartbeating, why `__destruct()`'s rollback is a safety net rather than a mechanism, and a worked transfer with a conflict-retry loop. Added `examples/txn.php` (the same code, runnable) and a `Transactions` block under Implemented Operations. The README no longer describes the library as RawKV-only, and `docs/getting-started.md` now links to the chapter. (#389)
 - API V2 and keyspace support for RawKV and TxnKV: `CodecV2` encodes mode/keyspace-prefixed keys and MCE region boundaries, PD resolves and caches keyspace IDs through `keyspacepb.Keyspace/LoadKeyspace`, TiKV requests receive V2 context fields and translated request/response keys (including async, streaming, and BatchCommands paths), and RawKV forces the `default` CF. Configure with `apiVersion => 2` and `keyspace => 'name'`; a dedicated V2 E2E lane is available through `make test-e2e-apiv2`. (#417)
 
 ### Fixed
