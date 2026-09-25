@@ -122,3 +122,18 @@ must report, and its `ignoreErrors` entry has `reportUnmatched: true`, so a
 rule that stopped firing fails the run with `ignore.unmatched`. When changing
 the rule, run `vendor/bin/phpstan clear-result-cache` first — the result cache
 is not keyed on custom-rule source.
+
+## Region-routing test boundaries must be decimal, not alphabetic (issue #232)
+
+Every region-cache and range-clipper test that existed before #232 built its
+region layout from `'a'`, `'m'`, `'key1'` — ASCII from the middle of the byte
+range, precisely where PHP's numeric-string comparison and TiKV's byte order
+agree, which is why the whole bug class of #186 passed CI unnoticed. The
+numeric-boundary vectors of #232 are now pinned as regression tests in
+`tests/Unit/Cache/RegionCacheNumericBoundaryTest.php` (the six-region layout
+`["", "1000") … ["999", "")`, the `"1e3"` vs `"1000"` distinctness, and a
+`strcmp` differential run over deterministic decimal keys) and in
+`tests/Unit/Region/RegionRangeClipperTest.php` (three-region clip, sub-range
+clip, and the `deleteRange("20", "300")` / `('3', '9')` shapes). When adding a
+region-routing test, do not reuse alphabetic boundaries: pick boundaries whose
+first byte disagrees with their numeric value, or the test cannot fail.
