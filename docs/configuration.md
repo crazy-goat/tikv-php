@@ -116,6 +116,35 @@ $client = RawKvClient::create(
 );
 ```
 
+### API V2 and Keyspaces
+
+RawKV and TxnKV clients can use TiKV's keyspace-aware API V2. Set
+`apiVersion` to `2` and provide a `keyspace` name; the name is resolved to its
+numeric ID through PD and cached for the client. An omitted or empty name uses
+PD's `DEFAULT` keyspace.
+
+```php
+$options = [
+    'apiVersion' => 2,
+    'keyspace' => 'tenant-a',
+];
+
+$raw = RawKvClient::create(['127.0.0.1:2379'], options: $options);
+$txn = TxnKvClient::create(['127.0.0.1:2379'], options: $options);
+```
+
+API V2 prefixes RawKV keys with `r` and transactional keys with `x`, followed
+by the three-byte keyspace ID. Region lookups use the same prefix with
+memory-comparable encoding. Response keys are decoded back to user keys, and a
+response containing a key from another keyspace raises
+`KeyOutOfBoundsException`. API V2 RawKV always uses the `default` column
+family, regardless of a configured legacy column-family setting.
+
+The TiKV cluster must be started with `[storage] api-version = 2` and
+`enable-ttl = true`. API V2 cannot be disabled after the server is enabled.
+The repository includes `tikv-apiv2.toml`, `docker-compose.apiv2.yml`, and
+`make test-e2e-apiv2` for the dedicated V2 smoke suite.
+
 ## Connection Settings
 
 ### PD Endpoints

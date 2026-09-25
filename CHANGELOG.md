@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- API V2 and keyspace support for RawKV and TxnKV: `CodecV2` encodes mode/keyspace-prefixed keys and MCE region boundaries, PD resolves and caches keyspace IDs through `keyspacepb.Keyspace/LoadKeyspace`, TiKV requests receive V2 context fields and translated request/response keys (including async, streaming, and BatchCommands paths), and RawKV forces the `default` CF. Configure with `apiVersion => 2` and `keyspace => 'name'`; a dedicated V2 E2E lane is available through `make test-e2e-apiv2`. (#417)
+
 ### Fixed
 
 - `RegionCache` now keeps an ID-keyed entry map, ordered start-key treap, insertion-ordered LRU, and expiry heap, removing packed-array/index shifts and linear LRU scans from inserts and eviction while preserving overlap, TTL, and metrics semantics. (#289)

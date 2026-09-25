@@ -6,6 +6,8 @@ namespace CrazyGoat\TiKV\Client\Connection;
 
 use Closure;
 use CrazyGoat\TiKV\Client\Cache\StoreCache;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -42,6 +44,7 @@ final readonly class ConnectionBundle
         public ?Closure $storeHostPolicy = null,
         public array $pdEndpoints = [],
         public ?array $allowedStorePorts = null,
+        public CodecInterface $codec = new CodecV1(),
     ) {
     }
 }

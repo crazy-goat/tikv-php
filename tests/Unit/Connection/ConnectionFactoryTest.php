@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Connection;
 
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionBundle;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
@@ -19,6 +21,38 @@ class ConnectionFactoryTest extends TestCase
         $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
 
         $this->assertNull($bundle->allowedStorePorts);
+    }
+
+    public function testApiVersionRejectsUnsupportedValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['apiVersion'] must be 0 (V1), 1 (V1), or 2 (V2)");
+
+        ConnectionFactory::create(['127.0.0.1:2379'], options: ['apiVersion' => 3]);
+    }
+
+    public function testApiV2KeyspaceMustBeString(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['keyspace'] must be a string when apiVersion is 2");
+
+        ConnectionFactory::create(['127.0.0.1:2379'], options: [
+            'apiVersion' => 2,
+            'keyspace' => 42,
+        ]);
+    }
+
+    public function testPreconfiguredApiV2CodecIsRetained(): void
+    {
+        $codec = new CodecV2(Mode::Raw, 42, 'tenant-a');
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['apiVersion' => 2],
+            codec: $codec,
+            mode: Mode::Raw,
+        );
+
+        $this->assertSame($codec, $bundle->codec);
     }
 
     // ========================================================================

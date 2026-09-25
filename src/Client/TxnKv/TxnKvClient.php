@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
@@ -31,6 +32,12 @@ final class TxnKvClient
 {
     public const OPT_TIMEOUT = 'timeout';
     public const OPT_METRICS = 'metrics';
+
+    /** API protocol version: 0/1 (V1, default) or 2 (keyspace-aware). */
+    public const OPT_API_VERSION = 'apiVersion';
+
+    /** API V2 keyspace name; omitted or empty means DEFAULT. */
+    public const OPT_KEYSPACE = 'keyspace';
 
     /**
      * options[] key for the per-operation retry deadline in milliseconds —
@@ -135,12 +142,16 @@ final class TxnKvClient
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
-        // TxnKV resolves regions in the memory-comparable-encoded key space:
-        // PD reports transactional region boundaries MCE-encoded, so lookup
-        // keys are encoded before GetRegion/ScanRegions and returned
-        // boundaries are decoded back into user-key space before caching
-        // (issue #415, GAP-01).
-        $bundle = ConnectionFactory::create($pdEndpoints, $logger, $options, new CodecV1(Mode::Txn));
+        // V1 TxnKV resolves regions in the memory-comparable-encoded key
+        // space; API V2 adds its mode/keyspace prefix at the shared
+        // transport boundary. PD boundaries are decoded before caching.
+        $bundle = ConnectionFactory::create(
+            $pdEndpoints,
+            $logger,
+            $options,
+            new CodecV1(Mode::Txn),
+            Mode::Txn,
+        );
 
         $safePointCache = self::resolveSafePointValidation($options)
             ? new SafePointCache(
@@ -152,7 +163,7 @@ final class TxnKvClient
 
         return new self(
             $bundle->pdClient,
-            $bundle->grpc,
+            new ApiV2GrpcClient($bundle->grpc, $bundle->codec, Mode::Txn),
             logger: $bundle->logger,
             timeoutConfig: $bundle->timeoutConfig,
             allowedStoreHosts: $bundle->allowedStoreHosts,

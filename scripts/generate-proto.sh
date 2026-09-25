@@ -22,6 +22,7 @@ OUT_DIR="/app/src/Proto"
 PROTO_FILES="
   kvrpcpb.proto
   pdpb.proto
+  keyspacepb.proto
   metapb.proto
   errorpb.proto
   tikvpb.proto
@@ -83,8 +84,8 @@ for f in "$WORK_DIR"/*.proto; do
   sed -i \
     -e '/import "gogoproto\/gogo.proto"/d' \
     -e '/import "rustproto.proto"/d' \
-    -e '/^option (gogoproto\./d' \
-    -e '/^option (rustproto\./d' \
+    -e '/^ *option (gogoproto\./d' \
+    -e '/^ *option (rustproto\./d' \
     "$f"
 
   # Pass 2: Remove single-line inline field options [(gogoproto.*)]

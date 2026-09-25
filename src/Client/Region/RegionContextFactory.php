@@ -9,6 +9,8 @@ use CrazyGoat\Proto\Kvrpcpb\Context;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\ReplicaReadTarget;
@@ -50,10 +52,11 @@ final class RegionContextFactory
         ReplicaReadPolicy $policy,
         Closure $storeLookup,
         ?int $excludedStoreId = null,
+        ?CodecInterface $codec = null,
     ): ReplicaReadTarget {
         $leader = self::leaderPeer($region);
         $leaderTarget = new ReplicaReadTarget(
-            self::buildContext($region, $leader, false, $policy->staleRead),
+            self::buildContext($region, $leader, false, $policy->staleRead, $codec),
             $region->leaderStoreId,
         );
 
@@ -91,12 +94,12 @@ final class RegionContextFactory
         $peerInfo = $candidates[random_int(0, count($candidates) - 1)];
 
         return new ReplicaReadTarget(
-            self::buildContext($region, self::peerFromInfo($peerInfo), true, $policy->staleRead),
+            self::buildContext($region, self::peerFromInfo($peerInfo), true, $policy->staleRead, $codec),
             $peerInfo->storeId,
         );
     }
 
-    public static function fromRegionInfo(RegionInfo $region): Context
+    public static function fromRegionInfo(RegionInfo $region, ?CodecInterface $codec = null): Context
     {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
@@ -110,12 +113,18 @@ final class RegionContextFactory
         $ctx->setRegionId($region->regionId);
         $ctx->setRegionEpoch($epoch);
         $ctx->setPeer($peer);
+        self::applyCodec($ctx, $codec);
 
         return $ctx;
     }
 
-    private static function buildContext(RegionInfo $region, Peer $peer, bool $replicaRead, bool $staleRead): Context
-    {
+    private static function buildContext(
+        RegionInfo $region,
+        Peer $peer,
+        bool $replicaRead,
+        bool $staleRead,
+        ?CodecInterface $codec = null,
+    ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
         $epoch->setVersion($region->epochVersion);
@@ -126,8 +135,20 @@ final class RegionContextFactory
         $ctx->setPeer($peer);
         $ctx->setReplicaRead($replicaRead);
         $ctx->setStaleRead($staleRead);
+        self::applyCodec($ctx, $codec);
 
         return $ctx;
+    }
+
+    private static function applyCodec(Context $context, ?CodecInterface $codec): void
+    {
+        if (!$codec instanceof CodecV2) {
+            return;
+        }
+
+        $context->setApiVersion($codec->getApiVersion());
+        $context->setKeyspaceName($codec->getKeyspaceName());
+        $context->setKeyspaceId($codec->getKeyspaceId());
     }
 
     private static function leaderPeer(RegionInfo $region): Peer

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Connection;
 
+use CrazyGoat\Proto\Keyspacepb\LoadKeyspaceRequest;
+use CrazyGoat\Proto\Keyspacepb\LoadKeyspaceResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\Proto\Pdpb\GetAllStoresRequest;
 use CrazyGoat\Proto\Pdpb\GetAllStoresResponse;
@@ -148,6 +150,27 @@ final class PdClient implements PdClientInterface
         }
 
         return RegionInfoMapper::fromProto($region, $response->getLeader(), $this->codec);
+    }
+
+    public function getKeyspaceId(string $name): int
+    {
+        $request = new LoadKeyspaceRequest();
+        $request->setHeader($this->createHeader());
+        $request->setName($name);
+
+        /** @var LoadKeyspaceResponse $response */
+        $response = $this->callWithClusterIdRetry(
+            'LoadKeyspace',
+            $request,
+            LoadKeyspaceResponse::class,
+            'keyspacepb.Keyspace',
+        );
+        $keyspace = $response->getKeyspace();
+        if ($keyspace === null) {
+            throw new TiKvException('PD LoadKeyspace returned no keyspace');
+        }
+
+        return (int) $keyspace->getId();
     }
 
     public function getStore(int $storeId): ?Store
@@ -482,6 +505,7 @@ final class PdClient implements PdClientInterface
         string $method,
         Message $request,
         string $responseClass,
+        string $service = 'pdpb.PD',
     ): Message {
         $this->discoverLeaderOnce();
 
@@ -489,7 +513,7 @@ final class PdClient implements PdClientInterface
         while (true) {
             $attempted[] = $this->currentAddress;
             try {
-                return $this->callCurrentAddressWithClusterIdRetry($method, $request, $responseClass);
+                return $this->callCurrentAddressWithClusterIdRetry($method, $request, $responseClass, $service);
             } catch (GrpcException $e) {
                 if ($this->extractClusterIdFromError($e->getMessage()) !== null) {
                     // The inner layer already retried the mismatch; a mismatch
@@ -710,12 +734,13 @@ final class PdClient implements PdClientInterface
         string $method,
         Message $request,
         string $responseClass,
+        string $service = 'pdpb.PD',
     ): Message {
         $this->logger->debug('PD gRPC call', ['method' => $method, 'address' => $this->currentAddress]);
         try {
             $response = $this->grpc->call(
                 $this->currentAddress,
-                'pdpb.PD',
+                $service,
                 $method,
                 $request,
                 $responseClass,
@@ -732,12 +757,13 @@ final class PdClient implements PdClientInterface
                     ['method' => $method, 'clusterId' => $extractedId],
                 );
                 $this->clusterId = $extractedId;
-                /** @phpstan-ignore method.notFound */
-                $request->setHeader($this->createHeader());
+                if (method_exists($request, 'setHeader')) {
+                    $request->setHeader($this->createHeader());
+                }
 
                 $response = $this->grpc->call(
                     $this->currentAddress,
-                    'pdpb.PD',
+                    $service,
                     $method,
                     $request,
                     $responseClass,

@@ -20,6 +20,7 @@ use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcBatchCommandsTransport;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
@@ -62,6 +63,12 @@ final class RawKvClient
     public const OPT_TIMEOUT = 'timeout';
     public const OPT_SLOW_LOG = 'slowLog';
     public const OPT_METRICS = 'metrics';
+
+    /** API protocol version: 0/1 (V1, default) or 2 (keyspace-aware). */
+    public const OPT_API_VERSION = 'apiVersion';
+
+    /** API V2 keyspace name; omitted or empty means DEFAULT. */
+    public const OPT_KEYSPACE = 'keyspace';
 
     /**
      * Default wall-clock deadline for one client operation's retry loop
@@ -176,13 +183,19 @@ final class RawKvClient
         ?LoggerInterface $logger = null,
         array $options = []
     ): self {
-        // RawKV passes keys through byte-for-byte (Mode::Raw, no MCE) — PD
-        // region lookups are raw, matching how the raw keyspace is laid out.
-        $bundle = ConnectionFactory::create($pdEndpoints, $logger, $options, new CodecV1(Mode::Raw));
+        // V1 RawKV passes keys through byte-for-byte; API V2 adds its
+        // keyspace prefix at the shared transport boundary.
+        $bundle = ConnectionFactory::create(
+            $pdEndpoints,
+            $logger,
+            $options,
+            new CodecV1(Mode::Raw),
+            Mode::Raw,
+        );
 
         return new self(
             $bundle->pdClient,
-            $bundle->grpc,
+            new ApiV2GrpcClient($bundle->grpc, $bundle->codec, Mode::Raw),
             new RegionCache(logger: $bundle->logger, metrics: $bundle->metrics),
             logger: $bundle->logger,
             timeoutConfig: $bundle->timeoutConfig,

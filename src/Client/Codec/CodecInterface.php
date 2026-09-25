@@ -58,8 +58,8 @@ interface CodecInterface
      * Encode a key range [start, end) for PD scan requests.
      *
      * Returns [encodedStart, encodedEnd] where each key is processed
-     * through encodeRegionKey(). An empty end key (unbounded) is preserved
-     * as-is.
+     * through encodeRegionKey(). V1 preserves an empty end key; V2 encodes
+     * the keyspace's upper sentinel so PD scans remain inside the keyspace.
      *
      * @return array{0: string, 1: string} [encodedStart, encodedEnd]
      */
@@ -81,7 +81,7 @@ interface CodecInterface
     public function getApiVersion(): int;
 
     /**
-     * Return the keyspace ID (0 for V1/default, 1-16777215 for V2).
+     * Return the keyspace ID (0 for V1/default, 0-16777215 for V2).
      */
     public function getKeyspaceId(): int;
 

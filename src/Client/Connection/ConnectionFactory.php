@@ -8,6 +8,8 @@ use Closure;
 use CrazyGoat\TiKV\Client\Cache\StoreCache;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
@@ -67,6 +69,9 @@ final class ConnectionFactory
      *        byte-for-byte unchanged). TxnKV callers pass CodecV1(Mode::Txn)
      *        so lookup keys are memory-comparable encoded and boundaries are
      *        decoded back to user-key space (issue #415, GAP-01).
+     * @param Mode|null $mode RawKV or TxnKV mode used when apiVersion=2.
+     *        API V2 resolves options['keyspace'] through PD before creating
+     *        the final codec. An omitted/empty keyspace selects DEFAULT.
      *
      * @throws InvalidArgumentException if PD endpoints array is empty
      */
@@ -75,6 +80,7 @@ final class ConnectionFactory
         ?LoggerInterface $logger = null,
         array $options = [],
         ?CodecInterface $codec = null,
+        ?Mode $mode = null,
     ): ConnectionBundle {
         if ($pdEndpoints === []) {
             throw new InvalidArgumentException('PD endpoints array must not be empty');
@@ -100,6 +106,30 @@ final class ConnectionFactory
             keepaliveTimeoutMs: $grpcArgs['keepaliveTimeoutMs'],
         );
         $storeCache = new StoreCache(logger: $resolvedLogger);
+        $resolvedMode = $mode ?? Mode::Raw;
+        $resolvedCodec = $codec ?? new CodecV1($resolvedMode);
+        $apiVersion = self::resolveApiVersion($options);
+        $resolvedClusterId = null;
+        if ($apiVersion === 2 && !$resolvedCodec instanceof CodecV2) {
+            $keyspaceName = self::resolveKeyspaceName($options);
+            $probePdClient = new PdClient(
+                $grpc,
+                array_values($pdEndpoints),
+                $resolvedLogger,
+                $storeCache,
+                self::resolveLowResMaxStalenessMs($options),
+                self::resolveTsoPoolSize($options),
+                new CodecV1($resolvedMode),
+            );
+            try {
+                $keyspaceId = (new KeyspaceResolver($probePdClient))->resolve($keyspaceName);
+                $resolvedCodec = new CodecV2($resolvedMode, $keyspaceId, $keyspaceName);
+                $resolvedClusterId = $probePdClient->getClusterId();
+            } catch (\Throwable $e) {
+                $grpc->close();
+                throw $e;
+            }
+        }
         $pdClient = new PdClient(
             $grpc,
             array_values($pdEndpoints),
@@ -107,8 +137,11 @@ final class ConnectionFactory
             $storeCache,
             self::resolveLowResMaxStalenessMs($options),
             self::resolveTsoPoolSize($options),
-            $codec ?? new CodecV1(),
+            $resolvedCodec,
         );
+        if ($resolvedClusterId !== null) {
+            $pdClient->setClusterId($resolvedClusterId);
+        }
 
         $timeoutConfig = self::buildTimeoutConfig($options);
         $slowLogConfig = self::buildSlowLogConfig($options);
@@ -127,6 +160,7 @@ final class ConnectionFactory
             storeHostPolicy: $storeHostValidation['storeHostPolicy'],
             pdEndpoints: array_values($pdEndpoints),
             allowedStorePorts: $storeHostValidation['allowedStorePorts'],
+            codec: $resolvedCodec,
         );
     }
 
@@ -299,6 +333,34 @@ final class ConnectionFactory
         }
 
         return $poolSize;
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    private static function resolveApiVersion(array $options): int
+    {
+        $version = $options['apiVersion'] ?? 1;
+        if (!is_int($version) || !in_array($version, [0, 1, 2], true)) {
+            throw new InvalidArgumentException("options['apiVersion'] must be 0 (V1), 1 (V1), or 2 (V2)");
+        }
+
+        return $version === 2 ? 2 : 1;
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    private static function resolveKeyspaceName(array $options): string
+    {
+        $name = $options['keyspace'] ?? KeyspaceResolver::DEFAULT_NAME;
+        if (!is_string($name)) {
+            throw new InvalidArgumentException(
+                "options['keyspace'] must be a string when apiVersion is 2",
+            );
+        }
+
+        return $name === '' ? KeyspaceResolver::DEFAULT_NAME : $name;
     }
 
     /**

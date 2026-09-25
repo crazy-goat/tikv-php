@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\Region;
 
 use CrazyGoat\Proto\Kvrpcpb\Context;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use PHPUnit\Framework\TestCase;
@@ -33,6 +35,18 @@ class RegionContextFactoryTest extends TestCase
         $this->assertNotNull($epoch);
         $this->assertSame(1, $epoch->getConfVer());
         $this->assertSame(10, $epoch->getVersion());
+    }
+
+    public function testFromRegionInfoSetsApiV2Context(): void
+    {
+        $region = new RegionInfo(42, 7, 3, 1, 10);
+        $codec = new CodecV2(Mode::Txn, 42, 'tenant-a');
+
+        $context = RegionContextFactory::fromRegionInfo($region, $codec);
+
+        $this->assertSame(2, $context->getApiVersion());
+        $this->assertSame('tenant-a', $context->getKeyspaceName());
+        $this->assertSame(42, $context->getKeyspaceId());
     }
 
     public function testFromRegionInfoWithZeroValues(): void
