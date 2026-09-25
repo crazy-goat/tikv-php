@@ -36,6 +36,7 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -505,8 +506,11 @@ final readonly class TxnReader
 
                 // Re-clip the sub-range against the freshly resolved region:
                 // after a split the fresh region is smaller, and TiKV rejects
-                // ranges that cross region boundaries.
-                $scanEnd = $freshEndKey !== '' && ($endKey === '' || $freshEndKey < $endKey)
+                // ranges that cross region boundaries. The bounds are
+                // compared bytewise — a loose `<` would compare numeric keys
+                // numerically ("20" < "100" is false) and widen the wire
+                // range across the region boundary (issue #186).
+                $scanEnd = $freshEndKey !== '' && ($endKey === '' || KeyOrder::lt($freshEndKey, $endKey))
                     ? $freshEndKey
                     : $endKey;
 
@@ -568,11 +572,16 @@ final readonly class TxnReader
 
             // Continue only when the fresh region ended inside the
             // sub-range (a split occurred) and the cursor actually
-            // advanced; otherwise the whole sub-range was covered.
+            // advanced; otherwise the whole sub-range was covered. Both
+            // bounds are compared bytewise, never with PHP's relational
+            // operators, which fall back to a numeric comparison for
+            // numeric strings: "9" is bytewise past the region end "10"
+            // while 9 >= 10 is false, so the scan would keep going over a
+            // range the region does not own (issue #186).
             if (
                 $freshEndKey === ''
-                || $freshEndKey <= $cursorStart
-                || ($endKey !== '' && $freshEndKey >= $endKey)
+                || KeyOrder::lte($freshEndKey, $cursorStart)
+                || ($endKey !== '' && KeyOrder::gte($freshEndKey, $endKey))
             ) {
                 break;
             }
@@ -686,7 +695,7 @@ final readonly class TxnReader
             // Byte-order comparison: numeric strings must never be compared
             // numerically ("9" >= "10" is true under PHP's loose comparison
             // but false in TiKV's byte order) (issue #331).
-            if (strcmp($key, $startKey) >= 0 && ($endKey === '' || strcmp($key, $endKey) < 0)) {
+            if (KeyOrder::inRange($key, $startKey, $endKey)) {
                 $allKeys[] = $key;
             }
         }

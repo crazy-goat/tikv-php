@@ -1030,12 +1030,18 @@ scan range's exclusive end by definition, and `RegionRangeClipper` handles the c
 TiKV orders keys bytewise, but PHP's default `sort()` (`SORT_REGULAR`) compares
 numeric strings numerically (`sort(["b","a","10","9"])` → `["9","10","a","b"]`)
 and the loose `<` / `>=` operators do the same. Any place the client orders,
-filters or clips key ranges must use `strcmp()` / `sort($keys, SORT_STRING)`
+filters or clips key ranges must use `CrazyGoat\TiKV\Client\Util\KeyOrder`
+(`cmp`/`lt`/`lte`/`gt`/`gte`/`eq`/`inRange`/`successor`, one comparison seam for
+all of them) or, for a plain list, `sort($keys, SORT_STRING)`
 (issue #331 fixed `TxnReader::finalizeScanResults()`: the merged scan output
 sorted with plain `sort()` and the write-set in-range filter used `>=` / `<`;
 both silently broke `scan()` pagination on the last returned key for numeric
-keys). Existing ordering helpers already follow this (`RegionRangeClipper`
-uses `strcmp()`). Watch for the inverse bug when writing tests: a scan *range*
+keys). Every existing ordering helper already goes through `KeyOrder`
+(`RegionRangeClipper` among them), and a PHPStan rule
+(`KeyOrderComparisonRule`, identifier `tikv.keyOrder.relationOnStrings`) reports
+any `<`/`<=`/`>`/`>=` between two key-like strings that bypasses it — see the
+decision in [decisions.md](decisions.md#all-key-ordering-goes-through-clientutilkeyorder-enforced-by-a-phpstan-rule-issue-186).
+Watch for the inverse bug when writing tests: a scan *range*
 that is only valid numerically (`['9', '11')`) is invalid bytewise — `9` >
 `11` — and `RegionRangeClipper` drops it, returning nothing; use ranges like
 `['2', '3')` with key `19` to exercise "in range numerically, out bytewise".

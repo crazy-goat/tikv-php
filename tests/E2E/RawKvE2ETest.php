@@ -1418,6 +1418,103 @@ class RawKvE2ETest extends TestCase
         $this->assertEquals('after', $this->testClient->get('dr-out-zafter'));
     }
 
+    public function testDeleteRangeWithNumericKeysClipsBytewise(): void
+    {
+        // Issue #186, verbatim from the acceptance criterion: bare numeric
+        // keys (no prefix — a shared prefix would make them non-numeric
+        // strings, and PHP's operators are already bytewise on those, so the
+        // pre-fix code would pass). Bytewise the order of the four dataset
+        // keys is "15" < "199" < "20" < "250" ('1' = 0x31 sorts before
+        // '2' = 0x32), so deleteRange("20", "300") must remove "20" and
+        // "250" and leave "15" and "199" alone. PHP's own relational
+        // operators read the same keys as the numbers 15 < 20 < 199 < 250,
+        // so the pre-fix clipping put "199" inside the range and deleted a
+        // key the caller never asked about.
+        $this->putOneAndTrack('15', 'v15');
+        $this->putOneAndTrack('199', 'v199');
+        $this->putOneAndTrack('20', 'v20');
+        $this->putOneAndTrack('250', 'v250');
+
+        // Guards outside ["20", "300") bytewise, plus one alphabetical key
+        // this section already uses ('dr-out-before' starts with 'd', which
+        // sorts after every digit).
+        $this->putOneAndTrack('1000', 'v1000');
+        $this->putOneAndTrack('3', 'v3');
+        $this->putOneAndTrack('9', 'v9');
+        $this->putOneAndTrack('3000', 'v3000');
+        $this->putOneAndTrack('dr-out-before', 'valpha');
+
+        $this->testClient->deleteRange('20', '300');
+
+        $this->assertEquals('v15', $this->testClient->get('15'), '"15" sorts before the range start');
+        $this->assertEquals('v199', $this->testClient->get('199'), '"199" sorts before the range start');
+        $this->assertNull($this->testClient->get('20'), 'startKey is inclusive');
+        $this->assertNull($this->testClient->get('250'), '"250" is inside the range');
+
+        // '3' is INSIDE bytewise ("2" < "3" and "3" is a prefix of "300"),
+        // even though 3 < 20 numerically — the mirror image of "199", and the
+        // case a numeric comparison loses in the other direction.
+        $this->assertNull($this->testClient->get('3'), "'3' sorts inside ['20', '300')");
+
+        $this->assertEquals('v1000', $this->testClient->get('1000'), '"1000" sorts before the range start');
+        $this->assertEquals('v9', $this->testClient->get('9'), '"9" sorts after the range end');
+        $this->assertEquals('v3000', $this->testClient->get('3000'), '"3000" sorts after the range end');
+        $this->assertEquals(
+            'valpha',
+            $this->testClient->get('dr-out-before'),
+            'an alphabetical key sorts after the range end',
+        );
+
+        // Byte order, not numeric order, in the survivors: '1' before '3'.
+        // Only this test's own keys are compared, so a key left behind by
+        // another test (or by an earlier failure) cannot make the ordering
+        // assertion flaky; the deleted keys are checked to be absent above.
+        $tracked = ['15', '199', '20', '250', '1000', '3', '9', '3000', 'dr-out-before'];
+        $survivors = array_values(array_intersect(array_column($this->testClient->scan('1', '4'), 'key'), $tracked));
+        $this->assertSame(['1000', '15', '199', '3000'], $survivors);
+    }
+
+    public function testForwardScanOverBareNumericKeysReturnsByteOrder(): void
+    {
+        // Issue #186. 60 BARE numeric keys (no prefix — see the deleteRange
+        // test above for why a shared prefix would make this vacuous), mixed
+        // widths on purpose: bytewise "700" < "7000" < "7001" < ... < "7029"
+        // < "701", while PHP reads 700..729 and 7000..7029 as two blocks with
+        // 700 == 7000 in between. A boundary compared with PHP's operators
+        // therefore drops or repeats keys.
+        //
+        // 60 rather than 600: bare numeric keys cannot be namespaced by a
+        // prefix, so every one of them is registered for individual cleanup in
+        // tearDown() (deletePrefix() is not available) and the set has to
+        // stay clear of the other bare numeric keys in this suite ('3', '9',
+        // '15', '20', '199', '250', '1000', '3000', '12345'). Every key lives
+        // in the reserved band 700..729 / 7000..7029, and the whole set sits
+        // inside the byte range ['7', '8'), so the scan below cannot pick up
+        // another test's key.
+        $keys = [];
+        foreach ([range(700, 729), range(7000, 7029)] as $block) {
+            foreach ($block as $number) {
+                $keys[] = (string) $number;
+            }
+        }
+        foreach ($keys as $key) {
+            $this->putOneAndTrack($key, 'v');
+        }
+
+        $results = $this->testClient->scan('7', '8');
+        // Restricted to this test's own keys: byte order is what is under
+        // test, not the absence of unrelated keys in the shared cluster.
+        $scanned = array_values(array_intersect(array_column($results, 'key'), $keys));
+
+        $expected = $keys;
+        sort($expected, SORT_STRING);
+        $this->assertSame($expected, $scanned, 'every key exactly once, in byte order');
+        $this->assertCount(count($keys), array_unique($scanned), 'no key is returned twice');
+        // The fixture is only interesting while byte order differs from
+        // numeric order, so pin that it does.
+        $this->assertNotSame($keys, $scanned, 'byte order must differ from the numeric write order');
+    }
+
     // ========================================================================
     // DeletePrefix
     // ========================================================================

@@ -9,6 +9,7 @@ use Rector\Set\ValueObject\SetList;
 return RectorConfig::configure()
     ->withPaths([
         __DIR__ . '/src/Client',
+        __DIR__ . '/phpstan',
         __DIR__ . '/tests',
     ])
     ->withPhpVersion(\Rector\ValueObject\PhpVersion::PHP_82)

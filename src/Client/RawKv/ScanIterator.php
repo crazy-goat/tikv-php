@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Iterator;
 
 /**
@@ -110,7 +111,7 @@ final class ScanIterator implements Iterator
             return;
         }
 
-        if ($this->endKey !== '' && strcmp($this->currentStartKey, $this->endKey) >= 0) {
+        if ($this->endKey !== '' && KeyOrder::gte($this->currentStartKey, $this->endKey)) {
             $this->buffer = [];
             $this->exhausted = true;
             return;
@@ -131,7 +132,7 @@ final class ScanIterator implements Iterator
         }
 
         $lastKey = $results[count($results) - 1]['key'];
-        $this->currentStartKey = $lastKey . "\x00";
+        $this->currentStartKey = KeyOrder::successor($lastKey);
 
         if (count($results) < $this->batchSize) {
             $this->exhausted = true;

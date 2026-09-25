@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 
@@ -318,7 +319,7 @@ final readonly class RawKvRangeOps
             return;
         }
 
-        if ($endKey !== '' && strcmp($region->endKey, $endKey) >= 0) {
+        if ($endKey !== '' && KeyOrder::gte($region->endKey, $endKey)) {
             return;
         }
 

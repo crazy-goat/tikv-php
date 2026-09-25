@@ -47,6 +47,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\UndeterminedCommitException;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -2016,15 +2017,17 @@ final readonly class TwoPhaseCommitter
      * Whether the region range covers every key (endKey === '' means the
      * last region, which extends to +inf).
      *
+     * Bytewise containment via KeyOrder: a loose `<`/`>=` compares numeric
+     * keys numerically, so "199" looked like it was past the region end "20"
+     * (199 >= 20) even though it sorts before it, and the group was reported
+     * as no longer covered (issue #186).
+     *
      * @param string[] $keys
      */
     private function regionCoversAllKeys(RegionInfo $region, array $keys): bool
     {
         foreach ($keys as $key) {
-            if (
-                $key < $region->startKey
-                || ($region->endKey !== '' && $key >= $region->endKey)
-            ) {
+            if (!KeyOrder::inRange($key, $region->startKey, $region->endKey)) {
                 return false;
             }
         }

@@ -39,6 +39,7 @@ use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -848,7 +849,7 @@ class TransactionTest extends TestCase
     private static function findRegionForKey(array $regions, string $key): ?RegionInfo
     {
         foreach ($regions as $region) {
-            if ($region->startKey <= $key && ($region->endKey === '' || $key < $region->endKey)) {
+            if (KeyOrder::inRange($key, $region->startKey, $region->endKey)) {
                 return $region;
             }
         }
@@ -4134,12 +4135,12 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k3', '');
 
         $this->regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getTimestamp')->willReturn(3000);
@@ -4171,12 +4172,12 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k3', '');
 
         $this->regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getTimestamp')->willReturn(4000);
@@ -4333,12 +4334,12 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k3', '');
 
         $this->regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getTimestamp')->willReturn(5000);
@@ -4396,12 +4397,12 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k3', '');
 
         $this->regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getTimestamp')->willReturn(6000);
@@ -4468,12 +4469,12 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k3', '');
 
         $this->regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getTimestamp')->willReturn(7000);
@@ -4569,12 +4570,12 @@ class TransactionTest extends TestCase
         $region2 = $this->makeRegion(2, 'k3', '');
 
         $this->regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo => $key < 'k3' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'k3') ? $region1 : $region2,
         );
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
 
@@ -5112,7 +5113,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            static fn(string $key): RegionInfo => $key >= 'k2' ? $splitRegion2 : $splitRegion1,
+            static fn(string $key): RegionInfo => KeyOrder::gte($key, 'k2') ? $splitRegion2 : $splitRegion1,
         );
         // First scanRegions (initial grouping): pre-split region covering
         // both keys. Second scanRegions (re-group after the split): the
@@ -5475,7 +5476,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            static fn(string $key): RegionInfo => $key >= 'k2' ? $splitRegion2 : $splitRegion1,
+            static fn(string $key): RegionInfo => KeyOrder::gte($key, 'k2') ? $splitRegion2 : $splitRegion1,
         );
         // First scanRegions (initial grouping): pre-split region covering
         // both keys. Second scanRegions (re-group after the split): the two
@@ -5617,7 +5618,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturnCallback(
-            static fn(string $key): RegionInfo => $key >= 'k2' ? $splitRegion2 : $splitRegion1,
+            static fn(string $key): RegionInfo => KeyOrder::gte($key, 'k2') ? $splitRegion2 : $splitRegion1,
         );
         $this->pdClient->method('scanRegions')
             ->willReturnOnConsecutiveCalls(

@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\RawKv\RawKvRangeOps;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -83,7 +84,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
         );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
@@ -99,7 +100,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         ) use (&$failuresPerRegion): RawScanResponse {
             $rawRequest = $request;
             $key = $rawRequest->getStartKey();
-            $regionIndex = $key < 'm' ? 0 : 1;
+            $regionIndex = KeyOrder::lt($key, 'm') ? 0 : 1;
 
             if ($failuresPerRegion[$regionIndex] < ($regionIndex === 0 ? 3 : 1)) {
                 $failuresPerRegion[$regionIndex]++;
@@ -155,7 +156,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
         );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
@@ -213,7 +214,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
         );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
@@ -267,7 +268,7 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->regionCache->method('invalidate');
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
         $this->pdClient->method('getRegion')->willReturnCallback(
-            fn(string $key): RegionInfo => $key < 'm' ? $region1 : $region2,
+            fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
         );
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
@@ -412,9 +413,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturn([$region1, $region2, $region3, $region4]);
         $this->pdClient->method('getRegion')->willReturnCallback(
             fn(string $key): RegionInfo => match (true) {
-                $key < 'b' => $region1,
-                $key < 'c' => $region2,
-                $key < 'd' => $region3,
+                KeyOrder::lt($key, 'b') => $region1,
+                KeyOrder::lt($key, 'c') => $region2,
+                KeyOrder::lt($key, 'd') => $region3,
                 default => $region4,
             },
         );
@@ -432,9 +433,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
         ) use (&$failuresPerRegion): RawScanResponse {
             $key = $request->getStartKey();
             $regionIndex = match (true) {
-                $key < 'b' => 0,
-                $key < 'c' => 1,
-                $key < 'd' => 2,
+                KeyOrder::lt($key, 'b') => 0,
+                KeyOrder::lt($key, 'c') => 1,
+                KeyOrder::lt($key, 'd') => 2,
                 default => 3,
             };
 
