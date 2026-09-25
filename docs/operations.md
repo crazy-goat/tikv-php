@@ -456,7 +456,8 @@ exception table.
 Scan in descending order:
 
 ```php
-$results = $client->reverseScan('startKey', 'endKey', limit: 100, keyOnly: false);
+// Note the order: the UPPER bound comes first, the LOWER bound second.
+$results = $client->reverseScan($upperBound, $lowerBound, limit: 100, keyOnly: false);
 ```
 
 **Parameters:**
@@ -472,22 +473,32 @@ $results = $client->reverseScan('startKey', 'endKey', limit: 100, keyOnly: false
 **Example:**
 
 ```php
-// Get 10 most recent log entries
+// Get the 10 most recent log entries
 // (assuming log keys are timestamp-based like "log:2024-01-15T10:30:00")
-$logs = $client->reverseScan('log:', 'log:0', limit: 10);
+//
+// reverseScan($startKey, $endKey) scans [$endKey, $startKey) descending, so the
+// FIRST argument is the UPPER bound and must sort AFTER the second one. To
+// cover every key with a prefix, bump the prefix's last byte: 'log:' -> 'log;'
+// (':' is 0x3A, the next byte ';' is 0x3B).
+$logs = $client->reverseScan('log;', 'log:', limit: 10);
 
-// Get last 5 messages for a user
-$messages = $client->reverseScan(
-    'msg:user:123:', 
-    'msg:user:123:0', 
-    limit: 5
-);
+// Get the last 5 messages for a user, newest first.
+// To make the upper bound INCLUSIVE of one specific key, append "\x00" to it:
+// that key sorts below its own "\x00"-suffixed form, and nothing else sorts in
+// between, so it is the last row returned.
+$newest = 'msg:user:123:2024-01-15T10:31:12';
+$messages = $client->reverseScan($newest . "\x00", 'msg:user:123:', limit: 5);
 ```
 
 **Important:** Reverse scan semantics differ from forward scan:
-- `startKey` = upper bound (exclusive)
-- `endKey` = lower bound (inclusive)
+- `startKey` = upper bound (exclusive) — the **first** argument
+- `endKey` = lower bound (inclusive) — the **second** argument
 - Results are in descending order
+
+Passing the bounds the other way round is the most common mistake here: the
+range is empty, the call succeeds, and you get an empty array with no error. If
+a reverse scan returns nothing, check that the first argument sorts after the
+second.
 
 ### Batch Scan
 

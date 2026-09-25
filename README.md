@@ -74,8 +74,11 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // silently truncating; the iterators above have no such limit.
 
 // Reverse scan (descending order)
-// Note: startKey = upper bound (exclusive), endKey = lower bound (inclusive)
-$results = $client->reverseScan('end', 'start', limit: 100);
+// Note the order: startKey = UPPER bound (exclusive), endKey = LOWER bound
+// (inclusive) — the first argument must sort after the second. Bump the last
+// byte of a prefix to cover all of its keys ('log:' -> 'log;'); append "\x00"
+// to a key to make the upper bound inclusive of that key.
+$results = $client->reverseScan('log;', 'log:', limit: 100);
 
 // Scan multiple non-contiguous ranges
 $results = $client->batchScan([['a:', 'a;'], ['b:', 'b;']], eachLimit: 50);
