@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.0] — 2026-09-25
+
 ### Added
 
 - `README.md` gained a full **Transactions (TxnKV)** chapter: when to choose TxnKV over RawKV, the `create`/`begin`/`commit`/`rollback` lifecycle and every public `Transaction` method, the read-your-writes and snapshot-at-`startTs` semantics (including that `Transaction::scan()`'s `limit: 0` caps at `MAX_SCAN_LIMIT` rather than paging the whole range), an optimistic-vs-pessimistic comparison, `TransactionStatus` including `Undetermined`, a per-exception retry table, long-transaction heartbeating, why `__destruct()`'s rollback is a safety net rather than a mechanism, and a worked transfer with a conflict-retry loop. Added `examples/txn.php` (the same code, runnable) and a `Transactions` block under Implemented Operations. The README no longer describes the library as RawKV-only, and `docs/getting-started.md` now links to the chapter. (#389)
@@ -26,7 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pessimistic transactions retain per-key read timestamps and perform a prewrite constraint check, so an intervening commit is reported as a conflict instead of silently overwriting a read-modify-write update. (#209)
 - Transaction commits now fail closed if region resolution does not assign every mutation or produces no commit regions, rather than silently reporting a partial or empty commit as successful. (#208)
 - Lock resolution no longer rolls back a transaction while its lock TTL is still active; live locks trigger bounded retry backoff, and rollback resolution only proceeds after TiKV reports expiry. (#206)
-
 - Commit-phase `KeyError` variants other than explicitly handled `retryable` and `abort` now fail closed with a `TiKvException` instead of silently marking the transaction committed. (#212)
 
 ## [v0.6.0] — 2026-09-24
