@@ -623,7 +623,20 @@ echo "Batch put took: {$elapsed}ms\n";
 
 ### Benchmarking
 
-Create benchmarks in `tests/Benchmark/`:
+Keep repeatable performance measurements outside the PHPUnit assertions. The
+RegionCache benchmark exercises the ID-map/treap write path directly:
+
+```bash
+php benchmarks/RegionCacheBenchmark.php
+```
+
+It reports cold sequential inserts, warm replacements, and the resulting
+entry count. For new cache data structures, extend this standalone benchmark
+with the relevant random, overlap, eviction, and range-enumeration scenarios;
+do not turn machine-dependent timings into flaky unit-test failures.
+
+For other operations, create focused benchmark classes under
+`tests/Benchmark/`:
 
 ```php
 <?php
@@ -640,9 +653,9 @@ class BatchPerformanceTest
             $data["bench:$i"] = "value-$i";
         }
         
-        $start = microtime(true);
+        $start = hrtime(true);
         $this->client->batchPut($data);
-        return (microtime(true) - $start) * 1000;
+        return (hrtime(true) - $start) / 1e6;
     }
 }
 ```

@@ -734,7 +734,9 @@ of the other) do NOT overlap — TiKV regions are half-open `[start, end)`, so
 a split `[a,m)` + `[m,z)` over an old `[a,z)` keeps both halves. Two entries
 genuinely sharing a start key cannot coexist: the newest put wins (the
 overlap removal also deletes the equal-startKey stale entry that the
-insert-position/binary-search tie used to prefer). Caveat: the removal does
+ordered treap would otherwise retain). Supersession is silent metrics-wise;
+`invalidate()` remains the sole `regionInvalidated()` emission point.
+
 ## A PdClientInterface mock auto-returns [] from scanRegions — grouping silently becomes empty
 
 `RegionResolver::batchResolveRegions()` calls `$pdClient->scanRegions()` (typed

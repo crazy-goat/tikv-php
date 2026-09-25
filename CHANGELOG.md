@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `RegionCache` now keeps an ID-keyed entry map, ordered start-key treap, insertion-ordered LRU, and expiry heap, removing packed-array/index shifts and linear LRU scans from inserts and eviction while preserving overlap, TTL, and metrics semantics. (#289)
 - Pessimistic transactions now acquire physical locks in `set()`/`delete()` by default, surface lock conflicts at the write call, and release attempted locks during rollback; `eagerPessimisticLocks => false` retains the legacy deferred pass. (#437)
 - E2E commands and container defaults now select the real `E2E-RawKV` / `E2E-TxnKV` suites, disable coverage for standalone runs, and document that `make test-e2e` orchestrates the required cluster-mode switch. (#369)
 - The `metrics` option now reaches both `RawKvClient` and `TxnKvClient`, including their region resolution, retry executors, caches, and transactions; `getMetrics()` returns the injected backend and observability documentation now lists the actual callback tags. (#368)
