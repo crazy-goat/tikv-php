@@ -410,8 +410,9 @@ Key proto files:
 
 ```
 proto/kvproto/proto/
-├── kvrpcpb.proto    # RawKV requests/responses
+├── kvrpcpb.proto    # RawKV/TxnKV requests/responses and API context
 ├── pdpb.proto       # PD requests/responses
+├── keyspacepb.proto # Keyspace metadata and LoadKeyspace
 ├── tikvpb.proto     # TiKV services
 └── metapb.proto     # Metadata (Region, Store, etc.)
 ```
@@ -559,6 +560,20 @@ public function testConcurrentBatchPuts(): void
     $this->assertCount(100, array_filter($values));
 }
 ```
+
+### API V2 E2E lane
+
+The normal E2E lane uses the V1 cluster. Run the API V2 smoke suite against
+`tikv-apiv2.toml` with:
+
+```bash
+make test-e2e-apiv2
+```
+
+The lane starts the override compose file, creates two PD keyspaces, and runs
+`E2E-ApiV2` against both of them — one as the client's keyspace, the other to
+prove that identical user keys stay isolated per keyspace. It is intentionally
+a separate suite because API V1 and API V2 cannot share one TiKV server mode.
 
 ### Test Data Generators
 

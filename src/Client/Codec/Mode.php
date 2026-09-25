@@ -29,7 +29,7 @@ enum Mode: string
     /**
      * Return the V2 mode prefix byte.
      *
-     * @return int 0x72 for Raw, 0x78 for Txn
+     * @return int<0, 255> 0x72 for Raw, 0x78 for Txn
      */
     public function prefixByte(): int
     {

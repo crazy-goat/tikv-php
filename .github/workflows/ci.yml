@@ -59,6 +59,9 @@ jobs:
               - 'src/**'
               - 'tests/E2E/**'
               - 'docker-compose.yml'
+              - 'docker-compose.apiv2.yml'
+              - 'tikv-apiv2.toml'
+              - 'scripts/test-e2e-apiv2.sh'
               - 'Dockerfile'
               - 'composer.json'
               - '.github/workflows/ci.yml'
@@ -332,3 +335,20 @@ jobs:
       - name: Cleanup V1 cluster
         if: always()
         run: docker compose down -v --remove-orphans
+
+  # API V2 needs a cluster whose TiKV nodes run with storage.api-version = 2,
+  # so it gets its own job instead of tearing the V1 cluster down and back up.
+  e2e-tests-apiv2:
+    name: E2E Tests (API V2)
+    needs: [check-actor, lint, changes]
+    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker images
+        run: docker compose -f docker-compose.yml -f docker-compose.apiv2.yml build
+
+      - name: Run API V2 E2E tests
+        run: ./scripts/test-e2e-apiv2.sh
+        timeout-minutes: 15

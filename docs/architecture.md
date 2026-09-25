@@ -250,6 +250,7 @@ class TimestampOracle
 interface PdClientInterface
 {
     public function getRegion(string $key): RegionInfo;
+    public function getKeyspaceId(string $name): int;
     public function scanRegions(string $startKey, string $endKey, int $limit): array;
     public function getStore(int $storeId): ?Store;
     public function getTimestamp(): int;
@@ -274,6 +275,19 @@ Cache in RegionCache
     ↓
 Return RegionInfo
 ```
+
+### API V2 keyspace boundary
+
+For `options['apiVersion'] === 2`, `ConnectionFactory` resolves the configured
+keyspace name through PD's `keyspacepb.Keyspace/LoadKeyspace` service and
+builds a mode-specific `CodecV2`. The codec is used twice: `PdClient` applies
+its memory-comparable region-key encoding for region discovery, while
+`ApiV2GrpcClient` decorates the shared transport to add the V2 context and
+translate request/response keys for unary, async, streaming, and
+BatchCommands calls. RawKV responses are forced to the `default` column family.
+This keeps application-facing components in user-key space and makes the
+keyspace contract a transport concern rather than a per-operation special
+case.
 
 ### 5. GrpcClient
 
@@ -948,7 +962,6 @@ $sensitiveData = decrypt($encrypted, $key);
 2. **Read Replicas**: Read from followers for load distribution
 3. **Compression**: Compress large values
 4. **Batching**: Automatic request batching
-5. **API V2 & Keyspace**: TiKV API V2 and keyspace support (issue #25)
 
 ## See Also
 

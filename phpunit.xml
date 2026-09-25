@@ -49,12 +49,16 @@
             <exclude>tests/E2E/GcSafePointE2ETest.php</exclude>
             <exclude>tests/E2E/FastCommitModesE2ETest.php</exclude>
             <exclude>tests/E2E/PdFailoverE2ETest.php</exclude>
+            <exclude>tests/E2E/ApiV2E2ETest.php</exclude>
         </testsuite>
         <testsuite name="E2E-TxnKV">
             <file>tests/E2E/TxnKvE2ETest.php</file>
             <file>tests/E2E/GcSafePointE2ETest.php</file>
             <file>tests/E2E/FastCommitModesE2ETest.php</file>
             <file>tests/E2E/PdFailoverE2ETest.php</file>
+        </testsuite>
+        <testsuite name="E2E-ApiV2">
+            <file>tests/E2E/ApiV2E2ETest.php</file>
         </testsuite>
     </testsuites>
     <source>

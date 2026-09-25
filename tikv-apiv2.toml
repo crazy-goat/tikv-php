@@ -1,0 +1,9 @@
+[storage]
+api-version = 2
+enable-ttl = true
+
+[rocksdb]
+max-open-files = 4096
+
+[raftdb]
+max-open-files = 4096

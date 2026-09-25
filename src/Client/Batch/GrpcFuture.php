@@ -23,12 +23,16 @@ final class GrpcFuture
      *                                           when set, `wait()` resolves
      *                                           through it instead of the
      *                                           gRPC call.
+     * @param (\Closure(): void)|null $canceller Optional callback invoked
+     *                                             when a waiter-backed future
+     *                                             is cancelled.
      */
     public function __construct(
         private readonly ?Call $call,
         /** @var class-string<Message> */
         private readonly string $responseClass,
         private readonly ?\Closure $waiter = null,
+        private readonly ?\Closure $canceller = null,
     ) {
     }
 
@@ -54,9 +58,9 @@ final class GrpcFuture
      *
      * @param (\Closure(): Message)|null $waiter
      */
-    public static function fromWaiter(?\Closure $waiter): self
+    public static function fromWaiter(?\Closure $waiter, ?\Closure $canceller = null): self
     {
-        return new self(null, Message::class, $waiter);
+        return new self(null, Message::class, $waiter, $canceller);
     }
 
     public function wait(): Message
@@ -118,6 +122,13 @@ final class GrpcFuture
 
         $this->error = new GrpcException('Call cancelled', GrpcStatusCode::Cancelled->value);
         $this->completed = true;
+
+        if ($this->canceller instanceof \Closure) {
+            try {
+                ($this->canceller)();
+            } catch (\Throwable) {
+            }
+        }
 
         // Swallow any throwable from the underlying call: cancel() must
         // never propagate, especially from __destruct() during shutdown.

@@ -26,6 +26,14 @@ interface PdClientInterface
     public function getRegion(string $key): RegionInfo;
 
     /**
+     * Resolve a keyspace name to its numeric ID through PD.
+     *
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD error or an empty keyspace response
+     */
+    public function getKeyspaceId(string $name): int;
+
+    /**
      * Get store metadata by ID.
      *
      * @throws GrpcException On transport error

@@ -8,6 +8,7 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
@@ -142,6 +143,26 @@ class RegionInfoMapperTest extends TestCase
         $region->setRegionEpoch($epoch);
 
         $info = RegionInfoMapper::fromProto($region, null, new CodecV1(Mode::Txn));
+
+        $this->assertSame('', $info->startKey);
+        $this->assertSame('', $info->endKey);
+    }
+
+    public function testV2CodecDecodesKeyspaceStartAndEndBoundaries(): void
+    {
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+        $codec = new CodecV2(Mode::Raw, 42, 'tenant-a');
+        [, $upperBound] = $codec->encodeRange('', '');
+
+        $region = new Region();
+        $region->setId(5);
+        $region->setStartKey($codec->encodeRegionKey(''));
+        $region->setEndKey($upperBound);
+        $region->setRegionEpoch($epoch);
+
+        $info = RegionInfoMapper::fromProto($region, null, $codec);
 
         $this->assertSame('', $info->startKey);
         $this->assertSame('', $info->endKey);

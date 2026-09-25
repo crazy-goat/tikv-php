@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -329,6 +330,17 @@ final readonly class RawKvBatch
             ? Timeval::now()->add(new Timeval($batchReadTimeout * 1000))
             : Timeval::infFuture();
 
+        if ($this->grpc instanceof ApiV2GrpcClient && $this->grpc->isApiV2Enabled()) {
+            return $this->grpc->callAsync(
+                $address,
+                'tikvpb.Tikv',
+                'RawBatchGet',
+                $request,
+                RawBatchGetResponse::class,
+                $batchReadTimeout,
+            );
+        }
+
         $call = new Call(
             $this->grpc->getChannel($address),
             '/tikvpb.Tikv/RawBatchGet',
@@ -377,6 +389,17 @@ final readonly class RawKvBatch
             ? Timeval::now()->add(new Timeval($batchWriteTimeout * 1000))
             : Timeval::infFuture();
 
+        if ($this->grpc instanceof ApiV2GrpcClient && $this->grpc->isApiV2Enabled()) {
+            return $this->grpc->callAsync(
+                $address,
+                'tikvpb.Tikv',
+                'RawBatchPut',
+                $request,
+                RawBatchPutResponse::class,
+                $batchWriteTimeout,
+            );
+        }
+
         $call = new Call(
             $this->grpc->getChannel($address),
             '/tikvpb.Tikv/RawBatchPut',
@@ -417,6 +440,17 @@ final readonly class RawKvBatch
         $deadline = $batchWriteTimeout !== null
             ? Timeval::now()->add(new Timeval($batchWriteTimeout * 1000))
             : Timeval::infFuture();
+
+        if ($this->grpc instanceof ApiV2GrpcClient && $this->grpc->isApiV2Enabled()) {
+            return $this->grpc->callAsync(
+                $address,
+                'tikvpb.Tikv',
+                'RawBatchDelete',
+                $request,
+                RawBatchDeleteResponse::class,
+                $batchWriteTimeout,
+            );
+        }
 
         $call = new Call(
             $this->grpc->getChannel($address),

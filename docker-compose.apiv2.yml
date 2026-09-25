@@ -1,0 +1,22 @@
+services:
+  tikv1:
+    volumes:
+      - tikv1-data:/data/tikv1
+      - ./tikv-apiv2.toml:/etc/tikv/tikv.toml:ro
+  tikv2:
+    volumes:
+      - tikv2-data:/data/tikv2
+      - ./tikv-apiv2.toml:/etc/tikv/tikv.toml:ro
+  tikv3:
+    volumes:
+      - tikv3-data:/data/tikv3
+      - ./tikv-apiv2.toml:/etc/tikv/tikv.toml:ro
+  php-test:
+    environment:
+      TIKV_API_VERSION: "2"
+      TIKV_KEYSPACE: DEFAULT
+
+volumes:
+  tikv1-data:
+  tikv2-data:
+  tikv3-data:

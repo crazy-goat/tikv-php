@@ -1,4 +1,4 @@
-.PHONY: help install test test-e2e test-unit proto-generate proto-clean build up down logs clean
+.PHONY: help install test test-e2e test-e2e-apiv2 test-unit proto-generate proto-clean build up down logs clean
 
 # Default target
 help:
@@ -8,6 +8,7 @@ help:
 	@echo "  make test             - Run all tests (unit + e2e)"
 	@echo "  make test-unit        - Run unit tests only"
 	@echo "  make test-e2e         - Run E2E tests with TiKV cluster"
+	@echo "  make test-e2e-apiv2   - Run API V2 E2E smoke tests"
 	@echo "  make proto-generate   - Generate PHP classes from proto files"
 	@echo "  make proto-clean      - Remove generated proto classes"
 	@echo "  make build            - Build Docker images"
@@ -36,6 +37,11 @@ test-unit:
 test-e2e:
 	@echo "Running E2E tests..."
 	./scripts/test-e2e.sh
+
+# Run API V2 E2E smoke tests against a dedicated cluster
+test-e2e-apiv2:
+	@echo "Running API V2 E2E tests..."
+	./scripts/test-e2e-apiv2.sh
 
 # Generate PHP classes + gRPC stubs from proto files
 proto-generate:

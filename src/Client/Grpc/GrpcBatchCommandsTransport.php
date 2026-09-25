@@ -25,6 +25,7 @@ final readonly class GrpcBatchCommandsTransport implements BatchCommandsTranspor
 {
     public function __construct(
         private BatchCommandsStreamPool $pool,
+        private ?ApiV2MessageTransformer $transformer = null,
     ) {
     }
 
@@ -37,12 +38,24 @@ final readonly class GrpcBatchCommandsTransport implements BatchCommandsTranspor
         $stream = $this->pool->get($address);
 
         try {
-            $stream->send($request);
+            $wireRequest = $this->transformer?->transformRequest($request, 'tikvpb.BatchCommands') ?? $request;
+            $stream->send($wireRequest);
 
-            return BatchCommandsCorrelator::drain(
+            $responses = BatchCommandsCorrelator::drain(
                 $requestIds,
                 fn (): ?BatchCommandsResponse => $stream->recv(),
                 $timeoutMs,
+            );
+            if (!$this->transformer instanceof ApiV2MessageTransformer) {
+                return $responses;
+            }
+
+            return array_map(
+                fn (BatchCommandsResponse $response): BatchCommandsResponse => $this->transformer->transformResponse(
+                    $response,
+                    'tikvpb.BatchCommands',
+                ),
+                $responses,
             );
         } catch (\Throwable $e) {
             // Dead stream (closed by the peer, deadline fired, transport
@@ -68,9 +81,14 @@ final readonly class GrpcBatchCommandsTransport implements BatchCommandsTranspor
      */
     public static function forClient(GrpcClientInterface $grpc): self
     {
-        return new self(new BatchCommandsStreamPool(
-            static fn (string $address): BatchCommandsStreamInterface =>
-                BatchCommandsConnection::open($grpc->getChannel($address)),
-        ));
+        return new self(
+            new BatchCommandsStreamPool(
+                static fn (string $address): BatchCommandsStreamInterface =>
+                    BatchCommandsConnection::open($grpc->getChannel($address)),
+            ),
+            $grpc instanceof ApiV2GrpcClient && $grpc->isApiV2Enabled()
+                ? $grpc->messageTransformer()
+                : null,
+        );
     }
 }
