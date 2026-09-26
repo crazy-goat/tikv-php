@@ -470,7 +470,7 @@ Issue #474 (regionInvalidated()) settled three rules worth reusing:
    change (`removeById(): bool`) so retry storms count one real drop instead of
    one per attempt.
 
-## Wrapping a formerly-direct call site in RetryExecutor flips its NotLeader ownership — and mocks must answer getByKey()
+## Wrapping a formerly-direct call site in RetryExecutor flips its NotLeader ownership — and mocks must answer getByKey() and expect its invalidate()s
 
 When issue #213 moved `TwoPhaseCommitter`'s prewrite loop under
 `RetryExecutor::execute()`, two follow-ups were mandatory and easy to miss:
@@ -486,6 +486,21 @@ which in tests means **every mocked-cache commit test must now stub
 so an unstubbed `getByKey` returns null and `PdClientInterface::getRegion()`
 tries (and fails, RegionInfo is final) to auto-generate a return value. The
 first-attempt cache hit is only real with a real `RegionCache`.
+
+(3) A **third** hazard of the same shape arrived with #233: the invalidation
+moved *above* the fatal `throw $e`, so a fatal routing `RegionException`
+(`KeyNotInRegion` today) now costs one more `getByKey()` and — if the double
+answers with a region — one more `invalidate()`. A test whose cache double
+stubs `getByKey()` and drives a fatal routing error therefore sees an extra
+`invalidate()` it never declared, which breaks an `expects(never())` or an
+`expects($this->once())` call count. The `never()` expectations that exist
+today are safe for two *different* reasons, worth knowing instead of
+re-deriving: `CheckedGrpcFutureRetryableDispatchTest`'s NotLeader-with-hint
+case never reaches the fatal block because `handleNotLeader()` claims it
+first (it returns `BackoffType::NotLeader` ahead of the classifier chain — the
+predicate would in fact answer `true` for it), and its kind-less
+`RaftEntryTooLarge` `RegionException` is built without a typed kind, so
+`errorKind === null` and the predicate rejects it before touching the cache.
 
 ## Error-handling docs must be derived from source, not from the issue text
 

@@ -87,6 +87,10 @@ interface MetricsInterface
      *                           lock-resolution paths).
      * - 'retry_region_error': RetryExecutor invalidated before scheduling the
      *                           next attempt on a retryable error
+     * - 'fatal_region_error': RetryExecutor invalidated a routing error that
+     *                           is fatal (KeyNotInRegion today) BEFORE
+     *                           rethrowing it, so the misrouting entry cannot
+     *                           survive the throw (issue #233)
      * - 'lock_resolve':       LockResolver dropped the region after resolving
      *                           a lock
      *

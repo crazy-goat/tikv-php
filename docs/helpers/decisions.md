@@ -173,6 +173,69 @@ region (1) for the two-region case, the latter answers both correctly. Write
 the revision you actually measured, and `git log -S` it before claiming a
 "pre-#N" behaviour.
 
+## Retryability and cache invalidation are two decisions, in two functions (issue #233)
+
+`RetryExecutor` used to express one decision — "is this error retryable?" — and
+hang the region-cache drop off its *positive* branch, so every fatal error
+skipped the drop. That coupling is what made a fatal `KeyNotInRegion` a
+sustained 11-minute outage: the error that means "your cached routing
+information is wrong" was the one error that kept its own cause cached (up to
+`ttlSeconds + jitterSeconds` = 660 s), and no application-level action could
+clear it. They are independent — client-go drops the region on a routing error
+regardless of the retry verdict — so they are two functions now:
+`ErrorClassifier::classify()` (reached through `handleNotLeader()` → custom
+classifier → `ErrorClassifier`) keeps the retry decision exactly where it was,
+and `RetryExecutor::invalidatesRoutingOnFatal()` states the invalidation
+decision, evaluated above the fatal `throw`.
+
+Two properties of that predicate are decisions, not omissions. It holds only
+for a `RegionException` carrying a *routing* `ErrorKind`, so the non-routing
+kinds (`RaftEntryTooLarge`, `FlashbackInProgress`, `FlashbackNotPrepared`, …)
+and any non-`RegionException` fatal error leave the cache alone — those say the
+request reached the right region and the region refused it, so dropping the
+entry would buy a re-resolve and nothing else. And its `match` has **no**
+`default` arm: PHPStan reports `match.unhandled` at level 9, so a new
+`ErrorKind` cannot be added without deciding here.
+
+Both gates were measured, not assumed (a scratch copy of the tree with
+`case ScratchSentinel = 'scratch_sentinel';` added to `ErrorKind`, then
+deleted). `match.unhandled` fires in exactly three places — `RetryExecutor.php`
+(`invalidatesRoutingOnFatal()`), `ErrorClassifier.php` (`classifyByKind()`) and
+`ErrorClassifierTest.php` (`errorClassForKind()`) — i.e. **every `match` over
+`ErrorKind`**, in production and in tests alike. The routing table in
+`RetryExecutorFatalInvalidationTest` is a hand-written array literal, so
+PHPStan never sees it; its gate is the runtime assertion
+`testRoutingTableCoversEveryErrorKindCase()`, which compares the table's keys
+against `ErrorKind::cases()` and is the only test that fails *because of the
+missing routing decision* (`ErrorClassifierTest`'s own providers are literals
+too, so they stay green).
+
+Note also that a new `ErrorKind` case is not merely a table row:
+`RegionException::detectErrorKind()` calls `$error->has{PascalCase}()` for
+every case, so a case with no matching `errorpb.Error` oneof turns *every*
+`RegionException::fromRegionError()` call into
+`Error: Call to undefined method …`. That is not silent, but the blast radius
+is wrong for the mistake — the same sentinel measured 8 errors + 3 failures
+across 11 tests in `LockResolverTest`, `RawKvScannerTest`, `TxnReaderTest` and
+`TransactionTest`, and not one of those names the enum. A one-line test
+asserting `method_exists(Error::class, 'has' . PascalCase($kind->value))` for
+every case would turn that scatter into a legible failure.
+
+The retryable path is deliberately untouched: it still invalidates for every
+retryable error, and #245 (REG-14 — a separate open milestone issue with its
+own acceptance criteria) is what will route it through this same predicate. Do
+not "finish" that narrowing here; the predicate is public and static precisely
+so that PR has a seam to reuse instead of a third copy of the list.
+
+That seam is a compatibility commitment, not a convenience: `RetryExecutor` is
+a documented user-constructible collaborator (`docs/configuration.md`), so
+`invalidatesRoutingOnFatal()`'s name and signature are semver-visible. #245 may
+still prefer to move the decision into `ErrorClassifier` — it needs the
+*kind*, not the exception — and such a relocation stays compatible with the
+commitment, because what callers are promised is the routing/non-routing table,
+not the class it lives in. Do not add a third copy of the list under either
+name.
+
 ## A class of bug gets a seam, a rule and a fixture — not three site patches (issue #180)
 
 Closing #180 after #186, #232 and #261: the answer to "how do we know this class

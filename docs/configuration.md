@@ -1090,10 +1090,11 @@ The library emits the following counter tags:
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
 | `regionCacheHit()`             | `'region_resolution'`      | Region was found in the cache                     |
 | `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
-| `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader region error (`RegionErrorHandler`), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on other retryable errors, or post-resolve cleanup in `LockResolver`. Invalidating an ID that is not cached emits nothing. |
+| `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader region error (`RegionErrorHandler`), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on other retryable errors, a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. Invalidating an ID that is not cached emits nothing. |
 
 Reasons are mutually exclusive per drop; the current source emits
-`'region_error'`, `'not_leader'`, `'retry_region_error'`, and `'lock_resolve'`
+`'region_error'`, `'not_leader'`, `'retry_region_error'`,
+`'fatal_region_error'`, and `'lock_resolve'`
 when those paths actually remove a region. A NotLeader response whose hinted
 peer is still valid only switches the cached leader and emits nothing.
 At executor-owned call sites, NotLeader drops are owned exclusively by the
