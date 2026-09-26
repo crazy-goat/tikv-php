@@ -123,6 +123,15 @@ rule that stopped firing fails the run with `ignore.unmatched`. When changing
 the rule, run `vendor/bin/phpstan clear-result-cache` first — the result cache
 is not keyed on custom-rule source.
 
+One consequence of "key-like **name**" that closes the loop on the rule's own
+coverage: the two places in the tree that exist precisely to *evaluate* the wrong
+comparison — `BinaryKeyVectors::isDiscriminating()`/`phpVerdict()` and
+`RawKvBatchKeyOrderTest::phpVerdict()` — name their parameters `$left`/`$right`
+rather than `$key`/`$otherKey`, so the rule stays silent on the deliberate
+`$left < $right` and the fixtures keep compiling. If either is ever renamed to a
+key-like name, the rule fires on a comparison that is the *subject* of the test
+rather than a bug.
+
 ## Region-routing test boundaries must be decimal, not alphabetic (issue #232)
 
 Every region-cache and range-clipper test that existed before #232 built its
@@ -163,3 +172,41 @@ the numeric `getByKey()` was already gone when #186 landed. Verified with
 region (1) for the two-region case, the latter answers both correctly. Write
 the revision you actually measured, and `git log -S` it before claiming a
 "pre-#N" behaviour.
+
+## A class of bug gets a seam, a rule and a fixture — not three site patches (issue #180)
+
+Closing #180 after #186, #232 and #261: the answer to "how do we know this class
+is done" is one `KeyOrder` seam (so a new comparison site has something to use),
+one PHPStan rule (so a bare `<` on keys cannot come back), and **one** shared
+vector fixture with a cross-implementation differential (so a component that
+silently disagrees with the others fails). `tests/Unit/Support/BinaryKeyVectors.php`
+owns the layouts, the discriminating pairs and the probe keys;
+`tests/Unit/Util/KeyOrderDifferentialTest.php` runs them through `KeyOrder`,
+`RegionCache`, `RegionRangeClipper` and `ScanIterator`.
+
+Say precisely how independent that reference is, because the strength of the whole
+argument rests on it and it is *not* uniform. It shares no code with `KeyOrder`,
+with `RegionCache::getByKey()`, with `keyInRegion` or with `ScanIterator` — those
+comparisons are plain `strcmp()` over vectors no production class sees. For
+`RegionRangeClipper` the picture is different: `referenceForwardClip()` re-derives
+`clipForward()`'s `max`/`min` and its `''`-as-+infinity algebra condition for
+condition, so a disagreement there proves a transcription error and nothing more.
+(The `clipReverse()` intersection check was removed for exactly this reason; the
+reverse direction is covered by the property below instead.) **That is why the
+tiling property is the load-bearing check for the clipper**:
+`testClippedSubRangesTileTheRequestWithoutGapOrOverlap()` cuts each request at the
+bounds of the regions it touches into maximal byte intervals and requires one
+sub-range per interval, each owned by the region the `strcmp` reference assigns —
+no gap, no overlap, no id in the wrong place. A statement about the sub-ranges
+rather than a second run of the formula, and one that still holds if the same bug
+is injected into both the clipper and the fixture's interval derivation.
+
+The rest of the reason is arithmetic, not taste: five of the nine auditors of the
+2026-08-08 review reported this same root cause independently (RAW-01, REG-01,
+GRPC-02, TXN-15, the test audit) and it still took three separate issues and
+three PRs to land, because each finding shipped its own vectors. Two rules for new
+work in this class: add a boundary to the shared fixture and let the differential
+report what moved — never a new site-local layout; and let the fixture *derive* its
+expectations (a key pair is admitted to the discriminating table only when asking
+PHP what `$a < $b` says proves it disagrees with byte order, so the table cannot rot
+into pairs a pre-#186 comparison passes).

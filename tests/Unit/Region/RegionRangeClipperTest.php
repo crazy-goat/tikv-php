@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Region;
 
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
+use CrazyGoat\TiKV\Tests\Unit\Support\BinaryKeyVectors;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
@@ -370,15 +371,11 @@ final class RegionRangeClipperTest extends TestCase
         // backwards from '2000' on — clipped forward to ['100', '9995').
         // Every region contributes exactly one sub-range, and they are
         // contiguous, i.e. no region is skipped in the middle.
-        $regions = [
-            $this->region('', '1000', regionId: 1),
-            $this->region('1000', '2000', regionId: 2),
-            $this->region('2000', '30', regionId: 3),
-            $this->region('30', '400', regionId: 4),
-            $this->region('400', '999', regionId: 5),
-            $this->region('999', '', regionId: 6),
-        ];
-        $results = iterator_to_array($this->clipper->clipForward($regions, '100', '9995'));
+        $results = iterator_to_array($this->clipper->clipForward(
+            BinaryKeyVectors::layoutRegions(BinaryKeyVectors::SIX_REGION),
+            '100',
+            '9995',
+        ));
 
         //   region      sub-range        why
         //   1 ["", "1000")    ['100', '1000')   '100' is inside it
@@ -464,19 +461,14 @@ final class RegionRangeClipperTest extends TestCase
 
     /**
      * The five-region layout ['', '0100') ['0100', '100') ['100', '1e3')
-     * ['1e3', '99') ['99', '').
+     * ['1e3', '99') ['99', ''), shared with the other key-ordering tests since
+     * issue #180.
      *
      * @return list<RegionInfo>
      */
     private function fourBoundaryLayout(): array
     {
-        return [
-            $this->region('', '0100', regionId: 1),
-            $this->region('0100', '100', regionId: 2),
-            $this->region('100', '1e3', regionId: 3),
-            $this->region('1e3', '99', regionId: 4),
-            $this->region('99', '', regionId: 5),
-        ];
+        return BinaryKeyVectors::layoutRegions(BinaryKeyVectors::FOUR_BOUNDARY);
     }
 
     public function testClipForwardYieldsEverySubRangeOfTheFourBoundaryLayout(): void
