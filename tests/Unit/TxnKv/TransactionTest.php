@@ -41,6 +41,7 @@ use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+use CrazyGoat\TiKV\Tests\Unit\Support\StubRegionCache;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -841,6 +842,35 @@ class TransactionTest extends TestCase
         $this->regionCache->method('getByKey')->willReturnCallback(
             static fn(string $key): ?RegionInfo => self::findRegionForKey($regions, $key),
         );
+    }
+
+    /**
+     * Back the mocked cache with a stateful in-memory one, so a test states
+     * *which region is cached* instead of *which lookup number answers what*.
+     *
+     * `getByKey()` and `put()` are wired unconditionally; a test that needs to
+     * assert on the client's own cache calls wires `invalidate()` /
+     * `switchLeader()` against the returned double (e.g.
+     * `->expects($this->never())->method('invalidate')` for the
+     * must-not-drop case, `->willReturnCallback($cache->switchLeader(...))` for
+     * the leader-hint case). Both work at once — the expectation counts the
+     * calls, the callback lets the state move.
+     *
+     * A `willReturnOnConsecutiveCalls()` sequence is *not* an equivalent
+     * substitute: issue #288 made `batchResolveRegions()` read the cache for
+     * every key, so the number of lookups per operation changed and the
+     * sequence started describing a cache state the client never had.
+     *
+     * @param RegionInfo[] $regions the regions the cache starts out holding
+     */
+    private function stubStatefulRegionCache(array $regions = []): StubRegionCache
+    {
+        $cache = new StubRegionCache($regions);
+        $this->regionCache->method('getByKey')->willReturnCallback($cache->getByKey(...));
+        $this->regionCache->method('getById')->willReturnCallback($cache->getById(...));
+        $this->regionCache->method('put')->willReturnCallback($cache->put(...));
+
+        return $cache;
     }
 
     /**
@@ -2195,20 +2225,17 @@ class TransactionTest extends TestCase
     public function testBatchGetNotLeaderUsesRetryExecutorLeaderHint(): void
     {
         $oldRegion = $this->makeRegion(1, '', 'z');
-        $newRegion = new RegionInfo(
-            regionId: 1,
-            leaderPeerId: 2,
-            leaderStoreId: 2,
-            epochConfVer: 1,
-            epochVersion: 1,
-            startKey: '',
-            endKey: 'z',
-        );
         $this->pdClient->method('scanRegions')->willReturn([$oldRegion]);
-        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($oldRegion, $newRegion);
-        $this->regionCache->method('put');
+        // The cache starts out holding the region on the OLD leader (store 1);
+        // the NotLeader hint below switches it to store 2, so the second
+        // attempt must talk to store 2. Modelled by state (issue #288) rather
+        // than by getByKey() call order: batchResolveRegions() now reads the
+        // cache for every key, so a call sequence would be a bet on the number
+        // of lookups instead of a statement about the cache.
+        $cache = $this->stubStatefulRegionCache([$oldRegion]);
         $this->regionCache->expects($this->never())->method('invalidate');
-        $this->regionCache->expects($this->once())->method('switchLeader')->willReturn(true);
+        $this->regionCache->expects($this->once())->method('switchLeader')
+            ->willReturnCallback($cache->switchLeader(...));
         $this->pdClient->method('getStore')->willReturnCallback(
             static function (int $storeId): Store {
                 $store = new Store();
@@ -2813,11 +2840,18 @@ class TransactionTest extends TestCase
 
         // The cache serves the old leader for the first resolution; after
         // RetryExecutor::handleNotLeader() switches the leader it serves the
-        // region with the new leader.
-        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($oldRegion, $newRegion);
-        $this->regionCache->method('put');
-        $this->regionCache->expects($this->once())->method('switchLeader')->willReturn(true);
+        // region with the new leader. Modelled by cache state, not by
+        // getByKey() call order (issue #288 — batchResolveRegions() reads the
+        // cache for every key, so the number of lookups is an implementation
+        // detail, not the thing under test).
+        $cache = $this->stubStatefulRegionCache([$oldRegion]);
+        $this->regionCache->expects($this->once())->method('switchLeader')
+            ->willReturnCallback($cache->switchLeader(...));
         $this->pdClient->method('scanRegions')->willReturn([$oldRegion]);
+        // Never reached on this path — handleNotLeader() switches the cached
+        // leader instead of dropping the region, so the retry reads the
+        // switched entry. Stubbed so a regression that invalidates would
+        // surface as a wrong address rather than as a null return.
         $this->pdClient->method('getRegion')->willReturn($newRegion);
         $this->pdClient->method('getStore')->willReturnCallback(
             function (int $storeId): Store {
@@ -4853,13 +4887,13 @@ class TransactionTest extends TestCase
             peers: [],
         );
 
-        // First attempt uses the region from groupStringsByRegion(); the
-        // retry re-resolves with a cache miss (null) and PD returns the
-        // fresh region.
-        $this->regionCache->method('getByKey')
-            ->willReturnOnConsecutiveCalls(null, null, null, null);
-        $this->regionCache->method('put');
-        $this->regionCache->method('invalidate');
+        // First attempt uses the region batchResolveRegions() scanned (the
+        // cache starts empty); the retry re-resolves with a cache miss —
+        // RegionErrorHandler::check() invalidated the stale region — and PD
+        // returns the fresh one. Modelled by cache state, not by getByKey()
+        // call order (issue #288).
+        $cache = $this->stubStatefulRegionCache();
+        $this->regionCache->method('invalidate')->willReturnCallback($cache->invalidate(...));
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($freshRegion);
         $this->pdClient->method('scanRegions')->willReturn([$staleRegion]);
@@ -4945,13 +4979,13 @@ class TransactionTest extends TestCase
             peers: [],
         );
 
-        // First attempt uses the region from groupStringsByRegion(); the
-        // retry re-resolves with a cache miss (null) and PD returns the
-        // fresh region.
-        $this->regionCache->method('getByKey')
-            ->willReturnOnConsecutiveCalls(null, null, null, null);
-        $this->regionCache->method('put');
-        $this->regionCache->method('invalidate');
+        // First attempt uses the region batchResolveRegions() scanned (the
+        // cache starts empty); check() invalidates it on the NotLeader error,
+        // so the retry re-resolves with a cache miss and PD returns the fresh
+        // region on the hinted store. Modelled by cache state, not by
+        // getByKey() call order (issue #288).
+        $cache = $this->stubStatefulRegionCache();
+        $this->regionCache->method('invalidate')->willReturnCallback($cache->invalidate(...));
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($freshRegion);
         $this->pdClient->method('scanRegions')->willReturn([$staleRegion]);
@@ -5370,13 +5404,13 @@ class TransactionTest extends TestCase
             peers: [],
         );
 
-        // Consecutive getByKey calls: pessimisticRollbackAll (1) attempt-1
-        // resolution, (2) RetryExecutor invalidation lookup, (3) attempt-2
-        // resolution (null → PD), then batchRollback resolutions.
-        $this->regionCache->method('getByKey')
-            ->willReturnOnConsecutiveCalls($staleRegion, $staleRegion, null, $freshRegion, $freshRegion);
-        $this->regionCache->method('put');
-        $this->regionCache->method('invalidate');
+        // The cache starts out holding the stale region, which
+        // pessimisticRollbackAll resolves for its first attempt. The
+        // EpochNotMatch error invalidates it, so attempt 2 misses and resolves
+        // through PD (getRegion → the fresh epoch). Modelled by cache state,
+        // not by getByKey() call order (issue #288).
+        $cache = $this->stubStatefulRegionCache([$staleRegion]);
+        $this->regionCache->method('invalidate')->willReturnCallback($cache->invalidate(...));
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
         $this->pdClient->method('getRegion')->willReturn($freshRegion);
         $this->pdClient->method('scanRegions')->willReturn([$staleRegion]);

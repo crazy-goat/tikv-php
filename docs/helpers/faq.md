@@ -840,22 +840,27 @@ overlap removal also deletes the equal-startKey stale entry that the
 ordered treap would otherwise retain). Supersession is silent metrics-wise;
 `invalidate()` remains the sole `regionInvalidated()` emission point.
 
-## A PdClientInterface mock auto-returns [] from scanRegions — grouping silently becomes empty
+## A PdClientInterface mock auto-returns [] from scanRegions — grouping comes back empty (loud since #187)
 
-`RegionResolver::batchResolveRegions()` calls `$pdClient->scanRegions()` (typed
-`array` return). A PHPUnit mock without an explicit stub auto-returns the type
-default — `[]` — so `RegionGrouper::groupKeysByRegionBatch()` returns `[]`,
-**no gRPC call is ever made**, and `commit()`/`rollback()` "succeed" doing
-nothing. A test that mocks only `getByKey`/`getRegion`/`getStore` and asserts
+`RegionResolver::batchResolveRegions()` falls back to
+`$pdClient->scanRegions()` (typed `array` return) for every key the region
+cache cannot answer. A PHPUnit mock without an explicit stub auto-returns the
+type default — `[]` — so `RegionGrouper::groupKeysByRegionBatch()` returns
+`[]`, **no gRPC call is ever made**, and `commit()`/`rollback()` "succeed"
+doing nothing. A test that mocks only `getRegion`/`getStore` and asserts
 `grpc->call()` behaviour can be silently vacuous: the existing
 `TransactionTest::testCommitPessimisticWithKeys()` and
 `testRollbackWithKeysCallsBatchRollback()` were passing without the grpc mock
 ever being reached (discovered in issue #216). Always stub
 `$pdClient->method('scanRegions')->willReturn([$region])` when a test must
-actually reach the RPC layer. Related latent bug: when a real `scanRegions()`
-returns nothing (or a key falls outside all returned regions),
-`TwoPhaseCommitter::commit()` / `rollback()` complete "successfully" without
-sending any RPC — no error is raised for keys that could not be grouped.
+actually reach the RPC layer — or, since #288, let the region cache answer:
+a `getByKey()` stub that covers the batch's keys is now sufficient, because
+`batchResolveRegions()` reads the cache before it ever asks PD. Related latent
+bug: when a real `scanRegions()` returns nothing (or a key falls outside all
+returned regions), `TwoPhaseCommitter::commit()` / `rollback()` complete
+"successfully" without sending any RPC — no error is raised for keys that
+could not be grouped. That one is closed: since #187 the resolver itself
+throws for the first unresolvable key, so the empty answer is loud now.
 
 ## Adding a `TiKvException` subclass means updating `docs/error-handling.md` in the same commit
 
@@ -1111,15 +1116,21 @@ methods via reflection against a dead `127.0.0.1:1` channel, asserting
 with `maxAttempts: 2` — one resolution/send per attempt, which the old
 dispatch-only-retry code could not produce.
 
-## Several legacy RawKvBatchTest TTL tests silently dispatch nothing
+## Several legacy RawKvBatchTest TTL tests dispatch nothing (silently before #187)
 
 `testBatchPutWithIntTtl` and friends mock `getByKey` but **not**
-`scanRegions`, so `batchResolveRegions()` returns an empty map, every key is
-silently skipped, `regionCalls` is empty, `executeParallel([])` returns
-immediately and the test passes without a single RPC. If you need such a
-test to actually dispatch, also mock
+`scanRegions`, so every key the stub declines is left unresolved,
+`regionCalls` is empty, `executeParallel([])` returns
+immediately and the test passes without a single RPC. (Since #187 this no
+longer fails silently — the resolver throws `TiKvException: PD could not
+resolve the region for key …` — so the symptom today is a *failing* test, and
+this entry records the historical shape.) Make one of the two answer for the
+batch's keys: since #288 the cache alone is enough — stub `getByKey()` to
+return the test region, and the scan is only consulted for what the cache
+declines. If you instead want the PD path exercised, stub
 `$this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()])`
-and `$this->pdClient->method('getStore')->willReturn($this->defaultStore())`
+as well, and note that a dispatch also needs
+`$this->pdClient->method('getStore')->willReturn($this->defaultStore())`
 (missing getStore makes dispatch fail early with "Store 1 not found in PD"
 before `getChannel()` is reached).
 
@@ -1130,11 +1141,14 @@ unit test for a pessimistic commit/rollback/batch path could pass while **every*
 before any RPC was sent — the mock gRPC client was never called and no assertion noticed. Four
 `TransactionTest` tests were in exactly that state: they never mocked
 `PdClientInterface::scanRegions()`, and the "success" they asserted came from the silent-drop
-path. Now that the grouper fails closed (#244), a missing `scanRegions` mock surfaces as
-`TiKvException: PD could not resolve the region for key ...` — fix the test by mocking
-`scanRegions` to return regions covering all batch keys, not by weakening the contract. When
-writing a new batch-path test, assert the gRPC mock actually received the request (call-count
-expectation), otherwise silent key drops remain invisible.
+path. Now that the resolver fails closed (#244/#187), an unresolvable key surfaces as
+`TiKvException: PD could not resolve the region for key ...` — fix the test by making the cache
+or `scanRegions` answer for all batch keys, not by weakening the contract. Since #288 there are
+two ways to make it answer, and which one the test needs is a real design choice: stub
+`regionCache->getByKey()` (or a `StubRegionCache`) and the batch is served with **no** PD call at
+all, which is what a warm client does; stub `pdClient->scanRegions()` and only the keys the cache
+declines are scanned. When writing a new batch-path test, assert the gRPC mock actually received
+the request (call-count expectation), otherwise a silently-dropped key set remains invisible.
 
 ## PD `scanRegions(start, end)` is half-open — the maximum batch key needs an appended `\x00`
 
@@ -1145,6 +1159,17 @@ at that key, and `findRegionForKey()` returns null for it — the classic bounda
 Any new caller of `scanRegions()` used for batch resolution must remember this; client-go resolves the
 last key inclusively for the same reason. Note `TxnReader::scan()` is different: there `$endKey` is the
 scan range's exclusive end by definition, and `RegionRangeClipper` handles the clipping.
+Since #288 the bound is computed per **run of cache misses**
+(`batchResolveRegions()` groups the keys the region cache cannot answer and
+scans each run's `[firstKey, successor(lastKey))` envelope), and a run is as
+often a single key — whose window collapses to the degenerate `[k, k."\x00")`.
+The successor is therefore never optional on the miss path, and a warm cache
+must not be allowed to hide its absence: the unit vector
+(`testMissPathKeepsTheSuccessorWindowEvenWithAPartiallyWarmCache()`) warms only
+the region *below* the boundary, and #188's E2E vector reads back through
+freshly created, **cold** clients, one per read, because its own `batchPut()`
+now warms the cache for every key of the batch and whichever read ran first
+would warm it for the other one.
 ## Byte order for TiKV key ordering — never PHP's default `sort()` or loose `<`/`>=`
 
 TiKV orders keys bytewise, but PHP's default `sort()` (`SORT_REGULAR`) compares
@@ -1180,28 +1205,55 @@ Note also that `Transaction::__destruct()` fires a `KvBatchRollback` via the
 gRPC mock when a test leaves a non-empty write set — `expects($this->once())`
 on `call()` then fails with "called 2 times"; use `method()` without an
 invocation count or expect one extra rollback call.
-## Stubbing rollback tests: batchResolveRegions() goes through PD scanRegions, not the region cache
+## Stubbing rollback tests: batchResolveRegions() reads the region cache first and throws on an unresolvable key since #187
 
-When a `TransactionTest` mock sets up `regionCache->getByKey()` but NOT
+When a `TransactionTest` mock stubs `regionCache->getByKey()` but NOT
 `pdClient->scanRegions()`, `TwoPhaseCommitter::batchRollback()` /
-`pessimisticRollbackAll()` silently group the write-set keys into **zero**
-regions: `RegionResolver::batchResolveRegions()` calls
-`pdClient->scanRegions($minKey, $maxKey)` (a PHPUnit array-typed mock
-returns `[]`) and skips unresolved keys, so `RetryExecutor::execute()` never
-runs, no `KvBatchRollback`/`KVPessimisticRollback` RPC is issued, and
-`rollback()` returns `RolledBack` having done nothing — the test "passes"
-its status assertion and fails only on the RPC-count assertion (issue
-#333 debugging). Any test that drives rollback/commit grouping must stub
-`pdClient->scanRegions()` to return the test region (plus
-`regionCache->put()`), not only `getByKey()`. The same silent-drop
-behaviour is the subject of issue #244/#329 for writes; for mocks it just
-means: stub scanRegions.
+`pessimisticRollbackAll()` group the write-set keys into **zero** regions:
+`RegionResolver::batchResolveRegions()` calls `pdClient->scanRegions()` for
+every key the cache cannot answer (a PHPUnit array-typed mock returns `[]`),
+the keys stay unresolved, `RetryExecutor::execute()` never runs, no
+`KvBatchRollback`/`KVPessimisticRollback` RPC is issued, and `rollback()`
+returns `RolledBack` having done nothing — the test "passes" its status
+assertion and fails only on the RPC-count assertion (issue #333 debugging).
+**The rule changed with #288**: the resolver reads the cache first, so a
+`getByKey()` stub that covers the batch's keys is now *sufficient* and
+`scanRegions()` is only needed for the keys the cache declines. Since #187 the
+failure is no longer silent either — it surfaces as `TiKvException: PD could
+not resolve the region for key ...`. So: stub `getByKey()` for the keys the
+test wants served from the cache, and `scanRegions()` for the rest.
 
 Also: `LockResolver::resolveLock()` on a `CheckTxnStatusResponse` with
 `commitVersion=0` runs CheckTxnStatus **twice** (it re-checks after the
 lock-TTL wait, even with `lockTtl=0` and no actual sleep) before issuing
 `KvResolveLock` — assert the full method sequence, not a single
 CheckTxnStatus.
+
+## `willReturnOnConsecutiveCalls()` on `getByKey()` is a bet on how many cache lookups the code performs (#288)
+
+Four `TransactionTest` tests modelled the region cache as
+`->method('getByKey')->willReturnOnConsecutiveCalls($stale, $stale, null,
+$fresh, $fresh)` with a comment enumerating which call was which. That is not
+a cache, it is a *call log*: it survives only while the number and order of
+`getByKey()` calls is frozen. #288 broke all four the moment
+`batchResolveRegions()` started reading the cache for every key before
+contacting PD — the sequence ran out and the tests died with
+`NoMoreReturnValuesConfiguredException` (and a test whose sequence happens to
+be long enough keeps passing while describing a cache state the client never
+had). #293 hit the same trap with `RawKvScannerTest`'s
+`getRegionsInRange` sequences and answered it by adding a method to the
+interface so the old tests' default answers stayed the same; #288 instead
+replaced the call log with a state machine:
+`tests/Unit/Support/StubRegionCache.php` is a stateful in-memory
+`RegionCacheInterface` whose `getByKey()` answers from the regions the client
+actually `put()` and which applies the client's own `invalidate()` and
+`switchLeader()`, so the test states "the cache starts out holding the stale
+region" instead of "lookups 1 and 2 answer stale and lookup 3 misses". Wire
+it behind the mock when the test also wants call counts
+(`->expects($this->once())->method('switchLeader')->willReturnCallback($cache->switchLeader(...))`).
+Generalisation: when a test's comment has to explain *which call* answers
+*what*, the mock is modelling an implementation detail — model the state.
+
 ## Bounding a fan-out: reuse executeParallelCapped() before building a new windowed executor
 
 Issue #264 asked for a windowed dispatch loop inside `BatchAsyncExecutor`, but the

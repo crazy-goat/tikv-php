@@ -48,6 +48,31 @@ final readonly class RegionResolver
     ];
 
     /**
+     * Regions requested per PD `ScanRegions` call by
+     * {@see batchResolveRegions()} (issue #288).
+     *
+     * `ScanRegions` paginates on this limit, so it trades round trips
+     * against response size. A cache gap is normally a handful of regions
+     * and fits in one page at any value, while the case that motivated the
+     * limit — a cold cache, or a scattered batch, on a 10 000-region cluster
+     * — answered with every region in the keyspace (1–2 MB of protobuf) when
+     * the limit was left at 0. 128 keeps a page in the tens of kilobytes and
+     * still re-resolves such a cluster in 79 round trips.
+     */
+    private const SCAN_PAGE_SIZE = 128;
+
+    /**
+     * Hard ceiling on the pages {@see batchResolveRegions()} fetches for one
+     * contiguous run of cache misses: 128 × 1024 = 131 072 regions, more than
+     * any cluster this client talks to. It exists so the continuation loop
+     * terminates on *every* input, including a PD that keeps answering with
+     * a full page of regions that advance the cursor one byte at a time.
+     * Exceeding it leaves the remaining keys unresolved, which fails the
+     * batch through the usual unresolvable-key error rather than looping.
+     */
+    private const MAX_SCAN_PAGES = 1024;
+
+    /**
      * @param string[] $allowedStoreHosts Exact hostnames, DNS suffixes
      *     (leading dot: matches the domain itself and any subdomain) or
      *     CIDR ranges the store host must match.
@@ -93,8 +118,44 @@ final readonly class RegionResolver
     }
 
     /**
-     * Resolve regions for a batch of keys using a single scanRegions() call
-     * instead of one getRegion() per key. Populates the cache as a side effect.
+     * Resolve regions for a batch of keys, reading the region cache first
+     * and asking PD only for the keys it cannot answer (issue #288).
+     * Populates the cache as a side effect.
+     *
+     * A warm cache answers the whole batch without a single PD round trip,
+     * which is what every `batchGet()`/`batchPut()`/`batchDelete()` and
+     * every `TwoPhaseCommitter::commit()` (three resolutions per
+     * transaction) previously paid unconditionally. Keys the cache does not
+     * hold are grouped into contiguous runs of misses and each run gets one
+     * bounded, paginated `ScanRegions` call.
+     *
+     * ## What "contiguous run of misses" means here
+     *
+     * Two consecutive misses `a < b` are split into separate runs when a
+     * cache-served key of the *same batch* sorts strictly between them. That
+     * is a proof, not a heuristic: the hit key's region is cached and
+     * contains the key, so it starts at or before it; `a` is a miss, so `a`
+     * cannot be inside it; and `b`, sorting after the key, is a miss too, so
+     * `b` is at or after the region's end. The cached region therefore lies
+     * strictly inside `(a, b)`, which means `a` and `b` sit in two different
+     * cache gaps and cannot be covered by one scan window.
+     *
+     * The rule is one-sided on purpose. A split only ever happens across a
+     * proven boundary, so it never splits a run that shares a gap, and each
+     * split saves a round trip. The other direction is deliberately
+     * unsplit: two gaps the batch happens to have no key between are merged
+     * into one wider window, which costs a page, not correctness — every run
+     * is scanned with the `[firstKey, successor(lastKey))` envelope and every
+     * returned region is assigned by binary search, so a window that spans
+     * more regions than the run needs only answers more of them. A cold cache
+     * therefore still issues exactly one scan for the whole key set, which is
+     * what the pre-#288 window `[min(keys), successor(max(keys)))` did.
+     *
+     * `RegionCacheInterface::getRegionsInRange()` cannot describe a run's
+     * interior and is deliberately not used for the grouping: it starts at
+     * `getByKey($startKey)`, which is `null` for every key of a run by
+     * definition, so it can only ever report a *cached* chain — and a run
+     * lies entirely in cache gaps.
      *
      * Every key must be assigned to a region: an unresolvable key is a bug
      * or a transient PD inconsistency, never an expected condition, and
@@ -102,6 +163,15 @@ final readonly class RegionResolver
      * would report success without writing it). This method therefore
      * fails closed and throws naming the first unresolvable key — callers
      * that group keys via {@see RegionGrouper} get the same guarantee.
+     *
+     * The miss path keeps the #244 window unchanged: `scanRegions(start, end)`
+     * is half-open and stops before the first region whose startKey >= end, so
+     * the upper bound must be `successor(maxKey)` — the smallest key strictly
+     * greater than the run's maximum — or the region that begins exactly at
+     * that key is excluded and its key is dropped from the batch. client-go
+     * resolves the last key inclusively for the same reason. Reading through
+     * the cache must not make that window optional, and issue #188's E2E
+     * vector fails loudly without it.
      *
      * The returned map inherits PHP's array-key semantics: a canonical
      * decimal-integer key is returned under its `int` form, every other key
@@ -125,34 +195,156 @@ final readonly class RegionResolver
         $sorted = $keys;
         sort($sorted, SORT_STRING);
 
-        $minKey = $sorted[0];
-        $maxKey = end($sorted);
+        $resolved = [];
+        $runs = [];
+        $run = [];
+        // True when a cache-served key sits between the previous miss and the
+        // next one, i.e. a cached region provably lies strictly between them
+        // and the two misses cannot share a cache gap.
+        $hitBetween = false;
 
-        // scanRegions(start, end) is half-open and stops before the first
-        // region whose startKey >= end. Passing the maximum key verbatim
-        // excluded the region that begins exactly at the maximum key, so
-        // that key found no region and was silently dropped from the batch
-        // (issue #244). KeyOrder::successor() yields the smallest key
-        // strictly greater than $maxKey, making the scan inclusive of the
-        // region owning the maximum key (client-go resolves the last key
-        // inclusively).
-        $regions = $this->pdClient->scanRegions($minKey, KeyOrder::successor($maxKey));
+        foreach ($sorted as $key) {
+            $region = $this->regionCache->getByKey((string) $key);
+            if ($region instanceof RegionInfo) {
+                $resolved[$key] = $region;
+                $hitBetween = true;
+                continue;
+            }
 
-        foreach ($regions as $region) {
-            $this->regionCache->put($region);
+            if ($run !== [] && $hitBetween) {
+                $runs[] = $run;
+                $run = [];
+            }
+            $run[] = (string) $key;
+            $hitBetween = false;
         }
 
-        $resolved = $this->assignKeysToRegions($keys, $regions);
+        if ($run !== []) {
+            $runs[] = $run;
+        }
+
+        foreach ($runs as $run) {
+            $maxKey = $run[count($run) - 1];
+            $regions = $this->scanRun($run[0], KeyOrder::successor($maxKey));
+
+            foreach ($regions as $region) {
+                $this->cacheScannedRegion($region);
+            }
+
+            foreach ($this->assignKeysToRegions($run, $regions) as $key => $region) {
+                $resolved[$key] = $region;
+            }
+        }
+
         foreach ($keys as $key) {
             if (!isset($resolved[$key])) {
                 throw new TiKvException(sprintf(
                     'PD could not resolve the region for key %s; refusing to silently drop it from the batch',
-                    KeyRedactor::redact($key),
+                    KeyRedactor::redact((string) $key),
                 ));
             }
         }
 
         return $resolved;
+    }
+
+    /**
+     * Fetch the regions covering the half-open range [$startKey, $endKey) with
+     * an explicit page limit, continuing from the last returned end key until
+     * the range is covered (issue #288).
+     *
+     * `ScanRegions` returns whole regions that intersect the range, so the
+     * answer is only complete once the last region's end key reaches $endKey.
+     * The loop stops on whichever of these comes first, and every one of them
+     * makes termination unconditional:
+     *
+     * - an empty page: PD has nothing more to say;
+     * - an unbounded last region (`''` is +infinity) or one that already
+     *   reaches $endKey: the range is covered;
+     * - a last end key that does not advance past the cursor: a PD that keeps
+     *   re-answering the same page would otherwise loop forever;
+     * - a page shorter than the limit: PD exhausted the range, and the
+     *   remaining keys fail closed instead of costing another round trip;
+     * - {@see self::MAX_SCAN_PAGES} pages, the absolute ceiling.
+     *
+     * @return list<RegionInfo> regions in ascending startKey order
+     */
+    private function scanRun(string $startKey, string $endKey): array
+    {
+        $regions = [];
+        $cursor = $startKey;
+
+        for ($page = 0; $page < self::MAX_SCAN_PAGES; $page++) {
+            $batch = $this->pdClient->scanRegions($cursor, $endKey, self::SCAN_PAGE_SIZE);
+            if ($batch === []) {
+                break;
+            }
+
+            foreach ($batch as $region) {
+                $regions[] = $region;
+            }
+
+            $lastEndKey = $batch[count($batch) - 1]->endKey;
+            if ($lastEndKey === '' || KeyOrder::gte($lastEndKey, $endKey)) {
+                break;
+            }
+            if (KeyOrder::lte($lastEndKey, $cursor) || count($batch) < self::SCAN_PAGE_SIZE) {
+                break;
+            }
+
+            $cursor = $lastEndKey;
+        }
+
+        return $regions;
+    }
+
+    /**
+     * Store a region a PD scan returned, skipping the write when the cache
+     * already holds exactly that region (issue #288).
+     *
+     * `put()` is not free — even its same-id/same-range fast path rebuilds the
+     * entry, refreshes its TTL, bumps the expiry heap and the LRU recency —
+     * and a scan's answer routinely contains regions the cache already holds
+     * (a window's envelope spans regions that own no key of the batch, and a
+     * re-scan of a partially warm range returns its neighbours).
+     *
+     * The identity is epoch + range + leader; the ID is the lookup key and so
+     * needs no comparison. The epoch is what makes a hit authoritative: a
+     * split or a merge bumps `epochVersion`, a peer change bumps
+     * `epochConfVer`, so an unchanged epoch with an unchanged range is the
+     * same region. The leader is part of the test because a leader transfer
+     * does *not* bump the epoch, and skipping the write would then keep
+     * serving the deposed leader out of the cache. The peer list is
+     * deliberately not compared — `epochConfVer` covers it.
+     *
+     * A miss here is not an error: a region the cache does not hold, one whose
+     * TTL ran out, or one whose overlapping stale entry must be superseded (a
+     * `put()` is what triggers that removal), is written as before.
+     *
+     * The probe is `RegionCacheInterface::getById()`, and it has to be that:
+     * a scan hands us the region ID, and the ID map answers for it in O(1).
+     * Asking `getByKey($region->startKey)` instead costs a treap descent plus
+     * a redacted debug string per region (~10 µs against a 10 000-entry cache
+     * on this tree) — *more* than the ~6.5 µs `put()` it avoids, which made
+     * this criterion a measured ~1.6× regression when it was first shipped. See
+     * `php benchmarks/BatchResolveRegionsBenchmark.php` for the columns.
+     */
+    private function cacheScannedRegion(RegionInfo $region): void
+    {
+        $cached = $this->regionCache->getById($region->regionId);
+        if (
+            $cached instanceof RegionInfo
+            && $cached->epochVersion === $region->epochVersion
+            && $cached->epochConfVer === $region->epochConfVer
+            && $cached->startKey === $region->startKey
+            && $cached->endKey === $region->endKey
+            && $cached->leaderStoreId === $region->leaderStoreId
+            && $cached->leaderPeerId === $region->leaderPeerId
+        ) {
+            return;
+        }
+
+        $this->regionCache->put($region);
     }
 
     /**

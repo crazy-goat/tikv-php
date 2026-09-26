@@ -566,7 +566,13 @@ public function testConcurrentBatchPuts(): void
 `RawKvE2ETest::testBatchRoundTripResolvesEveryKeyWhenTheLargestOneIsARegionStartKey()`
 pins issue #188's end-to-end vector — every key of a batch resolves, including
 the **largest** one when it is a region start key, and including it again as a
-one-key batch — against whatever layout the cluster happens to have. The
+one-key batch — against whatever layout the cluster happens to have. Since
+#288 it reads the batch back through a **freshly created client with a cold
+region cache, one per read**: its own `batchPut()` now warms the cache for
+every key of the batch, and whichever of the two reads ran first would warm it
+for the other one, so a warm client computes no scan window at all (reverting
+the window to `[minKey, maxKey)` is invisible on a warm client; on a cold one
+it throws `TiKvException: PD could not resolve the region for key …`). The
 issue's literal case, "a boundary *I* choose with `SplitRegion`, then write to",
 is a manual procedure instead, and the reason is a property of this client
 worth knowing before you try it yourself:
@@ -782,6 +788,28 @@ It reports cold sequential inserts, warm replacements, and the resulting
 entry count. For new cache data structures, extend this standalone benchmark
 with the relevant random, overlap, eviction, and range-enumeration scenarios;
 do not turn machine-dependent timings into flaky unit-test failures.
+
+The batch region-resolution benchmark measures one
+`RegionResolver::batchResolveRegions()` call for a 100-region batch against a
+warm 10 000-entry cache, next to the pre-#288 algorithm and next to the
+`put()`-skip micro-measurement (issue #288):
+
+```bash
+php benchmarks/BatchResolveRegionsBenchmark.php
+```
+
+Its `PD scanRegions() calls` line is the half of the pre-#288 cost a stubbed
+scan cannot show: the round trip itself, and the unbounded answer it used to
+ask for. Two other lines are worth reading together rather than alone: the
+`put() skip` block prints the unconditional `put()`, the `getByKey()`-based
+identity check and the `getById()`-based one side by side, which is the only
+way to see that the skip criterion is a *win* at all (an optimisation that
+costs more than the write it removes is a regression wearing a test's
+clothes); and the batch-size sweep below it shows the read-through's cost is
+**per key** and linear (~12 µs/key, so ~120 ms for a 10 000-key batch),
+which "zero PD calls" does not convey. Read that file's header note before
+quoting its CPU numbers — the issue's original 33.85 ms figure was taken
+against the pre-#289 `RegionCache` and no longer reproduces.
 
 For other operations, create focused benchmark classes under
 `tests/Benchmark/`:

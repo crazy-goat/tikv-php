@@ -387,3 +387,78 @@ Three decisions inside that, each of which was available and was rejected:
    A real case where `ScanRegions` misses a key `GetRegion` finds belongs in
    #288, not here.
 
+## `batchResolveRegions()` reads the cache first, and a "run" is a provable gap (issue #288)
+
+Closing #288 after #187/#244/#188, three decisions inside
+`RegionResolver::batchResolveRegions()`:
+
+1. **A run of misses is split where a cached key proves a boundary.** The
+   cache answers nothing about a key it does not hold, so the grouping cannot
+   ask "is there a cached region between these two misses?" — it asks the
+   only question the key set can answer: *does a cache-served key of this
+   batch sort between them?* If one does, its cached region contains that
+   key, so it starts at or before it; the earlier miss cannot be inside it and
+   the later miss (sorting after the key) is at or after its end. The region
+   therefore lies strictly between the two misses, i.e. they are in two
+   different cache gaps. That is a proof, and the rule is **one-sided on
+   purpose**: a split only ever happens across a proven boundary, so it never
+   splits a run that shares a gap, and every split saves a round trip. The
+   other direction is deliberately unsplit — two gaps the batch happens to have
+   no key between are merged into one wider window, which costs a page, not
+   correctness, because every run is scanned as the `[firstKey,
+   successor(lastKey))` envelope and every returned region is assigned by
+   binary search. A cold batch is therefore still **one** scan for the whole
+   key set. `getRegionsInRange()` cannot help here and is deliberately
+   unused: it starts at `getByKey($startKey)`, which is `null` for every key
+   of a run by definition, so it can only ever describe a cached chain — and
+   a run lies entirely in cache *gaps*.
+2. **The limit is 128 regions per page, with a 1024-page ceiling.**
+   `ScanRegions` paginates on it, so it trades round trips against response
+   size: a gap is a handful of regions and fits in one page at any value,
+   while the motivating case (a cold cache, or a scattered batch, on a
+   10 000-region cluster) answered with every region in the keyspace at
+   `limit = 0`. 128 keeps a page in the tens of kilobytes and re-resolves such
+   a cluster in 79 round trips. Every loop exit is unconditional — empty
+   page, range reached (or an unbounded last region), non-advancing cursor,
+   short page, and the ceiling — because a "does it advance?" test alone does
+   not stop a PD that advances one byte per page. A run whose keys are not all
+   covered fails closed on the unresolvable key, exactly as before.
+3. **The miss path still needs the `[minKey, successor(maxKey))` window, and
+   the read-through must not make it optional.** A cache read only removes
+   the *need* to scan; where a scan does happen the half-open
+   `ScanRegions` rule is unchanged, so the upper bound is still the
+   immediate byte successor of the run's maximum key or the region that
+   begins exactly there is excluded and its key is dropped. The trap is
+   specific to the E2E vector: `testBatchRoundTripResolvesEveryKeyWhenTheLargestOneIsARegionStartKey`
+   wrote its batch through `batchPut()`, which now warms the region cache for
+   every key of that batch, so its `batchGet()` is a pure cache hit and a
+   reverted `[minKey, maxKey)` window would have passed. It reads back
+   through freshly created, cold clients for exactly that reason — one per
+   read, because whichever ran first would warm the region the other one
+   needs to scan for, and a warm client computes no window at all. The unit
+   side asserts the window with a *partially* warm cache
+   (`testMissPathKeepsTheSuccessorWindowEvenWithAPartiallyWarmCache()`),
+   which is the only shape in which a warm client would expose a window
+   regression. The skip of a re-insert keeps the identity at epoch + range +
+   **leader**: an epoch-only test would keep serving a deposed leader out of
+   the cache, because a TiKV leader transfer does not bump the epoch, and the
+   ID needs no comparison at all because it *is* the lookup key.
+
+   The identity is asked through `RegionCacheInterface::getById()` — new in
+   this PR, and a **breaking** addition third-party caches must implement —
+   because the O(1) lookup is the only reason the criterion pays. The first
+   version of this fix asked `getByKey($region->startKey)`, which is the one
+   shape of the question the interface could already answer, and *that* was a
+   measured regression: on the post-#289 cache a key lookup runs ~10.4 µs
+   against 10 000 entries (a treap descent plus a `KeyRedactor::redact()`
+   string built for the debug line) while the `put()` it avoided — the
+   same-id/same-range fast path — runs ~6.5 µs, so the "optimisation" cost
+   1.6× the work it removed. `getById()` is one array lookup on the map the
+   cache already keeps. In isolation that lookup measures 0.16 µs (half of
+   it the `time()` the TTL check needs); the shipped method lands at ~2.5 µs
+   once the leader-aware copy, the expiry check and the debug line are in, and
+   still beats the `put()` it avoids by ~2.5×. The benchmark prints all three
+   shapes side by side — unconditional `put()`, `getByKey()` probe,
+   `getById()` probe — so the claim is checkable rather than asserted
+   (`benchmarks/BatchResolveRegionsBenchmark.php`).
+
