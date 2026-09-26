@@ -387,6 +387,47 @@ Three decisions inside that, each of which was available and was rejected:
    A real case where `ScanRegions` misses a key `GetRegion` finds belongs in
    #288, not here.
 
+4. **The guard keys on an absence check, not on `=== null`.** `NoSilentRegionDropGuardTest`
+   was originally written to match *an identity comparison against `null`* —
+   the shape the issue quoted. That was one spelling too few: rewriting a
+   guarded `continue` as `if (!isset($resolved[$key])) { continue; }`, or as
+   `if (!array_key_exists($key, $resolved)) { continue; }`, is the same silent
+   drop in the form PHP makes easiest to write, and **both passed the whole
+   1648-test `Unit` suite** at the two `RegionGrouper` loops a
+   `set(K); commit()` pair reaches. The rule now recognises any absence test
+   (`=== null` either way round, `isset()`, `empty()`, `array_key_exists()`)
+   and a data-provider test pins the recognised spellings, so the broadening
+   cannot be narrowed back silently. It over-matches on purpose: a *positive*
+   `isset($resolved[$key])` keeps the entry and is flagged anyway, because the
+   cost is one reviewed allowlist row (`ConnectionFactory::resolveGrpcChannelArgs()`,
+   which skips a configured gRPC option the caller did not supply) and the
+   alternative is a guard whose evasion is a two-character edit. The lesson is
+   the one the rule was written for — the original was already deliberately
+   broader than `$region === null`, because a name-keyed rule is defeated by
+   `$r` — applied one level further: **a guard must key on the *decision*, not
+   on any single spelling of it.** Note what a behavioural test cannot do
+   here: no loop-level `continue` is reachable (`batchResolveRegions()` throws
+   first), so reverting one changes no observable behaviour and only this
+   static rule can catch it.
+
+The issue's own fourth finding, the transaction (`set(K); commit()` as a total
+no-op reported as `Committed`), is the same defect at a different layer and was
+**not** fixed by #187 alone, so it is worth stating where it is caught:
+resolution happens at *commit*, not at `set()` — `TransactionState`'s write set
+is filled with no region lookup at all — and
+`TwoPhaseCommitter::groupMutationsByRegion()` → `RegionGrouper::groupItemsByRegion()`
+→ `RegionResolver::batchResolveRegions()` throws naming the redacted key before
+a single RPC is constructed. Below that sits #208's mutation-count guard
+(`InvalidStateException: Not all transaction mutations were assigned to a
+region`), which is defence in depth: it also catches a dropped key, but it
+reports a *count mismatch* and does not name the key, so the resolver's message
+is the one a caller can act on. A pessimistic transaction fails even earlier,
+at the eager lock inside `set()` (#437). Both paths are pinned in
+`UnresolvedRegionFailsClosedTest` — assert the throw, assert the status is not
+`Committed`, assert nothing reached the wire. `CommitPrewriteKeyCoverageTest`
+(#329) covers the *success*-path invariant (a write-set key must be prewritten)
+and is deliberately not duplicated here.
+
 ## `batchResolveRegions()` reads the cache first, and a "run" is a provable gap (issue #288)
 
 Closing #288 after #187/#244/#188, three decisions inside
