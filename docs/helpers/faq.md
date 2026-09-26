@@ -1091,6 +1091,17 @@ Watch for the inverse bug when writing tests: a scan *range*
 that is only valid numerically (`['9', '11')`) is invalid bytewise — `9` >
 `11` — and `RegionRangeClipper` drops it, returning nothing; use ranges like
 `['2', '3')` with key `19` to exercise "in range numerically, out bytewise".
+A new key-ordering bug report starts in `tests/Unit/Support/BinaryKeyVectors.php`
+(one shared fixture of the discriminating layouts, pairs and probe keys, plus the
+`strcmp` reference) and `tests/Unit/Util/KeyOrderDifferentialTest.php` (the
+cross-implementation differential: `KeyOrder`, `RegionCache::getByKey()`,
+`RegionRangeClipper` and `ScanIterator` all measured against that reference, the
+clipper through its no-gap/no-overlap tiling property) — add the boundary there and
+every component is measured against it at once, rather than writing a new site-local
+layout (issue #180). `RegionResolver` and `RawKvBatch::keyInRegion()` are *not* in
+that sweep: both reduce to `KeyOrder::inRange()` / `batchResolveRegions()` over the
+whole-layout sweep, and both already have site-pinned tests, so a differential
+against them duplicated coverage without adding a detection.
 Note also that `Transaction::__destruct()` fires a `KvBatchRollback` via the
 gRPC mock when a test leaves a non-empty write set — `expects($this->once())`
 on `call()` then fails with "called 2 times"; use `method()` without an

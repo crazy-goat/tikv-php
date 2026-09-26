@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Cache;
 
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Tests\Unit\Support\BinaryKeyVectors;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
@@ -19,6 +20,12 @@ use PHPUnit\Framework\TestCase;
  * numeric-string comparison and TiKV's byte order agree, so the bug class
  * stayed invisible. The layout below is byte-sorted yet numerically
  * *inverted*, which is the only shape on which the two orderings disagree.
+ *
+ * The layout itself and the `strcmp` reference both live in
+ * {@see BinaryKeyVectors} since issue #180 — they are the shared source every
+ * key-ordering component is differentially checked against in
+ * `KeyOrderDifferentialTest`, so this file keeps the *assertions* about the
+ * cache and no longer carries a second copy of either.
  */
 #[CoversClass(RegionCache::class)]
 final class RegionCacheNumericBoundaryTest extends TestCase
@@ -39,14 +46,7 @@ final class RegionCacheNumericBoundaryTest extends TestCase
      */
     private function numericLayout(): array
     {
-        return [
-            $this->region(1, '', '1000'),
-            $this->region(2, '1000', '2000'),
-            $this->region(3, '2000', '30'),
-            $this->region(4, '30', '400'),
-            $this->region(5, '400', '999'),
-            $this->region(6, '999', ''),
-        ];
+        return BinaryKeyVectors::layoutRegions(BinaryKeyVectors::SIX_REGION);
     }
 
     private function seededCache(): RegionCache
@@ -185,7 +185,7 @@ final class RegionCacheNumericBoundaryTest extends TestCase
         $regions = $this->numericLayout();
         $cache = $this->seededCache();
 
-        $plain = $this->decimalKeys(3000, 99999);
+        $plain = BinaryKeyVectors::decimalKeys(3000, 99999);
         // The same 500 keys zero-padded to five digits ('500' → '0500'). A
         // (string) cast of an int can never contain a leading zero, yet that
         // is exactly the shape that moves a key across a boundary ('0500'
@@ -234,7 +234,7 @@ final class RegionCacheNumericBoundaryTest extends TestCase
         $agreements = 0;
         $mismatches = [];
         foreach ($keys as $key) {
-            $expected = $this->referenceRegionId($regions, $key);
+            $expected = BinaryKeyVectors::referenceRegionIdIn($regions, $key);
             $actual = $cache->getByKey($key)?->regionId;
             if ($actual === $expected) {
                 ++$agreements;
@@ -251,44 +251,9 @@ final class RegionCacheNumericBoundaryTest extends TestCase
         return [$agreements, $mismatches];
     }
 
-    /**
-     * The strcmp-based reference: the owning region of $key is the first one
-     * in the byte-sorted layout that contains it. Deliberately a plain linear
-     * scan over half-open [start, end) bounds, with no shared code with
-     * RegionCache beyond the layout itself.
-     *
-     * @param list<RegionInfo> $regions
-     */
-    private function referenceRegionId(array $regions, string $key): ?int
-    {
-        foreach ($regions as $region) {
-            $atOrAfterStart = $region->startKey === '' || strcmp($key, $region->startKey) >= 0;
-            $beforeEnd = $region->endKey === '' || strcmp($key, $region->endKey) < 0;
-            if ($atOrAfterStart && $beforeEnd) {
-                return $region->regionId;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * A deterministic xorshift32 stream rendered as decimal keys — no
-     * rand()/mt_rand(), so a failure is reproducible from the seed alone.
-     *
-     * @return list<string>
-     */
-    private function decimalKeys(int $count, int $max): array
-    {
-        $keys = [];
-        $state = 0x5EED1234;
-        for ($i = 0; $i < $count; ++$i) {
-            $state ^= ($state << 13) & 0xFFFFFFFF;
-            $state ^= $state >> 17;
-            $state ^= ($state << 5) & 0xFFFFFFFF;
-            $keys[] = (string) ($state % ($max + 1));
-        }
-
-        return $keys;
-    }
+    // The strcmp reference and the deterministic decimal key stream are
+    // deliberately NOT duplicated here: they are
+    // BinaryKeyVectors::referenceRegionIdIn() and
+    // BinaryKeyVectors::decimalKeys(), so this test and the
+    // cross-implementation differential cannot drift apart (issue #180).
 }

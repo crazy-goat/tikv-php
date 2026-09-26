@@ -1057,11 +1057,22 @@ class RawKvE2ETest extends TestCase
 
         $this->assertCount(50, $results);
 
-        // Verify ascending order
+        // Verify ascending order. SORT_STRING, never the default SORT_REGULAR:
+        // SORT_REGULAR only falls back to a *numeric* comparison when BOTH
+        // elements are numeric strings, and 'scan-many-000'..'049' are not —
+        // so plain sort() was in fact comparing them as strings, i.e. it was
+        // accidentally right rather than right on purpose (and un-padding the
+        // prefix would not have changed that, since they would still be
+        // non-numeric strings). SORT_REGULAR and SORT_STRING diverge for
+        // *bare decimal* keys — '20' sorts before '100' numerically and after
+        // it bytewise — which is exactly the shape TiKV users store, and
+        // exactly the shape the keys of the numeric deleteRange/scan tests
+        // below use. The expectation must order the way the server does.
+        // (Issue #180, test-audit finding; see KeyOrder.)
         $keys = array_column($results, 'key');
         $sorted = $keys;
-        sort($sorted);
-        $this->assertEquals($sorted, $keys, 'Forward scan of many keys should be in ascending order');
+        sort($sorted, SORT_STRING);
+        $this->assertEquals($sorted, $keys, 'Forward scan of many keys should be in byte-ascending order');
     }
 
     public function testReverseScanManyKeys(): void
@@ -1076,11 +1087,14 @@ class RawKvE2ETest extends TestCase
 
         $this->assertCount(50, $results);
 
-        // Verify descending order
+        // Verify descending order. SORT_STRING again for the reason spelled out
+        // in testScanManyKeys(): rsort()'s SORT_REGULAR would agree with the
+        // byte order only by accident for these non-numeric keys, and diverges
+        // for bare decimal ones (issue #180).
         $keys = array_column($results, 'key');
         $sorted = $keys;
-        rsort($sorted);
-        $this->assertEquals($sorted, $keys, 'Reverse scan of many keys should be in descending order');
+        rsort($sorted, SORT_STRING);
+        $this->assertEquals($sorted, $keys, 'Reverse scan of many keys should be in byte-descending order');
     }
 
     public function testReverseScanManyKeysWithLimit(): void

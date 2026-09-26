@@ -305,10 +305,17 @@ class ScanIteratorTest extends TestCase
             $allResults[] = ['key' => sprintf('k-%03d', $i), 'value' => sprintf('v-%03d', $i)];
         }
 
+        // The fake server answers "first key at or after $startKey", exactly
+        // what a RawScan does — and it must answer it bytewise like TiKV. A
+        // `>=` here is the same latent bug the E2E suite had in its `sort()`:
+        // with 'k-000'..'k-099' the two orders agree, so the double would only
+        // start paging from the wrong key once the keys became numeric strings
+        // ('20' < '100' numerically, '100' < '20' bytewise), and the test would
+        // then compare the iterator against a wrong expectation (issue #180).
         $scanFn = function (string $startKey) use ($allResults): array {
             $startIdx = 0;
             foreach ($allResults as $idx => $r) {
-                if ($r['key'] >= $startKey) {
+                if (strcmp($r['key'], $startKey) >= 0) {
                     $startIdx = $idx;
                     break;
                 }
