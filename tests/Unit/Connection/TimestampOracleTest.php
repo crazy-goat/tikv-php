@@ -397,7 +397,9 @@ class TimestampOracleTest extends TestCase
                 'Tso',
                 $this->callback(fn (TsoRequest $request): bool => $request->getCount() === 64),
                 TsoResponse::class,
-                null,
+                // Issue #260: a TSO call always carries a deadline; `null`
+                // means the configured tsoTimeoutMs, not "no timeout".
+                TimestampOracle::DEFAULT_TSO_TIMEOUT_MS,
             )
             ->willReturn($this->makeTsoResponse(1715000000000, (1 << 18) - 2, 64));
 
@@ -466,7 +468,9 @@ class TimestampOracleTest extends TestCase
                 'Tso',
                 $this->callback(fn (TsoRequest $request): bool => $request->getCount() === 4),
                 TsoResponse::class,
-                null,
+                // Issue #260: a TSO call always carries a deadline; `null`
+                // means the configured tsoTimeoutMs, not "no timeout".
+                TimestampOracle::DEFAULT_TSO_TIMEOUT_MS,
             )
             ->willReturn($this->makePooledResponse(1000, 4));
 
@@ -489,7 +493,9 @@ class TimestampOracleTest extends TestCase
                 'Tso',
                 $this->callback(fn (TsoRequest $request): bool => $request->getCount() === 1),
                 TsoResponse::class,
-                null,
+                // Issue #260: a TSO call always carries a deadline; `null`
+                // means the configured tsoTimeoutMs, not "no timeout".
+                TimestampOracle::DEFAULT_TSO_TIMEOUT_MS,
             )
             ->willReturnOnConsecutiveCalls(
                 $this->makePooledResponse(1000, 1),

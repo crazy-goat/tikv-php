@@ -109,6 +109,9 @@ final class ConnectionFactory
         $resolvedMode = $mode ?? Mode::Raw;
         $resolvedCodec = $codec ?? new CodecV1($resolvedMode);
         $apiVersion = self::resolveApiVersion($options);
+        // Built before the PdClients below: PD and TSO deadlines are
+        // configured on TimeoutConfig and read from the client (issue #260).
+        $timeoutConfig = self::buildTimeoutConfig($options);
         $resolvedClusterId = null;
         if ($apiVersion === 2 && !$resolvedCodec instanceof CodecV2) {
             $keyspaceName = self::resolveKeyspaceName($options);
@@ -120,6 +123,7 @@ final class ConnectionFactory
                 self::resolveLowResMaxStalenessMs($options),
                 self::resolveTsoPoolSize($options),
                 new CodecV1($resolvedMode),
+                $timeoutConfig,
             );
             try {
                 $keyspaceId = (new KeyspaceResolver($probePdClient))->resolve($keyspaceName);
@@ -138,12 +142,12 @@ final class ConnectionFactory
             self::resolveLowResMaxStalenessMs($options),
             self::resolveTsoPoolSize($options),
             $resolvedCodec,
+            $timeoutConfig,
         );
         if ($resolvedClusterId !== null) {
             $pdClient->setClusterId($resolvedClusterId);
         }
 
-        $timeoutConfig = self::buildTimeoutConfig($options);
         $slowLogConfig = self::buildSlowLogConfig($options);
         $storeHostValidation = self::resolveStoreHostValidation($options);
 
@@ -539,6 +543,16 @@ final class ConnectionFactory
                     ? $t['ingestTimeoutMs'] : $timeoutConfig->ingestTimeoutMs,
                 batchDeadlineMs: isset($t['batchDeadlineMs']) && is_int($t['batchDeadlineMs'])
                     ? $t['batchDeadlineMs'] : $timeoutConfig->batchDeadlineMs,
+                // PD / TSO / lock-resolution deadlines (issue #260). Separate
+                // from the store RPC fields above: a hung PD fails every lookup
+                // and every transaction begin, which is a different failure
+                // mode from a slow store.
+                pdTimeoutMs: isset($t['pdTimeoutMs']) && is_int($t['pdTimeoutMs'])
+                    ? $t['pdTimeoutMs'] : $timeoutConfig->pdTimeoutMs,
+                tsoTimeoutMs: isset($t['tsoTimeoutMs']) && is_int($t['tsoTimeoutMs'])
+                    ? $t['tsoTimeoutMs'] : $timeoutConfig->tsoTimeoutMs,
+                lockResolveTimeoutMs: isset($t['lockResolveTimeoutMs']) && is_int($t['lockResolveTimeoutMs'])
+                    ? $t['lockResolveTimeoutMs'] : $timeoutConfig->lockResolveTimeoutMs,
             );
         }
 

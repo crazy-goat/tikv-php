@@ -12,6 +12,8 @@ use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class ConnectionFactoryTest extends TestCase
@@ -231,6 +233,67 @@ class ConnectionFactoryTest extends TestCase
         );
 
         $this->assertSame(0, $bundle->timeoutConfig->batchDeadlineMs);
+    }
+
+    // ========================================================================
+    // options['timeout']['pdTimeoutMs'|'tsoTimeoutMs'|'lockResolveTimeoutMs']
+    // — metadata-plane deadlines (issue #260)
+    // ========================================================================
+
+    /**
+     * @return array<string, array{string, int, int}>
+     */
+    public static function metadataDeadlineProvider(): array
+    {
+        return [
+            'pd' => ['pdTimeoutMs', 3000, 4321],
+            'tso' => ['tsoTimeoutMs', 3000, 5432],
+            'lockResolve' => ['lockResolveTimeoutMs', 5000, 6543],
+        ];
+    }
+
+    #[DataProvider('metadataDeadlineProvider')]
+    public function testTimeoutMetadataDeadlineDefaultsToTheFiniteDefault(string $field, int $default): void
+    {
+        $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
+
+        $this->assertSame($default, $bundle->timeoutConfig->{$field});
+    }
+
+    #[DataProvider('metadataDeadlineProvider')]
+    public function testTimeoutMetadataDeadlineIsThreadedThrough(string $field, int $default, int $configured): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => [$field => $configured]],
+        );
+
+        $this->assertSame($configured, $bundle->timeoutConfig->{$field});
+        // …and the other two keep their own defaults: they are configured
+        // separately because a hung PD and a slow store are different
+        // failures.
+        foreach (['pdTimeoutMs', 'tsoTimeoutMs', 'lockResolveTimeoutMs'] as $other) {
+            if ($other !== $field) {
+                $this->assertSame(
+                    (new TimeoutConfig())->{$other},
+                    $bundle->timeoutConfig->{$other},
+                    "{$other} must not inherit {$field}'s value",
+                );
+            }
+        }
+    }
+
+    #[DataProvider('metadataDeadlineProvider')]
+    public function testTimeoutMetadataDeadlineNonIntFallsBackToDefault(
+        string $field,
+        int $default,
+    ): void {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => [$field => '3000']],
+        );
+
+        $this->assertSame($default, $bundle->timeoutConfig->{$field});
     }
 
     /**

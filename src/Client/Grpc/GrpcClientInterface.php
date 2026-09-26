@@ -8,6 +8,23 @@ use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use Google\Protobuf\Internal\Message;
 use Grpc\Channel;
 
+/**
+ * Transport contract: every call carries a deadline.
+ *
+ * A call's `$timeoutMs` argument is read as follows (issue #260):
+ *
+ * - a positive int — that many milliseconds from now;
+ * - `null` — the **library default**, {@see GrpcClient::DEFAULT_TIMEOUT_MS}
+ *   (30 s). `null` used to mean "no deadline", which is why a blocking
+ *   `Grpc\Call::startBatch()` on a half-open connection could pin a worker
+ *   past `max_execution_time`;
+ * - a non-positive int (`0`) — the explicit opt-out: no deadline at all.
+ *
+ * The sentinel is `0` rather than a separate method because it is how the
+ * rest of the library already spells "disabled" (`TimeoutConfig`'s
+ * `batchDeadlineMs = 0`), and because a call site must be able to decide
+ * per call.
+ */
 interface GrpcClientInterface
 {
     /**
@@ -19,7 +36,9 @@ interface GrpcClientInterface
      * @param string $method Method name (e.g., "GetRegion")
      * @param Message $request Protobuf request message
      * @param class-string<T> $responseClass Response message class name
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Deadline in milliseconds; null = the library
+     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS}),
+     *                            0 = no deadline
      * @return T Response message
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException On gRPC error
      */
@@ -47,7 +66,9 @@ interface GrpcClientInterface
      * @param string $method Method name (e.g., "RawDeleteRange")
      * @param Message $request Protobuf request message
      * @param class-string<T> $responseClass Response message class name
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Deadline in milliseconds; null = the library
+     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS}),
+     *                            0 = no deadline
      * @return GrpcFuture Un-waited future resolving to T
      * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
      */
@@ -72,7 +93,9 @@ interface GrpcClientInterface
      * @param string $method Method name (e.g., "Write")
      * @param Message[] $requests Sequence of request messages to stream
      * @param class-string<T> $responseClass Response message class name
-     * @param int|null $timeoutMs Optional timeout in milliseconds
+     * @param int|null $timeoutMs Deadline in milliseconds; null = the library
+     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS}),
+     *                            0 = no deadline
      * @return T Response message
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException On gRPC error
      */

@@ -462,3 +462,50 @@ Closing #288 after #187/#244/#188, three decisions inside
    `getById()` probe — so the claim is checkable rather than asserted
    (`benchmarks/BatchResolveRegionsBenchmark.php`).
 
+## Every gRPC call carries a finite deadline, and PD/TSO/lock-resolution time out separately from the store RPCs (issue #260)
+
+Two decisions from #260 that should not be "simplified" away:
+
+1. **`null` means "library default", not "no timeout".** `GrpcClient` used to
+   resolve a `null` timeout to `Timeval::infFuture()`, which is the one
+   deadline the gRPC C core never expires — and `Grpc\Call::startBatch()` is
+   a blocking call *inside* the C extension, so neither `max_execution_time`
+   nor `set_time_limit()` can rescue a worker pinned on a half-open
+   connection. `null` now resolves to `GrpcClient::DEFAULT_TIMEOUT_MS` (30 s),
+   and the only way to ask for an unbounded call is the explicit non-positive
+   sentinel `0` — deliberately the same spelling `TimeoutConfig`'s
+   `batchDeadlineMs = 0` already uses for "disabled", so there is one
+   convention rather than two. The 30 s backstop is defence in depth, not the
+   fix: the real deadlines are named per call site, so a 30 s default never
+   has to be the one that fires.
+2. **PD, TSO and lock resolution have their own `TimeoutConfig` fields**
+   (`pdTimeoutMs` / `tsoTimeoutMs` / `lockResolveTimeoutMs`, all finite
+   defaults) rather than borrowing a store field. They are separate because
+   the failure modes are: a hung metadata plane takes every region lookup and
+   every transaction begin down **simultaneously** — one blackholed PD, the
+   whole process pool — whereas a slow store is a per-region problem the
+   `RetryExecutor` already handles against a per-region budget. A shared
+   field would force one value that is simultaneously too tight for a large
+   scan and too loose for a TSO fetch. The values are threaded at the call
+   site, not in `callWithClusterIdRetry()`'s signature: one helper, ten call
+   sites, and the three classes disagree about which field is right, so the
+   argument is the decision and it belongs where the call is made.
+
+   The consequence to remember: `checkTxnStatus()` asks PD for a timestamp on
+   its way to a store, so it consumes **two** deadlines — `tsoTimeoutMs` for
+   the `Tso` fetch and `lockResolveTimeoutMs` for `KvCheckTxnStatus` itself.
+   It previously passed the store `writeTimeoutMs` to `getLowResolutionTimestamp()`,
+   which made a TSO deadline a function of the write timeout.
+
+Enforcement is split by what each assertion can reach. `RpcDeadlineTest` drives
+the real entry points through a recording `GrpcClientInterface` and asserts the
+argument each one received — that is the only thing the pre-fix code got wrong.
+Its companion assertion in the same class tokenises the three source files and
+fails if *any* `->call()` / `->callAsync()` / `->callStreaming()` site lacks a
+sixth argument, because a per-entry-point test can only cover the paths it
+drives: it would not have caught a site added tomorrow. The `Timeval` itself
+needs ext-grpc, so `GrpcClientTimevalDeadlineTest` lives in the `Grpc` suite
+and asserts the object; the extension-free `GrpcClientDeadlineTest` pins the
+`null → 30 s` resolution through the private `resolveTimeoutMs()` seam, the
+same reflection-over-a-private-seam pattern as `channelArgs()` (see the FAQ).
+

@@ -9,6 +9,7 @@
         <testsuite name="Unit">
             <directory>tests/Unit</directory>
             <exclude>tests/Unit/Grpc/GrpcClientTest.php</exclude>
+            <exclude>tests/Unit/Grpc/GrpcClientTimevalDeadlineTest.php</exclude>
             <exclude>tests/Unit/Batch/GrpcFutureTest.php</exclude>
             <exclude>tests/Unit/RawKv/RawKvBatchTest.php</exclude>
             <exclude>tests/Unit/RawKv/RawKvBatchConcurrencyCapTest.php</exclude>
@@ -29,6 +30,7 @@
                  wait-phase retry). CI always invokes a single testsuite
                  selector, so nothing runs twice in any job. -->
             <file>tests/Unit/Grpc/GrpcClientTest.php</file>
+            <file>tests/Unit/Grpc/GrpcClientTimevalDeadlineTest.php</file>
             <file>tests/Unit/Batch/GrpcFutureTest.php</file>
             <file>tests/Unit/RawKv/RawKvBatchTest.php</file>
             <file>tests/Unit/RawKv/RawKvBatchConcurrencyCapTest.php</file>

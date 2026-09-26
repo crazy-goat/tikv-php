@@ -30,6 +30,14 @@ use Psr\Log\NullLogger;
 
 final readonly class LockResolver
 {
+    /**
+     * @param TimeoutConfig $timeoutConfig deadlines for the lock-resolution
+     *        RPCs (`lockResolveTimeoutMs`) and for the TSO fetch
+     *        `checkTxnStatus()` performs on its way to a store
+     *        (`tsoTimeoutMs`). Both are metadata-plane deadlines, sized
+     *        separately from the store read/write ones because a hung PD
+     *        and a slow store are different failures (issue #260).
+     */
     public function __construct(
         private GrpcClientInterface $grpc,
         private RegionResolver $regionResolver,
@@ -158,7 +166,7 @@ final readonly class LockResolver
         // resolution is staleness-tolerant — with a configured staleness
         // bound it reuses the cached TSO timestamp and saves a PD round
         // trip. Without a bound this is a fresh TSO fetch, unchanged.
-        $request->setCurrentTs($this->pdClient->getLowResolutionTimestamp($this->timeoutConfig->writeTimeoutMs));
+        $request->setCurrentTs($this->pdClient->getLowResolutionTimestamp($this->timeoutConfig->tsoTimeoutMs));
         $request->setRollbackIfNotExist(true);
 
         $this->logger->debug('CheckTxnStatus', [
@@ -173,6 +181,7 @@ final readonly class LockResolver
             'KvCheckTxnStatus',
             $request,
             CheckTxnStatusResponse::class,
+            $this->timeoutConfig->lockResolveTimeoutMs,
         );
 
 
@@ -273,6 +282,7 @@ final readonly class LockResolver
                 'KvCheckSecondaryLocks',
                 $request,
                 CheckSecondaryLocksResponse::class,
+                $this->timeoutConfig->lockResolveTimeoutMs,
             );
 
             RegionErrorHandler::check(
@@ -359,6 +369,7 @@ final readonly class LockResolver
                 'KvResolveLock',
                 $request,
                 ResolveLockResponse::class,
+                $this->timeoutConfig->lockResolveTimeoutMs,
             );
 
             RegionErrorHandler::check(
@@ -387,7 +398,14 @@ final readonly class LockResolver
         $request->setStartVersion($lockTs);
         $request->setCommitVersion($commitTs);
 
-        $this->grpc->call($address, 'tikvpb.Tikv', 'KvResolveLock', $request, ResolveLockResponse::class);
+        $this->grpc->call(
+            $address,
+            'tikvpb.Tikv',
+            'KvResolveLock',
+            $request,
+            ResolveLockResponse::class,
+            $this->timeoutConfig->lockResolveTimeoutMs,
+        );
     }
 
     private function resolveLockRolledBack(LockInfo $lock, int $lockTs): void
@@ -406,7 +424,14 @@ final readonly class LockResolver
         $request->setStartVersion($lockTs);
         $request->setCommitVersion(0);
 
-        $this->grpc->call($address, 'tikvpb.Tikv', 'KvResolveLock', $request, ResolveLockResponse::class);
+        $this->grpc->call(
+            $address,
+            'tikvpb.Tikv',
+            'KvResolveLock',
+            $request,
+            ResolveLockResponse::class,
+            $this->timeoutConfig->lockResolveTimeoutMs,
+        );
     }
 
     private function invalidateRegionFor(string $key): void
