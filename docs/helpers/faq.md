@@ -401,6 +401,48 @@ resolution and the executor's invalidation lookup, then a miss) use
 flag — it models the same state machine, is order-visible in the test,
 and is PHPStan-clean.
 
+## PHPStan remembers a helper's return value across calls — poll loops need `@phpstan-impure`
+
+Polling a cluster for a state change (PD learning a new region boundary, a
+leader moving) means calling the same predicate again and again:
+
+```php
+while (!$this->regionStartsAt($splitKey) && $attempt < 5) {
+    $attempt++;
+    /* split-region RPC, then: */
+    for ($i = 0; $i < 30; $i++) {
+        if ($this->regionStartsAt($splitKey)) {  // if.alwaysFalse
+            break;
+        }
+        usleep(500_000);
+    }
+}
+```
+
+PHPStan cannot see the state change through the interface, so it remembers the
+first `false` and reports `if.alwaysFalse` on every later call (with the
+negation in the loop condition it is `booleanNot.alwaysTrue` instead — the
+shape of the finding changes, the cause does not). It fires for a closure
+exactly as for a private method, and only once the call is repeated: a single
+call in a `for` body is fine. Fix it by stating the truth rather than by
+restructuring the loop:
+
+```php
+/**
+ * @phpstan-impure
+ */
+private function regionStartsAt(string $splitKey): bool
+```
+
+`TxnKvE2ETest::splitTxnKeyspaceIntoRegions()` — the only polling loop left in
+the tree — escapes this by accident: it wraps the same predicate in
+`count($regionsForWorkloadRange())`, and `count()` hides the call from the value
+cache. Do not copy that shape expecting it to stay clean if the `count()` ever
+goes away. This is the same trap as the by-ref-flag entry below, seen from the
+other side: there the state is invisible to PHPStan and mock call sequences
+model it; here the state is genuinely external, so the honest annotation is the
+fix.
+
 ## Bash 3.2 portability: process substitution, tab-IFS, BSD/GNU sed/date
 
 Lessons from building `bin/pick-issue.sh` (#457); the script itself is the

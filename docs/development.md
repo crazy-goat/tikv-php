@@ -561,6 +561,139 @@ public function testConcurrentBatchPuts(): void
 }
 ```
 
+### Region boundaries: the #188 split point by hand
+
+`RawKvE2ETest::testBatchRoundTripResolvesEveryKeyWhenTheLargestOneIsARegionStartKey()`
+pins issue #188's end-to-end vector — every key of a batch resolves, including
+the **largest** one when it is a region start key, and including it again as a
+one-key batch — against whatever layout the cluster happens to have. The
+issue's literal case, "a boundary *I* choose with `SplitRegion`, then write to",
+is a manual procedure instead, and the reason is a property of this client
+worth knowing before you try it yourself:
+
+> **PD stores the default keyspace's region boundaries memory-comparable
+> encoded, while a `Mode::Raw` bundle asks PD in the unencoded key space.**
+> `CodecV1::encodeRegionKey()` returns the key unchanged in `Mode::Raw`
+> (`src/Client/Codec/CodecV1.php:37`), and `SplitRegion` records
+> `MemComparableCodec::encode($key)`. So a Raw-mode bundle cannot observe the
+> boundary its own split created, while a `Mode::Txn` bundle can —
+> `RegionInfoMapper::fromProto()` decodes the stored bytes back to user keys for
+> it. That is why `TxnKvE2ETest::splitTxnKeyspaceIntoRegions()` is the working
+> precedent, and why its sibling `testTxnWorkloadAcrossPreSplitRegions()` is
+> the automated version of the split-point case.
+
+Print the same cluster's boundaries through both bundles and the asymmetry is
+one line each — this cluster's boundaries all came from a `SplitRegion` RPC at
+the user key `rawkv-188-txnsplit`:
+
+```bash
+docker-compose run --rm -T -e PD_ENDPOINTS=pd:2379 php-client php -r '
+require "/app/vendor/autoload.php";
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\Mode;
+use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
+foreach ([Mode::Raw, Mode::Txn] as $mode) {
+    $bundle = ConnectionFactory::create(["pd:2379"], null, [], new CodecV1($mode));
+    printf("--- Mode::%s\n", $mode->name);
+    foreach ($bundle->pdClient->scanRegions("", "") as $r) {
+        printf("  region %-4d start=%s\n", $r->regionId, bin2hex($r->startKey));
+    }
+}'
+```
+
+```text
+--- Mode::Raw
+  region 32    start=7261776b762d3138ff382d74786e73706cff6974000000000000f9   ← MCE bytes
+--- Mode::Txn
+  region 32    start=7261776b762d3138382d74786e73706c6974                    ← the user key
+```
+
+**1. Start a cluster** (this is the one `make test-e2e` uses, and no client
+build is needed):
+
+```bash
+docker-compose up -d pd tikv1 tikv2 tikv3
+```
+
+**2. Split the keyspace at a key of your choice.** `pd-ctl` takes keys
+hex-encoded, and `--keys` is the key **as PD stores it**, so the bytes you pass
+are the bytes the new region starts at:
+
+```bash
+KEY='rawkv-188-split-point'
+HEX=$(printf '%s' "$KEY" | od -An -tx1 | tr -d ' \n')
+docker-compose exec -T pd /pd-ctl region key "$HEX"          # JSON; take its "id"
+docker-compose exec -T pd /pd-ctl operator add split-region <id> \
+    --keys "$HEX" --policy usekey
+```
+
+The split is asynchronous (about 9 s here). Poll until the boundary is there —
+`docker-compose exec -T pd /pd-ctl operator show` prints `[]` again and
+`http://localhost:2379/pd/api/v1/regions` lists one more region whose
+`start_key` is your hex — before you write anything. Do not re-run the command
+for a key that already has a boundary: PD accepts it, leaves an operator that
+never completes, and then refuses every later operator with `failed to add
+operator, maybe already have one` until that operator's 1 min timeout expires
+(or `pd-ctl operator remove <region-id>` clears it).
+
+**3. Run the batch against the boundary key.** `$boundary` is now a region start
+key in the client's own key space, so this is issue #188's vector verbatim:
+
+```bash
+docker-compose run --rm -T -e PD_ENDPOINTS=pd:2379 php-client php -r '
+require "/app/vendor/autoload.php";
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+$boundary = "rawkv-188-split-point";   // the key the region now starts at
+$below = "rawkv-188-a";                // "a" < "s", so it sorts below it
+$client = RawKvClient::create(["pd:2379"]);
+$client->batchPut([$below => "below", $boundary => "at-the-boundary"]);
+print_r($client->batchGet([$below, $boundary]));   // whole batch
+print_r($client->batchGet([$boundary]));           // degenerate [k, k . "\x00")
+var_dump($client->get($boundary));                 // single-key path
+$client->batchDelete([$below, $boundary]);
+$client->close();'
+```
+
+Both `batchGet()` calls print the values, not `null`. Narrowing the batch's
+window from `[minKey, successor(maxKey))` back to the pre-#244
+`[minKey, maxKey)` turns this into `TiKvException: PD could not resolve the
+region for key …; refusing to silently drop it from the batch` — the reported
+symptom.
+
+If the batch fails with `Retry attempt cap (30) exhausted` while the keys
+themselves are fine, that is the store-side region information lagging, not the
+window: `docker-compose run` recreates the `tikv` containers it depends on (see
+`docs/helpers/faq.md`), and a request that reaches a store which has not applied
+the new split yet burns the whole retry budget. Wait a few seconds and re-run
+before suspecting the client.
+
+**4. Take the boundary away again.** Region boundaries live as long as the
+cluster, and *this* one is not MCE-shaped, which costs you two things:
+
+```bash
+docker-compose exec -T pd /pd-ctl operator add merge-region <new-region> <previous-region>
+```
+
+- Every `Mode::Txn` bundle — the whole TxnKV path, `tests/E2E/TxnKvE2ETest.php` —
+  throws `InvalidArgumentException: Invalid MCE marker 0x38 at byte 8` out of
+  `MemComparableCodec::decode()` on its next `scanRegions()`/`getRegion()`,
+  because a stored boundary that is not a valid MCE group sequence cannot be
+  decoded. Merge it away before running the TxnKV lane.
+- RawKV routing for keys between this boundary and its MCE-encoded neighbour
+  becomes unreliable: reads and writes there fail with `Retry attempt cap (30)
+  exhausted`, because PD's region lookup and this client's `RegionResolver`
+  disagree about which region owns them. Put the boundary at a key prefix of
+  your own, and expect to clean it up.
+
+**The safe variant**: pass the MCE-encoded bytes instead — `--keys` is the output
+of `MemComparableCodec::encode($key)`, e.g.
+`7261776b762d3138ff382d74786e73706cff6974000000000000f9` for
+`rawkv-188-txnsplit`. That is the boundary shape TiKV itself records, so neither
+problem above happens — but the RawKV client still cannot use it, because it
+asks PD in the unencoded key space. Only the transactional client sees the user
+key as a boundary, and that case is already automated
+(`testTxnWorkloadAcrossPreSplitRegions()`).
+
 ### API V2 E2E lane
 
 The normal E2E lane uses the V1 cluster. Run the API V2 smoke suite against

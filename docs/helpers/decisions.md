@@ -273,3 +273,71 @@ report what moved — never a new site-local layout; and let the fixture *derive
 expectations (a key pair is admitted to the discriminating table only when asking
 PHP what `$a < $b` says proves it disagrees with byte order, so the table cannot rot
 into pairs a pre-#186 comparison passes).
+## A Raw-mode region boundary is stored bytes, not the key you split at (issue #188)
+
+PD stores the default keyspace's region boundaries memory-comparable encoded:
+splitting the keyspace at `rawkv-188-txnsplit` (TiKV's `SplitRegion` RPC with
+that raw user key) records the boundary
+`7261776b762d3138ff382d74786e73706cff6974000000000000f9`, verified on a live
+cluster. A `Mode::Raw` bundle never sees that user key as a boundary:
+`CodecV1::encodeRegionKey()` returns the key unchanged in `Mode::Raw`
+(`src/Client/Codec/CodecV1.php:37,53-60`), and `RegionInfoMapper::fromProto()`
+decodes PD's stored boundaries back through the same passthrough codec, so the
+client asks PD *and* reads the answer in the unencoded key space — the space
+`RegionResolver::batchResolveRegions()` also computes its
+`[minKey, successor(maxKey))` window in (`src/Client/Region/RegionResolver.php:139`).
+One run, both bundles, same cluster:
+
+```text
+--- Mode::Raw boundaries as this client sees them
+  region 32    start=7261776b762d3138ff382d74786e73706cff6974000000000000f9  ← MCE bytes
+--- Mode::Txn boundaries as this client sees them
+  region 32    start=7261776b762d3138382d74786e73706c6974                   ← the user key
+```
+
+`Mode::Txn` is why `TxnKvE2ETest::splitTxnKeyspaceIntoRegions()` works and its
+sibling `testTxnWorkloadAcrossPreSplitRegions()` is the automated split-point
+vector: encode on the way out, decode on the way in, so `RegionInfo::startKey`
+is the user key again and the region that starts at `"\x01\x00"` / `"mrr"` is
+visible and assertable. A Raw-mode test that waits for a boundary it created
+with `SplitRegion` waits forever — that is the whole reason #188's E2E coverage
+used to self-skip (two runs, 1 m 15 s each, zero real coverage) and had to be
+replaced.
+
+What the replacement does instead of creating a boundary:
+`RawKvE2ETest::smallestRegionStartKey()` reads the layout through a `Mode::Raw`
+bundle — the same codec and `PdClient` the resolver uses, so its answer *is* a
+boundary in the key space the window is computed in — and
+`testBatchRoundTripResolvesEveryKeyWhenTheLargestOneIsARegionStartKey()` uses
+the smallest non-empty start key as the batch maximum, its proper prefixes as
+the other keys, and asserts every key resolves (whole batch, one-key batch, and
+`get()`). A single-region cluster offers no non-empty start key (`''` is the
+keyspace minimum and can never be a batch maximum), so the batch degrades to a
+plain `uniqid()`-keyed set and the test still runs and still pins the no-drop
+guarantee and the degenerate `[k, k . "\x00")` window. Verified as a real
+regression test: reverting the window to the pre-#244 `[minKey, maxKey)` in a
+scratch copy of `src/` makes it fail with
+`TiKvException: PD could not resolve the region for key …; refusing to silently
+drop it from the batch`.
+
+The issue's literal case (choose a boundary with `SplitRegion`, write to it) is
+a documented manual procedure — "Region boundaries: the #188 split point by
+hand" in `docs/development.md` — because it is not a test-suite action: it
+leaves a permanent region boundary behind, which would make the shared suite's
+layout depend on run order. `pd-ctl operator add split-region --keys <hex>`
+does store the bytes verbatim and *is* visible to a Raw client, but that
+boundary is not MCE-shaped and costs more than it buys: every `Mode::Txn`
+bundle then throws `InvalidArgumentException: Invalid MCE marker 0x…` out of
+`MemComparableCodec::decode()` (`src/Client/Codec/MemComparableCodec.php:88`),
+and PD and `RegionResolver` disagree about which region owns the keys between
+that boundary and its MCE-encoded neighbour, so RawKV reads and writes there
+fail after the retry budget is spent. Merge such a boundary away again.
+
+Production impact of the key-space asymmetry itself: none against a
+TiKV-created cluster. All 204 RawKV E2E tests pass, and the shapes where the two
+key spaces *can* differ — the stored boundary bytes themselves and their
+prefixes, which sit in the padding gap `[K, MemComparableCodec::encode($K))` —
+round-trip: for every non-empty boundary of an eight-region cluster the
+boundary bytes and their one- and two-byte prefixes were written and read back
+(21 keys, no region error, no retry). The client misroutes only when a stored
+boundary is not MCE-shaped, which no TiKV path produces.

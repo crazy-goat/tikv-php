@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\E2E;
 
+use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\Mode;
+use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
@@ -11,6 +14,7 @@ use CrazyGoat\TiKV\Client\RawKv\CasResult;
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -297,6 +301,149 @@ class RawKvE2ETest extends TestCase
     private function stringKeyedPairs(string $key, string $value): array
     {
         return [$key => $value];
+    }
+
+    /**
+     * Issue #188's end-to-end vector: every key of a batch resolves, and the
+     * **largest** one resolves too when it is a region start key.
+     *
+     * `RegionResolver::batchResolveRegions()` derives one PD `ScanRegions`
+     * window per batch, and `ScanRegions` is half-open, so since #244 the
+     * window is `[minKey, successor(maxKey))`: the successor — the immediate
+     * byte after the batch maximum — is what pulls in the region that
+     * *starts* at that key. Before #244 the window ended at the maximum key
+     * itself, that region stayed outside it and the maximum key resolved to
+     * nothing, so it was dropped from the batch (`batchGet()` answered
+     * `['k' => null]`). The two unit vectors in
+     * `tests/Unit/RawKv/RegionResolverTest.php` pin that window against a
+     * scripted PD; this test pins the observable consequence on a real
+     * cluster, twice:
+     *
+     *  - the whole multi-key batch (nine keys, or ten when the boundary is
+     *    longer than the shortest possible one), whose maximum key is a region
+     *    start key whenever the cluster's layout offers one, and
+     *  - that maximum key alone, the degenerate one-key window
+     *    `[k, k . "\x00")`, which pre-#244 collapsed to the empty `[k, k)`
+     *    that PD answers with an empty region list.
+     *
+     * The test never skips. A single-region cluster has no non-empty start
+     * key (the first region's `''` is the keyspace minimum, so it can never
+     * be a batch maximum), and the batch then degrades to a plain
+     * uniqid()-keyed set that still pins the no-drop guarantee and the
+     * degenerate window.
+     *
+     * The issue's literal case — a boundary this test creates with
+     * `SplitRegion` and then writes to — is a documented manual procedure
+     * instead, because it cannot be made automatic: `CodecV1` in `Mode::Raw`
+     * hands PD region keys unencoded while the default keyspace stores
+     * MCE-encoded boundaries, so a Raw-mode bundle cannot observe the
+     * boundary its own split created. See "Region boundaries: the #188 split
+     * point by hand" in `docs/development.md` and `docs/helpers/decisions.md`.
+     */
+    public function testBatchRoundTripResolvesEveryKeyWhenTheLargestOneIsARegionStartKey(): void
+    {
+        $boundary = $this->smallestRegionStartKey();
+        $maxKey = $boundary;
+
+        $keys = [];
+        if ($maxKey === null) {
+            // No boundary to aim at: '…-00' … '…-08' plus the '…-max' maximum
+            // under ONE token, since '0' < 'm' bytewise and a second uniqid()
+            // could sort above 'max' — the premise assertion below would then
+            // (correctly) fail.
+            $prefix = 'rawkv-188-' . uniqid() . '-';
+            for ($i = 0; $i < 9; $i++) {
+                $keys[] = $prefix . sprintf('%02d', $i);
+            }
+            $maxKey = $prefix . 'max';
+        } else {
+            // Proper prefixes of the boundary, as many as fit in a ten-key
+            // batch. A prefix is bytewise smaller than the key it prefixes, so
+            // the boundary is the batch maximum by construction; a region
+            // start key is at least nine bytes long (eight key bytes plus the
+            // MCE marker), so even the shortest possible one leaves eight
+            // distinct proper prefixes.
+            $prefixCount = min(9, strlen($boundary) - 1);
+            for ($length = 1; $length <= $prefixCount; $length++) {
+                $keys[] = substr($boundary, 0, $length);
+            }
+        }
+        $keys[] = $maxKey;
+
+        $pairs = [];
+        foreach ($keys as $index => $key) {
+            $pairs[$key] = 'value-' . $index;
+        }
+
+        // The vector only means something if the boundary really is the batch
+        // maximum, and byte order is what decides that: sort bytewise, never
+        // with the default SORT_REGULAR (issue #186), and check the premise
+        // before the round trip instead of assuming it.
+        $sorted = array_keys($pairs);
+        sort($sorted, SORT_STRING);
+        $this->assertSame(
+            $maxKey,
+            $sorted[count($sorted) - 1],
+            'the region boundary must be the bytewise maximum of the batch',
+        );
+
+        $this->putAndTrack($pairs);
+
+        $results = $this->testClient->batchGet(array_keys($pairs));
+        $this->assertCount(count($pairs), $results, 'batchGet must answer for every key, never drop one');
+        foreach ($pairs as $key => $value) {
+            $this->assertSame(
+                $value,
+                $results[$key] ?? null,
+                sprintf('batchGet of key %s', bin2hex($key)),
+            );
+        }
+
+        // The degenerate one-key window, and the single-key path that never
+        // goes through the resolver's batch window at all: both must answer
+        // for a key that is a region start key.
+        $single = $this->testClient->batchGet([$maxKey]);
+        $this->assertSame([$maxKey => $pairs[$maxKey]], $single);
+        $this->assertSame($pairs[$maxKey], $this->testClient->get($maxKey));
+    }
+
+    /**
+     * The smallest non-empty region start key the client can see, or null
+     * while the keyspace is a single region.
+     *
+     * Read through a `Mode::Raw` connection bundle — the same codec and the
+     * same `PdClient` the production RawKV path resolves with — so the
+     * returned bytes are a boundary in the *client's* key space, which is the
+     * space `batchResolveRegions()` computes its `[minKey, successor(maxKey))`
+     * window in. A `Mode::Txn` bundle would answer with decoded user keys
+     * instead; only the Raw bundle's answer is a boundary a RawKV batch can
+     * actually be resolved against.
+     *
+     * The first region's `''` start key is skipped: it is the keyspace
+     * minimum, so it can never be the maximum key of a batch.
+     */
+    private function smallestRegionStartKey(): ?string
+    {
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        $bundle = ConnectionFactory::create($pdEndpoints, null, [], new CodecV1(Mode::Raw));
+
+        try {
+            $smallest = null;
+            foreach ($bundle->pdClient->scanRegions('', '') as $region) {
+                $startKey = $region->startKey;
+                if ($startKey === '') {
+                    continue;
+                }
+                if ($smallest === null || KeyOrder::lt($startKey, $smallest)) {
+                    $smallest = $startKey;
+                }
+            }
+
+            return $smallest;
+        } finally {
+            $bundle->grpc->close();
+            $bundle->pdClient->close();
+        }
     }
 
     /**
