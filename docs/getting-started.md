@@ -268,10 +268,11 @@ use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 $txnClient = TxnKvClient::create(['127.0.0.1:2379']);
 
 try {
-    // Pessimistic transaction (default). Writes remain buffered until commit,
-    // but the timestamp of the preceding read (or write, if there was no read)
-    // is retained and checked by TiKV at lock/prewrite time. An intervening
-    // commit is reported as a conflict instead of being silently overwritten.
+    // Pessimistic transaction (default). The value stays buffered until
+    // commit(), but the physical lock is taken before set()/delete()
+    // returns, carrying the timestamp of the preceding read (or a fresh one
+    // if there was no read). An intervening commit is therefore reported as
+    // a conflict at the write instead of being silently overwritten.
     $txn = $txnClient->begin(['pessimistic' => true]);
     
     // Optimistic transaction — locks only on commit
@@ -293,7 +294,8 @@ $txn = $txnClient->begin();
 // Read (snapshot at startTs)
 $value = $txn->get('account:1');
 
-// Write (buffered until commit)
+// Write (value buffered until commit; the default pessimistic mode also takes
+// the physical lock here, so a conflict surfaces on this line)
 $txn->set('account:1', '1000');
 $txn->delete('account:2');
 

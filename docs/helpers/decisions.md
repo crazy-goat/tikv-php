@@ -674,3 +674,63 @@ Do not collapse the three bounds into one value: the 30 s wall clock is the
 binding one for a `ServerBusy` storm (1–2 s sleeps), the sleep budgets are what
 bound a millisecond-scale retry storm that no wall clock would catch.
 
+## The four Percolator invariants of the TxnKV path (issue #182)
+
+Closing the root-cause issue #182, whose four findings (TXN-01, TXN-02, TXN-04,
+TXN-05 + DIV-01/DIV-02) were each already closed by merged work — #449/#270,
+#586/#206 + #588/#209 + #595/#437, and #589/#210 + #590/#211 + #592/#263. The
+decision worth recording is the invariant list, not the diffs, because each one
+is a *silent* wrong-answer bug and a future change that looks like a
+simplification is a regression:
+
+1. **Every `*_ts` protobuf field is a PD TSO timestamp, never a monotonic
+   clock.** `CheckTxnStatus.caller_start_ts` is the resolving transaction's own
+   `start_ts` and `current_ts` comes from PD, so TiKV's
+   `lock_ts.physical() + ttl < current_ts.physical()` can be true at all.
+   Pinned by `LockResolverTest::testCheckTxnStatusSendsCallerStartTsAndFreshTsoFromPd`
+   and `::testCheckTxnStatusSendsTsoMagnitudeTimestamps`; the rule itself is
+   already in `faq.md` ("Every TiKV `*_ts` protobuf field…"), so do not restate
+   it here — cross-link only.
+2. **A live lock is retried, never rolled back.** `resolveLock()` throws
+   `TxnRetryableException` for a lock whose `lock_ttl > 0` and lets the caller's
+   `RetryExecutor` own the backoff; `commit_version = 0` is only ever sent when
+   TiKV reported *no* commit and *no* live lock, and a `commit_ts > 0` is
+   help-committed, never backed out. Pinned by
+   `LockResolverTest::testResolveLockWithActiveLockThrowsRetryableWithoutResolving`
+   (asserts **zero** `KvResolveLock` calls),
+   `::testResolveLockWithCommitTsGetsCommitted` and
+   `::testResolveLockDoesNotSleepForLiveLockRegardlessOfDeadline`. The
+   `usleep(min($ttl, 20s))` before the unconditional rollback is the shape not
+   to restore; a sleep inside a resolver is invisible to the caller's deadline.
+3. **A pessimistic write is protected at write time, and prewrite still
+   constraint-checks.** The default takes the physical lock inside
+   `set()`/`delete()` carrying the preceding read's per-key `for_update_ts`
+   (a fresh one only when there was no read), and the prewrite action is
+   `DO_CONSTRAINT_CHECK` — `DO_PESSIMISTIC_CHECK` tells TiKV to *skip* the
+   `start_ts` write-conflict check because it assumes the key is already locked,
+   which is exactly the lost update. Pinned by
+   `TransactionTest::testPessimisticSetAcquiresLockBeforeReturning` (eager lock
+   RPC *and* the constraint-check action),
+   `::testEagerPessimisticLocksSharePrimaryAndPerPassTimestamp`,
+   `::testEagerPessimisticWriteReusesThePrecedingReadsTimestamp` and
+   `OnePhaseAsyncCommitTest::testPessimisticPrewriteDefersConstraintCheckForBufferedWrites`.
+   `begin()`'s `pessimistic` default is part of the invariant, not an
+   implementation detail — `TxnKvClientTest::testBeginDefaultsToPessimistic` pins
+   it, because when it was unpinned every other test in the suite still passed
+   with the default flipped.
+4. **A per-pair `KeyError` is never silently `null`.** `TxnReader` reads it for
+   `batchGet()` and `scan()` and routes every variant through the single
+   `handleReadKeyError()`. A locked key must *raise* (resolve, then retry), not
+   come back as "not found", and a scan must not end at the first lock — both
+   are snapshot-isolation violations the caller cannot see. Pinned by
+   `TransactionTest::testBatchGetLockedPairResolvesLockAndRetriesInsteadOfReturningNull`,
+   `::testBatchGetRejectsUnhandledPairKeyError` and
+   `::testScanLockedPairResolvesLockRetriesAndReturnsNoMalformedRow`.
+
+The closure did **not** implement the issue's "gate TxnKV behind an
+experimental flag" recommendation: it was conditional on the defects being
+open, and all four are closed in production *and* pinned, so a flag would gate a
+path whose invariants are already verifiable. Do not add one without a new
+finding — `BatchCommands` (#418) is the precedent for a genuinely experimental
+surface, and it is opt-in per option rather than a client-wide gate.
+
