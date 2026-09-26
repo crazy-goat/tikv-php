@@ -951,6 +951,7 @@ is not retried automatically). See
 
 1. **Add backoff:**
    ```php
+   $client->setAtomicForCAS(true);  // required: compareAndSwap() throws without it
    $maxRetries = 10;
    for ($i = 0; $i < $maxRetries; $i++) {
        $current = $client->get('counter') ?? '0';
@@ -966,6 +967,7 @@ is not retried automatically). See
 
 2. **Use PutIfAbsent for locks:**
    ```php
+   $client->setAtomicForCAS(true);  // required: putIfAbsent() throws without it
    $existing = $client->putIfAbsent('lock:resource', 'owner-123', ttl: 30);
    if ($existing === null) {
        // Acquired lock

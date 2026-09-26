@@ -120,6 +120,8 @@ final class RawKvClient
     public function reverseScan(string $startKey, string $endKey, int $limit = 0, bool $keyOnly = false): array;
     
     // Atomic operations
+    public function setAtomicForCAS(bool $enabled): self;
+    public function isAtomicForCAS(): bool;
     public function compareAndSwap(string $key, ?string $expectedValue, string $newValue, int $ttl = 0): CasResult;
     public function putIfAbsent(string $key, string $value, int $ttl = 0): ?string;
     

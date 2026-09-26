@@ -2690,7 +2690,8 @@ class RawKvClientTest extends TestCase
     public function testCompareAndSwapRequiresAtomicMode(): void
     {
         $this->expectException(InvalidStateException::class);
-        $this->expectExceptionMessage('CompareAndSwap requires atomic mode');
+        // Verbatim message: the docs quote it for log searches (issue #367).
+        $this->expectExceptionMessage('CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))');
 
         $this->client->compareAndSwap('key', 'old', 'new');
     }
@@ -2718,7 +2719,8 @@ class RawKvClientTest extends TestCase
     public function testPutIfAbsentRequiresAtomicMode(): void
     {
         $this->expectException(InvalidStateException::class);
-        $this->expectExceptionMessage('CompareAndSwap requires atomic mode');
+        // Verbatim message: the docs quote it for log searches (issue #367).
+        $this->expectExceptionMessage('CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))');
 
         $this->client->putIfAbsent('key', 'value');
     }
