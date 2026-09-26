@@ -165,7 +165,18 @@ $client = RawKvClient::create([
 
 **Note**: All endpoints are used: the client discovers the PD leader via
 `GetMembers` and fails over to another configured endpoint when the current
-one fails on transport level (issue #416).
+one fails on transport level (issue #416). Since issue #234 it also rotates on
+a **not-leader** answer from PD — including the application-level form, where
+PD replies with a gRPC `OK` status and an error inside
+`pdpb.ResponseHeader.error` — retrying at most once per configured endpoint.
+Every PD response header is checked at a single choke point, so a PD
+application-level error (`NOT_BOOTSTRAPPED`, `INVALID_VALUE`, `ErrNotLeader`,
+…) raises `PdException` (carrying `getErrorType()`) instead of degrading into
+an empty result: `scanRegions()` can no longer answer `[]` for a failed
+`ScanRegions`, so a `deleteRange()` that reports success now means the range
+really was deleted. A leader URL PD advertises that is not one of the
+configured endpoints is ignored, so a rogue or rewritten PD member list cannot
+redirect traffic.
 
 ### Timestamp Batching and Pooling (issues #420, #292)
 
@@ -1091,7 +1102,11 @@ try {
     $clusterId = $client->healthCheck();   // int|null
     // $clusterId is non-null when PD responded with a cluster-id header.
 } catch (\CrazyGoat\TiKV\Client\Exception\HealthCheckException $e) {
-    // PD was unreachable or returned a non-OK status.
+    // PD was unreachable, returned a non-OK gRPC status, or answered with a
+    // PD-level error in the response header (issue #234). The underlying
+    // cause is available through $e->getPrevious() — a
+    // \CrazyGoat\TiKV\Client\Exception\PdException there names the failing
+    // RPC and carries getErrorType() (NOT_BOOTSTRAPPED, INVALID_VALUE, …).
 }
 
 // Throws ClientClosedException when called after $client->close().
@@ -1099,7 +1114,11 @@ try {
 
 Internally, `healthCheck()` issues the lightweight `GetMembers` RPC over
 the same gRPC channel used for region lookups, so it exercises the full
-network path without writing or reading user keys.
+network path without writing or reading user keys. Because `GetMembers` is
+the RPC that reports the PD leader, a successful probe also **records the
+current leader**: the client points its subsequent PD and TSO RPCs at it
+(issue #234), which is why a probe is worth issuing after a PD topology
+change rather than only as an uptime check.
 
 ### Metrics and Observability
 
