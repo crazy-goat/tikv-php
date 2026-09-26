@@ -182,10 +182,10 @@ final readonly class RawKvBatch
 
         $pairsByRegion = [];
         foreach ($keyValuePairs as $key => $value) {
-            $region = $resolved[$key] ?? null;
-            if ($region === null) {
-                continue;
-            }
+            // Fails closed rather than skipping: a key that never reaches
+            // the wire must not be reported as a successful write (issue
+            // #187).
+            $region = RegionGrouper::resolvedRegion($resolved, $key);
             $regionId = $region->regionId;
             if (!isset($pairsByRegion[$regionId])) {
                 $pairsByRegion[$regionId] = ['region' => $region, 'pairs' => []];
@@ -697,10 +697,8 @@ final readonly class RawKvBatch
 
                 $groups = [];
                 foreach ($keys as $k) {
-                    $r = $resolved[$k] ?? null;
-                    if ($r === null) {
-                        continue;
-                    }
+                    // Fails closed rather than skipping (issue #187).
+                    $r = RegionGrouper::resolvedRegion($resolved, $k);
                     $gid = $r->regionId;
                     $groups[$gid] ??= ['region' => $r, 'keys' => []];
                     $groups[$gid]['keys'][] = $k;
@@ -792,10 +790,8 @@ final readonly class RawKvBatch
                 $groups = [];
                 foreach ($pairs as $i => $pair) {
                     $k = $pair->getKey();
-                    $r = $resolved[$k] ?? null;
-                    if ($r === null) {
-                        continue;
-                    }
+                    // Fails closed rather than skipping (issue #187).
+                    $r = RegionGrouper::resolvedRegion($resolved, $k);
                     $gid = $r->regionId;
                     $groups[$gid] ??= ['region' => $r, 'pairs' => [], 'ttls' => []];
                     $groups[$gid]['pairs'][] = $pair;
@@ -878,10 +874,8 @@ final readonly class RawKvBatch
 
                 $groups = [];
                 foreach ($keys as $k) {
-                    $r = $resolved[$k] ?? null;
-                    if ($r === null) {
-                        continue;
-                    }
+                    // Fails closed rather than skipping (issue #187).
+                    $r = RegionGrouper::resolvedRegion($resolved, $k);
                     $gid = $r->regionId;
                     $groups[$gid] ??= ['region' => $r, 'keys' => []];
                     $groups[$gid]['keys'][] = $k;

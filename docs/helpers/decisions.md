@@ -341,3 +341,49 @@ round-trip: for every non-empty boundary of an eight-region cluster the
 boundary bytes and their one- and two-byte prefixes were written and read back
 (21 keys, no region error, no retry). The client misroutes only when a stored
 boundary is not MCE-shaped, which no TiKV path produces.
+
+## A key whose region cannot be resolved is an internal error, never a valid outcome (issue #187)
+
+Closing #187 after #244: **every** region-grouping loop in the client fails
+closed. A miss is a `TiKvException` naming the key through
+`KeyRedactor::redact()` — never a `continue`, never a `null` in a result map.
+The reason is that no entry point can report a partial result:
+`batchPut()`, `batchDelete()` and `ingest()` return `void`, so a skipped key
+was a write reported as done and never sent, and `batchGet()`'s `null` was
+indistinguishable from a legitimately missing key. client-go is the reference:
+`RegionCache.GroupKeysByRegion` propagates the resolution error rather than
+dropping keys.
+
+Three decisions inside that, each of which was available and was rejected:
+
+1. **One accessor, not six copies of the message.** `RegionGrouper::resolvedRegion()`
+   is the single reader of a `batchResolveRegions()` map, used by
+   `batchPut()`/`batchGet()`/`batchDelete()`, the three multi-region re-split
+   paths, `SstIngestor`, `TxnReader` and both `RegionGrouper` groupers — so the
+   wording cannot drift between sites, and the guard is *testable* (see 2).
+2. **Keep the guard even though it is unreachable.** `RegionResolver` is
+   `final` and fails closed, so the loop-level miss is not producible from the
+   public API — which is exactly why deleting the guard would be safe *today*
+   and unsafe the first time the resolver changes. It is kept as a tested seam
+   (`ResolvedRegionSeamTest` drives it with a hand-built partial map) and
+   `NoSilentRegionDropGuardTest` fails on the `if (<null check>) { continue; }`
+   shape returning to `src/Client` at all, allowlisted only for the two files
+   that legitimately discard an internal cache node or a malformed configured
+   PD endpoint. The rule is deliberately broader than `$region === null`:
+   a name-keyed rule is defeated by `$r`, which is what three of the five
+   sites used.
+3. **No per-key `getRegionInfo()` fallback in `batchResolveRegions()`.** The
+   issue suggested it "so partial results become the exception rather than the
+   norm" — but the throw *is* the exception now, and a partial map is no
+   longer an outcome at all, so the criterion is met without it. Against it:
+   `ScanRegions` and `GetRegion` are the same PD, so a window that missed a key
+   misses it the second time too — the fallback would buy N extra round trips
+   and the same error; it would *mask* the half-open-window bug of #244 (the
+   E2E vector for which, `testBatchRoundTripResolvesEveryKeyWhenTheLargestOneIsARegionStartKey`,
+   currently bites by reverting to `[minKey, maxKey)` and would then pass via
+   the fallback); and #288 (open, v0.8.0) restructures this method to read the
+   region cache first, so a second resolution path added now is precisely the
+   code #288 would rewrite, with its own cache-accounting decision to make.
+   A real case where `ScanRegions` misses a key `GetRegion` finds belongs in
+   #288, not here.
+

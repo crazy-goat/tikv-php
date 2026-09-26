@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
+use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
@@ -37,7 +38,6 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
-use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -281,18 +281,10 @@ final readonly class TxnReader
         // Group keys by resolved region.
         $grouped = [];
         foreach ($keys as $key) {
-            $region = $resolved[$key] ?? null;
-            if ($region === null) {
-                // Defense in depth: batchResolveRegions() already fails
-                // closed, so this is unreachable unless the resolver
-                // contract changes (issue #244). A silently skipped key
-                // here would read back as null — indistinguishable from
-                // "key not present".
-                throw new TiKvException(sprintf(
-                    'Region could not be resolved for key %s; refusing to silently drop it from the batch',
-                    KeyRedactor::redact($key),
-                ));
-            }
+            // Fails closed rather than skipping: a skipped key here would
+            // read back as null — indistinguishable from "key not present"
+            // (issue #187).
+            $region = RegionGrouper::resolvedRegion($resolved, $key);
             $regionId = $region->regionId;
             $grouped[$regionId] ??= ['region' => $region, 'keys' => []];
             $grouped[$regionId]['keys'][] = $key;

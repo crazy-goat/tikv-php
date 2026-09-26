@@ -966,16 +966,33 @@ sleep, because `RetryExecutor` checks the budget **before** `usleep()`
 (issue #237) — an over-budget ServerBusy error throws without sleeping, so
 budget-exhaustion tests are fast.
 
-## `ingest()` silently drops keys that cannot be resolved to a region
+## An unresolvable key fails the whole call — do not "handle" the exception by writing the rest
 
-`SstIngestor::groupPairsByRegion()` skips pairs whose `batchResolveRegions()`
-entry is `null` (`continue`, no error) — an `ingest()` run can "succeed" while
-never writing some keys. Verify the imported key count when completeness
-matters; the same no-throw-on-unresolvable-keys class of bug exists in
-`TwoPhaseCommitter` (issue #216). Separately, `ingest()` is not retried at all:
-any region/transport error aborts the remaining regions (the `finally` still
-switches all stores back to normal mode), and a killed process leaves the
-cluster in import mode — see the [DOC-24] section in `docs/operations.md`.
+This section used to be "`ingest()` silently drops keys that cannot be resolved
+to a region" and it is obsolete since #187: every region-grouping loop now
+fails closed through one accessor, `RegionGrouper::resolvedRegion()`, and
+`batchPut()`/`batchDelete()`/`ingest()` throw a `TiKvException` naming the
+redacted key rather than returning `void` with a subset written.
+`batchGet()` no longer substitutes `null` for such a key either, so a
+`null` in its result map once more means "the key is absent" and nothing else.
+
+The trap when this throws: catching `TiKvException` and re-running with the
+keys you believe are routable is a data-loss bug, not a workaround. The
+resolver is the component that decided the key has no region, and a miss is
+either a bug or a PD inconsistency — the same class of condition that made the
+key unroutable in the first place is usually still true. There is no
+per-key fallback on purpose: `batchResolveRegions()` already fails closed, so
+a fallback would only convert one clear error into extra PD round trips that
+end in the same error (and it would mask the half-open-`ScanRegions` window bug
+that #244 fixed). Log the redacted key, report the failure, and let the caller
+decide — do not re-derive routability in application code. `TwoPhaseCommitter`
+is not affected: it groups through `RegionGrouper`, so it has failed closed
+since #244.
+
+Separately, `ingest()` is not retried at all: any region/transport error
+aborts the remaining regions (the `finally` still switches all stores back to
+normal mode), and a killed process leaves the cluster in import mode — see the
+[DOC-24] section in `docs/operations.md`.
 
 ## Doc enum/const lists drift — regenerate them from code, never hand-write
 

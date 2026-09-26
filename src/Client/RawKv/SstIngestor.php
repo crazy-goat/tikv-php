@@ -25,6 +25,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
+use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use Psr\Log\LoggerInterface;
 
@@ -59,6 +60,10 @@ final readonly class SstIngestor
      * @throws RegionException On region error
      * @throws InvalidStoreAddressException When PD returns a store address
      *     that fails validation (malformed or outside the allowed set)
+     * @throws \CrazyGoat\TiKV\Client\Exception\TiKvException when a key's
+     *     region cannot be resolved. Fail-closed: `ingest()` returns void, so
+     *     it transmits nothing rather than importing a subset of the pairs
+     *     and reporting success (issue #187).
      */
     public function ingest(array $keyValuePairs, ?int $ttl = null): void
     {
@@ -256,10 +261,10 @@ final readonly class SstIngestor
         $grouped = [];
         foreach ($pairs as $pair) {
             $key = $pair->getKey();
-            $region = $resolvedRegions[$key] ?? null;
-            if ($region === null) {
-                continue;
-            }
+            // Fails closed rather than skipping: ingest() returns void, so
+            // dropping a pair would report a successful bulk import that
+            // never wrote the key (issue #187).
+            $region = RegionGrouper::resolvedRegion($resolvedRegions, $key);
 
             $regionId = $region->regionId;
             $grouped[$regionId] ??= ['region' => $region, 'pairs' => []];
