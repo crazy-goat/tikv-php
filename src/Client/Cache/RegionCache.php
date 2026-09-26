@@ -110,6 +110,43 @@ class RegionCache implements RegionCacheInterface
         return $this->resolveRegionInfo($entry);
     }
 
+    /**
+     * The cached region with this ID, or null when the cache does not hold
+     * it (issue #288).
+     *
+     * One array lookup on a map keyed by region ID — no ordered walk, no key
+     * comparisons — and the same value `getByKey()` would answer for the same
+     * entry: `resolveRegionInfo()` reflects a `switchLeader()` applied since
+     * the region was stored, and an expired entry is dropped rather than
+     * reported, so "the cache holds this region" means the same thing here as
+     * it does to a reader. A hit also counts as a use for LRU, as in
+     * `getByKey()`.
+     *
+     * The debug lines carry the region ID only, and that is deliberate: there
+     * is no key here to redact, and `getByKey()`'s equivalent line spends
+     * ~1.1 µs of every hit inside `KeyRedactor::redact()` building a string a
+     * `NullLogger` discards — a cost this method does not have to pay.
+     */
+    public function getById(int $regionId): ?RegionInfo
+    {
+        $entry = $this->entriesById[$regionId] ?? null;
+        if (!$entry instanceof RegionEntry) {
+            $this->logger->debug('Region cache miss by id', ['regionId' => $regionId]);
+            return null;
+        }
+
+        if ($this->isExpired($entry)) {
+            $this->removeById($regionId);
+            $this->logger->debug('Region cache miss by id', ['regionId' => $regionId]);
+            return null;
+        }
+
+        $this->touch($regionId);
+        $this->logger->debug('Region cache hit by id', ['regionId' => $regionId]);
+
+        return $this->resolveRegionInfo($entry);
+    }
+
     public function getRegionsInRange(string $startKey, string $endKey): array
     {
         $regions = [];

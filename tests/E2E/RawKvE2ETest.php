@@ -326,6 +326,10 @@ class RawKvE2ETest extends TestCase
      *    `[k, k . "\x00")`, which pre-#244 collapsed to the empty `[k, k)`
      *    that PD answers with an empty region list.
      *
+     * Both reads run on their own freshly created client, because #288's
+     * read-through makes a warm client compute no window at all: they are
+     * independent vectors and neither may be warmed by the other.
+     *
      * The test never skips. A single-region cluster has no non-empty start
      * key (the first region's `''` is the keyspace minimum, so it can never
      * be a batch maximum), and the batch then degrades to a plain
@@ -389,21 +393,47 @@ class RawKvE2ETest extends TestCase
 
         $this->putAndTrack($pairs);
 
-        $results = $this->testClient->batchGet(array_keys($pairs));
-        $this->assertCount(count($pairs), $results, 'batchGet must answer for every key, never drop one');
-        foreach ($pairs as $key => $value) {
-            $this->assertSame(
-                $value,
-                $results[$key] ?? null,
-                sprintf('batchGet of key %s', bin2hex($key)),
-            );
+        // Issue #288: the batch window is only computed when the region cache
+        // cannot answer, and `putAndTrack()` above just warmed it for every
+        // key of this batch. A client with a COLD cache is therefore the only
+        // way this test keeps pinning the window — without it, a reverted
+        // `[minKey, maxKey)` bound would pass here unnoticed. Each of the two
+        // reads below gets its OWN cold client, for the same reason: whichever
+        // ran first would warm the region that owns $maxKey, and the other
+        // would then be a pure cache hit that computes no window at all.
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        $batchClient = RawKvClient::create($pdEndpoints);
+        $singleClient = RawKvClient::create($pdEndpoints);
+
+        try {
+            // The whole batch, on a cache that holds none of its keys: the run
+            // of misses is the entire key set, so the window really is
+            // `[minKey, successor(maxKey))` and dropping the successor drops
+            // the region that starts at $maxKey.
+            $results = $batchClient->batchGet(array_keys($pairs));
+            $this->assertCount(count($pairs), $results, 'batchGet must answer for every key, never drop one');
+            foreach ($pairs as $key => $value) {
+                $this->assertSame(
+                    $value,
+                    $results[$key] ?? null,
+                    sprintf('batchGet of key %s', bin2hex($key)),
+                );
+            }
+
+            // The degenerate one-key window `[k, k . "\x00")` on the second
+            // cold client: a one-key batch is its own run of misses, so it
+            // computes the bound on its own — which it could not do on
+            // $batchClient, whose cache now holds the region that starts at
+            // $maxKey and answers the key without a scan.
+            $single = $singleClient->batchGet([$maxKey]);
+            $this->assertSame([$maxKey => $pairs[$maxKey]], $single);
+        } finally {
+            $batchClient->close();
+            $singleClient->close();
         }
 
-        // The degenerate one-key window, and the single-key path that never
-        // goes through the resolver's batch window at all: both must answer
-        // for a key that is a region start key.
-        $single = $this->testClient->batchGet([$maxKey]);
-        $this->assertSame([$maxKey => $pairs[$maxKey]], $single);
+        // The single-key path never goes through the resolver's batch window
+        // at all — `getRegionInfo()`, not `batchResolveRegions()`.
         $this->assertSame($pairs[$maxKey], $this->testClient->get($maxKey));
     }
 

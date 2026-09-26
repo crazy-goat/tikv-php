@@ -123,6 +123,143 @@ class RegionCacheTest extends TestCase
         $this->assertSame($region, $cache->getByKey('zzz'));
     }
 
+    /**
+     * The O(1) ID probe `RegionResolver::cacheScannedRegion()` asks "does the
+     * cache already hold this region?" with (issue #288). A hit must answer the
+     * *same value* `getByKey()` would: the stored region, unchanged.
+     */
+    public function testGetByIdReturnsTheStoredRegion(): void
+    {
+        $cache = new RegionCache();
+        $first = $this->makeRegion(1, 'a', 'm');
+        $second = $this->makeRegion(2, 'm', '');
+        $cache->put($first);
+        $cache->put($second);
+
+        $this->assertSame($first, $cache->getById(1));
+        $this->assertSame($second, $cache->getById(2));
+    }
+
+    /**
+     * A miss is `null`, in every way a region can be absent: never stored, a
+     * different ID than the one asked for (an ID-keyed lookup must not answer
+     * with a neighbour that happens to cover the same key), invalidated, and
+     * cleared.
+     */
+    public function testGetByIdMissReturnsNull(): void
+    {
+        $this->assertNull((new RegionCache())->getById(1), 'an empty cache holds nothing');
+
+        $cache = new RegionCache();
+        $region = $this->makeRegion(7, 'a', 'z');
+        $cache->put($region);
+        $this->assertNull($cache->getById(8), 'the ID is the lookup key, not a key range');
+
+        $cache->invalidate(7);
+        $this->assertNull($cache->getById(7), 'an invalidated region is gone');
+
+        $cache->put($region);
+        $cache->clear();
+        $this->assertNull($cache->getById(7), 'a cleared cache holds nothing');
+    }
+
+    /**
+     * The leader-aware half of the contract: a `switchLeader()` is stored on
+     * the entry, not in the region object, so a probe that returned the raw
+     * `RegionInfo` would answer with the **deposed** leader and the resolver's
+     * identity test would then skip the `put()` that a PD answer reporting the
+     * new leader is supposed to trigger. `getById()` must therefore agree with
+     * `getByKey()` field for field, and must not hand back the same instance.
+     */
+    public function testGetByIdIsLeaderAwareLikeGetByKey(): void
+    {
+        $cache = new RegionCache();
+        $region = $this->makeRegionWithPeers(1, 'a', 'z');
+        $cache->put($region);
+        $this->assertTrue($cache->switchLeader(1, 3));
+
+        $byId = $cache->getById(1);
+        $byKey = $cache->getByKey('m');
+
+        $this->assertNotNull($byId);
+        $this->assertNotSame($region, $byId, 'the switched entry is not the stored region object');
+        $this->assertSame(3, $byId->leaderStoreId);
+        $this->assertSame(30, $byId->leaderPeerId);
+        $this->assertEquals($byKey, $byId, 'both lookups must answer the same region');
+    }
+
+    /**
+     * "The cache holds this region" has to mean the same thing to a probe and
+     * to a reader, or the resolver's skip would keep a *dead* entry: a
+     * `getByKey()` on it answers `null` anyway, so every later key pays a PD
+     * round trip. An expired entry is therefore reported as a miss and dropped,
+     * exactly as `getByKey()` drops it.
+     */
+    public function testGetByIdReportsAnExpiredEntryAsAMissAndDropsIt(): void
+    {
+        $cache = new TestableRegionCache(1000, 600);
+        $cache->put($this->makeRegion(1, 'a', 'z'));
+        $this->assertNotNull($cache->getById(1), 'within the TTL it is a hit');
+
+        $cache->setTime(1600);
+
+        $this->assertNull($cache->getById(1));
+        $this->assertNull($cache->getByKey('m'), 'the same entry is a miss to a reader too');
+        $this->assertSame(0, $cache->count(), 'and the dead entry is gone, not left to rot');
+    }
+
+    /**
+     * A hit counts as a use, exactly as `getByKey()` does: a region a PD scan
+     * re-confirmed should not be the next eviction candidate. Without the
+     * touch, the skip in `cacheScannedRegion()` would quietly make every
+     * re-scanned region the *least* recently used one.
+     */
+    public function testGetByIdMarksTheEntryAsRecentlyUsed(): void
+    {
+        $cache = new TestableRegionCache(1000, 600, null, 2);
+        $cache->put($this->makeRegion(1, 'a', 'b'));
+        $cache->put($this->makeRegion(2, 'b', 'c'));
+
+        // The only access either region gets, and region 1 is the LRU before
+        // it — so this is the touch that has to save it.
+        $cache->getById(1);
+
+        $cache->put($this->makeRegion(3, 'c', 'd'));
+
+        $this->assertNotNull($cache->getById(1), 'the getById() access is what kept region 1');
+        $this->assertNull($cache->getById(2), 'region 2 was the least recently used');
+        $this->assertNotNull($cache->getById(3));
+    }
+
+    /**
+     * The probe logs its verdict like every other cache access, but with the
+     * region ID only: there is no key here, and `getByKey()` pays ~1.1 µs per
+     * hit for a redacted key string that a `NullLogger` throws away.
+     */
+    public function testGetByIdLogsHitAndMissWithTheRegionIdOnly(): void
+    {
+        $logger = $this->createMock(LoggerInterface::class);
+        $cache = new RegionCache(logger: $logger);
+        $region = $this->makeRegion(1, 'a', 'z');
+        $cache->put($region);
+
+        $logged = [];
+        $logger->method('debug')
+            ->willReturnCallback(function (string $message, array $context) use (&$logged): void {
+                if (str_starts_with($message, 'Region cache') && str_ends_with($message, 'by id')) {
+                    $logged[$message] = $context;
+                }
+            });
+
+        $cache->getById(1);
+        $cache->getById(2);
+
+        $this->assertSame(
+            ['Region cache hit by id' => ['regionId' => 1], 'Region cache miss by id' => ['regionId' => 2]],
+            $logged,
+        );
+    }
+
     public function testGetRegionsInRangeReturnsContiguousChain(): void
     {
         $cache = new RegionCache();

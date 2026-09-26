@@ -14,6 +14,25 @@ interface RegionCacheInterface
     public function getByKey(string $key): ?RegionInfo;
 
     /**
+     * Look up a cached region by its ID, or null when the cache does not hold
+     * it — never stored, invalidated, evicted, cleared, or past its TTL. An
+     * expired entry is dropped rather than reported, exactly as
+     * {@see self::getByKey()} drops it.
+     *
+     * The answer is the same value {@see self::getByKey()} returns for the
+     * entry: a *leader-aware* region, whose leaderPeerId and leaderStoreId
+     * reflect every `switchLeader()` applied since it was stored, not the raw
+     * stored region. A successful lookup also counts as a use for LRU, exactly
+     * as `getByKey()` does.
+     *
+     * O(1) by construction, where `getByKey()` walks the ordered index: a
+     * caller that already holds a region ID — a PD answer it is about to
+     * store, for instance — must not pay a treap descent to learn what the ID
+     * map already holds. Issue #288.
+     */
+    public function getById(int $regionId): ?RegionInfo;
+
+    /**
      * Return the contiguous chain of cached regions covering the half-open
      * key range [startKey, endKey), in ascending startKey order.
      *
