@@ -42,6 +42,7 @@ use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use CrazyGoat\TiKV\Tests\Unit\Support\StubRegionCache;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -375,6 +376,121 @@ class TransactionTest extends TestCase
         $this->assertCount(1, $prewriteRequests);
         $this->assertInstanceOf(PrewriteRequest::class, $prewriteRequests[0]);
         $this->assertSame(1250, $prewriteRequests[0]->getForUpdateTs());
+    }
+
+    /**
+     * A pessimistic read must stamp the key with the TSO it was read at, and
+     * the eager write must lock with exactly that stamp as `for_update_ts` —
+     * the #209 safety net, exercised through the eager (#437) path.
+     *
+     * If the write instead mints a fresh TSO, TiKV's `for_update_ts` check can
+     * no longer see the intervening commit and the read-modify-write silently
+     * loses the update — defect (3) of issue #182. Nothing else in the suite
+     * covered the read side: dropping the `readTsByKey` assignment in
+     * `Transaction::get()`/`batchGet()` left all 1664 tests green, because
+     * `testCommitPessimisticLockTwoRegionsSharesForUpdateTsPerPass` drives the
+     * deferred path, where the timestamp comes from staging rather than a read.
+     *
+     * @param callable(Transaction): ?string $read performs the preceding read
+     */
+    #[DataProvider('eagerPessimisticReadThenWriteProvider')]
+    public function testEagerPessimisticWriteReusesThePrecedingReadsTimestamp(
+        callable $read,
+    ): void {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        // Count-driven rather than willReturnOnConsecutiveCalls(): a counter
+        // makes the assertion order-independent, so a read that stops minting
+        // a TSO cannot pass by shifting which value the lock receives.
+        $tsoCalls = 0;
+        $this->pdClient->method('getTimestamp')->willReturnCallback(
+            static function () use (&$tsoCalls): int {
+                $tsoCalls++;
+
+                return 1000 + (100 * $tsoCalls);
+            },
+        );
+
+        $getResponse = new GetResponse();
+        $getResponse->setValue('read-value');
+
+        $getPair = new KvPair();
+        $getPair->setKey('key');
+        $getPair->setValue('read-value');
+        $batchGetResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $batchGetResponse->setPairs([$getPair]);
+
+        $lockRequests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $addr,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$lockRequests,
+                $getResponse,
+                $batchGetResponse,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $lockRequests[] = $request;
+                }
+
+                return match ($method) {
+                    'KvGet' => $getResponse,
+                    'KvBatchGet' => $batchGetResponse,
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => true,
+        ]);
+
+        $this->assertSame('read-value', $read($txn));
+        $this->assertSame(1, $tsoCalls, 'the read is the only TSO fetch before the write');
+
+        $txn->set('key', 'written-value');
+
+        $this->assertCount(1, $lockRequests);
+        $this->assertInstanceOf(PessimisticLockRequest::class, $lockRequests[0]);
+        $this->assertSame(
+            1100,
+            $lockRequests[0]->getForUpdateTs(),
+            'the lock must carry the read timestamp, not a fresh one',
+        );
+        $this->assertSame(1, $tsoCalls, 'the write must reuse the read timestamp');
+        $this->assertSame(['key' => 'written-value'], $txn->getWriteSet());
+
+        $txn->rollback();
+    }
+
+    /**
+     * @return array<string, array{0: callable(Transaction): ?string}>
+     */
+    public static function eagerPessimisticReadThenWriteProvider(): array
+    {
+        return [
+            'get()' => [
+                static fn (Transaction $txn): ?string => $txn->get('key'),
+            ],
+            'batchGet()' => [
+                static function (Transaction $txn): ?string {
+                    $values = $txn->batchGet(['key']);
+
+                    return $values['key'] ?? null;
+                },
+            ],
+        ];
     }
 
     public function testPessimisticDeleteAcquiresLockBeforeReturning(): void

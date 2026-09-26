@@ -69,6 +69,24 @@ class TxnKvClientTest extends TestCase
         $client->begin(['eagerPessimisticLocks' => 'yes']); // @phpstan-ignore argument.type
     }
 
+    public function testBeginDefaultsToPessimistic(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $client = new TxnKvClient($pdClient, $this->createMock(GrpcClientInterface::class));
+
+        // Issue #182: the issue called the pessimistic default a defect in
+        // itself ("Pessimistic is the begin() default"), so the default is a
+        // contract of its own. Until this test existed, flipping
+        // `$options['pessimistic'] ?? true` to `?? false` passed the whole
+        // Unit suite: every other test names the mode explicitly, and the two
+        // mode tests below pass it in.
+        $txn = $client->begin();
+
+        $this->assertTrue($txn->isPessimistic());
+        $txn->rollback();
+    }
+
     public function testBeginDefaultsToEagerPessimisticLocks(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);
