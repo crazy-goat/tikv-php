@@ -131,6 +131,27 @@ final readonly class RetryExecutor
                     }
 
                     if (!$backoffType instanceof BackoffType) {
+                        // Issue #233 (REG-02): retryability and cache
+                        // invalidation are two independent decisions, so the
+                        // invalidation runs ABOVE this throw instead of below
+                        // it. A routing error means the cached region that
+                        // produced it is wrong, so the entry has to go even
+                        // though the request itself is not retryable —
+                        // otherwise the misroute survives for the whole
+                        // lifetime of the entry (ttlSeconds + jitterSeconds,
+                        // 660 s with the defaults) and every later request for
+                        // the key repeats the same fatal error, with nothing
+                        // the application can do in between. The decision
+                        // itself lives in self::invalidatesRoutingOnFatal(),
+                        // deliberately separate from the retry decision above.
+                        //
+                        // Metric emission stays with RegionCache::invalidate()
+                        // (#474 — see invalidateRegionForFatalError()) and the
+                        // gRPC channel is left alone: closeChannel() sits
+                        // downstream of the retry decision, so no fatal error
+                        // can reach it.
+                        $this->invalidateRegionForFatalError($e, $key);
+
                         $this->logger->error('Fatal error, not retrying', [
                             'key' => KeyRedactor::redact($key),
                             'error' => $e->getMessage(),
@@ -138,6 +159,13 @@ final readonly class RetryExecutor
                         throw $e;
                     }
 
+                    // Issue #245 (REG-14, still open) will narrow this branch
+                    // too — the retryable path currently invalidates for EVERY
+                    // retryable error, including non-routing ones such as
+                    // ServerIsBusy / DiskFull / IsWitness /
+                    // RecoveryInProgress. Its fix is to route this decision
+                    // through self::invalidatesRoutingOnFatal() as well; until
+                    // then the behaviour here is deliberately unchanged.
                     $cached = $this->regionCache->getByKey($key);
                     if ($cached instanceof RegionInfo) {
                         // The cache itself emits regionInvalidated() with
@@ -259,6 +287,117 @@ final readonly class RetryExecutor
             $lastError,
             rawKey: $key,
         );
+    }
+
+    /**
+     * Whether a FATAL (non-retryable) error must still drop the cached region
+     * the request was routed through (issue #233, REG-02).
+     *
+     * Retryability and cache invalidation are independent decisions, and this
+     * is the second one: client-go's RegionRequestSender.onRegionError drops
+     * the region for a routing error whether or not the request is then
+     * retried, because a routing error is evidence about the CACHED REGION,
+     * not about the request. KeyNotInRegion is the extreme case — it is fatal
+     * precisely because the key is not in the region the client believed owned
+     * it, so the entry that caused it must not survive the throw.
+     *
+     * A NON-RegionException fatal error must NOT invalidate. A GrpcException
+     * with a fatal status (UNAUTHENTICATED, PERMISSION_DENIED, …), an
+     * InvalidStoreAddressException or a TxnAbortedByGcException says nothing
+     * about which region the key lives in — they are credentials, a PD answer
+     * and a GC verdict respectively — so dropping the entry would only trade
+     * one re-resolve for another. This is a decision, not an omission: the
+     * non-routing kinds below are enumerated for the same reason.
+     *
+     * The match has no `default` arm, so PHPStan reports match.unhandled at
+     * level 9 and a new ErrorKind case cannot be added without deciding
+     * here. The set is wider than "fatal today" on purpose: of the six
+     * routing kinds only KeyNotInRegion classifies as fatal, so the other
+     * five are here to keep the predicate correct if that classification
+     * changes, and to serve issue #245 (REG-14), which will route the
+     * retryable path's invalidation through this same match. A custom
+     * $classifier cannot make any of them fatal either — returning null from
+     * it falls through to ErrorClassifier::classify(), which maps every one
+     * of them to a BackoffType.
+     *
+     * ErrorKind::NotLeader is listed for completeness and for that #245 seam,
+     * not because it can reach a fatal path today: handleNotLeader() returns
+     * BackoffType::NotLeader for ANY RegionException carrying a notLeader
+     * oneof, before the custom classifier is ever consulted, so control never
+     * enters the fatal block and the predicate is never asked about it.
+     */
+    public static function invalidatesRoutingOnFatal(TiKvException $e): bool
+    {
+        if (!$e instanceof RegionException) {
+            return false;
+        }
+
+        $kind = $e->errorKind;
+        if (!$kind instanceof ErrorKind) {
+            return false;
+        }
+
+        return match ($kind) {
+            ErrorKind::KeyNotInRegion,
+            ErrorKind::EpochNotMatch,
+            ErrorKind::RegionNotFound,
+            ErrorKind::StoreNotMatch,
+            ErrorKind::NotLeader,
+            ErrorKind::RegionNotInitialized => true,
+
+            // The request DID reach the region that owns the key; the region
+            // rejected the request itself (an oversized entry, a flashback in
+            // progress, a busy/overloaded store) or the retry must pick a
+            // different peer. The cached entry is correct, so keep it.
+            ErrorKind::RaftEntryTooLarge,
+            ErrorKind::FlashbackInProgress,
+            ErrorKind::FlashbackNotPrepared,
+            ErrorKind::ServerIsBusy,
+            ErrorKind::DiskFull,
+            ErrorKind::IsWitness,
+            ErrorKind::RecoveryInProgress,
+            ErrorKind::StaleCommand,
+            ErrorKind::DataIsNotReady,
+            ErrorKind::ReadIndexNotReady,
+            ErrorKind::ProposalInMergingMode,
+            ErrorKind::MaxTimestampNotSynced,
+            ErrorKind::MismatchPeerId,
+            ErrorKind::BucketVersionNotMatch,
+            ErrorKind::UndeterminedResult => false,
+        };
+    }
+
+    /**
+     * Drop the cached region behind a fatal routing error (issue #233).
+     *
+     * Split from the retry decision on purpose — see
+     * self::invalidatesRoutingOnFatal(). The retryable path's own
+     * invalidation is deliberately NOT reused or narrowed here; routing it
+     * through the same predicate is issue #245's job.
+     */
+    private function invalidateRegionForFatalError(TiKvException $e, string $key): void
+    {
+        if (!self::invalidatesRoutingOnFatal($e)) {
+            return;
+        }
+
+        $cached = $this->regionCache->getByKey($key);
+        if (!$cached instanceof RegionInfo) {
+            // Either nothing was cached under this key, or the source of the
+            // region error (RegionErrorHandler::check()) already dropped the
+            // entry and emitted for it. Either way there is no state change to
+            // count (issue #474's single-emission rule).
+            return;
+        }
+
+        // The cache itself emits regionInvalidated() with the reason passed
+        // here — do not emit here too.
+        $this->regionCache->invalidate($cached->regionId, 'fatal_region_error');
+        $this->logger->info('Invalidated region on fatal routing error', [
+            'key' => KeyRedactor::redact($key),
+            'regionId' => $cached->regionId,
+            'errorKind' => $e instanceof RegionException ? $e->errorKind?->value : null,
+        ]);
     }
 
     private function handleNotLeader(TiKvException $e, string $key): ?BackoffType

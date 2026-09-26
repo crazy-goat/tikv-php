@@ -370,7 +370,11 @@ Notes:
   EpochNotMatch / ServerIsBusy / StaleCommand / RegionNotFound and friends
   retry with typed backoff curves, while `RaftEntryTooLarge`,
   `KeyNotInRegion`, `FlashbackInProgress`, `FlashbackNotPrepared` and
-  `InvalidStoreAddressException` are fatal immediately.
+  `InvalidStoreAddressException` are fatal immediately. A fatal
+  `KeyNotInRegion` still drops the cached region for the key before the
+  exception propagates, so the next request re-resolves instead of repeating
+  the same misroute until the entry's TTL expires; the other fatal kinds do not
+  drop it, because they say nothing about which region owns the key. (#233)
 
 See also:
 

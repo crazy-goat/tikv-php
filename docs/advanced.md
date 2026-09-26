@@ -741,7 +741,7 @@ The interface has six methods (full reference with emitted tag examples:
 | `retryAttempted()`     | A retryable error triggers another attempt                |
 | `regionCacheHit()`     | A region was served from the client's region cache        |
 | `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
-| `regionInvalidated()`  | A region was dropped from the cache (e.g. `retry_region_error`) |
+| `regionInvalidated()`  | A region was dropped from the cache (e.g. `retry_region_error`, `fatal_region_error`) |
 
 Implementations must never throw; the default is a zero-cost no-op
 (`NoOpMetrics`). A ready-made in-memory recorder for tests and benchmarks
