@@ -585,3 +585,51 @@ and asserts the object; the extension-free `GrpcClientDeadlineTest` pins the
 `null → 30 s` resolution through the private `resolveTimeoutMs()` seam, the
 same reflection-over-a-private-seam pattern as `channelArgs()` (see the FAQ).
 
+## No code path in `src/Client` may derive an infinite gRPC deadline (issue #184)
+
+Closing the root-cause issue #184, whose three mechanisms (#611/#260 for the
+`null` timeout, #294 for `deadlineMs = 0`, #271 for the per-invocation retry
+budget) were already fixed by merged work. The decision worth recording is the
+rule that class is now held to:
+
+1. **A gRPC deadline is derived from a strictly positive number of
+   milliseconds, or not at all.** `Timeval::infFuture()` is the one deadline
+   the gRPC C core never expires, and `Grpc\Call::startBatch()` blocks *inside*
+   the extension, where `max_execution_time` and `set_time_limit()` cannot
+   reach — so an unbounded deadline converts one slow store into an exhausted
+   PHP-FPM pool. The class of bug is not a bad value but a **`null` that
+   silently means "forever"**, and nothing in PHP's type system objects to a
+   `?:` over a `?int` that produces it. So the nullable deadline helper is
+   gone: `RawKvBatch::timeoutMs()` returns `int` with a `default => throw`, and
+   a non-positive configured value resolves to
+   `GrpcClient::DEFAULT_TIMEOUT_MS` — because `TimeoutConfig`'s `0` is a
+   *transport-level* opt-out, and a hand-rolled `new Call(...)` is not the
+   transport.
+2. **Two sites may legitimately produce one, and they are enumerated, counted
+   and justified**: `GrpcClient::deadline()`'s explicit `0` sentinel (the
+   library's single "disabled" spelling, from #260) and
+   `BatchCommandsConnection::open()`'s `$deadlineMs` stream-lifetime parameter
+   (a bidirectional stream, not a unary call; production never passes `0`).
+3. **`NoInfiniteDeadlineGuardTest` keeps it that way.** A guard is the right
+   instrument precisely because the bug is an *absent* value: a behavioural
+   test can only assert the paths it drives, and a value assertion says nothing
+   about a site added tomorrow. It states the rule over
+   `Timeval::infFuture()` **occurrences** rather than over `?:` and ternaries —
+   every shape that can produce an unbounded deadline must mention it somewhere,
+   so `match`, `??`, `if` and a hardcoded one are all caught, and a count-based
+   allowlist (the `NoSilentRegionDropGuardTest` precedent) forces a conscious
+   review whenever a site is added or removed. It carries an
+   `assertSame(2, …)` witness so a scan that silently stops finding anything
+   fails too.
+
+The same reasoning is why the *retry* half is a test and not a refactor: a
+shared `RetryExecutor` is the documented collaborator `Transaction` memoizes
+for its whole lifetime, so "every invocation starts with a full budget" is a
+contract with three independent bounds (backoff budget, server-busy budget,
+wall-clock deadline) that no single behavioural test covers.
+`RetryExecutorFreshBudgetTest` names the two already covered by #243 and adds
+the wall-clock deadline, the #233 fatal-path interaction, and the attempt cap.
+Do not collapse the three bounds into one value: the 30 s wall clock is the
+binding one for a `ServerBusy` storm (1–2 s sleeps), the sleep budgets are what
+bound a millisecond-scale retry storm that no wall clock would catch.
+
