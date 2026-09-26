@@ -1083,9 +1083,9 @@ an empty array is a no-op.
   `readTimeoutMs`, `writeTimeoutMs`, `batchReadTimeoutMs`,
   `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs` and
   `checksumTimeoutMs` keys).
-- Keys that cannot be resolved to a region (region lookup returned nothing for
-  them) are **silently dropped** from the import — no error is raised. Verify
-  the imported key count if completeness matters.
+- Keys that cannot be resolved to a region fail the import with a
+  `TiKvException` naming the redacted key — `ingest()` never writes a subset
+  of the pairs and reports success (issue #187).
 - The number of simultaneously in-flight SwitchMode requests is bounded by the
   client's `options['maxConcurrency']` (default
   `RawKvClient::DEFAULT_MAX_CONCURRENCY`), so the per-call mode-switch overhead

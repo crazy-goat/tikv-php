@@ -12,6 +12,46 @@ use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 final class RegionGrouper
 {
     /**
+     * Read the region that {@see RegionResolver::batchResolveRegions()}
+     * assigned to $key, failing closed when the map has no entry for it.
+     *
+     * **Every** region-grouping loop in the client reads its map through
+     * this accessor, and none of them may `continue` past a miss. The
+     * resolver already fails closed (issue #244), so a miss is an internal
+     * error — the client's own invariant is broken, or the resolver contract
+     * changed — never a key to skip. Skipping one is silent data loss:
+     * `batchPut()`/`batchDelete()`/`ingest()` return `void` and would report
+     * success for a write that was never sent, and `batchGet()` would hand
+     * back a `null` indistinguishable from a legitimately missing key. That
+     * is why the guard exists at all and why it throws: client-go's
+     * `GroupKeysByRegion` propagates the resolution error instead of
+     * dropping keys (issue #187).
+     *
+     * The key is redacted with {@see KeyRedactor::redact()} — the message
+     * must name *which* key could not be routed without ever putting raw
+     * key bytes in an exception message.
+     *
+     * @param array<array-key, RegionInfo> $resolved map returned by
+     *     {@see RegionResolver::batchResolveRegions()}
+     * @param array-key $key the key being grouped. `int|string`, not
+     *     `string`: the map inherits PHP's array-key semantics (issue
+     *     #261), so a canonical decimal key is stored under its `int` form.
+     * @throws TiKvException when the map has no region for $key
+     */
+    public static function resolvedRegion(array $resolved, int|string $key): RegionInfo
+    {
+        $region = $resolved[$key] ?? null;
+        if (!$region instanceof RegionInfo) {
+            throw new TiKvException(sprintf(
+                'Region could not be resolved for key %s; refusing to silently drop it from the batch',
+                KeyRedactor::redact((string) $key),
+            ));
+        }
+
+        return $region;
+    }
+
+    /**
      * @param string[] $keys
      * @param callable(string): RegionInfo $regionResolver
      * @return array<int, array{region: RegionInfo, keys: string[]}>
@@ -45,16 +85,8 @@ final class RegionGrouper
 
         $grouped = [];
         foreach ($keys as $key) {
-            $region = $resolved[$key] ?? null;
-            if ($region === null) {
-                // Defense in depth: batchResolveRegions() already fails
-                // closed, so this is unreachable unless the resolver
-                // contract changes (issue #244).
-                throw new TiKvException(sprintf(
-                    'Region could not be resolved for key %s; refusing to silently drop it from the batch',
-                    KeyRedactor::redact($key),
-                ));
-            }
+            // Fails closed rather than skipping: see resolvedRegion().
+            $region = self::resolvedRegion($resolved, $key);
             $regionId = $region->regionId;
             $grouped[$regionId] ??= ['region' => $region, 'keys' => []];
             $grouped[$regionId]['keys'][] = $key;
@@ -69,7 +101,8 @@ final class RegionGrouper
      * This is the generalised version of {@see groupKeysByRegionBatch} for
      * callers that hold non-string items (e.g. Mutation objects). Every key
      * must resolve to a region — an unresolvable key throws a
-     * {@see TiKvException} naming the key (issue #244), it is never skipped.
+     * {@see TiKvException} naming the key, it is never skipped
+     * ({@see resolvedRegion()}; issue #244, #187).
      *
      * Example:
      * <code>
@@ -100,16 +133,8 @@ final class RegionGrouper
         $grouped = [];
         foreach ($items as $item) {
             $key = $keyExtractor($item);
-            $region = $resolved[$key] ?? null;
-            if ($region === null) {
-                // Defense in depth: batchResolveRegions() already fails
-                // closed, so this is unreachable unless the resolver
-                // contract changes (issue #244).
-                throw new TiKvException(sprintf(
-                    'Region could not be resolved for key %s; refusing to silently drop it from the batch',
-                    KeyRedactor::redact($key),
-                ));
-            }
+            // Fails closed rather than skipping: see resolvedRegion().
+            $region = self::resolvedRegion($resolved, $key);
             $regionId = $region->regionId;
             $grouped[$regionId] ??= ['region' => $region, 'items' => []];
             $grouped[$regionId]['items'][] = $item;

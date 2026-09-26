@@ -20,6 +20,7 @@ use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcBatchCommandsTransport;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -768,6 +769,9 @@ final class RawKvClient
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException
+     * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
+     *     the call transmits nothing rather than applying a subset of the batch
+     *     (issue #187).
      */
     public function batchGet(array $keys): array
     {
@@ -805,6 +809,9 @@ final class RawKvClient
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException
+     * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
+     *     the call transmits nothing rather than applying a subset of the batch
+     *     (issue #187).
      */
     public function batchPut(array $keyValuePairs, int|array $ttl = 0): void
     {
@@ -842,6 +849,9 @@ final class RawKvClient
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException
+     * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
+     *     the call transmits nothing rather than applying a subset of the batch
+     *     (issue #187).
      */
     public function batchDelete(array $keys): void
     {
@@ -1083,6 +1093,9 @@ final class RawKvClient
      * @throws ClientClosedException
      * @throws GrpcException
      * @throws RegionException
+     * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
+     *     the call transmits nothing rather than applying a subset of the pairs
+     *     (issue #187).
      */
     public function ingest(array $keyValuePairs, ?int $ttl = null): void
     {
