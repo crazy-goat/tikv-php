@@ -68,6 +68,8 @@ final class TimestampOracle
      */
     public const DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS = 5;
 
+    public const DEFAULT_TSO_TIMEOUT_MS = 3000;
+
     /** Cached low-resolution timestamp, or null when not populated. */
     private ?int $lowResCachedTs = null;
     /** Wall-clock milliseconds (per {@see $clock}) at which the cache was filled. */
@@ -125,6 +127,11 @@ final class TimestampOracle
      * @param (\Closure(): void)|null $onTransportFailure invoked when a TSO
      *        RPC fails on transport level (after cluster-id handling), so
      *        the owning PdClient can fail over before the failure propagates
+     * @param int $tsoTimeoutMs deadline for every `Tso` RPC this oracle
+     *        issues when the caller does not pass one explicitly (issue
+     *        #260). Added last so the #292 positional signature stays
+     *        stable; {@see TimeoutConfig} supplies the value, whose default
+     *        is {@see self::DEFAULT_TSO_TIMEOUT_MS}
      */
     public function __construct(
         private readonly GrpcClientInterface $grpc,
@@ -138,6 +145,7 @@ final class TimestampOracle
         ?int $poolMaxAgeMs = null,
         ?\Closure $pid = null,
         private readonly ?\Closure $onTransportFailure = null,
+        private readonly int $tsoTimeoutMs = self::DEFAULT_TSO_TIMEOUT_MS,
     ) {
         $this->pdAddress = $pdAddress instanceof \Closure
             ? $pdAddress
@@ -183,7 +191,8 @@ final class TimestampOracle
      * so callers must observe the failure and decide whether to retry or
      * abort the transaction.
      *
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Deadline in milliseconds for the `Tso` RPC; null
+     *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
      */
@@ -225,7 +234,8 @@ final class TimestampOracle
      *
      * @param int $count number of timestamps to request (>= 1 and
      *                   <= {@see self::MAX_TIMESTAMP_POOL_SIZE})
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Deadline in milliseconds for the `Tso` RPC; null
+     *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @return list<int> at most $count monotonically increasing timestamps
      *                   (PD may grant fewer than requested; never fewer than 1)
@@ -259,6 +269,10 @@ final class TimestampOracle
      * this method; {@see getTimestampBatch()} wraps it and discards the
      * pool first.
      *
+     * `null` is resolved here rather than at each public entry point: a
+     * caller with no opinion inherits the configured {@see $tsoTimeoutMs}
+     * instead of the unbounded deadline `null` used to mean (issue #260).
+     *
      * @return list<int>
      *
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
@@ -270,7 +284,7 @@ final class TimestampOracle
         $request->setCount($count);
 
         try {
-            $response = $this->callTso($request, $timeoutMs);
+            $response = $this->callTso($request, $timeoutMs ?? $this->tsoTimeoutMs);
 
             return $this->extractTimestampRange($response, $count);
         } catch (GrpcException $e) {
@@ -395,7 +409,8 @@ final class TimestampOracle
      * fresh fetch, and serving from — or discarding — the pool here would
      * perturb the start/commit timestamp stream.
      *
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Deadline in milliseconds for the `Tso` RPC; null
+     *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
      */
@@ -440,8 +455,12 @@ final class TimestampOracle
      * RPCs. The retry only fires for the "mismatch cluster id" error;
      * any other gRPC failure propagates immediately so the caller can
      * fail closed.
+     *
+     * @param int $timeoutMs deadline in milliseconds, already resolved from
+     *        the caller's argument or the configured `tsoTimeoutMs`
+     *        (issue #260)
      */
-    private function callTso(TsoRequest $request, ?int $timeoutMs): TsoResponse
+    private function callTso(TsoRequest $request, int $timeoutMs): TsoResponse
     {
         try {
             $response = $this->grpc->call(

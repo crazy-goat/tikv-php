@@ -231,8 +231,11 @@ TTL-expiry and min-commit-ts logic (issue #270: abandoned locks were never
 detected as expired). Always obtain timestamps from
 `PdClientInterface::getTimestamp()` (PD TSO, fails closed). The only
 legitimate uses of `hrtime`/`microtime` in timestamp positions are duration
-measurements (differences) and logging — and `TimestampOracle::getTimestamp()`
-accepts an optional `$timeoutMs` so TSO fetches can carry a finite deadline.
+measurements (differences) and logging. Since issue #260 every `Tso` RPC carries
+a finite deadline anyway — `TimeoutConfig::$tsoTimeoutMs` (default 3 s) when the
+caller passes no `$timeoutMs` — so `TimestampOracle::getTimestamp()`'s optional
+argument only ever *overrides* the configured value; there is no longer a way to
+ask for an unbounded TSO fetch.
 
 ## gRPC target strings accept more than host:port — always validate PD-supplied addresses
 

@@ -934,6 +934,9 @@ $options = [
                                          // regions; exceeding it throws
                                          // BatchDeadlineExceededException after
                                          // cancelling in-flight futures
+        'pdTimeoutMs' => 3000,           // default: 3000 (PD metadata RPCs)
+        'tsoTimeoutMs' => 3000,          // default: 3000 (PD TSO)
+        'lockResolveTimeoutMs' => 5000,  // default: 5000 (lock resolution)
     ],
 ];
 
@@ -943,11 +946,51 @@ $client = RawKvClient::create(
 );
 ```
 
+The last three are **metadata-plane** deadlines and are configured separately from the
+store-RPC ones above because they address different failure modes: a hung PD (a
+blackholed connection, a PD process that accepts but never answers) takes down every
+region lookup and every transaction begin at once, while a slow store is a
+per-region problem the retry executor already handles. `pdTimeoutMs` covers
+`GetRegion` / `ScanRegions` / `GetStore` / `GetAllStores` / `GetMembers` /
+`LoadKeyspace` and the GC safe-point RPCs; `tsoTimeoutMs` covers every `Tso` RPC
+(so also the timestamp `checkTxnStatus()` fetches); `lockResolveTimeoutMs` covers
+`KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`.
+
+Every gRPC call carries a deadline. `GrpcClientInterface::call()`'s `$timeoutMs`
+argument of `null` means the library default (30 s) and a value of `0` is the
+explicit opt-out meaning "no deadline at all" — see [Deadlines are never
+infinite](#deadlines-are-never-infinite).
+
 When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught and retried by the retry executor unless the budget is exhausted.
 
 ### Default Timeouts
 
-By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range). Set any value to `0` to disable it (not recommended in production).
+By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Set any value to `0` to disable it (not recommended in production).
+
+### Deadlines are never infinite
+
+A gRPC call created with an infinite deadline does not expire, and PHP cannot
+interrupt one that is already blocking: `Grpc\Call::startBatch()` is a synchronous
+call into the gRPC C core, where neither `max_execution_time` nor
+`set_time_limit()` applies. A worker blocked on a half-open connection therefore
+stays blocked until the kernel tears the connection down — minutes, or never — and
+in PHP-FPM that exhausts the whole pool, taking down requests that never touch
+TiKV. Long-running workers (Swoole, RoadRunner, queue consumers) hang instead, and
+their jobs are never acknowledged.
+
+So `GrpcClient` never builds an unbounded deadline implicitly. The `$timeoutMs`
+argument of `call()`, `callAsync()` and `callStreaming()` reads as:
+
+| `$timeoutMs` | Meaning                                                      |
+|--------------|--------------------------------------------------------------|
+| positive int | that many milliseconds from now                              |
+| `null`       | the library default — `GrpcClient::DEFAULT_TIMEOUT_MS` (30 s)  |
+| `0`          | explicit opt-out: no deadline at all                          |
+
+A caller that omits the argument therefore gets a bounded call; only a caller that
+passes `0` (or a `TimeoutConfig` field set to `0`) gets an unbounded one. Prefer a
+large finite value: an unbounded call is a resource that a hung peer can pin
+indefinitely, in a process that has no way to give the slot back.
 
 ### Handling Slow Operations
 

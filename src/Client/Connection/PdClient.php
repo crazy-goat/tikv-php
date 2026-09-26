@@ -29,6 +29,7 @@ use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use Google\Protobuf\Internal\Message;
@@ -51,6 +52,9 @@ final class PdClient implements PdClientInterface
     /**
      * @param string|list<string> $pdAddresses one PD address or a list of
      *        PD cluster endpoints (issue #416, GAP-02)
+     * @param TimeoutConfig $timeoutConfig deadlines for the PD and TSO RPCs
+     *        (issue #260). Added last so the #416 positional signature stays
+     *        stable; the default is {@see TimeoutConfig}
      */
     public function __construct(
         private readonly GrpcClientInterface $grpc,
@@ -67,6 +71,7 @@ final class PdClient implements PdClientInterface
          * region boundaries in); RawKV uses the default passthrough codec.
          */
         private readonly CodecInterface $codec = new CodecV1(),
+        private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
     ) {
         if (is_string($pdAddresses)) {
             $pdAddresses = [$pdAddresses];
@@ -122,6 +127,7 @@ final class PdClient implements PdClientInterface
                 $this->lowResMaxStalenessMs,
                 poolSize: $this->tsoPoolSize,
                 onTransportFailure: $this->markAddressBad(...),
+                tsoTimeoutMs: $this->timeoutConfig->tsoTimeoutMs,
             );
         }
 
@@ -654,6 +660,7 @@ final class PdClient implements PdClientInterface
             'GetMembers',
             $request,
             GetMembersResponse::class,
+            $this->timeoutConfig->pdTimeoutMs,
         );
 
         $this->learnClusterId($response);
@@ -744,6 +751,7 @@ final class PdClient implements PdClientInterface
                 $method,
                 $request,
                 $responseClass,
+                $this->timeoutConfig->pdTimeoutMs,
             );
 
             $this->learnClusterId($response);
@@ -767,6 +775,7 @@ final class PdClient implements PdClientInterface
                     $method,
                     $request,
                     $responseClass,
+                    $this->timeoutConfig->pdTimeoutMs,
                 );
 
                 $this->learnClusterId($response);

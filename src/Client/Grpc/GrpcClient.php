@@ -38,6 +38,19 @@ final class GrpcClient implements GrpcClientInterface
     public const DEFAULT_KEEPALIVE_TIMEOUT_MS = 3000;
 
     /**
+     * Deadline applied to a call whose `$timeoutMs` is null (issue #260).
+     *
+     * `null` used to mean "no deadline" (`Timeval::infFuture()`), which is
+     * unreachable in practice: a blocking `Grpc\Call::startBatch()` inside the
+     * C extension is not interrupted by `max_execution_time`, so a
+     * half-open connection pinned a PHP-FPM worker for minutes or forever
+     * and exhausted the whole pool. `null` now means "library default" and a
+     * caller who genuinely wants an unbounded call must say so with the
+     * explicit sentinel `0`.
+     */
+    public const DEFAULT_TIMEOUT_MS = 30000;
+
+    /**
      * @param bool $allowInsecure When true (default), an insecure (plaintext) gRPC channel
      *                            is created when no TLS configuration is provided or when
      *                            the TLS configuration has no credentials set. When false,
@@ -113,9 +126,7 @@ final class GrpcClient implements GrpcClientInterface
         try {
             $channel = $this->getChannel($address);
 
-            $deadline = $timeoutMs !== null && $timeoutMs > 0
-                ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
-                : Timeval::infFuture();
+            $deadline = $this->deadline($timeoutMs);
 
             $call = new Call(
                 $channel,
@@ -172,9 +183,7 @@ final class GrpcClient implements GrpcClientInterface
         try {
             $channel = $this->getChannel($address);
 
-            $deadline = $timeoutMs !== null && $timeoutMs > 0
-                ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
-                : Timeval::infFuture();
+            $deadline = $this->deadline($timeoutMs);
 
             $call = new Call(
                 $channel,
@@ -242,7 +251,9 @@ final class GrpcClient implements GrpcClientInterface
      * @param string $method Method name (e.g., "RawDeleteRange")
      * @param Message $request Protobuf request message
      * @param class-string<T> $responseClass Response message class name
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds;
+     *                            null = the library default
+     *                            ({@see self::DEFAULT_TIMEOUT_MS}), 0 = no deadline
      * @return GrpcFuture Un-waited future resolving to T
      * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
      */
@@ -260,9 +271,7 @@ final class GrpcClient implements GrpcClientInterface
 
         $channel = $this->getChannel($address);
 
-        $deadline = $timeoutMs !== null && $timeoutMs > 0
-            ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
-            : Timeval::infFuture();
+        $deadline = $this->deadline($timeoutMs);
 
         $call = new Call(
             $channel,
@@ -511,6 +520,38 @@ final class GrpcClient implements GrpcClientInterface
     private function now(): float
     {
         return microtime(true);
+    }
+
+    /**
+     * Resolve a call's `$timeoutMs` argument to a number of milliseconds
+     * that is never "unset" (issue #260).
+     *
+     * `null` — a call site with no opinion — becomes the conservative
+     * library default {@see self::DEFAULT_TIMEOUT_MS} rather than an
+     * unbounded deadline. A caller that genuinely wants no deadline has to
+     * pass the explicit non-positive sentinel `0`, which is the same way
+     * the rest of the library spells "disabled" (`TimeoutConfig`'s
+     * `batchDeadlineMs = 0`).
+     */
+    private function resolveTimeoutMs(?int $timeoutMs): int
+    {
+        return $timeoutMs ?? self::DEFAULT_TIMEOUT_MS;
+    }
+
+    /**
+     * Build the gRPC deadline for a call (issue #260).
+     *
+     * The single place where a deadline is derived from a `$timeoutMs`
+     * argument, so {@see self::resolveTimeoutMs()} cannot be honoured in
+     * one entry point and forgotten in another.
+     */
+    private function deadline(?int $timeoutMs): Timeval
+    {
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
+        return $timeout > 0
+            ? Timeval::now()->add(new Timeval($timeout * 1000))
+            : Timeval::infFuture();
     }
 
     private function createTlsCredentials(): ChannelCredentials

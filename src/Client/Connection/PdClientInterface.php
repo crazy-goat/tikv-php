@@ -71,7 +71,8 @@ interface PdClientInterface
      * discarded on a PD error, a cluster-ID change, after a fork, or when
      * it outlives its physical window; a TSO failure still fails closed.
      *
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Deadline in milliseconds for the `Tso` RPC; null
+     *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD error
@@ -84,7 +85,8 @@ interface PdClientInterface
      *
      * @param int $count number of timestamps to request (>= 1 and
      *                   <= {@see TimestampOracle::MAX_TIMESTAMP_POOL_SIZE})
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Deadline in milliseconds for the `Tso` RPC; null
+     *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @return list<int> at most $count monotonically increasing timestamps
      *
@@ -104,7 +106,8 @@ interface PdClientInterface
      * timestamp. Intended for staleness-tolerant consumers such as lock
      * resolution — never for start/commit timestamps.
      *
-     * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds (null = no timeout)
+     * @param int|null $timeoutMs Deadline in milliseconds for the `Tso` RPC; null
+     *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD error
