@@ -35,6 +35,7 @@ extends `\InvalidArgumentException` directly — it is **not** a
     ├── HealthCheckException                       src/Client/Exception/
     ├── InvalidStateException                      src/Client/Exception/
     ├── InvalidStoreAddressException               src/Client/Exception/
+    ├── PdException                                src/Client/Exception/
     ├── RegionException                            src/Client/Exception/
     ├── ScanLimitExceededException                 src/Client/Exception/
     ├── StoreNotFoundException                     src/Client/Exception/
@@ -50,16 +51,16 @@ extends `\InvalidArgumentException` directly — it is **not** a
 └── InvalidArgumentException                        src/Client/Exception/
 ```
 
-All seventeen `TiKvException` subclasses are `final`; `TiKvException` itself is
+All eighteen `TiKvException` subclasses are `final`; `TiKvException` itself is
 the only non-final class in the tree (it is the intended base for any custom
 project-wide exception work).
 
 > The client never throws a raw `\Exception`, `\RuntimeException` or
 > `\InvalidArgumentException`: everything that can reach your code is one of
-> the seventeen classes above.
+> the eighteen classes above.
 
 `TiKvException` itself is also thrown **directly** — no more specific subclass —
-at nineteen `throw new TiKvException(...)` statements across multiple call
+at sixteen `throw new TiKvException(...)` statements across multiple call
 sites (some inside shared private helpers), so a `catch` on any single
 subclass will not match these; only a bare `catch (TiKvException $e)` does.
 Several are
@@ -68,9 +69,8 @@ contract changes (noted per row):
 
 | Site | Thrown when | Message (verbatim in `src/`) |
 |---|---|---|
-| `PdClient::getRegion()` | PD returned no region for the requested key. Fail-closed by design: a fabricated region would be cached and silently misroute requests. Reachable from every region-resolved operation. | `PD GetRegion returned no region for key` |
-| `PdClient::getGCSafePoint()` | PD returned an error header for `GetGCSafePoint`. | `PD GetGCSafePoint failed: %s` |
-| `PdClient::updateServiceGCSafePoint()` | PD returned an error header for `UpdateServiceGCSafePoint` (the "not supported" / GC-v1 case is handled separately as `null`). Reachable via `TxnKvClient::holdGcSafePoint()`. | `PD UpdateServiceGCSafePoint failed: %s` |
+| `PdClient::getRegion()` | PD returned no region for the requested key. Fail-closed by design: a fabricated region would be cached and silently misroute requests. A PD *header error* is a separate, earlier failure — see [`PdException`](#what-each-class-means) below. Reachable from every region-resolved operation. | `PD GetRegion returned no region for key` |
+| `PdClient::getKeyspaceId()` | PD answered `LoadKeyspace` with no keyspace. Fail-closed: the codec cannot be built without a keyspace ID, and defaulting to `0` would address the wrong keyspace. | `PD LoadKeyspace returned no keyspace` |
 | `PdClient::uint64ToInt()` (private) | A PD uint64 scalar (`GC safe point` / `min GC safe point`) was non-numeric, did not round-trip through a PHP int (out of 64-bit range or non-canonical), or was negative. Called from `getGCSafePoint()` and `updateServiceGCSafePoint()`. Three throw statements. | `PD returned a non-numeric %s: %s` / `PD returned an invalid %s: %s` |
 | `TimestampOracle::requestTimestampRange()` (private; reached from `getTimestamp()`, `getTimestampBatch()` and the pool refill) | The TSO RPC failed. **Re-wraps a `GrpcException`** (preserved as `getPrevious()`, gRPC status code kept) into the base class, so `catch (GrpcException)` around a transaction begin/commit will **not** match. Reachable from every timestamp mint (`begin()`, `commit()`, …). | `TSO request failed: %s` (sprintf'd with the wrapped message) |
 | `TimestampOracle::extractTimestampRange()` (private, same call) | The TSO response carried no timestamp. Fail-closed: no local timestamp is fabricated. | `TSO response missing timestamp` |
@@ -95,6 +95,7 @@ contract changes (noted per row):
 | [`InvalidArgumentException`](../src/Client/Exception/InvalidArgumentException.php) | `\InvalidArgumentException` | Invalid argument (empty key, oversized key/value, negative scan limit, bad option value). **Outside** the `TiKvException` hierarchy |
 | [`InvalidStateException`](../src/Client/Exception/InvalidStateException.php) | `TiKvException` | Client/transaction is in a state that cannot serve the call (e.g. CAS without atomic mode, transaction already committed) |
 | [`InvalidStoreAddressException`](../src/Client/Exception/InvalidStoreAddressException.php) | `TiKvException` | PD returned a store address that failed validation (not a bare `host:port`, reserved scheme, out-of-range port, or outside the allowed host policy) |
+| [`PdException`](../src/Client/Exception/PdException.php) | `TiKvException` | PD reported an application-level error in a `pdpb.ResponseHeader.error` — `NOT_BOOTSTRAPPED`, `ErrNotLeader`, `INVALID_VALUE`, … — which arrives with a gRPC `OK` status and an **empty payload**, so reading it as a success produced a silently wrong result (issue #234). Raised by the single choke point every PD response passes through, so it covers `getRegion()`, `scanRegions()`, `getStore()`, `getAllStores()`, `getKeyspaceId()`, `ping()`, both GC-safe-point methods and the `GetMembers` discovery path. Accessors: `getMethod()`, `getErrorType()` (raw `pdpb.ErrorType`), `getErrorTypeName()`, `getPdErrorMessage()`, `isNotLeader()`. A typed error with an **empty** message is still an error and renders as `unknown PD error (header error with empty message)` |
 | [`RegionException`](../src/Client/Exception/RegionException.php) | `TiKvException` | Region-level error reported by TiKV (NotLeader, EpochNotMatch, ServerIsBusy, …); carries `public readonly ?NotLeader $notLeader` and `?ErrorKind $errorKind` |
 | [`ScanLimitExceededException`](../src/Client/Exception/ScanLimitExceededException.php) | `TiKvException` | An unbounded scan (`limit: 0`) collected more than `options['maxScanRows']` rows (default 100000); accessors: `getMaxRows()`, `getScannedRows()`. Thrown instead of silently truncating — switch to `scanIterator()`/`scanPrefixIterator()` or raise the option (issue #191) |
 | [`StoreNotFoundException`](../src/Client/Exception/StoreNotFoundException.php) | `TiKvException` | The store backing a region leader is missing from PD; carries `public readonly int $storeId` |
@@ -133,6 +134,7 @@ Verdict legend:
 | `InvalidStateException` | **Never retry** — fix the calling code / lifecycle first |
 | `ClientClosedException` | **Never retry** on that client instance — reopen a new client if appropriate |
 | `InvalidStoreAddressException` | **Never retry** — classified fatal before any retry backoff (`ErrorClassifier::classify()` returns null), so the client did not retry and will not succeed next time without configuration change |
+| `PdException` | **Do not retry blindly** — read `getErrorType()` first. A **not-leader** rejection (`isNotLeader()`) is the one header error another endpoint can satisfy, and the client already rotated the PD endpoint and retried once per remaining endpoint before letting it reach you, so a second failure means no configured endpoint can serve the call. `NOT_BOOTSTRAPPED` and `INCOMPATIBLE_VERSION` resolve on their own (wait for the cluster, upgrade PD) and retrying only multiplies the RPC load; `INVALID_VALUE` means the request itself is wrong. **No user data was touched** — the failure is in the metadata plane — so re-driving the operation is safe for idempotent ops once PD is healthy (issue #234) |
 | `ScanLimitExceededException` | **Never retry** — the same query will hit the same guard. Switch to `scanIterator()`/`scanPrefixIterator()` (constant memory) or raise `options['maxScanRows']` |
 | `HealthCheckException` | Probe result only — no user data was touched. Re-probe after an interval instead of tight-looping |
 | `TransactionConflictException` | **New transaction** — the transaction's writes were not applied |
@@ -196,10 +198,16 @@ re-applying.
 One row per public method. "Throws" lists every exception class the method
 can raise, verified against both the `@throws` annotations and the method
 bodies (several scan methods validate limits even where no annotation says
-so). Two routing exceptions are deliberately *not* repeated in every row:
+so). Three routing exceptions are deliberately *not* repeated in every row:
 `StoreNotFoundException` and `InvalidStoreAddressException` can escape any
-operation that resolves a store address on the RPC path — treat them as an
-additional possibility for every row that includes `RegionException`.
+operation that resolves a store address on the RPC path, and `PdException`
+can escape any operation that resolves a region or a store through PD —
+treat them as an additional possibility for every row that includes
+`RegionException`. (Since issue #234 every PD response header is checked, so
+a PD application-level error such as `NOT_BOOTSTRAPPED` is raised as
+`PdException` instead of degrading into an empty result — e.g. `scanRegions()`
+can no longer return `[]` for a failed `ScanRegions`, so `deleteRange()`
+cannot report success having deleted nothing.)
 
 | Method | Throws | Notes |
 |---|---|---|
@@ -304,8 +312,9 @@ try {
     //    FlashbackInProgress). Retry only if idempotent.
 } catch (TiKvException $e) {
     // 7. Any other library failure (StoreNotFoundException,
-    //    InvalidStoreAddressException, HealthCheckException,
-    //    TxnRetryableException, ...). Default: do not retry.
+    //    InvalidStoreAddressException, PdException, HealthCheckException,
+    //    TxnRetryableException, ...). Default: do not retry. PdException
+    //    additionally carries getErrorType() — see its retryability row.
 }
 ```
 

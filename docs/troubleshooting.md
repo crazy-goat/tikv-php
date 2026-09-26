@@ -10,6 +10,7 @@ Common issues and solutions for the TiKV PHP Client.
     - [Region Errors](#region-errors)
     - [TTL Errors](#ttl-errors)
     - [Transaction Failures](#transaction-failures)
+    - [PD Metadata Errors](#pd-metadata-errors)
     - [Client Errors](#client-errors)
 4. [Performance Issues](#performance-issues)
 5. [Data Issues](#data-issues)
@@ -360,6 +361,42 @@ reserved scheme name (`unix:`/`dns:`/…), an out-of-range port, or outside
 succeed without a configuration change. Check what PD is advertising
 (`curl http://<pd-host>:2379/pd/api/v1/stores`) and your
 `allowedStoreHosts`/`allowedStorePorts`/`storeHostPolicy` options.
+
+### PD Metadata Errors
+
+#### PD Response Header Error
+
+**Error:**
+```
+PdException: PD <Method> failed: <pdpb.Error.message>
+PdException: PD <Method> failed: unknown PD error (header error with empty message)
+```
+(`<Method>` is the failing PD RPC, e.g. `ScanRegions`, `GetRegion`,
+`GetStore`, `LoadKeyspace`, `GetMembers`)
+
+**What it means:** PD answered with a gRPC `OK` status and an error inside
+`pdpb.ResponseHeader.error` — `NOT_BOOTSTRAPPED`, `ErrNotLeader`,
+`INVALID_VALUE`, `REGION_NOT_FOUND`, … — with an **empty payload**. Since
+issue #234 every PD response header is checked at one choke point, so the
+error is raised instead of read as a successful empty result. The exception
+carries `getErrorType()` (the raw `pdpb.ErrorType`),
+`getErrorTypeName()` and `isNotLeader()`. The second message form is a typed
+error whose text is empty: still an error, and deliberately says so rather
+than reporting a blank reason.
+
+**Likely cause:** The cluster is not bootstrapped yet or is being
+bootstrapped, the endpoint answered is not the PD leader, or the request was
+malformed. Notably `scanRegions()` used to answer `[]` here, which made
+`deleteRange()` return successfully having deleted nothing.
+
+**Solution:** Inspect `getErrorType()` first. `isNotLeader()` means the
+client already rotated to another configured endpoint and retried once per
+endpoint before this reached you — check that *all* configured PD endpoints
+are reachable and that the member list is consistent
+(`curl http://<pd-host>:2379/pd/api/v1/members`). `NOT_BOOTSTRAPPED` means
+wait for the cluster (or check `pd-ctl` bootstrap state); `INVALID_VALUE`
+means the request itself is wrong. No user data was touched, so re-driving
+an idempotent operation once PD is healthy is safe.
 
 ### Base Exception
 

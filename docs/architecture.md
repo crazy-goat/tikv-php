@@ -810,6 +810,9 @@ TiKvException
 │   ├── Unavailable → Retry with progressive backoff
 │   ├── DeadlineExceeded → Retry with progressive backoff
 │   └── Cancelled → Don't retry
+├── PdException → Don't retry (a PD-level error in the response header —
+│   the PD client already rotated the endpoint once per configured member
+│   for the not-leader case; see issue #234)
 └── ClientClosedException → Don't retry
 ```
 

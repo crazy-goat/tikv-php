@@ -462,6 +462,82 @@ Closing #288 after #187/#244/#188, three decisions inside
    `getById()` probe — so the claim is checkable rather than asserted
    (`benchmarks/BatchResolveRegionsBenchmark.php`).
 
+## A PD `ResponseHeader.error` is an error even with an empty message, checked at one choke point (issue #234)
+
+PD reports application-level failures (`NOT_BOOTSTRAPPED`, `ErrNotLeader`,
+`INVALID_VALUE`, …) inside a gRPC response with `OK` status and an **empty
+payload**, so before #234 every method that read such a response as a success
+degraded instead of failing: `getRegion()` threw "returned no region",
+`getStore()` returned `null` (a `StoreNotFoundException` for a store that
+exists) and `scanRegions()` returned `[]` — which made
+`RawKvRangeOps::deleteRange()` return normally having deleted nothing. Three
+decisions, each of which was available and was rejected:
+
+1. **The check lives in one choke point, not in each method.**
+   `checkHeader()` runs inside `callCurrentAddressWithClusterIdRetry()` (on
+   both of its responses, so a cluster-id retry is checked too) and in
+   `callGetMembers()` — the only two places the client obtains a PD response.
+   A per-method call is the issue's fallback suggestion and is what the two
+   GC-safe-point methods had; a method added later would then have to remember
+   to call it, and the failure mode of forgetting is a *silent wrong result*,
+   not a visible one. The per-method checks were removed, and the four
+   existing message assertions in `PdClientGcSafePointTest` still pass because
+   `PdException` renders as `PD <method> failed: <text>`.
+2. **The presence of the `pdpb.Error` message is the signal, not its `type`.**
+   `pdpb.ErrorType` has no case for "the error is present but the text is
+   empty", and a `setType(0)` (`OK`) is indistinguishable from unset, so
+   requiring `type !== OK` would re-open the typed-but-silent hole. The
+   `type` is carried on `PdException::$errorType` (with `getErrorTypeName()`,
+   which renders an unknown value as its number rather than throwing) for
+   classification; an empty text renders as
+   `PdException::EMPTY_MESSAGE`, so the message still names a reason.
+3. **A not-leader header error rotates the endpoint instead of failing the
+   call — and it reuses the transport failover machinery rather than getting
+   its own.** `callWithClusterIdRetry()` catches `PdException` beside its
+   existing `GrpcException` and routes a `isNotLeader()` error through the
+   same `discoverLeaderAddress()` re-discovery and the same "at most once per
+   configured endpoint" budget; a second rotation implementation would be a
+   third copy of that rule (the lesson of the #233/#245 predicate in this
+   file). `isNotLeader()` matches PD's *text* ("not leader", "not the leader",
+   "no leader", "leader has changed") because `pdpb.ErrorType` has no
+   not-leader member — `UNKNOWN` is PD's catch-all, so a type test would miss
+   the exact case rotation exists for. Every other header error
+   (`NOT_BOOTSTRAPPED`, `INVALID_VALUE`, …) is fatal here: another endpoint
+   cannot satisfy it, and retrying would only multiply the RPC load on a
+   cluster that is not coming up.
+
+Two soft-fail paths had to be rewired rather than assumed to survive the move
+of the check, and both are worth remembering as a shape:
+`updateServiceGCSafePoint()` used to inspect the response itself and now
+catches `GrpcException | PdException` instead (a cluster without service GC
+safe points is a supported configuration, so the `isUnsupportedFeatureError`
+soft-fail must catch the header form too — a `catch (GrpcException)` would have
+turned a supported configuration into a hard failure); and `ping()`, whose
+`GetMembers` response was previously read for the cluster ID only, now records
+the leader URL that RPC exists to report — validated against the configured
+endpoints, because adopting an address PD advertised but we were never given is
+the rogue-PD redirect #306/SEC-03 exists to prevent.
+
+`TimestampOracle::callTso()` is deliberately left alone: it does not go through
+`callWithClusterIdRetry()`, and it does not need to — `extractTimestampRange()`
+already fails closed on a timestamp-less response (`TSO response missing
+timestamp`), so a TSO header error surfaces as an exception rather than as a
+fabricated timestamp. Adding a second copy of the header reader there would
+buy nothing and duplicate the rule.
+
+`ErrorClassifier` is left alone too, which is a decision rather than an
+omission. A `PdException` can reach the retry executor (every region-resolved
+operation resolves through PD inside a retry closure), and it falls through to
+the message-text fallback. The default verdict is `null` — fatal — which is
+exactly the verdict the issue requires for `NOT_BOOTSTRAPPED` ("must not be
+retried forever"), and `PdClient` has already spent the one rotation that can
+help before the exception escapes. The only text matches that can reclassify it
+are PD prose naming `RegionNotFound` / `NotLeader`, and retrying *those* is
+defensible (a PD-side region miss is a routing miss). Adding an explicit
+`PdException` arm would move that decision into a list #245 is about to
+narrow, so it is recorded here instead: if #245 narrows the retryable path,
+this is the place to decide whether a PD-level region miss stays retryable.
+
 ## Every gRPC call carries a finite deadline, and PD/TSO/lock-resolution time out separately from the store RPCs (issue #260)
 
 Two decisions from #260 that should not be "simplified" away:

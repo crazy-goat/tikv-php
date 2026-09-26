@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\Connection;
 use CrazyGoat\Proto\Keyspacepb\LoadKeyspaceRequest;
 use CrazyGoat\Proto\Keyspacepb\LoadKeyspaceResponse;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\Proto\Pdpb\Error;
 use CrazyGoat\Proto\Pdpb\GetAllStoresRequest;
 use CrazyGoat\Proto\Pdpb\GetAllStoresResponse;
 use CrazyGoat\Proto\Pdpb\GetGCSafePointRequest;
@@ -18,6 +19,7 @@ use CrazyGoat\Proto\Pdpb\GetRegionResponse;
 use CrazyGoat\Proto\Pdpb\GetStoreRequest;
 use CrazyGoat\Proto\Pdpb\GetStoreResponse;
 use CrazyGoat\Proto\Pdpb\RequestHeader;
+use CrazyGoat\Proto\Pdpb\ResponseHeader;
 use CrazyGoat\Proto\Pdpb\ScanRegionsRequest;
 use CrazyGoat\Proto\Pdpb\ScanRegionsResponse;
 use CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointRequest;
@@ -27,6 +29,7 @@ use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\PdException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -210,9 +213,6 @@ final class PdClient implements PdClientInterface
     /**
      * @return Store[]
      */
-    /**
-     * @return Store[]
-     */
     public function getAllStores(): array
     {
         $request = new GetAllStoresRequest();
@@ -272,13 +272,17 @@ final class PdClient implements PdClientInterface
      * Probe the PD member list to verify connectivity & discover cluster ID.
      *
      * Issues a `GetMembers` RPC against the configured PD address and learns
-     * the cluster ID from the response header (if present). Returns the
-     * cluster ID on success; returns null if the response carried no cluster
-     * ID header. Unlike getRegion(), this call does NOT look up any user
-     * data and never fails with "no region" — making it suitable as a
-     * health check.
+     * the cluster ID from the response header (if present) and the current
+     * PD leader from the response's member list (issue #234 — the leader is
+     * what every subsequent PD and TSO RPC targets, and `GetMembers` is the
+     * RPC that reports it, so a health check that discarded it was
+     * reporting less than it had learned). Returns the cluster ID on
+     * success; returns null if the response carried no cluster ID header.
+     * Unlike getRegion(), this call does NOT look up any user data and never
+     * fails with "no region" — making it suitable as a health check.
      *
      * @throws GrpcException On transport error
+     * @throws PdException On a PD-level error in the response header
      * @throws TiKvException On PD-level error
      */
     public function ping(): ?int
@@ -294,6 +298,7 @@ final class PdClient implements PdClientInterface
         );
 
         $this->learnClusterId($response);
+        $this->adoptDiscoveredLeader($response);
 
         return $this->clusterId;
     }
@@ -301,8 +306,10 @@ final class PdClient implements PdClientInterface
     /**
      * Fetch the cluster's current GC safe point from PD.
      *
-     * {@inheritdoc} The full contract (including the fail-closed error
-     * handling) is documented on PdClientInterface.
+     * {@inheritdoc} The header error is raised by the shared choke point
+     * ({@see checkHeader()}) as a {@see PdException}; the full contract
+     * (including the fail-closed error handling) is documented on
+     * PdClientInterface.
      */
     public function getGCSafePoint(): int
     {
@@ -315,11 +322,6 @@ final class PdClient implements PdClientInterface
             $request,
             GetGCSafePointResponse::class,
         );
-
-        $headerError = $this->headerErrorMessage($response);
-        if ($headerError !== null) {
-            throw new TiKvException(sprintf('PD GetGCSafePoint failed: %s', $headerError));
-        }
 
         return $this->uint64ToInt($response->getSafePoint(), 'GC safe point');
     }
@@ -358,31 +360,24 @@ final class PdClient implements PdClientInterface
                 $request,
                 UpdateServiceGCSafePointResponse::class,
             );
-        } catch (GrpcException $e) {
-            if ($this->isUnsupportedFeatureError($e->getMessage())) {
-                $this->logger->warning(
-                    'PD does not support service GC safe points; GC will not be held back',
-                    ['serviceId' => $serviceId, 'error' => $e->getMessage()],
-                );
-
-                return null;
+        } catch (GrpcException | PdException $e) {
+            // A cluster without service GC safe points is a supported
+            // configuration, so "this PD does not implement the RPC" is a
+            // soft failure: report "GC will not be held back" rather than
+            // failing the caller. The soft-fail has to catch the header
+            // error too (PdException) and not only the gRPC status, because
+            // the shared choke point turns both into the same shape of
+            // failure (issue #234).
+            if (!$this->isUnsupportedFeatureError($e->getMessage())) {
+                throw $e;
             }
 
-            throw $e;
-        }
+            $this->logger->warning(
+                'PD does not support service GC safe points; GC will not be held back',
+                ['serviceId' => $serviceId, 'error' => $e->getMessage()],
+            );
 
-        $headerError = $this->headerErrorMessage($response);
-        if ($headerError !== null) {
-            if ($this->isUnsupportedFeatureError($headerError)) {
-                $this->logger->warning(
-                    'PD does not support service GC safe points; GC will not be held back',
-                    ['serviceId' => $serviceId, 'error' => $headerError],
-                );
-
-                return null;
-            }
-
-            throw new TiKvException(sprintf('PD UpdateServiceGCSafePoint failed: %s', $headerError));
+            return null;
         }
 
         return $this->uint64ToInt($response->getMinSafePoint(), 'min GC safe point');
@@ -448,33 +443,67 @@ final class PdClient implements PdClientInterface
     }
 
     /**
-     * Extract a PD-level error message from a response header, if present.
+     * Read the pdpb.Error out of a PD response header.
      *
      * PD reports request failures inside the response header (pdpb.Error)
-     * rather than as gRPC status errors. A header carrying a pdpb.Error is
-     * an error even when its message text is empty (a typed-but-silent
-     * error is still an error — treating it as success would turn a
-     * documented fail-closed method into a source of fabricated defaults).
+     * rather than as gRPC status errors, so a response can carry a failure
+     * with a gRPC `OK` status and an empty payload. Returns null when the
+     * response carries no error — including a response that is not a pdpb
+     * one at all (the `keyspacepb.Keyspace` service answers with its own
+     * header shape).
      */
-    private function headerErrorMessage(Message $response): ?string
+    private function headerError(Message $response): ?Error
     {
         if (!method_exists($response, 'getHeader')) {
             return null;
         }
 
         $header = $response->getHeader();
-        if (!$header instanceof \CrazyGoat\Proto\Pdpb\ResponseHeader) {
+        if (!$header instanceof ResponseHeader) {
             return null;
         }
 
         $error = $header->getError();
-        if (!$error instanceof \CrazyGoat\Proto\Pdpb\Error) {
-            return null;
+
+        return $error instanceof Error ? $error : null;
+    }
+
+    /**
+     * Fail closed on a PD application-level error carried in the response
+     * header (issue #234).
+     *
+     * This is the *single* choke point: every PD response the client obtains
+     * — from {@see callWithClusterIdRetry()} and from the GetMembers
+     * discovery path — passes through here, so a method added later cannot
+     * forget to check. A header carrying a pdpb.Error is an error even when
+     * its message text is empty (a typed-but-silent error is still an
+     * error), and treating it as success turns a documented fail-closed
+     * method into a source of fabricated defaults: `getRegion()` throws
+     * "returned no region", `getStore()` returns `null` (which becomes a
+     * `StoreNotFoundException` for a store that does exist) and
+     * `scanRegions()` returns `[]` — which makes
+     * {@see \CrazyGoat\TiKV\Client\RawKv\RawKvRangeOps::deleteRange()}
+     * return normally having deleted nothing, a correctness failure rather
+     * than an outage.
+     *
+     * The presence of the error message is the signal; `pdpb.ErrorType` is
+     * carried on the exception for classification only, so a *not leader*
+     * rejection can be told apart from a `NOT_BOOTSTRAPPED` one.
+     *
+     * @throws PdException when the response header carries a pdpb.Error
+     */
+    private function checkHeader(Message $response, string $method): void
+    {
+        $error = $this->headerError($response);
+        if (!$error instanceof Error) {
+            return;
         }
 
-        $message = $error->getMessage();
-
-        return $message !== '' ? $message : 'unknown PD error (header error with empty message)';
+        throw new PdException(
+            $method,
+            (int) $error->getType(),
+            (string) $error->getMessage(),
+        );
     }
 
     /**
@@ -493,15 +522,23 @@ final class PdClient implements PdClientInterface
 
     /**
      * Execute a PD gRPC call with automatic cluster ID mismatch retry and
-     * multi-endpoint failover (issue #416, GAP-02).
+     * multi-endpoint failover (issue #416, GAP-02; header errors #234).
      *
-     * Two layers:
+     * Three layers:
      *  - inner ({@see callCurrentAddressWithClusterIdRetry}): the historical
-     *    "mismatch cluster id, need X but got 0" retry against one address;
-     *  - outer: on any remaining transport failure the current address is
-     *    marked bad, the PD leader is re-discovered via GetMembers against
-     *    the remaining configured endpoints, and the call is retried against
-     *    the new address — at most once per configured endpoint.
+     *    "mismatch cluster id, need X but got 0" retry against one address,
+     *    and the {@see checkHeader()} choke point that fails closed on a PD
+     *    application-level error carried in the response header — on *every*
+     *    response it obtains, so a returned response is always
+     *    header-checked;
+     *  - outer: on any remaining transport failure, or on a *not leader*
+     *    header error, the current address is marked bad, the PD leader is
+     *    re-discovered via GetMembers against the remaining configured
+     *    endpoints, and the call is retried against the new address — at
+     *    most once per configured endpoint. A not-leader rejection is the one
+     *    header error another endpoint can satisfy, so it rotates instead of
+     *    failing; every other header error (`NOT_BOOTSTRAPPED`,
+     *    `INVALID_VALUE`, …) is fatal here, because retrying cannot help.
      *
      * @template T of Message
      * @param class-string<T> $responseClass
@@ -520,6 +557,20 @@ final class PdClient implements PdClientInterface
             $attempted[] = $this->currentAddress;
             try {
                 return $this->callCurrentAddressWithClusterIdRetry($method, $request, $responseClass, $service);
+            } catch (PdException $e) {
+                if (!$e->isNotLeader()) {
+                    throw $e;
+                }
+
+                // Not-leader reuses the transport failover machinery rather
+                // than a second rotation implementation: the endpoint is
+                // just as unusable, so the same "re-discover, retry once per
+                // remaining endpoint" rule applies (issue #234).
+                $next = $this->failoverAfterNotLeader($e, $method, $attempted);
+                if ($next === null) {
+                    throw $e;
+                }
+                $this->currentAddress = $next;
             } catch (GrpcException $e) {
                 if ($this->extractClusterIdFromError($e->getMessage()) !== null) {
                     // The inner layer already retried the mismatch; a mismatch
@@ -577,7 +628,39 @@ final class PdClient implements PdClientInterface
      */
     private function failoverAfterTransportFailure(GrpcException $e, string $method, array $attempted): ?string
     {
-        $this->logger->warning('PD endpoint failed, attempting failover', [
+        return $this->failoverToAnotherEndpoint($e, 'PD endpoint failed, attempting failover', $method, $attempted);
+    }
+
+    /**
+     * A not-leader header error makes the current endpoint as unusable as a
+     * dead one, so it takes the same re-discovery path (issue #234) — the
+     * same "retry once per remaining configured endpoint" rule, the same
+     * {@see discoverLeaderAddress()}, and the same budget. Not a second
+     * rotation implementation on purpose: the two failure modes differ only
+     * in *why* the endpoint cannot serve the call.
+     *
+     * @param list<string> $attempted
+     */
+    private function failoverAfterNotLeader(PdException $e, string $method, array $attempted): ?string
+    {
+        return $this->failoverToAnotherEndpoint(
+            $e,
+            'PD answered not-leader, rotating to another endpoint',
+            $method,
+            $attempted,
+        );
+    }
+
+    /**
+     * @param list<string> $attempted addresses already tried for this call
+     */
+    private function failoverToAnotherEndpoint(
+        GrpcException | PdException $e,
+        string $logMessage,
+        string $method,
+        array $attempted,
+    ): ?string {
+        $this->logger->warning($logMessage, [
             'method' => $method,
             'failedAddress' => $this->currentAddress,
             'error' => $e->getMessage(),
@@ -588,7 +671,7 @@ final class PdClient implements PdClientInterface
         } catch (GrpcException | TiKvException $discoveryError) {
             // Nearly unreachable: discoverLeaderAddress() catches these per
             // endpoint. Kept as defense in depth — a throw here would abort
-            // the failover instead of reporting the original transport error.
+            // the failover instead of reporting the original error.
             $this->logger->warning('PD leader rediscovery failed', [
                 'error' => $discoveryError->getMessage(),
             ]);
@@ -664,8 +747,39 @@ final class PdClient implements PdClientInterface
         );
 
         $this->learnClusterId($response);
+        // The discovery path is the *other* producer of PD responses, so it
+        // gets the same choke point as callWithClusterIdRetry(). A
+        // GetMembers answer carrying a header error is not a member list;
+        // the caller (discoverLeaderAddress) treats the endpoint as not
+        // having answered and moves to the next one.
+        $this->checkHeader($response, 'GetMembers');
 
         return $response;
+    }
+
+    /**
+     * Point the client at the leader a GetMembers response names.
+     *
+     * Called from {@see ping()}, whose whole purpose is to probe PD and
+     * learn about it: `GetMembers` is the RPC that reports the leader and
+     * the member URLs, and discarding everything but the cluster ID (the
+     * pre-#234 behaviour) threw away the one answer a health check should
+     * act on. A leader URL that is not one of the configured endpoints is
+     * ignored — it is an address PD advertises that we were never given, and
+     * the configured-endpoint validation is what keeps a rogue PD from
+     * redirecting traffic.
+     */
+    private function adoptDiscoveredLeader(GetMembersResponse $response): void
+    {
+        $this->leaderDiscovered = true;
+
+        $leader = $this->resolveLeaderUrl($response);
+        if ($leader === null || !in_array($leader, $this->pdAddresses, true)) {
+            return;
+        }
+
+        $this->currentAddress = $leader;
+        $this->logger->info('PD leader recorded from GetMembers', ['newAddress' => $leader]);
     }
 
     /**
@@ -733,6 +847,11 @@ final class PdClient implements PdClientInterface
      * "mismatch cluster id, need X but got 0". We extract X, cache it,
      * and retry exactly once.
      *
+     * This is also the {@see checkHeader()} choke point: it runs on *both*
+     * responses (the first attempt and the cluster-id retry), so a response
+     * this method returns is always header-checked, whatever
+     * {@see callWithClusterIdRetry()} grows in future.
+     *
      * @template T of Message
      * @param class-string<T> $responseClass
      * @return T
@@ -755,6 +874,7 @@ final class PdClient implements PdClientInterface
             );
 
             $this->learnClusterId($response);
+            $this->checkHeader($response, $method);
 
             return $response;
         } catch (GrpcException $e) {
@@ -779,6 +899,7 @@ final class PdClient implements PdClientInterface
                 );
 
                 $this->learnClusterId($response);
+                $this->checkHeader($response, $method);
 
                 return $response;
             }
