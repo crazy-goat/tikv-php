@@ -14,21 +14,28 @@ use CrazyGoat\TiKV\Client\RawKv\SstIngestor;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
+use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 
 /**
- * Issue #187 (RAW-02): a key whose region cannot be resolved is an internal
+ * Issue #187 (RAW-02) and issue #181 (RC-2, the root cause four auditors
+ * filed independently): a key whose region cannot be resolved is an internal
  * error, never a valid outcome. Every region-grouping loop fails closed
- * instead of `continue`-ing past the key, because all four of these entry
+ * instead of `continue`-ing past the key, because all of these entry
  * points have no way to report a partial result:
  *
  *  - `batchPut()`, `batchDelete()` and `ingest()` return `void`, so a
  *    skipped key was a write the caller was told had succeeded and that was
  *    never sent to the cluster;
  *  - `batchGet()` returns a map, and a skipped key became a `null` value
- *    indistinguishable from a legitimately missing key.
+ *    indistinguishable from a legitimately missing key;
+ *  - `Transaction::commit()` returns `void` and then reports
+ *    {@see TransactionStatus::Committed}, so a skipped key was a
+ *    `set(K); commit()` pair that was a **total** no-op and said so.
  *
  * ## How the resolver is faked
  *
@@ -140,6 +147,108 @@ class UnresolvedRegionFailsClosedTest extends TestCase
             new TimeoutConfig(),
             new NullLogger(),
         );
+    }
+
+    private function transaction(bool $pessimistic): Transaction
+    {
+        $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
+
+        return new Transaction(
+            txnId: 'unresolvable-181',
+            startTs: 1000,
+            pessimistic: $pessimistic,
+            priority: 0,
+            pdClient: $this->pdClient,
+            grpc: $this->grpc,
+            regionCache: $this->regionCache,
+            lockResolver: new LockResolver($this->grpc, $regionResolver, $this->regionCache, $this->pdClient, 1000),
+            regionResolver: $regionResolver,
+            maxBackoffMs: 100,
+        );
+    }
+
+    /**
+     * The issue's own wording: "for a transaction, `set(K); commit()` can be
+     * a total no-op reported as `Committed`".
+     *
+     * Three properties, because each is a way the claim can come back:
+     *
+     *  - the failure **names the key**, in its redacted form. This is the
+     *    assertion that bites. `TwoPhaseCommitter::commit()` also carries a
+     *    count guard from #208 that throws `InvalidStateException('Not all
+     *    transaction mutations were assigned to a region; refusing to report
+     *    commit success')` when the grouped mutations outnumber the write
+     *    set — so a silently-skipped key still fails, but a caller learns
+     *    only that *something* was unassignable and not which key, and the
+     *    guard lives one layer below the region resolution that named it.
+     *  - the status is **not** `Committed`, so the transaction never claims
+     *    the write happened;
+     *  - **nothing reached the wire** — a total no-op that at least cost a
+     *    prewrite would be a different bug.
+     */
+    public function testSetThenCommitWithAnUnresolvableKeyNeverReportsCommitted(): void
+    {
+        $this->givenAPdWindowThatMissesKeyZ();
+        $this->expectNoRequestOnTheWire();
+
+        $txn = $this->transaction(pessimistic: false);
+        $txn->set('z', 'v1');
+
+        $threw = null;
+        try {
+            $txn->commit();
+        } catch (TiKvException $e) {
+            $threw = $e;
+        }
+
+        self::assertInstanceOf(
+            TiKvException::class,
+            $threw,
+            'commit() must not return normally with an unroutable key in the write set',
+        );
+        self::assertStringContainsString(
+            '"' . bin2hex('z') . '" (1 bytes); refusing to silently drop',
+            $threw->getMessage(),
+            'the failure must name the key that could not be routed, not just report a count mismatch',
+        );
+        self::assertNotSame(
+            TransactionStatus::Committed,
+            $txn->getStatus(),
+            'a transaction that wrote nothing must not report Committed',
+        );
+    }
+
+    /**
+     * The pessimistic path fails *earlier* — at the write, not at the commit —
+     * because the physical lock is acquired inside `set()` by default
+     * (#437). Worth its own case: the guarantee is then "an unroutable key
+     * cannot even be staged", which is a stronger claim than the commit one
+     * and would be lost silently if `set()` were ever made to buffer again.
+     */
+    public function testPessimisticSetWithAnUnresolvableKeyFailsAtTheWrite(): void
+    {
+        $this->givenAPdWindowThatMissesKeyZ();
+        $this->expectNoRequestOnTheWire();
+
+        $txn = $this->transaction(pessimistic: true);
+
+        $threw = null;
+        try {
+            $txn->set('z', 'v1');
+        } catch (TiKvException $e) {
+            $threw = $e;
+        }
+
+        self::assertInstanceOf(
+            TiKvException::class,
+            $threw,
+            'set() must not return normally for a key that cannot be locked',
+        );
+        self::assertStringContainsString(
+            '"' . bin2hex('z') . '" (1 bytes); refusing to silently drop',
+            $threw->getMessage(),
+        );
+        self::assertNotSame(TransactionStatus::Committed, $txn->getStatus());
     }
 
     /**
