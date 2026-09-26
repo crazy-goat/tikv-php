@@ -213,8 +213,8 @@ additional possibility for every row that includes `RegionException`.
 | `put(string, string, int $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Same validation as `get()` plus value size |
 | `delete(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Idempotent at the TiKV level |
 | `getKeyTTL(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException` | Returns `null` when the key has no TTL |
-| `compareAndSwap(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `GrpcException` | `InvalidStateException` when atomic mode is off |
-| `putIfAbsent(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `GrpcException` | Delegates to `compareAndSwap()`; requires atomic mode |
+| `compareAndSwap(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `GrpcException` | `InvalidStateException` with `CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))` when atomic mode is off |
+| `putIfAbsent(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `GrpcException` | Delegates to `compareAndSwap()`; requires atomic mode (`setAtomicForCAS(true)`), same `InvalidStateException` message |
 | `batchGet(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Empty input returns `[]` without RPC |
 | `batchPut(array, int|array $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | Per-key validation happens before any send |
 | `batchDelete(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException` | As above |

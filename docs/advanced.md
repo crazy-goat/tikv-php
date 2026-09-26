@@ -197,6 +197,8 @@ warmCache($client, $hotKeys);
 
 #### Leader Election
 
+> **Prerequisite:** `compareAndSwap()` and `putIfAbsent()` require atomic mode — see [Atomic Mode](operations.md#atomic-mode-setatomicforcas--isatomicforcas).
+
 ```php
 class LeaderElection
 {
@@ -251,6 +253,7 @@ class LeaderElection
 }
 
 // Usage
+$client->setAtomicForCAS(true);  // required: tryBecomeLeader() uses putIfAbsent()
 $election = new LeaderElection($client, 'node-1', 'scheduler');
 
 if ($election->tryBecomeLeader()) {
@@ -319,6 +322,7 @@ class DistributedCounter
 }
 
 // Usage
+$client->setAtomicForCAS(true);  // required: increment() uses compareAndSwap()
 $counter = new DistributedCounter($client, 'page_views');
 $newCount = $counter->increment();
 echo "Page views: $newCount\n";

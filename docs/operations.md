@@ -707,12 +707,65 @@ $client->batchPut(['perm' => 'permanent', 'temp' => 'temporary'], ttl: [0, 300])
 
 ## Atomic Operations
 
+### Atomic Mode (`setAtomicForCAS` / `isAtomicForCAS`)
+
+Both operations in this section are gated on a client-wide flag that is **off by
+default**.
+
+**Signatures:**
+
+```php
+public function setAtomicForCAS(bool $enabled): self;  // fluent, returns the client
+public function isAtomicForCAS(): bool;                 // current state of the flag
+```
+
+**What the flag does:** with atomic mode enabled the client sets the `for_cas`
+flag on every `RawPut`/`RawDelete` request it sends (single-key and batch),
+which is what selects TiKV's atomic code path on the store.
+
+**Why it defaults to `false`:** the non-atomic path is the faster one for plain
+writes, which is what most calls are. The flag is per client and not per call,
+so a client that mixes a handful of CAS operations with bulk plain writes pays
+the atomic-path cost on *every* write it sends: atomic mode cannot be paid for
+only where CAS is actually needed. When just a few operations need CAS, give
+those their own client and leave the bulk client in the fast mode.
+
+**When it is required:** `compareAndSwap()` and `putIfAbsent()` — and therefore
+every lock, leader-election and counter pattern built on them — throw
+`InvalidStateException` while the flag is off:
+
+```
+CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))
+```
+
+**How to enable it:** once, right after the client is created. It is a
+client-wide switch, not a per-call argument:
+
+```php
+$client = RawKvClient::create(['127.0.0.1:2379']);
+$client->setAtomicForCAS(true);  // required by compareAndSwap() / putIfAbsent()
+```
+
+The flag lives on the client *instance*: a process that calls `close()` and
+`RawKvClient::create()` again (reconnect, failover) has to re-apply it. Read it
+back with `isAtomicForCAS()` when a library hands a client to code that may not
+have enabled it.
+
 ### Compare And Swap (CAS)
 
 Atomic compare-and-set operation:
 
+> **Prerequisite:** `compareAndSwap()` and `putIfAbsent()` require atomic mode.
+> Call `$client->setAtomicForCAS(true)` once after creating the client, otherwise
+> both methods throw `InvalidStateException`. Atomic mode makes the client send the
+> `for_cas` flag on `RawPut`/`RawDelete`, which selects TiKV's atomic code path.
+> It is disabled by default because the non-atomic path is faster for plain writes.
+
 ```php
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
+
+// Required once per client: compareAndSwap() throws without atomic mode
+$client->setAtomicForCAS(true);
 
 $result = $client->compareAndSwap('counter', '5', '6');
 // Returns: CasResult object
@@ -732,6 +785,7 @@ $result = $client->compareAndSwap('counter', '5', '6');
 
 ```php
 // Counter increment
+$client->setAtomicForCAS(true);  // required by compareAndSwap()
 $current = $client->get('counter') ?? '0';
 $result = $client->compareAndSwap('counter', $current, (string)($current + 1));
 
@@ -748,6 +802,8 @@ if ($result->swapped) {
 ```php
 function incrementCounter(RawKvClient $client, string $key): int
 {
+    // Requires atomic mode: the caller must have called
+    // $client->setAtomicForCAS(true) on this client.
     while (true) {
         $current = $client->get($key) ?? '0';
         $next = (int)$current + 1;
@@ -769,6 +825,9 @@ function incrementCounter(RawKvClient $client, string $key): int
 Insert only if key doesn't exist:
 
 ```php
+// Same prerequisite as compareAndSwap(): atomic mode must be on
+$client->setAtomicForCAS(true);
+
 $existing = $client->putIfAbsent('lock:resource', 'owner-123');
 // Returns: null (success) or existing value (failure)
 ```
@@ -784,6 +843,7 @@ $existing = $client->putIfAbsent('lock:resource', 'owner-123');
 
 ```php
 // Distributed lock
+$client->setAtomicForCAS(true);  // required by putIfAbsent()
 $owner = 'process-' . getmypid();
 $existing = $client->putIfAbsent('lock:resource:123', $owner, ttl: 30);
 
@@ -804,6 +864,8 @@ if ($existing === null) {
 ```php
 function acquireLock($client, $resource, $owner, $ttl = 30)
 {
+    // Requires atomic mode: the caller must have called
+    // $client->setAtomicForCAS(true) on this client.
     $existing = $client->putIfAbsent("lock:$resource", $owner, $ttl);
     
     if ($existing !== null && $existing !== $owner) {
