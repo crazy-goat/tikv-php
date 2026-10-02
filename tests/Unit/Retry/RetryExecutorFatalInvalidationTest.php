@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
@@ -166,6 +167,43 @@ class RetryExecutorFatalInvalidationTest extends TestCase
         );
         $this->assertSame(1, $this->metrics->getInvalidations('fatal_region_error'));
         $this->assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
+    }
+
+    // ========================================================================
+    // A removed leader store is evidence about the cached region (issue #627)
+    // ========================================================================
+
+    public function testFatalStoreNotFoundInvalidatesTheCachedRegionAndRethrows(): void
+    {
+        $this->cache->put($this->cachedRegion());
+        $executor = $this->createExecutor();
+
+        $error = new StoreNotFoundException(1);
+        $this->assertNull(ErrorClassifier::classify($error), 'fixture must be a fatal classification');
+
+        $calls = 0;
+        $caught = null;
+        try {
+            $executor->execute(self::KEY, function () use (&$calls, $error): string {
+                $calls++;
+                throw $error;
+            });
+        } catch (StoreNotFoundException $e) {
+            $caught = $e;
+        }
+
+        $this->assertSame($error, $caught, 'fail closed: the original exception must propagate unchanged');
+        $this->assertSame(1, $calls, 'a fatal error must not be retried');
+        $this->assertNull(
+            $this->cache->getByKey(self::KEY),
+            'the region whose leader store is gone must not outlive the throw',
+        );
+        $this->assertSame(1, $this->metrics->getInvalidations('fatal_region_error'));
+    }
+
+    public function testInvalidatesRoutingOnFatalAcceptsStoreNotFound(): void
+    {
+        $this->assertTrue(RetryExecutor::invalidatesRoutingOnFatal(new StoreNotFoundException(7)));
     }
 
     // ========================================================================

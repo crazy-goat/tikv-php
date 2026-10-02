@@ -301,12 +301,21 @@ final readonly class RetryExecutor
      * precisely because the key is not in the region the client believed owned
      * it, so the entry that caused it must not survive the throw.
      *
-     * A NON-RegionException fatal error must NOT invalidate. A GrpcException
-     * with a fatal status (UNAUTHENTICATED, PERMISSION_DENIED, …), an
-     * InvalidStoreAddressException or a TxnAbortedByGcException says nothing
-     * about which region the key lives in — they are credentials, a PD answer
-     * and a GC verdict respectively — so dropping the entry would only trade
-     * one re-resolve for another. This is a decision, not an omission: the
+     * A StoreNotFoundException DOES invalidate (issue #627). It is raised by
+     * RegionResolver::resolveStoreAddress() while routing the key, when PD no
+     * longer knows the store that the cached region names as leader, and the
+     * store cache has no address for it either. That is evidence about the
+     * CACHED REGION (its leader store is gone), exactly like a routing error:
+     * keeping the entry would fail every later request for the key with the
+     * same fatal error until the TTL ran out. The exception is still thrown
+     * (fail closed, #104, #480); only the next request asks PD again.
+     *
+     * Any OTHER non-RegionException fatal error must NOT invalidate. A
+     * GrpcException with a fatal status (UNAUTHENTICATED, PERMISSION_DENIED,
+     * …), an InvalidStoreAddressException or a TxnAbortedByGcException says
+     * nothing about which region the key lives in — they are credentials, a PD
+     * answer and a GC verdict respectively — so dropping the entry would only
+     * trade one re-resolve for another. This is a decision, not an omission: the
      * non-routing kinds below are enumerated for the same reason.
      *
      * The match has no `default` arm, so PHPStan reports match.unhandled at
@@ -328,6 +337,10 @@ final readonly class RetryExecutor
      */
     public static function invalidatesRoutingOnFatal(TiKvException $e): bool
     {
+        if ($e instanceof StoreNotFoundException) {
+            return true;
+        }
+
         if (!$e instanceof RegionException) {
             return false;
         }

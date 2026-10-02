@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fatal `StoreNotFoundException` (the cached region's leader store was removed from PD) now drops the cached region for the key, so the next request asks PD again instead of failing until the entry expires. The exception is still thrown. (#627)
+
 - **[GRPC-22]**: `RegionErrorHandler::check()` no longer ignores a populated `KeyError`. It now throws `RegionException` for a top-level `KeyError` and for a per-pair error on `RawScanResponse`, `RawBatchScanResponse`, `ScanResponse` and `BatchGetResponse` (previously only `RawBatchGetResponse`), so `RawKvScanner` no longer returns a key with an empty value when TiKV failed to read it. Transactional call sites keep their own lock-resolution and conflict handling and pass the new `keyErrorsHandledByCaller: true`. (#281)
 
 - **[GRPC-21]**: a gRPC completion event without a status, or with a non-integer status code, is now a `GrpcException` (`STATUS_INTERNAL`) instead of being read as `STATUS_OK`, and `GrpcResponseParser::deserialize()` throws when an OK response carries no message (`null`/absent) instead of returning an all-defaults object. A zero-length message is still a valid empty response. `deserialize()` has a new `$requireMessage` parameter (default `true`). (#280)

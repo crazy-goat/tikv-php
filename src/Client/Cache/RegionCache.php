@@ -186,9 +186,8 @@ class RegionCache implements RegionCacheInterface
      * {@see \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper}) is not cached
      * (issue #576). PD reports one during a transient window such as a PD
      * restart or a leader election; routing it fails closed with a fatal
-     * StoreNotFoundException, which skips the retry path's invalidation, so a
-     * cached copy would keep failing every request for the key until the TTL
-     * ran out, long after PD knows the leader again. Not caching it makes the
+     * StoreNotFoundException, so a cached copy would keep failing the key until
+     * the fatal path drops it (issue #627), long after PD knows the leader again. Not caching it makes the
      * next request ask PD again.
      *
      * The incoming region is still PD's newer answer for its range, so the
