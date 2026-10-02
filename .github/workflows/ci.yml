@@ -17,6 +17,10 @@ jobs:
   changes:
     name: Changes
     uses: crazy-goat/.github/.github/workflows/changes.yml@main
+    with:
+      # tests/Unit/Docs/AtomicModeDocumentationGuardTest.php scans README.md and docs/**/*.md,
+      # so changes to them need the unit tests and must not count as docs-only.
+      docs-regex: '^(CHANGELOG\.md|AGENTS\.md|LICENSE.*|\.github/ISSUE_TEMPLATE/.*|\.github/pull_request_template\.md|\.gitignore)$'
 
   docs:
     name: Docs
