@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `LICENSE` (MIT), `AGENTS.md`, `docs/release-workflow.md`, issue forms, a pull request template and Dependabot configuration for Composer and GitHub Actions. (#617)
+- `.github/workflows/release.yaml`: pushing a `v*` tag creates the GitHub Release from the matching `CHANGELOG.md` section and fails when the section is missing. (#617)
+- `bin/lint.sh`: one entry point for PHPCS, Rector, PHPStan, shellcheck and hadolint (`--fix` applies the fixers first). `composer lint` and `composer lint:fix` call it, and the CI `lint` job runs only this script. (#617)
+- `bin/worktree.sh`, `bin/worktree-done.sh`, `bin/worktree-setup.sh` and `bin/worktree-teardown.sh` for one isolated worktree (and compose project) per issue. (#617)
+
+### Changed
+
+- `workflow.md` moved to `docs/workflow.md` and replaced by the shared crazy-goat workflow; `bin/pick-issue.sh` is the shared version. (#617)
+- CI: new `changes` and `docs` jobs skip the heavy jobs for documentation-only changes, `ci-ok` aggregates all results, the `check-actor` gate is removed (the repository setting requires maintainer approval for external contributors), and CI also runs on pushes to `master`. The E2E jobs now run on every code change instead of a path filter. (#617)
+- `docker-compose.yml`: the published host ports are `${PD_PORT:-2379}`, `${TIKV1_PORT:-20160}`, `${TIKV2_PORT:-20161}` and `${TIKV3_PORT:-20162}`, so several clusters can run side by side. The defaults are unchanged. (#617)
+
 ## [v0.8.0] — 2026-09-28
 
 ### Tests

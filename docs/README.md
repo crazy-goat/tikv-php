@@ -20,7 +20,7 @@ Contributing to the project or need deep technical details?
 - **[Contributing Guide](contributing.md)** - How to contribute, development workflow, before your first commit
 - **[Development Guide](development.md)** - Technical implementation details, adding features, testing strategies
 - **[Architecture](architecture.md)** - System architecture, design decisions, component details
-- **[Workflow](../workflow.md)** - Full issue→branch→implementation→review→PR→CI→merge workflow
+- **[Workflow](workflow.md)** - Full issue→branch→implementation→review→PR→CI→merge workflow
 
 ### Reference
 
@@ -28,7 +28,6 @@ Quick reference and troubleshooting:
 
 - **[Error Handling](error-handling.md)** - Exception hierarchy, per-operation exceptions, retryability guidance
 - **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
-- **[Implementation Plans](superpowers/plans/)** - Roadmap and feature plans
 - **[Examples](../examples/)** - Working code examples (in repository)
 
 ## Overview

@@ -993,4 +993,3 @@ if ($scanTime > 1.0) {
 
 - [Contributing Guide](contributing.md) - General contribution guidelines
 - [Architecture](architecture.md) - System architecture details
-- [Testing](testing.md) - Testing documentation (if exists)
