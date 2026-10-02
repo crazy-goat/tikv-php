@@ -928,4 +928,46 @@ class RegionCacheTest extends TestCase
         // Region 3 should be present
         $this->assertNotNull($cache->getByKey('c'));
     }
+
+    public function testPutDoesNotCacheARegionWithoutLeader(): void
+    {
+        // Issue #576: a leaderless region (leaderStoreId=0) fails closed when
+        // routed, and that fatal error does not invalidate, so it must never
+        // be cached.
+        $cache = new RegionCache();
+        $cache->put($this->makeLeaderlessRegion(1, 'a', 'z'));
+
+        $this->assertNull($cache->getByKey('m'));
+        $this->assertNull($cache->getById(1));
+    }
+
+    public function testPutOfARegionWithoutLeaderStillRemovesTheEntriesItSupersedes(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->makeRegion(1, 'a', 'm'));
+        $cache->put($this->makeRegion(2, 'm', 'z'));
+        $cache->put($this->makeRegion(3, 'z'));
+
+        // Region 1 merged into region 2's range and has no leader yet.
+        $cache->put($this->makeLeaderlessRegion(1, 'a', 'z'));
+
+        $this->assertNull($cache->getById(1));
+        $this->assertNull($cache->getById(2));
+        $this->assertNull($cache->getByKey('b'));
+        $this->assertNull($cache->getByKey('n'));
+        $this->assertNotNull($cache->getByKey('zz'));
+    }
+
+    private function makeLeaderlessRegion(int $id, string $startKey, string $endKey = ''): RegionInfo
+    {
+        return new RegionInfo(
+            regionId: $id,
+            leaderPeerId: 0,
+            leaderStoreId: 0,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: $startKey,
+            endKey: $endKey,
+        );
+    }
 }
