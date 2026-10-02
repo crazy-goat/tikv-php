@@ -3,7 +3,7 @@
 Persistent knowledge base maintained by `worker`/`coder` (implementation)
 and `review` (code review) subagents so lessons learned carry over to
 future tasks. Part of the workflow described in
-[`workflow.md`](../../workflow.md).
+[`workflow.md`](../workflow.md).
 
 ## Files
 

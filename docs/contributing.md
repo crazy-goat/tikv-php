@@ -159,7 +159,7 @@ composer run lint
 
 ### 6. Create a Branch
 
-Never commit directly to `master` (see [`workflow.md`](../workflow.md) for the
+Never commit directly to `master` (see [`workflow.md`](workflow.md) for the
 canonical branching and PR process):
 
 ```bash
