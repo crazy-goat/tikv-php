@@ -7,6 +7,9 @@
 # make the final pick. Keeps triage cheap: bodies and comment text are
 # never fetched, only titles, labels, age and comment counts.
 #
+# Shared script: the source of truth is standard/pick-issue.sh in crazy-goat/.github;
+# repositories carry an identical copy in bin/pick-issue.sh.
+#
 # Requires: bash 3.2+, the `gh` CLI (installed and authenticated),
 # standard coreutils. No PHP, no Python, no standalone jq — all JSON
 # projection uses gh's built-in --jq.
@@ -14,7 +17,7 @@
 # Usage: bin/pick-issue.sh [options]
 #
 # Options:
-#   --repo=owner/name   GitHub repository (default: crazy-goat/tikv-php)
+#   --repo=owner/name   GitHub repository (default: the current repository)
 #   --milestone=X       score issues from this milestone instead of the lowest
 #   --top=N             how many candidates to show (default: 5, 0 = all)
 #   --json              machine-readable output (JSON on stdout)
@@ -33,12 +36,15 @@
 # next one. Cut a release for the finished milestone, close it, then the
 # next run will pick the next one.
 #
-# Scoring (additive, all components shown in the breakdown):
-#   - type labels (first match wins): bug=50, security=45, data-loss=40,
-#     enhancement=20, performance=15, documentation=8
-#   - severity labels: severity:critical=60, severity:high=30,
-#     severity:medium=12, severity:low=3
-#   - meta labels: good first issue=+10, help wanted=+8, question=-5
+# Scoring (additive, all components shown in the breakdown). Labels follow the
+# crazy-goat standard (https://github.com/crazy-goat/.github):
+#   - type labels (first match wins): type:bug=50, type:security=45,
+#     type:feature=20, type:performance=15, type:refactor=10, type:tests=8,
+#     type:docs=8
+#   - priority labels: priority:critical=60, priority:high=30,
+#     priority:medium=12, priority:low=3
+#   - meta labels: good first issue=+10, help wanted=+8, question=-5,
+#     status:blocked=-100, status:needs-info=-100 (kept visible, ranked last)
 #   - title signals: leak=25, crash/segfault/fatal/panic/corrupt=30,
 #     security/auth/xss/csrf/injection=20, performance=15, dead code=5
 #   - age:            +0.2 per day since creation, capped at 20
@@ -51,7 +57,7 @@
 
 set -euo pipefail
 
-DEFAULT_REPO="crazy-goat/tikv-php"
+DEFAULT_REPO=""   # empty = the repository of the current directory (gh repo view)
 
 # NB: bash 3.2 only — no mapfile, no associative arrays, no ${var,,}.
 # Title-signal regexes rely on nocasematch instead of inline /i flags.
@@ -117,7 +123,7 @@ $(basename "$0") — pick top GitHub issues to work on
 Usage: $(basename "$0") [options]
 
 Options:
-  --repo=owner/name   GitHub repository (default: $DEFAULT_REPO)
+  --repo=owner/name   GitHub repository (default: the current repository)
   --milestone=X       score issues from this milestone (default: lowest open)
   --top=N             how many candidates to show (default: 5, 0 = all)
   --json              machine-readable output (JSON on stdout)
@@ -214,18 +220,18 @@ score_line() {
     labels_list="${labels_field//$SEP/$'\n'}"
 
     # Type labels: first (most valuable) match wins.
-    for entry in "bug:50" "security:45" "data-loss:40" "enhancement:20" \
-        "performance:15" "documentation:8"; do
-        tlabel="${entry%%:*}"
+    for entry in "type:bug:50" "type:security:45" "type:feature:20" \
+        "type:performance:15" "type:refactor:10" "type:tests:8" "type:docs:8"; do
+        tlabel="${entry%:*}"
         tweight="${entry##*:}"
         if has_label "$labels_list" "$tlabel"; then
             score=$((score + tweight))
-            breakdown="$breakdown type:$tlabel +$tweight"
+            breakdown="$breakdown $tlabel +$tweight"
             break
         fi
     done
-    for entry in "severity:critical:60" "severity:high:30" \
-        "severity:medium:12" "severity:low:3"; do
+    for entry in "priority:critical:60" "priority:high:30" \
+        "priority:medium:12" "priority:low:3"; do
         tlabel="${entry%:*}"
         tweight="${entry##*:}"
         if has_label "$labels_list" "$tlabel"; then
@@ -234,8 +240,9 @@ score_line() {
         fi
     done
 
-    for entry in "good first issue:+10" "help wanted:+8" "question:-5"; do
-        tlabel="${entry%%:*}"
+    for entry in "good first issue:+10" "help wanted:+8" "question:-5" \
+        "status:blocked:-100" "status:needs-info:-100"; do
+        tlabel="${entry%:*}"
         tweight="${entry##*:}"
         if has_label "$labels_list" "$tlabel"; then
             score=$((score + tweight))
@@ -334,6 +341,13 @@ print_json() {
 main() {
     parse_args "$@"
 
+    if [ -z "$REPO" ]; then
+        REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" || {
+            echo "Cannot detect the repository. Run inside a clone or pass --repo=owner/name." >&2
+            exit "$EXIT_USAGE"
+        }
+    fi
+
     # tmp dir is global so the EXIT trap can clean it up after main()
     # returns and its locals are gone.
     TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pick-issue.XXXXXX")"
@@ -403,8 +417,8 @@ main() {
     # 4. Release rule: an empty milestone ends the workflow — stop here.
     if [ "$target_open" -eq 0 ]; then
         local message
-        message="$(printf 'Milestone %s is complete (0 open issues left). STOP the workflow — cut the release:\n  1. Tag + publish the release (e.g. gh release create v%s)\n  2. Close milestone %s\n  3. Re-run this script to pick the next milestone\n' \
-            "$target_title" "${target_title#v}" "$target_title")"
+        message="$(printf 'Milestone %s is complete (0 open issues left). STOP the workflow — cut the release:\n  1. Follow docs/release-workflow.md (CHANGELOG PR, annotated tag %s)\n  2. Close milestone %s\n  3. Re-run this script to pick the next milestone\n' \
+            "$target_title" "$target_title" "$target_title")"
         if [ "$JSON_OUT" -eq 1 ]; then
             printf '{\n  "release_needed": true,\n  "message": "%s",\n  "milestone": {\n    "title": "%s",\n    "open_issues": 0,\n    "closed_issues": %s\n  }\n}\n' \
                 "$(json_escape "$message")" "$(json_escape "$target_title")" "$target_closed"
@@ -493,7 +507,7 @@ main() {
         IFS="$SEP" read -r best_score best_num best_t _x _y _z _w <<<"$best_line"
         printf '\nHighest-scoring candidate: #%s (%s pts) — %s\n' "$best_num" "$best_score" "$best_t"
     fi
-    echo "Pick one of these, then run the workflow (workflow.md)."
+    echo "Pick one of these, then follow docs/workflow.md."
 }
 
 main "$@"

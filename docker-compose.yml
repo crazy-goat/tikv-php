@@ -2,7 +2,7 @@ services:
   pd:
     image: pingcap/pd:v8.5.5
     ports:
-      - "2379:2379"
+      - "${PD_PORT:-2379}:2379"
     command: >
       --name=pd
       --client-urls=http://0.0.0.0:2379
@@ -22,7 +22,7 @@ services:
   tikv1:
     image: pingcap/tikv:v8.5.5
     ports:
-      - "20160:20160"
+      - "${TIKV1_PORT:-20160}:20160"
     command: >
       --addr=0.0.0.0:20160
       --advertise-addr=tikv1:20160
@@ -39,7 +39,7 @@ services:
   tikv2:
     image: pingcap/tikv:v8.5.5
     ports:
-      - "20161:20161"
+      - "${TIKV2_PORT:-20161}:20161"
     command: >
       --addr=0.0.0.0:20161
       --advertise-addr=tikv2:20161
@@ -56,7 +56,7 @@ services:
   tikv3:
     image: pingcap/tikv:v8.5.5
     ports:
-      - "20162:20162"
+      - "${TIKV3_PORT:-20162}:20162"
     command: >
       --addr=0.0.0.0:20162
       --advertise-addr=tikv3:20162
