@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **[GRPC-21]**: a gRPC completion event without a status, or with a non-integer status code, is now a `GrpcException` (`STATUS_INTERNAL`) instead of being read as `STATUS_OK`, and `GrpcResponseParser::deserialize()` throws when an OK response carries no message (`null`/absent) instead of returning an all-defaults object. A zero-length message is still a valid empty response. `deserialize()` has a new `$requireMessage` parameter (default `true`). (#280)
+
 ### Added
 
 - `LICENSE` (MIT), `AGENTS.md`, `docs/release-workflow.md`, issue forms, a pull request template and Dependabot configuration for Composer and GitHub Actions. (#617)

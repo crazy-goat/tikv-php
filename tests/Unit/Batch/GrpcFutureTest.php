@@ -66,7 +66,7 @@ class GrpcFutureTest extends TestCase
         $future->wait();
     }
 
-    public function testWaitReturnsEmptyMessageOnNullResult(): void
+    public function testWaitThrowsWhenOkStatusCarriesNoMessage(): void
     {
         $call = $this->createMock(Call::class);
         $call->expects($this->once())
@@ -77,7 +77,23 @@ class GrpcFutureTest extends TestCase
             ]);
 
         $future = new GrpcFuture($call, RawGetResponse::class);
-        $result = $future->wait();
+
+        $this->expectException(GrpcException::class);
+        $this->expectExceptionMessage('no response body');
+        $future->wait();
+    }
+
+    public function testWaitReturnsEmptyMessageForZeroLengthBody(): void
+    {
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('startBatch')
+            ->willReturn([
+                'status' => ['code' => 0, 'details' => 'OK'],
+                'message' => '',
+            ]);
+
+        $result = (new GrpcFuture($call, RawGetResponse::class))->wait();
 
         $this->assertInstanceOf(RawGetResponse::class, $result);
         $this->assertSame('', $result->getValue());
