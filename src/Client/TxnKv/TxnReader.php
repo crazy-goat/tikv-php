@@ -125,7 +125,12 @@ final readonly class TxnReader
                         $this->timeoutMs('read'),
                     );
 
-                    RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+                    RegionErrorHandler::check(
+                        $response,
+                        $this->regionCache,
+                        $region->regionId,
+                        keyErrorsHandledByCaller: true,
+                    );
                 } catch (RegionException $e) {
                     if ($e->errorKind === ErrorKind::DataIsNotReady) {
                         // The selected replica's applied index is behind: exclude
@@ -410,6 +415,7 @@ final readonly class TxnReader
                 $this->regionCache,
                 $region->regionId,
                 notLeaderOwnedByRetryExecutor: true,
+                keyErrorsHandledByCaller: true,
             );
 
             $error = $response->getError();
@@ -543,7 +549,12 @@ final readonly class TxnReader
                         ScanResponse::class,
                         $this->timeoutMs('scan'),
                     );
-                    RegionErrorHandler::check($response, $this->regionCache, $fresh->regionId);
+                    RegionErrorHandler::check(
+                        $response,
+                        $this->regionCache,
+                        $fresh->regionId,
+                        keyErrorsHandledByCaller: true,
+                    );
                 } catch (RegionException $e) {
                     if ($e->errorKind === ErrorKind::DataIsNotReady) {
                         $excludedStore = $target->storeId;

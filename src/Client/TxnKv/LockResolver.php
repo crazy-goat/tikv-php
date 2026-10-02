@@ -190,6 +190,7 @@ final readonly class LockResolver
             $this->regionCache,
             $region->regionId,
             notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+            keyErrorsHandledByCaller: true,
         );
 
         $error = $response->getError();
@@ -290,6 +291,7 @@ final readonly class LockResolver
                 $this->regionCache,
                 $region->regionId,
                 notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+                keyErrorsHandledByCaller: true,
             );
 
             $responseLocks = $response->getLocks();
@@ -377,6 +379,7 @@ final readonly class LockResolver
                 $this->regionCache,
                 $region->regionId,
                 notLeaderOwnedByRetryExecutor: false,
+                keyErrorsHandledByCaller: true,
             );
         }
     }

@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\Deadlock;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
@@ -14,8 +15,11 @@ use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\WriteConflict;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -463,5 +467,106 @@ class RegionErrorHandlerTest extends TestCase
         $this->expectExceptionMessage('retryable: too old');
 
         RegionErrorHandler::check($response);
+    }
+
+    private function errorPair(string $key): KvPair
+    {
+        $keyError = new KeyError();
+        $keyError->setRetryable('too old');
+        $pair = new KvPair();
+        $pair->setKey($key);
+        $pair->setError($keyError);
+
+        return $pair;
+    }
+
+    public function testTopLevelKeyErrorOnBatchGetResponseThrows(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setRetryable('conflict');
+        $response = new BatchGetResponse();
+        $response->setError($keyError);
+
+        $this->expectException(RegionException::class);
+        $this->expectExceptionMessage('conflict');
+
+        RegionErrorHandler::check($response);
+    }
+
+    public function testTopLevelKeyErrorIsLeftToCallerWhenHandledByCaller(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setRetryable('conflict');
+        $response = new BatchGetResponse();
+        $response->setError($keyError);
+        $response->setPairs([$this->errorPair('k')]);
+
+        RegionErrorHandler::check($response, keyErrorsHandledByCaller: true);
+
+        self::assertSame($keyError, $response->getError());
+    }
+
+    public function testPerPairKeyErrorOnRawScanResponseThrows(): void
+    {
+        $response = new RawScanResponse();
+        $response->setKvs([$this->errorPair('scan-key')]);
+
+        $this->expectException(RegionException::class);
+        $this->expectExceptionMessage('per-pair error');
+
+        RegionErrorHandler::check($response);
+    }
+
+    public function testPerPairKeyErrorOnRawBatchScanResponseThrows(): void
+    {
+        $response = new RawBatchScanResponse();
+        $response->setKvs([$this->errorPair('scan-key')]);
+
+        $this->expectException(RegionException::class);
+
+        RegionErrorHandler::check($response);
+    }
+
+    public function testPerPairKeyErrorOnScanResponseThrows(): void
+    {
+        $response = new ScanResponse();
+        $response->setPairs([$this->errorPair('txn-key')]);
+
+        $this->expectException(RegionException::class);
+        $this->expectExceptionMessage('per-pair error');
+
+        RegionErrorHandler::check($response);
+    }
+
+    public function testPerPairKeyErrorOnBatchGetResponseThrows(): void
+    {
+        $response = new BatchGetResponse();
+        $response->setPairs([$this->errorPair('txn-key')]);
+
+        $this->expectException(RegionException::class);
+
+        RegionErrorHandler::check($response);
+    }
+
+    public function testPerPairKeyErrorIsLeftToCallerWhenHandledByCaller(): void
+    {
+        $response = new ScanResponse();
+        $response->setPairs([$this->errorPair('txn-key')]);
+
+        RegionErrorHandler::check($response, keyErrorsHandledByCaller: true);
+
+        self::assertCount(1, $response->getPairs());
+    }
+
+    public function testRegionErrorStillThrowsWhenKeyErrorsAreHandledByCaller(): void
+    {
+        $error = new Error();
+        $error->setMessage('boom');
+        $response = new ScanResponse();
+        $response->setRegionError($error);
+
+        $this->expectException(RegionException::class);
+
+        RegionErrorHandler::check($response, keyErrorsHandledByCaller: true);
     }
 }

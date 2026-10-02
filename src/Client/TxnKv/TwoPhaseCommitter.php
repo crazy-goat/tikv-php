@@ -649,7 +649,12 @@ final readonly class TwoPhaseCommitter
                 $this->timeoutMs('write'),
             );
 
-            RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+            RegionErrorHandler::check(
+                $response,
+                $this->regionCache,
+                $region->regionId,
+                keyErrorsHandledByCaller: true,
+            );
 
             $error = $response->getError();
             if ($error !== null) {
@@ -828,7 +833,12 @@ final readonly class TwoPhaseCommitter
             // would double-count the metric and defeat valid-hint leader
             // switching (issue #474), so NotLeader oneofs are left for the
             // executor.
-            RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+            RegionErrorHandler::check(
+                $response,
+                $this->regionCache,
+                $region->regionId,
+                keyErrorsHandledByCaller: true,
+            );
 
             $errors = $response->getErrors();
             if (count($errors) > 0) {
@@ -1258,6 +1268,7 @@ final readonly class TwoPhaseCommitter
                 $this->regionCache,
                 $region->regionId,
                 notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+                keyErrorsHandledByCaller: true,
             );
 
             $error = $response->getError();
@@ -1462,7 +1473,12 @@ final readonly class TwoPhaseCommitter
                 return CheckedGrpcFuture::fromCallable(function () use ($future, $region) {
                     /** @var BatchRollbackResponse $response */
                     $response = $future->wait();
-                    RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+                    RegionErrorHandler::check(
+                        $response,
+                        $this->regionCache,
+                        $region->regionId,
+                        keyErrorsHandledByCaller: true,
+                    );
 
                     $error = $response->getError();
                     if ($error !== null) {
@@ -1812,6 +1828,7 @@ final readonly class TwoPhaseCommitter
                                 $this->regionCache,
                                 $region->regionId,
                                 notLeaderOwnedByRetryExecutor: false,
+                                keyErrorsHandledByCaller: true,
                             );
                         } catch (RegionException $caught) {
                             $regionError = $caught;
@@ -2187,7 +2204,12 @@ final readonly class TwoPhaseCommitter
                 return CheckedGrpcFuture::fromCallable(function () use ($future, $region) {
                     /** @var PessimisticRollbackResponse $response */
                     $response = $future->wait();
-                    RegionErrorHandler::check($response, $this->regionCache, $region->regionId);
+                    RegionErrorHandler::check(
+                        $response,
+                        $this->regionCache,
+                        $region->regionId,
+                        keyErrorsHandledByCaller: true,
+                    );
 
                     $errors = $response->getErrors();
                     foreach ($errors as $keyError) {

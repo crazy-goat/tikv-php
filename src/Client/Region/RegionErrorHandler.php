@@ -4,7 +4,12 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Region;
 
+use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -15,9 +20,17 @@ final class RegionErrorHandler
      * Check a response for region errors and throw if any are found.
      *
      * Inspects:
-     * 1. Top-level region_error (all batch responses)
-     * 2. Top-level error string (RawBatchPutResponse, RawBatchDeleteResponse)
-     * 3. Per-pair KeyError in pairs (RawBatchGetResponse)
+     * 1. Top-level region_error (all responses)
+     * 2. Top-level error: a string (RawBatchPutResponse, RawBatchDeleteResponse,
+     *    RawGetResponse) or a KeyError (transactional responses)
+     * 3. Per-pair KeyError on RawBatchGetResponse, RawScanResponse,
+     *    RawBatchScanResponse, ScanResponse and BatchGetResponse
+     *
+     * Transactional callers must interpret a KeyError themselves (lock
+     * resolution, write conflicts, GC aborts). They pass
+     * $keyErrorsHandledByCaller = true, which skips checks 2 (KeyError only)
+     * and 3; every other caller gets a RegionException for a populated KeyError
+     * instead of a silently accepted response.
      *
      * When a $cache and $regionId are provided, the region is invalidated
      * from the cache before the exception is thrown. This is the consistent
@@ -45,6 +58,7 @@ final class RegionErrorHandler
         ?RegionCacheInterface $cache = null,
         ?int $regionId = null,
         bool $notLeaderOwnedByRetryExecutor = true,
+        bool $keyErrorsHandledByCaller = false,
     ): void {
         // 1. Top-level region error (all response types). NotLeader oneofs
         // are handled per $notLeaderOwnedByRetryExecutor — see docblock.
@@ -63,7 +77,10 @@ final class RegionErrorHandler
             }
         }
 
-        // 2. Top-level error string (RawBatchPutResponse, RawBatchDeleteResponse)
+        // 2. Top-level error: a string (RawBatchPutResponse, RawBatchDeleteResponse,
+        // RawGetResponse) or a KeyError (GetResponse, ScanResponse, CommitResponse,
+        // BatchGetResponse, ...). The type is checked explicitly: a populated error
+        // of a shape we do not recognise must never pass silently.
         if (method_exists($response, 'getError')) {
             $error = $response->getError();
             if (is_string($error) && $error !== '') {
@@ -72,20 +89,35 @@ final class RegionErrorHandler
                     message: $error,
                 );
             }
+
+            if ($error instanceof KeyError && !$keyErrorsHandledByCaller) {
+                throw new RegionException(
+                    operation: 'KeyError',
+                    message: 'key error: ' . KeyErrorDescriber::describe($error),
+                );
+            }
         }
 
-        // 3. Per-pair KeyError in RawBatchGetResponse pairs
-        if ($response instanceof RawBatchGetResponse) {
-            foreach ($response->getPairs() as $pair) {
-                if ($pair->hasError()) {
-                    $keyError = $pair->getError();
-                    $key = $pair->getKey();
-                    $message = self::describeKeyError($key, $keyError);
-                    throw new RegionException(
-                        operation: 'BatchGet',
-                        message: $message,
-                    );
-                }
+        // 3. Per-pair KeyError on every response that carries pairs.
+        if ($keyErrorsHandledByCaller) {
+            return;
+        }
+
+        $pairs = match (true) {
+            $response instanceof RawBatchGetResponse,
+            $response instanceof BatchGetResponse,
+            $response instanceof ScanResponse => $response->getPairs(),
+            $response instanceof RawScanResponse,
+            $response instanceof RawBatchScanResponse => $response->getKvs(),
+            default => [],
+        };
+
+        foreach ($pairs as $pair) {
+            if ($pair->hasError()) {
+                throw new RegionException(
+                    operation: $response instanceof RawBatchGetResponse ? 'BatchGet' : 'PerPairError',
+                    message: self::describeKeyError($pair->getKey(), $pair->getError()),
+                );
             }
         }
     }
