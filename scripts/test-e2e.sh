@@ -13,6 +13,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Function to cleanup
+# shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
     echo ""
     echo -e "${YELLOW}Cleaning up...${NC}"

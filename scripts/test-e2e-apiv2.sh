@@ -23,6 +23,7 @@ compose() {
     docker compose "${COMPOSE_FILES[@]}" --profile test "$@"
 }
 
+# shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
     echo ""
     echo -e "${YELLOW}Cleaning up...${NC}"

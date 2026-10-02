@@ -46,7 +46,7 @@ echo ""
 
 # --- Prepare temp workspace ---
 WORK_DIR=$(mktemp -d)
-trap "rm -rf $WORK_DIR" EXIT
+trap 'rm -rf "$WORK_DIR"' EXIT
 
 echo "Copying proto files..."
 for f in $PROTO_FILES; do
@@ -135,7 +135,7 @@ done
 
 # --- Clean output directory ---
 echo "Cleaning output directory..."
-rm -rf "$OUT_DIR"/*
+rm -rf "${OUT_DIR:?}"/*
 mkdir -p "$OUT_DIR"
 
 # --- Generate PHP classes ---
@@ -146,17 +146,21 @@ for f in $PROTO_FILES; do
   fi
 done
 
+# PROTO_LIST is a space-separated file list; it is split on purpose.
+# shellcheck disable=SC2086
 FILE_COUNT=$(echo $PROTO_LIST | wc -w)
 echo ""
 echo "Generating PHP from $FILE_COUNT proto files..."
 
 # Message classes (--php_out)
+# shellcheck disable=SC2086
 protoc \
   -I"$WORK_DIR" \
   --php_out="$OUT_DIR" \
   $PROTO_LIST
 
 # gRPC service stubs (--grpc_out) — generates *Client classes for service definitions
+# shellcheck disable=SC2086
 protoc \
   -I"$WORK_DIR" \
   --grpc_out="$OUT_DIR" \
