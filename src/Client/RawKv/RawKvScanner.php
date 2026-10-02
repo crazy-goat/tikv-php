@@ -1177,6 +1177,11 @@ final readonly class RawKvScanner
      */
     private function parseScanPairs(RawScanResponse $response, bool $keyOnly): array
     {
+        // The parallel paths wait on the raw response without check(), so a
+        // per-pair KeyError must be rejected here instead of being copied
+        // through as an empty value (issue #281).
+        RegionErrorHandler::check($response);
+
         $pairs = [];
         foreach ($response->getKvs() as $pair) {
             $pairs[] = [
