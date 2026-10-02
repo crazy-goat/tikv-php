@@ -28,7 +28,6 @@ Quick reference and troubleshooting:
 
 - **[Error Handling](error-handling.md)** - Exception hierarchy, per-operation exceptions, retryability guidance
 - **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
-- **[Implementation Plans](superpowers/plans/)** - Roadmap and feature plans
 - **[Examples](../examples/)** - Working code examples (in repository)
 
 ## Overview
