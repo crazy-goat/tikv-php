@@ -19,7 +19,7 @@ Everything is written in English (code, comments, docs, commits, issues).
 | `tests/E2E/` | End-to-end suites, need a TiKV cluster (Docker) |
 | `phpstan/` | Custom PHPStan rules |
 | `scripts/` | `test-e2e.sh`, `test-e2e-apiv2.sh`, `generate-proto.sh`, `test.sh` |
-| `bin/` | `pick-issue.sh`, `worktree*.sh` |
+| `bin/` | `lint.sh`, `pick-issue.sh`, `worktree*.sh` |
 | `docs/` | User and developer docs, `docs/helpers/` knowledge base (FAQ, decisions), process docs |
 | `benchmarks/`, `examples/` | Benchmarks and runnable examples |
 
@@ -33,10 +33,10 @@ PHP 8.2+ (CI runs 8.2, 8.3 and 8.4) with `ext-grpc` for the `Grpc` suite and the
 ```bash
 composer install
 
-# Lint: PHPCS + Rector (dry run) + PHPStan level 9
-composer lint
-composer lint:fix          # Rector + phpcbf
-composer cs | cs-fix | phpstan | rector | rector:fix
+# Lint: PHPCS + Rector (dry run) + PHPStan level 9 + shellcheck + hadolint (needs both installed)
+bin/lint.sh                # check only; runs every step; `composer lint` calls it
+bin/lint.sh --fix          # Rector + phpcbf first, then the checks; `composer lint:fix`
+composer cs | cs-fix | phpstan | rector | rector:fix   # single tools
 
 # Tests
 composer test:unit         # Unit suite, no cluster, no ext-grpc
@@ -89,8 +89,9 @@ combinations (and the `test` profile); `bin/worktree-done.sh` calls it.
 `.github/workflows/ci.yml` runs on pull requests to `master` and on pushes to `master`. The
 `changes` job detects documentation-only changes and the `docs` job checks them fast. `lint`,
 the unit matrix, `grpc-unit-tests`, `integration-tests`, `e2e-tests` and `e2e-tests-apiv2` run only
-for code changes. `ci-ok` aggregates the results and is the check to require. The `check-actor` job
-allows the owner, collaborators with write access and `dependabot[bot]`.
+for code changes. `ci-ok` aggregates the results and is the check to require. The `lint` job does
+the setup (PHP, Composer, hadolint) and runs only `bin/lint.sh`. Workflow runs of external
+contributors need maintainer approval (repository setting); there is no custom actor gate.
 
 ## Conventions
 

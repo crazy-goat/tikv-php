@@ -14,42 +14,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check-actor:
-    name: Check actor permissions
-    runs-on: ubuntu-latest
-    outputs:
-      allowed: ${{ steps.check.outputs.allowed }}
-    steps:
-      - name: Check if actor is owner or collaborator
-        id: check
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const actor = context.actor;
-            const owner = context.repo.owner;
-
-            if (actor === owner || actor === 'dependabot[bot]') {
-              core.setOutput('allowed', 'true');
-              return;
-            }
-
-            try {
-              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                username: actor,
-              });
-              const level = data.permission;
-              const allowed = ['admin', 'maintain', 'write'].includes(level);
-              core.setOutput('allowed', allowed ? 'true' : 'false');
-              if (!allowed) {
-                core.warning(`Actor "${actor}" has permission "${level}" — skipping CI.`);
-              }
-            } catch (e) {
-              core.setOutput('allowed', 'false');
-              core.warning(`Could not determine permissions for "${actor}": ${e.message}`);
-            }
-
   changes:
     name: Changes
     uses: crazy-goat/.github/.github/workflows/changes.yml@main
@@ -60,8 +24,8 @@ jobs:
 
   lint:
     name: Lint (PHPCS + Rector + PHPStan)
-    needs: [check-actor, changes]
-    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,19 +50,20 @@ jobs:
       - name: Install dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
-      - name: Run PHPCS
-        run: composer cs
+      - name: Install hadolint
+        run: |
+          set -euo pipefail
+          curl -fsSL -o hadolint https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          sudo install -m 0755 hadolint /usr/local/bin/hadolint
+          hadolint --version
 
-      - name: Run Rector (dry-run)
-        run: composer rector
-
-      - name: Run PHPStan
-        run: composer phpstan
+      - name: Lint
+        run: bin/lint.sh
 
   unit-tests:
     name: Unit Tests (PHP ${{ matrix.php }})
-    needs: [check-actor, changes, lint]
-    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -130,8 +95,8 @@ jobs:
 
   grpc-unit-tests:
     name: gRPC Unit Tests (PHP 8.4)
-    needs: [check-actor, changes, lint]
-    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -160,8 +125,8 @@ jobs:
 
   integration-tests:
     name: Integration Tests (PHP 8.4)
-    needs: [check-actor, changes, lint]
-    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -190,8 +155,8 @@ jobs:
 
   e2e-tests:
     name: E2E Tests
-    needs: [check-actor, changes, lint]
-    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -332,8 +297,8 @@ jobs:
   # so it gets its own job instead of tearing the V1 cluster down and back up.
   e2e-tests-apiv2:
     name: E2E Tests (API V2)
-    needs: [check-actor, changes, lint]
-    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -349,7 +314,7 @@ jobs:
   # (skipped is fine); code changes need every heavy job to succeed.
   ci-ok:
     name: ci-ok
-    needs: [check-actor, changes, docs, lint, unit-tests, grpc-unit-tests, integration-tests, e2e-tests, e2e-tests-apiv2]
+    needs: [changes, docs, lint, unit-tests, grpc-unit-tests, integration-tests, e2e-tests, e2e-tests-apiv2]
     if: always()
     runs-on: ubuntu-latest
     steps:
