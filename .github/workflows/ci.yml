@@ -1,8 +1,17 @@
 name: CI
 
 on:
+  push:
+    branches: [master]
   pull_request:
-    branches: ["master"]
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check-actor:
@@ -19,7 +28,7 @@ jobs:
             const actor = context.actor;
             const owner = context.repo.owner;
 
-            if (actor === owner) {
+            if (actor === owner || actor === 'dependabot[bot]') {
               core.setOutput('allowed', 'true');
               return;
             }
@@ -42,34 +51,17 @@ jobs:
             }
 
   changes:
-    name: Detect changed paths
-    needs: check-actor
-    if: needs.check-actor.outputs.allowed == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      e2e: ${{ steps.filter.outputs.e2e }}
-    steps:
-      - uses: actions/checkout@v4
+    name: Changes
+    uses: crazy-goat/.github/.github/workflows/changes.yml@main
 
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            e2e:
-              - 'src/**'
-              - 'tests/E2E/**'
-              - 'docker-compose.yml'
-              - 'docker-compose.apiv2.yml'
-              - 'tikv-apiv2.toml'
-              - 'scripts/test-e2e-apiv2.sh'
-              - 'Dockerfile'
-              - 'composer.json'
-              - '.github/workflows/ci.yml'
+  docs:
+    name: Docs
+    uses: crazy-goat/.github/.github/workflows/docs-check.yml@main
 
   lint:
     name: Lint (PHPCS + Rector + PHPStan)
-    needs: check-actor
-    if: needs.check-actor.outputs.allowed == 'true'
+    needs: [check-actor, changes]
+    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -105,8 +97,8 @@ jobs:
 
   unit-tests:
     name: Unit Tests (PHP ${{ matrix.php }})
-    needs: [check-actor, lint]
-    if: needs.check-actor.outputs.allowed == 'true'
+    needs: [check-actor, changes, lint]
+    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -138,8 +130,8 @@ jobs:
 
   grpc-unit-tests:
     name: gRPC Unit Tests (PHP 8.4)
-    needs: [check-actor, lint]
-    if: needs.check-actor.outputs.allowed == 'true'
+    needs: [check-actor, changes, lint]
+    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -168,8 +160,8 @@ jobs:
 
   integration-tests:
     name: Integration Tests (PHP 8.4)
-    needs: [check-actor, lint]
-    if: needs.check-actor.outputs.allowed == 'true'
+    needs: [check-actor, changes, lint]
+    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -198,8 +190,8 @@ jobs:
 
   e2e-tests:
     name: E2E Tests
-    needs: [check-actor, lint, changes]
-    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.e2e == 'true'
+    needs: [check-actor, changes, lint]
+    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -340,8 +332,8 @@ jobs:
   # so it gets its own job instead of tearing the V1 cluster down and back up.
   e2e-tests-apiv2:
     name: E2E Tests (API V2)
-    needs: [check-actor, lint, changes]
-    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.e2e == 'true'
+    needs: [check-actor, changes, lint]
+    if: needs.check-actor.outputs.allowed == 'true' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -352,3 +344,28 @@ jobs:
       - name: Run API V2 E2E tests
         run: ./scripts/test-e2e-apiv2.sh
         timeout-minutes: 15
+
+  # The single required check. Documentation-only changes skip the heavy jobs
+  # (skipped is fine); code changes need every heavy job to succeed.
+  ci-ok:
+    name: ci-ok
+    needs: [check-actor, changes, docs, lint, unit-tests, grpc-unit-tests, integration-tests, e2e-tests, e2e-tests-apiv2]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Code changes: $CODE"
+          echo "Results: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in failure|cancelled) exit 1 ;; esac
+          done
+          # Documentation-only changes skip the heavy jobs; code changes need all of them.
+          if [ "$CODE" = "true" ]; then
+            for r in $RESULTS; do
+              [ "$r" = "success" ] || exit 1
+            done
+          fi
