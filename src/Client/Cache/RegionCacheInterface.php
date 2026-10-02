@@ -52,6 +52,11 @@ interface RegionCacheInterface
 
     /**
      * Store a region in the cache.
+     *
+     * Implementations must not cache a region without a known leader
+     * (`leaderStoreId === 0`): routing it fails with a fatal
+     * StoreNotFoundException that does not invalidate the entry, so a cached
+     * copy would keep failing the key until it expires (issue #576).
      */
     public function put(RegionInfo $region): void;
 

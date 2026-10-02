@@ -181,8 +181,30 @@ class RegionCache implements RegionCacheInterface
         }
     }
 
+    /**
+     * A region without a known leader (`leaderStoreId === 0`, see
+     * {@see \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper}) is not cached
+     * (issue #576). PD reports one during a transient window such as a PD
+     * restart or a leader election; routing it fails closed with a fatal
+     * StoreNotFoundException, which skips the retry path's invalidation, so a
+     * cached copy would keep failing every request for the key until the TTL
+     * ran out, long after PD knows the leader again. Not caching it makes the
+     * next request ask PD again.
+     *
+     * The incoming region is still PD's newer answer for its range, so the
+     * entries it supersedes (same ID, overlapping range) are removed as on a
+     * normal put.
+     */
     public function put(RegionInfo $region): void
     {
+        if ($region->leaderStoreId === 0) {
+            $this->removeById($region->regionId);
+            $this->removeOverlapping($region);
+            $this->logger->debug('Region without a leader not cached', ['regionId' => $region->regionId]);
+
+            return;
+        }
+
         $existing = $this->entriesById[$region->regionId] ?? null;
         if (
             $existing instanceof RegionEntry

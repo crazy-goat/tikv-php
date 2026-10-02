@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: new `changes` and `docs` jobs skip the heavy jobs for documentation-only changes, `ci-ok` aggregates all results, the `check-actor` gate is removed (the repository setting requires maintainer approval for external contributors), and CI also runs on pushes to `master`. The E2E jobs now run on every code change instead of a path filter. (#617)
 - `docker-compose.yml`: the published host ports are `${PD_PORT:-2379}`, `${TIKV1_PORT:-20160}`, `${TIKV2_PORT:-20161}` and `${TIKV3_PORT:-20162}`, so several clusters can run side by side. The defaults are unchanged. (#617)
 
+### Fixed
+
+- `RegionCache::put()` no longer caches a region that PD reports without a leader (`leaderStoreId=0`), and it still removes the entries such a region supersedes. Before, one leaderless answer during a PD restart was cached, every later request for its keys failed with a fatal `StoreNotFoundException` ("Store 0 not found in PD"), and nothing invalidated the entry until the region-cache TTL (about 600 s) ran out. Now the next request asks PD again. Routing a leaderless region still fails closed. (#576)
+
 ## [v0.8.0] — 2026-09-28
 
 ### Tests
