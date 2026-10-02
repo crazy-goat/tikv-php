@@ -155,9 +155,10 @@ final class GrpcClient implements GrpcClientInterface
                 );
             }
 
+            $response = GrpcResponseParser::deserialize($event, $responseClass);
             $success = true;
 
-            return GrpcResponseParser::deserialize($event, $responseClass);
+            return $response;
         } finally {
             $durationMs = (hrtime(true) - $start) / 1_000_000;
             $this->metrics->rpcCompleted($operation, $durationMs, $success);
@@ -225,9 +226,10 @@ final class GrpcClient implements GrpcClientInterface
                 );
             }
 
+            $response = GrpcResponseParser::deserialize($event, $responseClass);
             $success = true;
 
-            return GrpcResponseParser::deserialize($event, $responseClass);
+            return $response;
         } finally {
             $durationMs = (hrtime(true) - $start) / 1_000_000;
             $this->metrics->rpcCompleted($operation, $durationMs, $success);
