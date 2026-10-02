@@ -301,12 +301,25 @@ final readonly class RetryExecutor
      * precisely because the key is not in the region the client believed owned
      * it, so the entry that caused it must not survive the throw.
      *
-     * A NON-RegionException fatal error must NOT invalidate. A GrpcException
-     * with a fatal status (UNAUTHENTICATED, PERMISSION_DENIED, …), an
-     * InvalidStoreAddressException or a TxnAbortedByGcException says nothing
-     * about which region the key lives in — they are credentials, a PD answer
-     * and a GC verdict respectively — so dropping the entry would only trade
-     * one re-resolve for another. This is a decision, not an omission: the
+     * A StoreNotFoundException DOES invalidate (issue #627), but only the
+     * region it is about. It is raised by RegionResolver::resolveStoreAddress()
+     * while routing, when PD no longer knows a store the cached region names
+     * (its leader, or a follower chosen by a replica read) and the store cache
+     * has no address for it either. That is evidence about the CACHED REGION,
+     * exactly like a routing error: keeping the entry would fail every later
+     * request for the key with the same fatal error until the TTL ran out. The
+     * exception is still thrown (fail closed, #104, #480); only the next request
+     * asks PD again. See invalidateRegionForFatalError() for the store match:
+     * the same exception can also come from another region (for example the
+     * primary key's region during lock resolution), and that case does not
+     * touch the executor key's entry.
+     *
+     * Any OTHER non-RegionException fatal error must NOT invalidate. A
+     * GrpcException with a fatal status (UNAUTHENTICATED, PERMISSION_DENIED,
+     * …), an InvalidStoreAddressException or a TxnAbortedByGcException says
+     * nothing about which region the key lives in — they are credentials, a PD
+     * answer and a GC verdict respectively — so dropping the entry would only
+     * trade one re-resolve for another. This is a decision, not an omission: the
      * non-routing kinds below are enumerated for the same reason.
      *
      * The match has no `default` arm, so PHPStan reports match.unhandled at
@@ -328,6 +341,10 @@ final readonly class RetryExecutor
      */
     public static function invalidatesRoutingOnFatal(TiKvException $e): bool
     {
+        if ($e instanceof StoreNotFoundException) {
+            return true;
+        }
+
         if (!$e instanceof RegionException) {
             return false;
         }
@@ -390,6 +407,13 @@ final readonly class RetryExecutor
             return;
         }
 
+        // A StoreNotFoundException may be about another region (lock
+        // resolution routes the primary key inside this call). Only drop the
+        // entry when the missing store belongs to it (issue #627).
+        if ($e instanceof StoreNotFoundException && !$this->regionUsesStore($cached, $e->storeId)) {
+            return;
+        }
+
         // The cache itself emits regionInvalidated() with the reason passed
         // here — do not emit here too.
         $this->regionCache->invalidate($cached->regionId, 'fatal_region_error');
@@ -398,6 +422,21 @@ final readonly class RetryExecutor
             'regionId' => $cached->regionId,
             'errorKind' => $e instanceof RegionException ? $e->errorKind?->value : null,
         ]);
+    }
+
+    private function regionUsesStore(RegionInfo $region, int $storeId): bool
+    {
+        if ($region->leaderStoreId === $storeId) {
+            return true;
+        }
+
+        foreach ($region->peers as $peer) {
+            if ($peer->storeId === $storeId) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function handleNotLeader(TiKvException $e, string $key): ?BackoffType

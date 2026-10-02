@@ -18,9 +18,11 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
+use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
@@ -166,6 +168,90 @@ class RetryExecutorFatalInvalidationTest extends TestCase
         );
         $this->assertSame(1, $this->metrics->getInvalidations('fatal_region_error'));
         $this->assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
+    }
+
+    // ========================================================================
+    // A removed leader store is evidence about the cached region (issue #627)
+    // ========================================================================
+
+    public function testFatalStoreNotFoundInvalidatesTheCachedRegionAndRethrows(): void
+    {
+        $this->cache->put($this->cachedRegion());
+        $executor = $this->createExecutor();
+
+        $error = new StoreNotFoundException(1);
+        $this->assertNull(ErrorClassifier::classify($error), 'fixture must be a fatal classification');
+
+        $calls = 0;
+        $caught = null;
+        try {
+            $executor->execute(self::KEY, function () use (&$calls, $error): string {
+                $calls++;
+                throw $error;
+            });
+        } catch (StoreNotFoundException $e) {
+            $caught = $e;
+        }
+
+        $this->assertSame($error, $caught, 'fail closed: the original exception must propagate unchanged');
+        $this->assertSame(1, $calls, 'a fatal error must not be retried');
+        $this->assertNull(
+            $this->cache->getByKey(self::KEY),
+            'the region whose leader store is gone must not outlive the throw',
+        );
+        $this->assertSame(1, $this->metrics->getInvalidations('fatal_region_error'));
+    }
+
+    public function testFatalStoreNotFoundForAnotherRegionKeepsTheCachedRegion(): void
+    {
+        $this->cache->put($this->cachedRegion());
+        $executor = $this->createExecutor();
+
+        $error = new StoreNotFoundException(99);
+
+        $caught = null;
+        try {
+            $executor->execute(self::KEY, static function () use ($error): string {
+                throw $error;
+            });
+        } catch (StoreNotFoundException $e) {
+            $caught = $e;
+        }
+
+        $this->assertSame($error, $caught);
+        $this->assertInstanceOf(
+            RegionInfo::class,
+            $this->cache->getByKey(self::KEY),
+            'a store that is not part of the cached region says nothing about it',
+        );
+        $this->assertSame(0, $this->metrics->getInvalidations('fatal_region_error'));
+    }
+
+    public function testFatalStoreNotFoundForAFollowerInvalidatesTheCachedRegion(): void
+    {
+        $this->cache->put(new RegionInfo(
+            regionId: self::REGION_ID,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            peers: [new PeerInfo(peerId: 2, storeId: 2)],
+        ));
+        $executor = $this->createExecutor();
+
+        try {
+            $executor->execute(self::KEY, static function (): string {
+                throw new StoreNotFoundException(2);
+            });
+        } catch (StoreNotFoundException) {
+        }
+
+        $this->assertNull($this->cache->getByKey(self::KEY));
+    }
+
+    public function testInvalidatesRoutingOnFatalAcceptsStoreNotFound(): void
+    {
+        $this->assertTrue(RetryExecutor::invalidatesRoutingOnFatal(new StoreNotFoundException(7)));
     }
 
     // ========================================================================
