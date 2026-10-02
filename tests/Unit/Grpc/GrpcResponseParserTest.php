@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcResponseParser;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -29,25 +30,9 @@ class GrpcResponseParserTest extends TestCase
                 'event' => (object) ['status' => (object) ['code' => 5, 'details' => 'Not found']],
                 'expected' => ['code' => 5, 'details' => 'Not found'],
             ],
-            'missing status defaults to zero' => [
-                'event' => ['message' => 'data'],
-                'expected' => ['code' => 0, 'details' => ''],
-            ],
-            'null status becomes empty array' => [
-                'event' => ['status' => null],
-                'expected' => ['code' => 0, 'details' => ''],
-            ],
-            'status without code defaults to zero' => [
-                'event' => ['status' => ['details' => 'msg']],
-                'expected' => ['code' => 0, 'details' => 'msg'],
-            ],
             'status without details defaults to empty string' => [
                 'event' => ['status' => ['code' => 3]],
                 'expected' => ['code' => 3, 'details' => ''],
-            ],
-            'code as string is cast to int' => [
-                'event' => ['status' => ['code' => '4', 'details' => 'test']],
-                'expected' => ['code' => 4, 'details' => 'test'],
             ],
             'details as int is cast to string' => [
                 'event' => ['status' => ['code' => 1, 'details' => 42]],
@@ -59,10 +44,6 @@ class GrpcResponseParserTest extends TestCase
                     'message' => 'some data',
                 ],
                 'expected' => ['code' => 10, 'details' => 'Aborted'],
-            ],
-            'non-array code defaults to zero' => [
-                'event' => ['status' => ['code' => ['nested'], 'details' => 'x']],
-                'expected' => ['code' => 0, 'details' => 'x'],
             ],
         ];
     }
@@ -102,10 +83,21 @@ class GrpcResponseParserTest extends TestCase
         $this->assertSame('test-key', $result->getKey());
     }
 
-    public function testDeserializeWithNullMessage(): void
+    public function testDeserializeWithNullMessageThrowsWhenRequired(): void
     {
-        $event = ['message' => null];
-        $result = GrpcResponseParser::deserialize($event, \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class);
+        $this->expectException(GrpcException::class);
+        $this->expectExceptionMessage('no response body');
+
+        GrpcResponseParser::deserialize(['message' => null], \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class);
+    }
+
+    public function testDeserializeWithNullMessageWhenNotRequired(): void
+    {
+        $result = GrpcResponseParser::deserialize(
+            ['message' => null],
+            \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
+            requireMessage: false,
+        );
 
         $this->assertInstanceOf(Message::class, $result);
     }
@@ -131,12 +123,66 @@ class GrpcResponseParserTest extends TestCase
         $this->assertSame('obj-key', $result->getKey());
     }
 
-    public function testDeserializeWithMissingMessage(): void
+    public function testDeserializeWithMissingMessageThrowsWhenRequired(): void
     {
-        $event = ['status' => ['code' => 0]];
-        $result = GrpcResponseParser::deserialize($event, \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class);
+        $this->expectException(GrpcException::class);
+
+        GrpcResponseParser::deserialize(['status' => ['code' => 0]], \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class);
+    }
+
+    public function testDeserializeWithMissingMessageWhenNotRequired(): void
+    {
+        $result = GrpcResponseParser::deserialize(
+            ['status' => ['code' => 0]],
+            \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
+            requireMessage: false,
+        );
 
         $this->assertInstanceOf(Message::class, $result);
+    }
+
+    public function testExtractStatusThrowsWhenStatusIsMissing(): void
+    {
+        $this->expectException(GrpcException::class);
+        $this->expectExceptionMessage('no status');
+
+        GrpcResponseParser::extractStatus(['message' => 'x']);
+    }
+
+    public function testExtractStatusThrowsWhenStatusIsNull(): void
+    {
+        $this->expectException(GrpcException::class);
+
+        GrpcResponseParser::extractStatus(['status' => null]);
+    }
+
+    public function testExtractStatusThrowsWhenCodeIsMissing(): void
+    {
+        $this->expectException(GrpcException::class);
+
+        GrpcResponseParser::extractStatus(['status' => ['details' => 'msg']]);
+    }
+
+    /**
+     * @return array<string, array{code: mixed}>
+     */
+    public static function nonIntCodeProvider(): array
+    {
+        return [
+            'string' => ['code' => '4'],
+            'array' => ['code' => ['nested']],
+            'float' => ['code' => 1.5],
+            'null' => ['code' => null],
+        ];
+    }
+
+    #[DataProvider('nonIntCodeProvider')]
+    public function testExtractStatusThrowsWhenCodeIsNotAnInteger(mixed $code): void
+    {
+        $this->expectException(GrpcException::class);
+        $this->expectExceptionMessage('unexpected type');
+
+        GrpcResponseParser::extractStatus(['status' => ['code' => $code, 'details' => 'x']]);
     }
 
     public function testDeserializeDifferentResponseTypes(): void
@@ -191,7 +237,11 @@ class GrpcResponseParserTest extends TestCase
         GrpcResponseParser::setMaxMessageSize(1);
 
         $event = ['message' => null];
-        $result = GrpcResponseParser::deserialize($event, \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class);
+        $result = GrpcResponseParser::deserialize(
+            $event,
+            \CrazyGoat\Proto\Kvrpcpb\RawGetRequest::class,
+            requireMessage: false,
+        );
 
         $this->assertInstanceOf(Message::class, $result);
     }
