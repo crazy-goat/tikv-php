@@ -771,6 +771,101 @@ The client logs:
 - **WARNING**: Retry attempts, region invalidations, slow operations (only when the `slowLog` option is enabled — see [Slow Operation Logging](#slow-operation-logging))
 - **ERROR**: Failed operations, exhausted retries, fatal errors
 
+Keys in the log details are redacted — see
+[Log Redaction](#log-redaction) for the exact format.
+
+### Log Redaction
+
+The client never writes a raw key it holds into the log context: every key
+it formats for a log line or an exception message passes through
+[`KeyRedactor`](../src/Client/Util/KeyRedactor.php), which replaces it with
+the first `min(8, length)` bytes as lowercase hex plus the total length of
+the key:
+
+| Key | Logged as |
+|---|---|
+| `key_a` (5 bytes) | `"6b65795f61" (5 bytes)` |
+| `user:session` (12 bytes) | `"757365723a736573... (12 bytes)` |
+| empty key | `"" (0 bytes)` |
+
+That is the exact output of the code, not a paraphrase of it. A key of 8
+bytes or fewer is hex-encoded in full and quoted on both sides; a longer key
+is quoted only at the front, and its 16-character hex prefix is followed by
+`...` **without a closing quote**. The byte count is the length of the whole
+key, not of the prefix. The shape is pinned by the unit tests — do not
+"repair" the missing quote when you copy these strings, and do not quote the
+redacted value a second time in a message template (pass it to an unquoted
+`%s`; see [`helpers/faq.md`](helpers/faq.md)).
+
+**Values are never logged at all** — not redacted, not truncated. The client
+puts no value into any log context or exception message, so there is nothing
+to redact on that side: only keys cross the log boundary, and only in their
+redacted form.
+
+**The channel the redactor does not cover: TiKV's own error text.** Two log
+lines copy the message of a `RegionException` into the log context — the
+aggregated prewrite-failure warning
+(`TwoPhaseCommitter::logPrewritePartialFailure()`) and the pessimistic-lock
+retry warning — and that message can be TiKV's own text:
+`RegionException::fromRegionError()` copies `errorpb.Error::getMessage()`
+verbatim. TiKV can name a key in such a message, and the client cannot
+redact a key it never saw. Every key the client itself holds is redacted; a
+key only the server ever saw is not (tracked in issue #307).
+
+The redactor is applied wherever a key can reach a log line:
+
+- the **region cache** (`RegionCache` — cache hits, misses, cached regions);
+- the **retry executor** (`RetryExecutor` — retry attempts, budget
+  exhaustion, region invalidation);
+- the **lock resolver** (`LockResolver` — lock resolution, `CheckTxnStatus`);
+- the **transaction committer** (`TwoPhaseCommitter` — heartbeats, the
+  primary key of a commit). `Transaction` itself contains no redaction call
+  of its own — the transactional path is covered through the lock resolver
+  and the committer;
+- the **slow-log paths** (`RawKvCrud`, `RawKvScanner`, `RawKvAtomic`,
+  `RawKvBatch` and `RawKvRangeOps` — the "Slow TiKV operation" warnings).
+
+Exception messages are redacted too, because a message is a logging channel:
+Monolog, Sentry and uncaught-exception handlers all capture `getMessage()`.
+The fail-closed region-resolution errors (`RegionResolver`,
+`RegionGrouper`), the per-pair `KeyError` messages (`RegionErrorHandler`),
+the region-shrink error (`RawKvRangeOps`), the heartbeat and primary-key
+errors of the committer (`TwoPhaseCommitter` — a retryable
+`TxnRetryableException` and a fatal `InvalidStateException`), the
+retry-budget and lock-wait exceptions (`RetryBudgetExhaustedException`,
+`LockWaitTimeoutException`) and the API V2 keyspace check
+(`KeyOutOfBoundsException`) therefore name the redacted key. When your own
+code needs the raw key, read it from the typed accessor instead of parsing
+it out of a message — `RetryBudgetExhaustedException::getRawKey()` and
+`LockWaitTimeoutException::getKey()`.
+
+#### Installing a stricter redactor
+
+`KeyRedactor::setRedactor()` replaces the default redactor:
+
+```php
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+
+KeyRedactor::setRedactor(
+    fn (string $key): string => 'sha256:' . substr(hash('sha256', $key), 0, 16)
+);
+```
+
+The callable receives the raw key and returns the string that is logged in
+its place. Install a hash when an 8-byte prefix is still sensitive in your
+key scheme — the prefix alone can leak a tenant identifier. Pass `null` to
+restore the default:
+
+```php
+KeyRedactor::setRedactor(null);
+```
+
+> **The redactor is process-global.** `KeyRedactor::setRedactor()` is a
+> static method and the custom callable is held in a static property, so it
+> applies to every client, every transaction and every key in the process —
+> not to a single client instance. Set it once, before the first client is
+> created, and remember that it also covers the exception messages.
+
 ### Structured Logging
 
 Use JSON format for log aggregation:

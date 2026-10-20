@@ -101,10 +101,11 @@ echo "   use Monolog\\Formatter\\JsonFormatter;\n";
 echo "   \$handler->setFormatter(new JsonFormatter());\n\n";
 
 echo "4. Key redaction:\n";
-echo "   - Raw keys are automatically redacted in log context using the\n";
-echo "     KeyRedactor utility (first 8 bytes as hex + length).\n";
+echo "   - Raw keys are never written to the log context: the KeyRedactor\n";
+echo "     utility replaces every key with the first min(8, length) bytes as\n";
+echo "     lowercase hex plus the total byte length, e.g. \"6b65795f61\" (5 bytes).\n";
 echo "   - Use KeyRedactor::setRedactor() to provide a custom redaction\n";
-echo "     callable for your environment.\n";
+echo "     callable for your environment; the redactor is process-global.\n";
 echo "   - Avoid DEBUG level in production; keys contain tenant IDs,\n";
 echo "     user IDs, session tokens, etc. and can leak via logs.\n\n";
 

@@ -1577,6 +1577,10 @@ Two lessons from the #269 (GRPC-10) review:
    `... for key ""757365725f656d61... (28 bytes)"`. Pass the redacted value to an
    *unquoted* `%s` (`for key %s`). Do not change `KeyRedactor`'s own output —
    log contexts store the value unwrapped and depend on the current shape.
+   The user-facing description of the whole redaction contract (the default
+   format, the places the redactor is applied, the process-global nature of
+   `setRedactor()` and the fact that values are never logged at all) lives
+   in [`configuration.md`](../configuration.md#log-redaction) (#400).
 2. **Guard tests must scan the `sprintf()` argument list, not raw text.** The
    first cut matched the raw form with a text regex keyed off a positional
    bare `$key`; it stayed green only because the raw key was passed as the
