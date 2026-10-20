@@ -150,7 +150,17 @@ final class TxnKvClient
      *        discovery and failover (issue #416)
      * @param array<string, mixed> $options Client options, including 'tls' for TLS
      *                                      configuration, 'timeout' for timeout config,
-     *                                      and 'metrics' for the metrics backend
+     *                                      and 'metrics' for the metrics backend.
+     *                                      The shared transport options are
+     *                                      accepted too: 'allowInsecure'
+     *                                      (fail-closed TLS, default true),
+     *                                      'maxChannels' and 'idleTtlMs'
+     *                                      (channel pool), 'grpc' (gRPC channel
+     *                                      arguments) and 'grpcClient' (a transport
+     *                                      built by the application — the client
+     *                                      uses it and never closes it, so one
+     *                                      transport can be shared with other
+     *                                      clients)
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
@@ -186,6 +196,7 @@ final class TxnKvClient
             safePointCache: $safePointCache,
             replicaReadPolicy: self::resolveReplicaReadPolicy($options),
             metrics: $bundle->metrics,
+            ownsGrpcClient: $bundle->ownsGrpcClient,
         );
     }
 
@@ -212,6 +223,19 @@ final class TxnKvClient
         private readonly ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
         /** Metrics backend used by region resolution, retries, and transactions. */
         private readonly MetricsInterface $metrics = new NoOpMetrics(),
+        /**
+         * Whether this client owns the gRPC transport and may close it.
+         *
+         * true (the default) for a client that built the transport itself —
+         * and for a client assembled by hand, which therefore closes the
+         * transport it was given (issue #204 tracks the change to close only
+         * what a client owns).
+         * false when the transport was supplied by the application
+         * (options['grpcClient']): the application stays its owner, so the
+         * client never closes it and the same transport can be shared with
+         * other clients.
+         */
+        private readonly bool $ownsGrpcClient = true,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -615,7 +639,12 @@ final class TxnKvClient
         }
 
         try {
-            $this->grpc->close();
+            // A transport supplied by the application (options['grpcClient'])
+            // belongs to the application — closing it here would break every
+            // other client sharing it.
+            if ($this->ownsGrpcClient) {
+                $this->grpc->close();
+            }
         } catch (\Throwable $e) {
             $this->logger->error('Failed to close gRPC client', ['exception' => $e]);
         }

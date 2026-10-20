@@ -175,7 +175,13 @@ final class RawKvClient
 
     /**
      * @param string[] $pdEndpoints
-     * @param array<string, mixed> $options
+     * @param array<string, mixed> $options Client options. Besides the
+     *        RawKV-specific ones, the shared transport options are accepted:
+     *        'tls' (TLS configuration), 'allowInsecure' (fail-closed TLS,
+     *        default true), 'maxChannels' and 'idleTtlMs' (channel pool),
+     *        'grpc' (gRPC channel arguments) and 'grpcClient' (a transport
+     *        built by the application — the client uses it and never closes
+     *        it, so one transport can be shared with other clients).
      *
      * @throws InvalidArgumentException if PD endpoints array is empty
      */
@@ -211,6 +217,7 @@ final class RawKvClient
             replicaReadPolicy: self::resolveReplicaReadPolicy($options),
             maxScanRows: self::resolveMaxScanRows($options),
             batchCommands: self::resolveBatchCommands($options),
+            ownsGrpcClient: $bundle->ownsGrpcClient,
         );
     }
 
@@ -244,6 +251,19 @@ final class RawKvClient
         private readonly ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
         int $maxScanRows = self::DEFAULT_MAX_SCAN_ROWS,
         bool $batchCommands = false,
+        /**
+         * Whether this client owns the gRPC transport and may close it.
+         *
+         * true (the default) for a client that built the transport itself —
+         * and for a client assembled by hand, which therefore closes the
+         * transport it was given (issue #204 tracks the change to close only
+         * what a client owns).
+         * false when the transport was supplied by the application
+         * (options['grpcClient']): the application stays its owner, so the
+         * client never closes it and the same transport can be shared with
+         * other clients.
+         */
+        private readonly bool $ownsGrpcClient = true,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -1202,7 +1222,12 @@ final class RawKvClient
         }
 
         try {
-            $this->grpc->close();
+            // A transport supplied by the application (options['grpcClient'])
+            // belongs to the application — closing it here would break every
+            // other client sharing it.
+            if ($this->ownsGrpcClient) {
+                $this->grpc->close();
+            }
         } catch (\Throwable $e) {
             $this->logger->error('Failed to close gRPC client', ['exception' => $e]);
         }

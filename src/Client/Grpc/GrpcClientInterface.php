@@ -110,6 +110,22 @@ interface GrpcClientInterface
 
     /**
      * Close all open channels and release resources.
+     *
+     * **Ownership.** The transport belongs to whoever created it:
+     *
+     * - a client built by `RawKvClient::create()` / `TxnKvClient::create()`
+     *   creates the transport itself and closes it here;
+     * - a transport the application passes in (the `grpcClient` option) stays
+     *   the property of the application — the client never closes it, so the
+     *   same transport can be shared by several clients. Close it yourself
+     *   when the application is done with it;
+     * - a client assembled by hand (`new RawKvClient($pdClient, $grpc)`) is
+     *   given a transport it did not create and closes it here anyway — pass
+     *   `ownsGrpcClient: false` to keep the ownership with the application.
+     *
+     * Closing twice is safe: the second call is a no-op. Every call on a
+     * closed transport throws
+     * {@see \CrazyGoat\TiKV\Client\Exception\InvalidStateException}.
      */
     public function close(): void;
 

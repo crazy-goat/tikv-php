@@ -465,6 +465,54 @@ guards `clientCertFile` and `clientKeyFile`.
 > directory. They still work for backward compatibility — use the `*File` /
 > `*Pem` keys above instead.
 
+To make a misconfigured TLS setup fail instead of silently downgrading to
+plaintext, set `allowInsecure` to `false` — the client then throws
+`InvalidStateException` when it cannot open a TLS channel:
+
+```php
+$options = [
+    'tls' => ['caCertFile' => '/path/to/ca.crt'],
+    'allowInsecure' => false, // recommended for production
+];
+
+$client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
+```
+
+### Connection Lifetime and Transport Ownership
+
+The gRPC transport behind a client is **long-lived and shared**: it keeps one
+open channel per address, and that cache only pays off when the same
+transport serves many requests. Create the client once (at the start of a
+worker, or in a container) and reuse it — a client per request throws the
+cache away and pays a reconnect every time.
+
+Closing is the mirror image of creating:
+
+- a client created by `RawKvClient::create()` / `TxnKvClient::create()` owns
+  the transport it built and closes it in `close()`;
+- a transport **you** build and pass in (`options['grpcClient']`) belongs to
+  your application — the client never closes it, so the same transport can
+  serve a RawKV and a transactional client. Close it yourself;
+- a client you assemble by hand (`new RawKvClient($pdClient, $grpc)`) closes
+  the transport it was **given** — pass `ownsGrpcClient: false` when your
+  application keeps the transport and wants to close it itself.
+
+```php
+use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+
+// The transport the application builds and owns.
+// $tlsConfig is your TlsConfig (null = plaintext); $logger your PSR-3 logger.
+$grpc = new GrpcClient($logger, $tlsConfig);
+$options = ['grpcClient' => $grpc];
+
+$raw = RawKvClient::create(['127.0.0.1:2379'], $logger, $options);
+$txn = TxnKvClient::create(['127.0.0.1:2379'], $logger, $options);
+
+// …use both clients…
+
+// The application owns $grpc:
+$grpc->close();
+```
 ### PSR-3 Logging
 
 ```php
@@ -721,6 +769,9 @@ $options = [
         'clientKeyFile' => '/path/to/client.key',  // Client private key (for mTLS)
         // Or inline PEM: caCertPem, clientCertPem, clientKeyPem
     ],
+    'allowInsecure' => false,     // Fail closed: refuse a plaintext channel
+    'maxChannels' => 64,          // Open gRPC channels kept at the same time
+    'idleTtlMs' => 600000,        // Idle time before an unused channel is evicted
 ];
 
 $client = RawKvClient::create(
@@ -729,6 +780,8 @@ $client = RawKvClient::create(
     options: $options          // Additional options (optional)
 );
 ```
+
+The full list of options lives in [docs/configuration.md](docs/configuration.md).
 
 ### TiKV Configuration
 

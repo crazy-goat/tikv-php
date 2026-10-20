@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
@@ -58,11 +59,32 @@ final class ConnectionFactory
     ];
 
     /**
+     * Options that configure the gRPC transport the factory builds. They
+     * cannot be combined with a caller-supplied transport
+     * (options['grpcClient']) — that transport was configured by the
+     * application, so these options would be silently ignored.
+     */
+    private const TRANSPORT_OPTION_KEYS = [
+        'tls',
+        'allowInsecure',
+        'maxChannels',
+        'idleTtlMs',
+        'grpc',
+    ];
+
+    /**
      * Build the shared connection layer from the given endpoints and options.
      *
      * @param string[] $pdEndpoints  PD cluster addresses
      * @param array<string, mixed> $options  Client options (see OPT_ constants
-     *                                       on RawKvClient / TxnKvClient)
+     *                                       on RawKvClient / TxnKvClient).
+     *                                       Transport options: 'tls',
+     *                                       'allowInsecure', 'maxChannels',
+     *                                       'idleTtlMs' and 'grpc'. A
+     *                                       caller-supplied transport is
+     *                                       passed as 'grpcClient' and
+     *                                       replaces every other transport
+     *                                       option.
      * @param CodecInterface|null $codec  Key codec applied to PD region
      *        lookups. null builds the default V1 passthrough codec (RawKV
      *        behaviour — region keys sent to PD and region boundaries cached
@@ -90,21 +112,38 @@ final class ConnectionFactory
 
         $metrics = self::resolveMetrics($options);
 
-        $tlsConfig = self::buildTlsConfig($options);
+        $suppliedGrpc = self::resolveSuppliedGrpcClient($options);
 
-        $grpcArgs = self::resolveGrpcChannelArgs($options);
-        $allowInsecure = self::resolveAllowInsecure($options);
+        if ($suppliedGrpc instanceof GrpcClientInterface) {
+            // The application owns the transport: it configured it (TLS,
+            // channel pool) and it closes it. The transport options would be
+            // silently ignored here, so they are rejected instead.
+            self::rejectTransportOptions($options);
+            $grpc = $suppliedGrpc;
+            $tlsConfig = null;
+            $ownsGrpcClient = false;
+        } else {
+            $tlsConfig = self::buildTlsConfig($options);
 
-        $grpc = new GrpcClient(
-            $resolvedLogger,
-            $tlsConfig,
-            allowInsecure: $allowInsecure,
-            metrics: $metrics,
-            maxReceiveMessageBytes: $grpcArgs['maxReceiveMessageBytes'],
-            maxSendMessageBytes: $grpcArgs['maxSendMessageBytes'],
-            keepaliveTimeMs: $grpcArgs['keepaliveTimeMs'],
-            keepaliveTimeoutMs: $grpcArgs['keepaliveTimeoutMs'],
-        );
+            $grpcArgs = self::resolveGrpcChannelArgs($options);
+            $allowInsecure = self::resolveAllowInsecure($options);
+            $maxChannels = self::resolveMaxChannels($options);
+            $idleTtlMs = self::resolveIdleTtlMs($options);
+
+            $grpc = new GrpcClient(
+                $resolvedLogger,
+                $tlsConfig,
+                maxChannels: $maxChannels,
+                idleTtlMs: $idleTtlMs,
+                allowInsecure: $allowInsecure,
+                metrics: $metrics,
+                maxReceiveMessageBytes: $grpcArgs['maxReceiveMessageBytes'],
+                maxSendMessageBytes: $grpcArgs['maxSendMessageBytes'],
+                keepaliveTimeMs: $grpcArgs['keepaliveTimeMs'],
+                keepaliveTimeoutMs: $grpcArgs['keepaliveTimeoutMs'],
+            );
+            $ownsGrpcClient = true;
+        }
         $storeCache = new StoreCache(logger: $resolvedLogger);
         $resolvedMode = $mode ?? Mode::Raw;
         $resolvedCodec = $codec ?? new CodecV1($resolvedMode);
@@ -130,7 +169,9 @@ final class ConnectionFactory
                 $resolvedCodec = new CodecV2($resolvedMode, $keyspaceId, $keyspaceName);
                 $resolvedClusterId = $probePdClient->getClusterId();
             } catch (\Throwable $e) {
-                $grpc->close();
+                if ($ownsGrpcClient) {
+                    $grpc->close();
+                }
                 throw $e;
             }
         }
@@ -165,6 +206,7 @@ final class ConnectionFactory
             pdEndpoints: array_values($pdEndpoints),
             allowedStorePorts: $storeHostValidation['allowedStorePorts'],
             codec: $resolvedCodec,
+            ownsGrpcClient: $ownsGrpcClient,
         );
     }
 
@@ -407,6 +449,114 @@ final class ConnectionFactory
         }
 
         return $allowInsecure;
+    }
+
+    /**
+     * Resolve options['maxChannels'] (default {@see GrpcClient::DEFAULT_MAX_CHANNELS}):
+     * the maximum number of gRPC channels the transport keeps open at the
+     * same time. The least recently used channel is evicted when the cap is
+     * reached. Must be an int >= 1.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveMaxChannels(array $options): int
+    {
+        return self::resolvePositiveIntOption($options, 'maxChannels', GrpcClient::DEFAULT_MAX_CHANNELS);
+    }
+
+    /**
+     * Resolve options['idleTtlMs'] (default {@see GrpcClient::DEFAULT_IDLE_TTL_MS}):
+     * the idle time in milliseconds after which an unused channel is evicted.
+     * Must be an int >= 1.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveIdleTtlMs(array $options): int
+    {
+        return self::resolvePositiveIntOption($options, 'idleTtlMs', GrpcClient::DEFAULT_IDLE_TTL_MS);
+    }
+
+    /**
+     * Read an int >= 1 from the options, falling back to the given default.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolvePositiveIntOption(array $options, string $key, int $default): int
+    {
+        if (!array_key_exists($key, $options)) {
+            return $default;
+        }
+
+        $value = $options[$key];
+        if (!is_int($value)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be an int, %s given",
+                $key,
+                get_debug_type($value),
+            ));
+        }
+        if ($value < 1) {
+            throw new InvalidArgumentException("options['{$key}'] must be >= 1");
+        }
+
+        return $value;
+    }
+
+    /**
+     * Resolve the caller-supplied gRPC transport (options['grpcClient']).
+     *
+     * A transport built by the application is used as it is: it is
+     * long-lived and shared (one transport can serve a RawKV and a
+     * transactional client), and the application stays its owner — the
+     * client never closes it.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveSuppliedGrpcClient(array $options): ?GrpcClientInterface
+    {
+        if (!array_key_exists('grpcClient', $options)) {
+            return null;
+        }
+
+        $grpc = $options['grpcClient'];
+        if ($grpc === null) {
+            return null;
+        }
+        if (!$grpc instanceof GrpcClientInterface) {
+            throw new InvalidArgumentException(
+                "options['grpcClient'] must be an instance of GrpcClientInterface, got "
+                . get_debug_type($grpc)
+            );
+        }
+
+        return $grpc;
+    }
+
+    /**
+     * Reject the transport options when the application supplies its own
+     * transport: they configure a transport the factory does not build, so
+     * honouring them is impossible and ignoring them silently would leave
+     * the caller believing (for example) that TLS is enforced.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function rejectTransportOptions(array $options): void
+    {
+        $conflicts = array_values(array_intersect(self::TRANSPORT_OPTION_KEYS, array_keys($options)));
+        if ($conflicts === []) {
+            return;
+        }
+
+        $names = array_map(
+            static fn (string $key): string => "'{$key}'",
+            $conflicts,
+        );
+
+        throw new InvalidArgumentException(sprintf(
+            "options['grpcClient'] cannot be combined with the transport option(s) %s — "
+            . 'configure them on the GrpcClient you pass in',
+            implode(', ', $names),
+        ));
     }
 
     /**

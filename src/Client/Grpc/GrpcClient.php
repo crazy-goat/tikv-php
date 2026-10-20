@@ -18,6 +18,23 @@ use Grpc\Timeval;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
+/**
+ * gRPC transport for TiKV and PD.
+ *
+ * The client keeps a cache of open channels (one per address, evicted when
+ * idle or when the cap is reached), so it is meant to be **long-lived and
+ * shared** between the requests of one process — creating one per request
+ * throws the cache away and pays a reconnect every time.
+ *
+ * Ownership: the transport belongs to whoever created it. A client built by
+ * `RawKvClient::create()` / `TxnKvClient::create()` creates the transport
+ * itself and closes it in `close()`. A transport the application passes in
+ * (the `grpcClient` option) belongs to the application: the client never
+ * closes it, so the same transport can serve several clients. A client
+ * assembled by hand (`new RawKvClient($pdClient, $grpc)`) closes the
+ * transport it was given unless `ownsGrpcClient: false` is passed. See
+ * {@see GrpcClientInterface::close()}.
+ */
 final class GrpcClient implements GrpcClientInterface
 {
     /**
@@ -43,8 +60,16 @@ final class GrpcClient implements GrpcClientInterface
 
     private bool $closed = false;
 
-    private const DEFAULT_MAX_CHANNELS = 64;
-    private const DEFAULT_IDLE_TTL_MS = 600000; // 10 minutes
+    /**
+     * Maximum number of channels kept open at the same time.
+     *
+     * The client is meant to be long-lived and shared: the channel cache is
+     * only worth its memory when the same transport serves many requests.
+     */
+    public const DEFAULT_MAX_CHANNELS = 64;
+
+    /** Idle time (ms) after which an unused channel is evicted. */
+    public const DEFAULT_IDLE_TTL_MS = 600000; // 10 minutes
     /**
      * Defaults large enough for MAX_SCAN_LIMIT (10240 rows) responses — the
      * gRPC C core's own default receive limit is 4 MB, which a full-limit
@@ -69,6 +94,12 @@ final class GrpcClient implements GrpcClientInterface
     public const DEFAULT_TIMEOUT_MS = 30000;
 
     /**
+     * @param int $maxChannels Maximum number of channels kept open at the same
+     *                        time (default 64). The least recently used channel
+     *                        is evicted when the cap is reached. Must be >= 1.
+     * @param int $idleTtlMs Idle time (ms) after which an unused channel is
+     *                       evicted (default 10 minutes). A channel that is
+     *                       evicted is reopened on the next request.
      * @param bool $allowInsecure When true (default), an insecure (plaintext) gRPC channel
      *                            is created when no TLS configuration is provided or when
      *                            the TLS configuration has no credentials set. When false,

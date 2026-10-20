@@ -810,3 +810,35 @@ the thrown type. Pinned by `tests/Unit/TxnKv/TxnKvFanoutTest.php`
 (`testFailingRegionsAreAllObservedAndTheFirstErrorSurfaces`,
 `::testFailingRegionIsRetriedOnItsOwnWhilePeersAreNotResent`,
 `::testAggregatedPrewriteFailureNamesEveryFailingRegion`).
+
+## The transport belongs to whoever created it (issue #407)
+
+The gRPC transport is **long-lived and shared** — one instance keeps the channel
+cache that only pays off when it serves many requests — so "who closes it" has
+to be unambiguous, and the answer is not "whoever calls `close()`":
+
+1. **A transport the factory builds belongs to the client.** `create()` builds
+   the transport, the store cache and the PD client, and `close()` closes the
+   transport it built.
+2. **A transport the application supplies belongs to the application.**
+   `options['grpcClient']` hands a ready-made `GrpcClientInterface` to the
+   factory; the client uses it as it is and **never** closes it, so one
+   transport can serve a RawKV and a transactional client and closing one of
+   them cannot break the other. The transport options (`tls`, `allowInsecure`,
+   `maxChannels`, `idleTtlMs`, `grpc`) are rejected next to it instead of
+   ignored — an ignored `allowInsecure: false` would leave the caller
+   believing TLS is enforced while the transport is used without it.
+3. **A client assembled by hand closes the transport it was given.** The public
+   constructors of `RawKvClient` / `TxnKvClient` default `ownsGrpcClient` to
+   `true`, so `new RawKvClient($pdClient, $grpc)` closes `$grpc` in `close()`
+   and in the destructor. `ownsGrpcClient: false` is the documented escape
+   hatch for an application that keeps the transport. Issue #204 tracks the
+   change (a client should close only what it owns); until it lands the flag is
+   the only way to say so.
+
+The rule is published in three places, and a reader of any one of them has to
+find the same answer: `GrpcClientInterface::close()` (the API contract), the
+README ("Connection Lifetime and Transport Ownership") and
+`docs/configuration.md` ("Sharing One Transport Between Clients" plus the
+manual-construction snippet). Keep them in sync — the contradiction #407 had to
+fix was a snippet sitting next to the rule and breaking it.

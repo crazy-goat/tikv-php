@@ -30,6 +30,9 @@ final readonly class ConnectionBundle
      * @param (Closure(string): bool)|null $storeHostPolicy
      * @param list<string> $pdEndpoints
      * @param list<int>|null $allowedStorePorts null = unrestricted
+     * @param bool $ownsGrpcClient true when the factory built the transport
+     *        and the client may close it; false when the application supplied
+     *        it (options['grpcClient']) and stays its owner
      */
     public function __construct(
         public GrpcClientInterface $grpc,
@@ -45,6 +48,7 @@ final readonly class ConnectionBundle
         public array $pdEndpoints = [],
         public ?array $allowedStorePorts = null,
         public CodecInterface $codec = new CodecV1(),
+        public bool $ownsGrpcClient = true,
     ) {
     }
 }

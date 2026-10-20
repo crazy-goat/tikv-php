@@ -108,6 +108,21 @@ $options = [
         'clientCertFile' => '/path/to/client.crt',
         'clientKeyFile' => '/path/to/client.key',
     ],
+    // Fail-closed TLS (issue #407): when false, the client refuses to open
+    // a plaintext gRPC channel and throws InvalidStateException instead —
+    // a missing or unusable TLS configuration then fails loudly instead of
+    // silently downgrading to plaintext. Default: true (plaintext allowed,
+    // with a warning on every insecure channel). See "Security: Fail-Closed
+    // TLS" below.
+    'allowInsecure' => false,
+    // Maximum number of gRPC channels kept open at the same time. The least
+    // recently used channel is evicted when the cap is reached. Default: 64
+    // (GrpcClient::DEFAULT_MAX_CHANNELS). Must be >= 1.
+    'maxChannels' => 64,
+    // Idle time in milliseconds after which an unused channel is evicted
+    // (and reopened on the next request). Default: 600000 (10 minutes,
+    // GrpcClient::DEFAULT_IDLE_TTL_MS). Must be >= 1.
+    'idleTtlMs' => 600000,
 ];
 
 $client = RawKvClient::create(
@@ -360,6 +375,85 @@ so a dead connection is detected rather than blocking until TCP retransmission
 gives up. Lowering `maxReceiveMessageBytes` is a valid hardening choice when
 you know your values are small.
 
+### Channel Pool (maxChannels, idleTtlMs)
+
+The transport keeps one gRPC channel per address and caches it. Two options
+size that cache:
+
+```php
+$options = [
+    // Maximum number of channels kept open at the same time. The least
+    // recently used channel is evicted when the cap is reached. Default: 64.
+    'maxChannels' => 64,
+    // Idle time in milliseconds after which an unused channel is evicted
+    // (and reopened on the next request). Default: 600000 (10 minutes).
+    'idleTtlMs' => 600000,
+];
+
+$client = RawKvClient::create(['127.0.0.1:2379'], options: $options);
+```
+
+Both must be ints `>= 1`. The defaults are the ones the transport uses when it
+is built by hand (`GrpcClient::DEFAULT_MAX_CHANNELS`,
+`GrpcClient::DEFAULT_IDLE_TTL_MS`).
+
+Lower the idle TTL when the network drops idle flows earlier than the
+10-minute default — a cloud NAT gateway typically does so after ~350 seconds,
+which is exactly the case the keepalive pings above cannot cover (they keep
+the *connection* alive, not the *entry* in the cache). Lowering the cap
+limits the memory the channel cache can use; a channel is evicted only when
+another one is needed, so the cap never breaks a request.
+
+### Sharing One Transport Between Clients
+
+The gRPC transport is **long-lived and shared**: it caches one channel per
+address, and that cache only pays off when the same transport serves many
+requests. A RawKV client and a transactional client that talk to the same
+cluster can therefore use one transport instead of two:
+
+```php
+use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+
+// The transport the application builds and owns.
+// $tlsConfig is your TlsConfig (null = plaintext); $logger your PSR-3 logger.
+// With a null $tlsConfig the transport opens plaintext channels; pass
+// allowInsecure: false to refuse them (see "Security: Fail-Closed TLS").
+$grpc = new GrpcClient($logger, $tlsConfig);
+
+$options = ['grpcClient' => $grpc];
+
+$raw = RawKvClient::create(['127.0.0.1:2379'], $logger, $options);
+$txn = TxnKvClient::create(['127.0.0.1:2379'], $logger, $options);
+
+// The application owns $grpc and closes it when it is done.
+$grpc->close();
+```
+
+`options['grpcClient']` accepts a `GrpcClientInterface` (any implementation —
+`GrpcClient`, a test double, an application-specific transport). The client
+then uses it as it is and **never closes it**: the transport belongs to the
+application, so closing one client cannot break the other clients sharing it.
+A client that built its own transport (the normal case) closes it in
+`close()` as before.
+
+Because the supplied transport was configured by the application, the
+transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
+`grpc`) cannot be combined with it — they would configure a transport the
+factory does not build, so they are rejected with an
+`InvalidArgumentException` instead of being silently ignored. Configure them
+on the `GrpcClient` you pass in.
+
+One caveat of sharing: on a retryable transport error the client closes the
+channel of the affected address to force a reconnect. With a shared transport
+that affects every client using the same address — the channel is reopened on
+the next request, but a request in flight on it can be interrupted.
+
+Sharing the transport shares the **channels** only. Every client keeps its own
+region cache and its own store-address cache, so the two clients do not warm
+each other's caches.
+
 ### Environment Variables
 
 For flexibility, use environment variables:
@@ -491,6 +585,10 @@ or the inline `caCertPem`, `clientCertPem` + `clientKeyPem`.
 For advanced TLS configuration:
 
 ```php
+use CrazyGoat\TiKV\Client\Cache\StoreCache;
+use CrazyGoat\TiKV\Client\Connection\PdClient;
+use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 
 $builder = new TlsConfigBuilder();
@@ -501,35 +599,119 @@ $tlsConfig = $builder->build();
 
 // Use with custom client construction
 $grpc = new GrpcClient($logger, $tlsConfig);
-$pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger);
+// The store cache is the fourth argument of PdClient: without it every
+// store address is looked up in PD again on every request.
+$storeCache = new StoreCache(logger: $logger);
+$pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
+// The client closes the transport it was given in close() — pass
+// ownsGrpcClient: false to keep the ownership with the application.
 $client = new RawKvClient($pdClient, $grpc);
 ```
 
-### Fail-Closed Mode (Require TLS)
+> **Note:** the manual path above is for the rare case where the client has
+> to be assembled by hand. `RawKvClient::create()` /
+> `TxnKvClient::create()` build the transport, the store cache and the PD
+> client for you, and accept the same TLS options through
+> `options['tls']` — see [Basic Configuration](#basic-configuration).
 
-By default, if no TLS configuration is provided, the client connects in plaintext
-and logs a warning. To fail-closed — reject any connection that isn't using TLS —
-set `allowInsecure: false` on the `GrpcClient`:
+**Who closes the transport on the manual path.** The rule of
+[Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
+is "the transport belongs to whoever created it", and it holds for the factory
+path. A client assembled by hand is *given* a transport it did not create and
+still closes it: `close()` (and the destructor) closes `$grpc`, exactly like a
+client built by `create()` closes the transport it built. If the application
+keeps the transport — to share it with a second client, or to close it later —
+say so explicitly:
+
+```php
+$client = new RawKvClient($pdClient, $grpc, ownsGrpcClient: false);
+```
+
+With `ownsGrpcClient: false` the client never closes the transport and the
+application stays its owner. The flag defaults to `true` today; issue #204
+tracks the change (a client should close only what it owns), so pass the flag
+explicitly whenever the ownership matters. `TxnKvClient` takes the same
+parameter.
+
+### Security: Fail-Closed TLS
+
+By default the client **permits plaintext gRPC** and logs a warning on every
+insecure channel it opens. That is the historical behaviour and it stays the
+default, but it means a client without any TLS configuration talks to the
+cluster in plaintext, and only the log says so.
+
+`allowInsecure: false` turns that into a fail-closed control: the client
+refuses to open a channel it cannot secure, and the misconfiguration surfaces
+as an `InvalidStateException` instead of as unencrypted traffic.
+
+```php
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+
+$client = RawKvClient::create(
+    ['tikv.example.com:2379'],
+    options: [
+        'tls' => ['caCertFile' => '/path/to/ca.crt'],
+        'allowInsecure' => false,   // throws InvalidStateException if TLS is not configured
+    ],
+);
+```
+
+**What `allowInsecure: false` does**
+
+- every attempt to open a gRPC channel checks the TLS configuration first;
+- if the TLS configuration is enabled (a CA certificate — a client certificate
+  and key need one too), the channel is opened with TLS — the option changes
+  nothing else;
+- if it is not, the client throws an `InvalidStateException` instead of
+  opening a plaintext channel. The channel is never opened, so no request is
+  sent in the clear.
+
+The exception message is:
+
+> Cannot create gRPC channel: TLS is not configured and insecure connections are not allowed. Provide a TlsConfig or set allowInsecure=true explicitly.
+
+**What happens when no TLS configuration is given**
+
+| Configuration | `allowInsecure` (default `true`) | `allowInsecure: false` |
+|---|---|---|
+| `tls` with a usable CA (and optionally a client certificate) | TLS channel, no warning | TLS channel, no warning — identical |
+| no `tls` block at all | plaintext channel, a warning is logged for every channel | `InvalidStateException` on the first channel |
+| a `tls` block the factory rejects (missing file, unknown key, half-configured client certificate) | `InvalidArgumentException` while the client is created | the same — the client is not created at all |
+
+A `tls` block the factory *accepts* is never downgraded to plaintext either
+way: the channel is created with TLS credentials, so a configuration that does
+not work (an empty CA, a certificate the server does not trust) fails the
+handshake instead of falling back to an unencrypted connection.
+
+The `InvalidStateException` is raised when the first channel is opened — that
+is, on the first request — not when the client is created. In the default API
+version `create()` opens no channel, so a misconfigured client fails on use;
+in API V2 mode (`options['apiVersion'] => 2`) the keyspace probe in
+`create()` already needs a channel, so the failure surfaces there.
+
+**How it differs from the default**
+
+- the default (`true`) is *fail-open*: it downgrades to plaintext and only
+  warns. The warning goes to the log, and a deployment that does not ship
+  the log never learns that its traffic is unencrypted;
+- `false` is *fail-closed*: the request fails and nothing is transmitted. The
+  trade-off is that a missing TLS configuration becomes an outage instead of
+  an unencrypted connection.
+
+**Recommendation:** set `allowInsecure: false` together with a valid `tls`
+block for every production deployment. It is the control a security review
+asks for: proof that the client cannot silently fall back to plaintext when
+a certificate path is misconfigured. The default stays `true` only for
+backward compatibility.
+
+The same option exists on the transport itself, for a client assembled by
+hand:
 
 ```php
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 
 // Insecure connections will throw InvalidStateException
 $grpc = new GrpcClient($logger, tlsConfig: $tlsConfig, allowInsecure: false);
-```
-
-TLS can also be enforced through the documented `create()` construction path.
-When `options['allowInsecure']` is `false`, any attempt to open a gRPC channel
-without usable TLS credentials throws `InvalidStateException`:
-
-```php
-$client = RawKvClient::create(
-    ['tikv.example.com:2379'],
-    options: [
-        'tls' => ['caCertFile' => '/path/to/ca.crt'],
-        'allowInsecure' => false, // enforce TLS — fail closed
-    ],
-);
 ```
 
 To guard against TLS misconfiguration, the factory rejects:
@@ -551,11 +733,6 @@ Recognised `options['tls']` keys:
   `clientCertBaseDir`, `clientKeyFile`, `clientCertPem`, `clientKeyPem`.
 - **Deprecated:** `caCert`, `clientCert`, `clientKey` — see
   [Deprecated TLS Option Keys](#deprecated-tls-option-keys).
-
-> **Note:** `allowInsecure` defaults to `true` (plaintext allowed) for
-> backward compatibility; setting it to `false` together with a valid `tls`
-> block is the recommended production configuration.
-
 
 ## Logging
 
@@ -1314,6 +1491,9 @@ default). `maxChannels` is a constructor argument of `GrpcClient`; a client
 built by `RawKvClient::create()` uses the default of 64, because the factory
 does not expose the knob yet.
 
+The pool itself is configurable when the defaults do not fit: `maxChannels`
+caps the number of open channels and `idleTtlMs` sets how long an unused one
+is kept — see [Channel Pool](#channel-pool-maxchannels-idlettlms).
 ### Resource Limits
 
 Consider PHP's resource limits:
@@ -1346,6 +1526,7 @@ Before deploying to production:
 - [ ] PD endpoints are correct and accessible
 - [ ] Store address policy reviewed: default PD-derived policy, explicit `allowedStoreHosts`/`storeHostPolicy`, or TLS with hostname verification enforced
 - [ ] TLS certificates are configured (if required)
+- [ ] `allowInsecure` is `false` in production, so a broken TLS configuration fails instead of downgrading to plaintext (see [Security: Fail-Closed TLS](#security-fail-closed-tls))
 - [ ] Logging is configured with appropriate level
 - [ ] Log files have correct permissions
 - [ ] Health checks are implemented

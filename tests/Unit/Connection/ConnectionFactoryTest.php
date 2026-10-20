@@ -11,6 +11,7 @@ use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -400,6 +401,179 @@ class ConnectionFactoryTest extends TestCase
             ['127.0.0.1:2379'],
             options: ['allowInsecure' => 'false'],
         );
+    }
+
+    /**
+     * The fail-closed contract of issue #407: with `allowInsecure` false and
+     * no TLS configuration, the transport refuses to open a plaintext channel
+     * instead of silently downgrading.
+     */
+    public function testAllowInsecureFalseWithoutTlsThrowsWhenAChannelIsOpened(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['allowInsecure' => false],
+        );
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('TLS is not configured');
+
+        $bundle->grpc->getChannel('127.0.0.1:20160');
+    }
+
+    // ========================================================================
+    // options['maxChannels'] / options['idleTtlMs'] — channel pool
+    // ========================================================================
+
+    public function testMaxChannelsDefaultsToGrpcClientDefault(): void
+    {
+        $grpc = $this->grpcFromFactory(['127.0.0.1:2379']);
+
+        $this->assertSame(GrpcClient::DEFAULT_MAX_CHANNELS, $this->grpcProperty($grpc, 'maxChannels'));
+    }
+
+    public function testMaxChannelsIsThreadedThroughToGrpcClient(): void
+    {
+        $grpc = $this->grpcFromFactory(['127.0.0.1:2379'], ['maxChannels' => 8]);
+
+        $this->assertSame(8, $this->grpcProperty($grpc, 'maxChannels'));
+    }
+
+    public function testMaxChannelsRejectsNonIntValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['maxChannels'] must be an int, string given");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['maxChannels' => '8'],
+        );
+    }
+
+    public function testMaxChannelsRejectsValueBelowOne(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['maxChannels'] must be >= 1");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['maxChannels' => 0],
+        );
+    }
+
+    public function testIdleTtlMsDefaultsToGrpcClientDefault(): void
+    {
+        $grpc = $this->grpcFromFactory(['127.0.0.1:2379']);
+
+        $this->assertSame(GrpcClient::DEFAULT_IDLE_TTL_MS, $this->grpcProperty($grpc, 'idleTtlMs'));
+    }
+
+    public function testIdleTtlMsIsThreadedThroughToGrpcClient(): void
+    {
+        $grpc = $this->grpcFromFactory(['127.0.0.1:2379'], ['idleTtlMs' => 30000]);
+
+        $this->assertSame(30000, $this->grpcProperty($grpc, 'idleTtlMs'));
+    }
+
+    public function testIdleTtlMsRejectsNonIntValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['idleTtlMs'] must be an int, string given");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['idleTtlMs' => '30000'],
+        );
+    }
+
+    public function testIdleTtlMsRejectsValueBelowOne(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['idleTtlMs'] must be >= 1");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['idleTtlMs' => 0],
+        );
+    }
+
+    // ========================================================================
+    // options['grpcClient'] — a transport supplied by the application
+    // ========================================================================
+
+    public function testFactoryBuiltTransportIsOwnedByTheClient(): void
+    {
+        $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
+
+        $this->assertTrue($bundle->ownsGrpcClient);
+    }
+
+    public function testSuppliedGrpcClientIsUsedAsTheTransport(): void
+    {
+        $grpc = new GrpcClient();
+
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpcClient' => $grpc],
+        );
+
+        $this->assertSame($grpc, $bundle->grpc);
+        $this->assertFalse($bundle->ownsGrpcClient);
+    }
+
+    public function testSuppliedGrpcClientRejectsNonGrpcClientValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['grpcClient'] must be an instance of GrpcClientInterface, got string");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpcClient' => 'not-a-grpc-client'],
+        );
+    }
+
+    /**
+     * @return array<string, array{array<string, mixed>}>
+     */
+    public static function transportOptionProvider(): array
+    {
+        return [
+            'tls' => [['tls' => ['caCertFile' => '/etc/tikv/ca.pem']]],
+            'allowInsecure' => [['allowInsecure' => false]],
+            'maxChannels' => [['maxChannels' => 8]],
+            'idleTtlMs' => [['idleTtlMs' => 30000]],
+            'grpc' => [['grpc' => ['keepaliveTimeMs' => 5000]]],
+        ];
+    }
+
+    /**
+     * A supplied transport was configured by the application, so the
+     * transport options would be silently ignored — they are rejected
+     * instead.
+     */
+    /**
+     * @param array<string, mixed> $option
+     */
+    #[DataProvider('transportOptionProvider')]
+    public function testSuppliedGrpcClientRejectsTransportOptions(array $option): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['grpcClient'] cannot be combined with the transport option(s)");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpcClient' => new GrpcClient()] + $option,
+        );
+    }
+
+    public function testSuppliedGrpcClientAcceptsNull(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpcClient' => null],
+        );
+
+        $this->assertTrue($bundle->ownsGrpcClient);
     }
 
     public function testTlsNonArrayStringThrowsInsteadOfSilentPlaintext(): void
