@@ -19,7 +19,7 @@ Guide for developers who want to contribute to the TiKV PHP Client project.
 Before you start developing, ensure you have:
 
 - **PHP >= 8.2** with extensions:
-  - `grpc` - gRPC extension
+  - `grpc` - gRPC extension (1.57 or newer)
   - `protobuf` - Protocol Buffers extension
 - **Composer** - PHP dependency manager
 - **Docker & Docker Compose** - For running TiKV cluster locally
@@ -587,11 +587,12 @@ composer run phpstan
 ```
 
 **Issue: gRPC extension not found**
-```bash
-# Solution: Install gRPC
-pecl install grpc
-# Add to php.ini: extension=grpc.so
-```
+
+The client requires the `ext-grpc` PHP extension, 1.57 or newer, and
+`composer.json` enforces it. See
+[Installing the gRPC Extension](getting-started.md#installing-the-grpc-extension)
+for the per-platform instructions (Debian/Ubuntu, Alpine, macOS) and the
+version check.
 
 ## Development Tips
 

@@ -72,8 +72,34 @@ coerces numeric-string keys, so `(string)`-cast keys taken from proto fields.
 
 - `composer test:unit` (`--testsuite Unit`) mocks gRPC calls — fast, no
   cluster, no `grpc` extension needed.
-- `composer test:grpc` (`--testsuite Grpc`) exercises real gRPC connections
-  missing extension fails the run locally.
+- `composer test:grpc` (`--testsuite Grpc`) exercises real gRPC connections;
+  without the extension it fails the run locally.
+
+## `composer.json` requires `ext-grpc`, but the unit job installs without it
+
+`composer.json` declares `"ext-grpc": ">=1.57"` — the library cannot work
+without the extension. The `unit-tests` CI job (`.github/workflows/ci.yml`)
+deliberately runs **without** it, because the Unit suite must stay
+extension-free (see the section above). Two consequences:
+
+- The install step of that job uses
+  `composer install --ignore-platform-req=ext-grpc`. **Do not add
+  `extensions: grpc` to that job**: the obvious "fix" for a red unit job
+  would silently delete the guarantee that the Unit suite runs without the
+  extension. Every other job (lint, `grpc-unit-tests`, `integration-tests`,
+  the two E2E jobs) installs the extension and therefore enforces the
+  requirement.
+- The flag has a second effect: Composer drops the ignored requirement from
+  the generated `vendor/composer/platform_check.php`, so the autoloader still
+  boots on a machine without the extension. Without the flag the generated
+  check would abort before the first test.
+
+The local scripts follow the same rule: `bin/worktree-setup.sh` (used by
+`bin/worktree.sh`) and `scripts/test.sh` add `--ignore-platform-req=ext-grpc`
+**only when the extension is really missing**, so the requirement is enforced
+on a machine that has it (an extension that is too old is still reported) and
+the Unit-only workflow keeps working on one that has not. Re-check both
+whenever the job's PHP setup changes.
 
 ## PHP coerces numeric-string array keys to int — string-cast at every typed consumption point
 

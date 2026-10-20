@@ -29,7 +29,17 @@ fi
 # Install dependencies if needed
 if [ ! -d "vendor" ]; then
     print_section "Installing dependencies..."
-    composer install --no-interaction
+    # composer.json requires the ext-grpc extension (">=1.57"), but neither
+    # the Unit nor the Integration suite needs it. The platform requirement
+    # is ignored only when the extension is really missing; otherwise
+    # Composer still enforces the version. See docs/helpers/faq.md,
+    # "composer.json requires ext-grpc, but the unit job installs without it".
+    install_args=(--no-interaction)
+    if ! php -r 'exit(extension_loaded("grpc") ? 0 : 1);'; then
+        echo "ext-grpc is not installed - installing without the platform check."
+        install_args+=(--ignore-platform-req=ext-grpc)
+    fi
+    composer install "${install_args[@]}"
 fi
 
 # Run Unit tests

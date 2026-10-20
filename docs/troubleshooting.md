@@ -28,23 +28,46 @@ recommended catch order, see the [Error Handling Reference](error-handling.md).
 Fatal error: Uncaught Error: Class 'Grpc\Channel' not found
 ```
 
+The library requires the **`ext-grpc`** PHP extension, version **1.57 or newer**
+(`"ext-grpc": ">=1.57"` in `composer.json`). A missing extension is also
+reported by Composer, before any code runs:
+
+```
+crazy-goat/tikv-client <version> requires ext-grpc >=1.57 -> it is missing from your system. Install or enable PHP's grpc extension.
+```
+
+`<version>` is the version of the package you install.
+Contributors working on this repository see the root-package wording of the
+same error instead:
+
+```
+Root composer.json requires PHP extension ext-grpc >=1.57 but it is missing from your system. Install or enable PHP's grpc extension.
+```
+
 **Solution:**
 
-1. Check if gRPC is installed:
+1. Check if gRPC is installed, and which version:
    ```bash
    php -m | grep grpc
+   php -r 'echo phpversion("grpc"), PHP_EOL;'
    ```
 
 2. Install gRPC extension:
    ```bash
-   # Using PECL
-   pecl install grpc
-   
-   # Ubuntu/Debian
+   # Debian/Ubuntu (PECL - the build tools are needed, PECL compiles the
+   # extension from source)
+   sudo apt-get install php-dev build-essential autoconf
+   sudo pecl install grpc
+
+   # Debian/Ubuntu (distribution package from the sury.org PHP repository,
+   # https://packages.sury.org/php/ - not part of stock Debian/Ubuntu)
    sudo apt-get install php-grpc
-   
-   # macOS with Homebrew
-   brew install php@8.2-grpc
+
+   # Alpine
+   apk add php83-pecl-grpc
+
+   # macOS (Homebrew)
+   pecl install grpc
    ```
 
 3. Enable in php.ini:
@@ -60,6 +83,9 @@ Fatal error: Uncaught Error: Class 'Grpc\Channel' not found
 ```bash
 php -r "echo class_exists('Grpc\Channel') ? 'OK' : 'FAIL';"
 ```
+
+See [Installing the gRPC Extension](getting-started.md#installing-the-grpc-extension)
+for the full walkthrough.
 
 ### Composer Dependencies Fail
 
@@ -91,6 +117,13 @@ Your requirements could not be resolved to an installable set of packages.
    ```bash
    composer check-platform-reqs
    ```
+
+5. If the error names `ext-grpc`, the gRPC extension is missing or too old:
+   ```
+   crazy-goat/tikv-client <version> requires ext-grpc >=1.57 -> it is missing from your system. Install or enable PHP's grpc extension.
+   ```
+   The extension must be 1.57 or newer — see
+   [Installing the gRPC Extension](getting-started.md#installing-the-grpc-extension).
 
 ### Protobuf Extension Issues
 

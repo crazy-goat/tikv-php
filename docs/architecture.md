@@ -693,6 +693,7 @@ enum BackoffType
 - Smaller attack surface
 
 **Dependencies**:
+- `ext-grpc` - The gRPC C extension (1.57 or newer), a hard requirement
 - `grpc/grpc` - Required for gRPC
 - `google/protobuf` - Required for protobuf
 - `psr/log` - PSR-3 interface (optional to implement)

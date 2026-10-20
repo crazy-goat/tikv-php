@@ -15,7 +15,7 @@ This guide will help you get up and running with the TiKV PHP Client in minutes.
 Before you begin, ensure you have:
 
 - **PHP >= 8.2** installed
-- **gRPC PHP extension** enabled
+- **gRPC PHP extension** (`ext-grpc`) enabled, **1.57 or newer**
 - **Composer** for dependency management
 - **Docker** (optional, for running TiKV locally)
 
@@ -26,28 +26,78 @@ php --version
 # Should show PHP 8.2 or higher
 ```
 
-### Checking gRPC Extension
+### Installing the gRPC Extension
+
+The client talks gRPC through the **`ext-grpc`** PHP extension, and the library
+requires it (`"ext-grpc": ">=1.57"` in `composer.json`). Composer checks the
+requirement at install time, so the install fails with a clear message on a
+machine without the extension:
+
+```
+crazy-goat/tikv-client <version> requires ext-grpc >=1.57 -> it is missing from your system. Install or enable PHP's grpc extension.
+```
+
+`<version>` is the version of the package you install.
+Contributors working on this repository see the root-package wording of the
+same error instead:
+
+```
+Root composer.json requires PHP extension ext-grpc >=1.57 but it is missing from your system. Install or enable PHP's grpc extension.
+```
+
+Check whether the extension is present, and which version it is:
 
 ```bash
 php -m | grep grpc
 # Should output: grpc
+
+php -r 'echo phpversion("grpc"), PHP_EOL;'
+# Should print 1.57 or newer
 ```
 
-If gRPC is not installed, install it:
+If it is missing (or too old), install it:
+
+**Debian / Ubuntu**
+
+PECL compiles the extension, so the build tools come first:
 
 ```bash
-# Ubuntu/Debian
-sudo apt-get install php-grpc
-
-# Or using PECL
-pecl install grpc
+sudo apt-get install php-dev build-essential autoconf
+sudo pecl install grpc
+PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')
+echo "extension=grpc.so" | sudo tee "/etc/php/$PHP_VERSION/mods-available/grpc.ini"
+sudo phpenmod grpc
 ```
 
-Then enable it in your `php.ini`:
+The `php-grpc` distribution package comes from the
+[sury.org PHP repository](https://packages.sury.org/php/), which is not part
+of stock Debian or Ubuntu. When that repository is already configured, the
+package works too:
+
+```bash
+sudo apt-get install php-grpc
+```
+
+**Alpine**
+
+```bash
+apk add php83-pecl-grpc
+```
+
+**macOS (Homebrew)**
+
+```bash
+pecl install grpc
+echo "extension=grpc.so" >> "$(brew --prefix)/etc/php.ini"
+```
+
+Then enable it in your `php.ini` if the installer did not do it for you:
 
 ```ini
 extension=grpc.so
 ```
+
+and restart PHP-FPM (or your web server).
 
 ## Installation
 
@@ -414,8 +464,9 @@ If you get "Connection refused" errors:
 
 If you see "Class 'Grpc\Channel' not found":
 
-1. Install gRPC extension: `pecl install grpc`
-2. Enable in php.ini: `extension=grpc.so`
+1. Install the `ext-grpc` extension (1.57 or newer) — see
+   [Installing the gRPC Extension](#installing-the-grpc-extension) above.
+2. Enable it in `php.ini`: `extension=grpc.so`
 3. Restart web server/PHP-FPM
 
 ### TTL Not Working

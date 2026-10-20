@@ -7,7 +7,9 @@ PHP client for TiKV's RawKV and TxnKV APIs, using the gRPC extension.
 ## Requirements
 
 - PHP >= 8.2
-- gRPC extension
+- **`ext-grpc`** — the PECL gRPC extension, **1.57 or newer**. It is a hard
+  requirement: Composer refuses to install the package without it. See
+  [Installation](#installation) for the per-platform instructions.
 - TiKV cluster — default (V1) mode for TxnKV, or `[storage] enable-ttl = true`
   for RawKV TTL. The two are mutually exclusive; see
   [Transactions (TxnKV)](#transactions-txnkv).
@@ -25,6 +27,73 @@ make example
 ```bash
 composer require crazy-goat/tikv-client
 ```
+
+The client speaks gRPC through the **`ext-grpc`** PHP extension, so the
+requirement is declared in `composer.json` (`"ext-grpc": ">=1.57"`). Composer
+checks it at install time and refuses to install the package on a machine
+without the extension:
+
+```
+crazy-goat/tikv-client <version> requires ext-grpc >=1.57 -> it is missing from your system. Install or enable PHP's grpc extension.
+```
+
+`<version>` is the version of the package you install.
+Contributors working on this repository see the root-package wording of the
+same error instead:
+
+```
+Root composer.json requires PHP extension ext-grpc >=1.57 but it is missing from your system. Install or enable PHP's grpc extension.
+```
+
+The minimum version (1.57) matches the `grpc/grpc` library the client depends
+on and covers every extension API it uses (`Grpc\Call::startBatch()`,
+`Grpc\Timeval`, `Grpc\Channel`, the `OP_*` call-operation constants).
+
+### Installing the extension
+
+**Debian / Ubuntu**
+
+PECL compiles the extension, so the build tools come first:
+
+```bash
+sudo apt-get install php-dev build-essential autoconf
+sudo pecl install grpc
+PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')
+echo "extension=grpc.so" | sudo tee "/etc/php/$PHP_VERSION/mods-available/grpc.ini"
+sudo phpenmod grpc
+```
+
+The `php-grpc` distribution package comes from the
+[sury.org PHP repository](https://packages.sury.org/php/), which is not part
+of stock Debian or Ubuntu. When that repository is already configured, the
+package works too:
+
+```bash
+sudo apt-get install php-grpc
+```
+
+**Alpine**
+
+```bash
+apk add php83-pecl-grpc
+```
+
+**macOS (Homebrew)**
+
+```bash
+pecl install grpc
+echo "extension=grpc.so" >> "$(brew --prefix)/etc/php.ini"
+```
+
+**Verify**
+
+```bash
+php -m | grep grpc
+php -r 'echo phpversion("grpc"), PHP_EOL;'
+```
+
+The reported version must be 1.57 or newer. Restart PHP-FPM (or your web
+server) after enabling the extension.
 
 ## Usage
 

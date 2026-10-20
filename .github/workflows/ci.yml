@@ -18,8 +18,10 @@ jobs:
     name: Changes
     uses: crazy-goat/.github/.github/workflows/changes.yml@main
     with:
-      # tests/Unit/Docs/AtomicModeDocumentationGuardTest.php scans README.md and docs/**/*.md,
-      # so changes to them need the unit tests and must not count as docs-only.
+      # tests/Unit/Docs/AtomicModeDocumentationGuardTest.php and
+      # tests/Unit/Docs/ExtGrpcRequirementGuardTest.php scan README.md and
+      # docs/**/*.md, so changes to them need the unit tests and must not
+      # count as docs-only.
       docs-regex: '^(CHANGELOG\.md|AGENTS\.md|LICENSE.*|\.github/ISSUE_TEMPLATE/.*|\.github/pull_request_template\.md|\.gitignore)$'
 
   docs:
@@ -96,7 +98,15 @@ jobs:
             ${{ runner.os }}-composer-
 
       - name: Install dependencies
-        run: composer install --no-interaction --prefer-dist --no-progress
+        # This job deliberately runs WITHOUT ext-grpc: the Unit suite must
+        # stay extension-free (see docs/helpers/faq.md, "Unit tests don't
+        # need TiKV — gRPC tests do"). The library requires ext-grpc in
+        # composer.json, so the platform requirement is ignored here only —
+        # every other job installs the extension and enforces it. The flag
+        # also keeps ext-grpc out of the generated platform_check.php, so
+        # the autoloader still boots without the extension. Do NOT add
+        # `extensions: grpc` here — it would delete that guarantee.
+        run: composer install --no-interaction --prefer-dist --no-progress --ignore-platform-req=ext-grpc
 
       - name: Run unit tests
         run: ./vendor/bin/phpunit --testsuite Unit --testdox --fail-on-skipped --no-coverage

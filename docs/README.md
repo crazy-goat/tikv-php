@@ -65,7 +65,7 @@ $client->close();
 ## Requirements
 
 - PHP >= 8.2
-- gRPC PHP extension
+- **`ext-grpc`** — the PECL gRPC extension, **1.57 or newer**
 - TiKV cluster with RawKV enabled
 
 ## Installation
@@ -73,6 +73,11 @@ $client->close();
 ```bash
 composer require crazy-goat/tikv-client
 ```
+
+`ext-grpc` is a hard requirement — Composer refuses to install the package on a
+machine without the extension. See
+[Installing the gRPC Extension](getting-started.md#installing-the-grpc-extension)
+for the per-platform instructions.
 
 ## Support
 
