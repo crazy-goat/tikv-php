@@ -905,16 +905,32 @@ if (!$status['healthy']) {
 
 ### TLS Best Practices
 
+Use the explicit TLS option keys: `caCertFile`, `clientCertFile` and
+`clientKeyFile` for files, `caCertPem`, `clientCertPem` and `clientKeyPem` for
+inline PEM content. The legacy `caCert`, `clientCert` and `clientKey` keys are
+**deprecated** — they guess between a file path and inline PEM, and they cannot
+be restricted to a base directory.
+
+The optional `caCertBaseDir` and `clientCertBaseDir` options restrict **where
+the certificate files may live**: the path is canonicalized with `realpath()`
+before the comparison, so a `..` segment or a symlink cannot pull in a file
+from outside the base directory. `caCertBaseDir` guards `caCertFile`;
+`clientCertBaseDir` guards both `clientCertFile` and `clientKeyFile`.
+
 ```php
 // Production TLS configuration
 $options = [
     'tls' => [
         // Always verify server certificate
         'caCertFile' => '/etc/ssl/certs/tikv-ca.crt',
+        // Optional: keep the certificate inside one directory
+        'caCertBaseDir' => '/etc/ssl/certs',
 
         // Use client certificates for mutual TLS
         'clientCertFile' => '/etc/ssl/certs/tikv-client.crt',
         'clientKeyFile' => '/etc/ssl/private/tikv-client.key',
+        // Optional: both client files must resolve inside this directory
+        'clientCertBaseDir' => '/etc/ssl',
     ],
 ];
 

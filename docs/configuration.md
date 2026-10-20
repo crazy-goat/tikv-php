@@ -394,7 +394,7 @@ Verify the server's certificate:
 $options = [
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
-        'caCertBaseDir' => '/path/to', // optional: restrict to base directory
+        'caCertBaseDir' => '/path/to', // optional: restrict the file to one directory
     ],
 ];
 
@@ -428,6 +428,28 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 > provided without a CA certificate — this prevents accidental downgrade to
 > plaintext.
 
+### Restricting Certificate Paths (`*BaseDir`)
+
+`caCertBaseDir` and `clientCertBaseDir` are optional and restrict **where the
+certificate files may live**. The path is canonicalized with `realpath()`
+before the comparison, so `..` segments and symlinks are resolved first, and
+the canonicalized path has to start with the canonicalized base directory — a
+path that does not is rejected with `InvalidArgumentException` ("TLS file path
+is outside the allowed base directory"). That is what stops a certificate path
+— or a symlink planted in the certificate directory — from loading a file you
+did not intend.
+
+Each option restricts only the read it belongs to:
+
+| Option | Restricts |
+| --- | --- |
+| `caCertBaseDir` | `caCertFile` |
+| `clientCertBaseDir` | `clientCertFile` **and** `clientKeyFile` |
+
+Without a base directory the file is still canonicalized with `realpath()`, but
+nothing keeps it inside one particular directory. Certificate files must have a
+`.pem`, `.crt` or `.key` extension.
+
 ### Using Certificate Content (Inline PEM)
 
 You can pass certificate content directly instead of file paths — use the `*Pem` variants:
@@ -445,6 +467,24 @@ $options = [
     ],
 ];
 ```
+
+### Deprecated TLS Option Keys
+
+`caCert`, `clientCert` and `clientKey` are **deprecated**. They still work for
+backward compatibility, but they guess between a file path and inline PEM
+content from the value itself: a value containing a `-----BEGIN` header is read
+as inline PEM, anything else is read as a file path (a path that does not exist
+or is not readable throws `InvalidArgumentException`). For the client pair the
+guess is made for both values together — if either value looks like a file
+path, both are read as file paths — so mixing an inline PEM certificate with a
+file path (or the other way round) fails with `TLS file has disallowed
+extension ""`. The guess makes the same key mean two different things
+depending on the string, and — because the legacy keys have no base-directory
+counterpart — the `*BaseDir` restriction cannot be applied to them at all.
+
+Use the explicit keys instead: `caCertFile`, `clientCertFile` + `clientKeyFile`
+(with `caCertBaseDir` / `clientCertBaseDir` if you want the path restriction),
+or the inline `caCertPem`, `clientCertPem` + `clientKeyPem`.
 
 ### TLS Configuration Builder
 
@@ -505,9 +545,12 @@ To guard against TLS misconfiguration, the factory rejects:
 - an incomplete client certificate pair (e.g. `clientCertFile` without
   `clientKeyFile`), which would otherwise be silently dropped the same way.
 
-Recognised `options['tls']` keys: `caCertFile`, `caCertBaseDir`, `caCertPem`,
-`caCert`, `clientCertFile`, `clientCertBaseDir`, `clientKeyFile`,
-`clientCertPem`, `clientKeyPem`, `clientCert`, `clientKey`.
+Recognised `options['tls']` keys:
+
+- **Supported:** `caCertFile`, `caCertBaseDir`, `caCertPem`, `clientCertFile`,
+  `clientCertBaseDir`, `clientKeyFile`, `clientCertPem`, `clientKeyPem`.
+- **Deprecated:** `caCert`, `clientCert`, `clientKey` — see
+  [Deprecated TLS Option Keys](#deprecated-tls-option-keys).
 
 > **Note:** `allowInsecure` defaults to `true` (plaintext allowed) for
 > backward compatibility; setting it to `false` together with a valid `tls`

@@ -454,6 +454,17 @@ $options = [
 $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 ```
 
+The `*BaseDir` options are optional and restrict **where** the certificate
+files may live: the path is canonicalized with `realpath()` before the
+comparison, so a `..` segment or a symlink cannot pull in a file from outside
+the base directory. `caCertBaseDir` guards `caCertFile`; `clientCertBaseDir`
+guards `clientCertFile` and `clientKeyFile`.
+
+> **Deprecated:** the legacy `caCert`, `clientCert` and `clientKey` keys guess
+> between a file path and inline PEM content and cannot be restricted to a base
+> directory. They still work for backward compatibility — use the `*File` /
+> `*Pem` keys above instead.
+
 ### PSR-3 Logging
 
 ```php

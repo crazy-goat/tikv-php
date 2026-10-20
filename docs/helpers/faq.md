@@ -1963,3 +1963,47 @@ pins the current contract and fails when the inner future is dropped again
 issue names line numbers and a mechanism, check both against the current
 source before implementing the suggested fix — the same trap as the
 "error-handling docs must be derived from source" entry above.
+
+## Documenting a deprecated option key: guard the quoted form, check the premise, and describe the code as it is
+
+Issue #384 [DOC-18] asked the docs to stop recommending the deprecated TLS
+option keys `caCert` / `clientCert` / `clientKey` — and the tree had already
+moved on: the explicit `*File` / `*Pem` keys had been documented since #305
+(SEC-02), so the issue's snippets and line numbers no longer existed. What was
+still missing was narrower: the `*BaseDir` guards had no security purpose in
+prose, and the legacy keys were listed as "recognised" without a deprecation
+label. Four lessons:
+
+1. **Grep the tree before writing the change an audit issue asks for.** Same
+   trap as #394 [DOC-28]: an audit issue's premise expires when a later PR
+   changes the code or the docs it describes. The *behaviour* of the
+   deprecated keys had expired too — `TlsConfigBuilder::resolveWithGuess()`
+   now throws for a path that does not exist (it used to reinterpret it as
+   inline PEM), so the issue's "silently reinterpreted" claim was stale.
+2. **A doc guard for a deprecated option key has to match the option-key
+   form, not the bare name.**
+   `tests/Unit/Docs/TlsOptionKeysDocumentationGuardTest.php` matches the
+   deprecated key in its quoted option-key form (a quoted name followed by
+   `=>` inside an options array) and the whole-word name in prose, but skips
+   fenced code blocks and a `$`-prefixed name — `$caCert` as a PHP variable
+   holding PEM content is not the deprecated option. The deprecation label is
+   checked per *paragraph*, not per line, because the docs wrap their
+   sentences and a label at the end of a wrapped sentence still covers the
+   whole paragraph.
+3. **A doc sentence has to describe the check the code implements, not the
+   property you wish it had.** The `*BaseDir` guard is a plain
+   `str_starts_with($resolved, $resolvedBase)` prefix comparison
+   (`src/Client/Tls/TlsConfigBuilder.php`), so the honest wording is "the
+   canonicalized path has to start with the canonicalized base directory", not
+   "a file that resolves outside the base directory is rejected" — the second
+   one promises a containment check the code does not make (a sibling
+   directory whose name starts with the base directory's name passes it).
+   Overstating a guard in the docs is a docs bug of the same kind as
+   understating it.
+4. **A deprecated API can behave differently per call shape.** `withCaCert()`
+   guesses per value, but `withClientCert()` ORs the two guesses
+   (`resolveWithGuess($cert) || resolveWithGuess($key)`), so the client pair is
+   decided for both values together and a mixed pair (inline PEM certificate
+   with a file key) dies with `TLS file has disallowed extension ""`. Copying
+   the single-value description to the pair is wrong — read the whole method,
+   not its helper.
