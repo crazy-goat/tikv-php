@@ -347,34 +347,67 @@ public function batchMyOperation(array $keys): array
 
 ### Pattern: Scan Operations
 
-For scan operations, handle multi-region scans:
+For scan operations, handle multi-region scans. Ask PD for a **bounded**
+number of regions per call and load the next batch only when the current
+one is consumed — `scanRegions($startKey, $endKey, 0)` asks for *every*
+region covering the range, which is a multi-megabyte answer for a query
+that may read a single region (issue #282, see
+[helpers/decisions.md](helpers/decisions.md)).
 
 ```php
 public function scanMyOperation(string $startKey, string $endKey): array
 {
     $this->ensureOpen();
-    
-    // Get all regions in range
-    $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
+
     $results = [];
-    
-    foreach ($regions as $region) {
-        // Calculate intersection with scan range
-        $scanStart = max($startKey, $region->startKey);
-        $scanEnd = min($endKey, $region->endKey);
-        
-        if ($scanStart >= $scanEnd) {
-            continue;
+    $cursor = $startKey;
+
+    while (true) {
+        // At most RegionScanBatch::MAX_REGIONS (32) regions per PD call.
+        $regions = $this->pdClient->scanRegions($cursor, $endKey, RegionScanBatch::MAX_REGIONS);
+        if ($regions === []) {
+            break;
         }
-        
-        // Execute scan for this region
-        $regionResults = $this->executeMyScanForRegion($region, $scanStart, $scanEnd);
-        $results = array_merge($results, $regionResults);
+
+        foreach ($regions as $region) {
+            // Calculate intersection with scan range — byte-wise, through
+            // KeyOrder, never with PHP's relational operators (issue #186).
+            // An empty end key means +infinity, on both bounds.
+            $scanStart = KeyOrder::gte($cursor, $region->startKey) ? $cursor : $region->startKey;
+            $scanEnd = $endKey;
+            if ($region->endKey !== '' && ($endKey === '' || KeyOrder::lt($region->endKey, $endKey))) {
+                $scanEnd = $region->endKey;
+            }
+
+            if ($scanEnd !== '' && !KeyOrder::lt($scanStart, $scanEnd)) {
+                continue;
+            }
+
+            // Execute scan for this region
+            $regionResults = $this->executeMyScanForRegion($region, $scanStart, $scanEnd);
+            foreach ($regionResults as $row) {
+                $results[] = $row;
+            }
+        }
+
+        // The next batch continues at the last region's end key. An empty
+        // end key is the end of the keyspace, so the loop stops there.
+        $cursor = $regions[count($regions) - 1]->endKey;
+        if ($cursor === '' || ($endKey !== '' && KeyOrder::gte($cursor, $endKey))) {
+            break;
+        }
     }
-    
+
     return $results;
 }
 ```
+
+The library's own scanners do exactly this — `RawKvScanner::regionBatches()`
+yields the batches lazily, so a scan whose row limit is satisfied by the
+first region never triggers a second PD call. Prefer it over a hand-rolled
+loop: it also handles the merge case (a region that a merge produced
+between two batches starts *below* the cursor and must be trimmed to it,
+so the rows below it are not read twice).
 
 ## Protocol Buffer Changes
 

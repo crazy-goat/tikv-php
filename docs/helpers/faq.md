@@ -1865,3 +1865,49 @@ Caveat: the protection only covers calls issued through
 `\Grpc\Call` itself on a raw `getChannel()` handle, so its calls are not
 counted — that path is routed through `callAsync()` by GRPC-14 (#273), which
 is still open.
+
+## A PD mock that ignores the `ScanRegions` limit breaks the batched region loader (issue #282)
+
+Since #282 a scan loads its regions in bounded batches: it asks PD for at
+most `RegionScanBatch::MAX_REGIONS` (32) regions and continues at the last
+region's end key when the batch is consumed. A mocked
+`PdClientInterface::scanRegions()` that answers with a **fixed** list —
+`->method('scanRegions')->willReturn([$region1, $region2])` — therefore
+answers *every* batch with the same regions. The loader stops on the first
+short batch (fewer regions than requested) or when the cursor stops
+advancing, so the mock does not loop forever, but it does change what the
+test measures: the repeated regions lie **below** the batch cursor and are
+trimmed away (`RegionScanBatch::trimToCursor()`), so their rows are not read
+twice — but the mock no longer measures what the test thinks it measures.
+Tests that exercise the batching must answer like PD does — the regions
+intersecting the requested range, in ascending order, up to the requested
+limit — which is what `tests/Unit/RawKv/RawKvScannerRegionBatchTest.php`
+and `tests/Unit/TxnKv/TxnReaderRegionBatchTest.php` do.
+
+## A scratch tree that symlinks `vendor/` silently runs the *branch's* sources
+
+To check that a new regression test fails on `master`, the usual recipe is
+a scratch tree: `git archive origin/master | tar -x -C /tmp/tree`, copy the
+branch's test files over, patch the classes the branch introduced, and run
+PHPUnit there. The recipe breaks when the scratch tree **symlinks** the
+worktree's `vendor/`: Composer's autoloader resolves the project's own
+namespaces from `dirname(dirname(__DIR__))` of the vendor directory
+(`vendor/composer/autoload_psr4.php`), so the symlink resolves to the
+*worktree* and the scratch tree loads the **branch's** `src/Client/`. Every
+test then passes, and the check proves nothing — the exact opposite of its
+purpose.
+
+The scratch tree needs its own **copy** of `vendor/` (`cp -cR` on APFS,
+`cp -RL` for hard links — both are cheap). Verify the setup before trusting
+the result:
+
+```bash
+php -r 'require "vendor/autoload.php";
+echo (new ReflectionClass("CrazyGoat\\TiKV\\Client\\RawKv\\RawKvScanner"))->getFileName(), PHP_EOL;'
+```
+
+The printed path must point into the scratch tree. A test that fails on
+`master` for the right reason names the behaviour, not a missing class:
+"Failed asserting that 0 is greater than 0" (the unbounded `ScanRegions`
+request) is a regression guard; "Class … not found" is a broken scratch
+tree.

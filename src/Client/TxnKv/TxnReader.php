@@ -31,6 +31,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
@@ -225,6 +226,13 @@ final readonly class TxnReader
     /**
      * Scan keys in range [startKey, endKey).
      *
+     * The regions covering the range are loaded from PD in bounded batches
+     * (issue #282): the scan asks for a bounded number of regions at a time
+     * and only fetches the next batch when the current one is consumed
+     * without satisfying the row limit. Asking PD for the whole range
+     * answers with every region of the keyspace, which is tens of megabytes
+     * for a scan that reads one region.
+     *
      * @return array<array{key: string, value: ?string}>
      *
      * @throws InvalidArgumentException
@@ -241,32 +249,73 @@ final readonly class TxnReader
     ): array {
         $limit = $this->normalizeScanLimit($limit, $maxScanLimit);
 
-        $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
-        foreach ($regions as $region) {
-            $this->regionCache->put($region);
-        }
         $results = [];
         $remaining = $limit;
+        $cursor = $startKey;
+        $batchSize = RegionScanBatch::forRowBudget($limit);
 
         $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
-            $regionLimit = $remaining > 0 ? $remaining : $limit;
-            $regionResults = $this->executeScanForRegion(
-                $scanStart,
-                $scanEnd,
-                $regionLimit,
-                $retryExecutor,
-                $classifier,
-                $maxScanLimit,
-            );
-            array_push($results, ...$regionResults);
+        while ($remaining > 0) {
+            $regions = array_values($this->pdClient->scanRegions($cursor, $endKey, $batchSize));
+            if ($regions === []) {
+                break;
+            }
 
-            if ($remaining > 0) {
+            foreach ($regions as $region) {
+                $this->regionCache->put($region);
+            }
+
+            $batchCount = count($regions);
+            $lastEndKey = $regions[$batchCount - 1]->endKey;
+
+            // A region that starts below the cursor is the region a merge
+            // produced after the previous batch was enumerated: the part
+            // below the cursor was read already (RegionScanBatch::trimToCursor()).
+            $regions = RegionScanBatch::trimToCursor($regions, $cursor);
+
+            foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
+                $regionResults = $this->executeScanForRegion(
+                    $scanStart,
+                    $scanEnd,
+                    $remaining,
+                    $retryExecutor,
+                    $classifier,
+                    $maxScanLimit,
+                );
+                foreach ($regionResults as $row) {
+                    $results[] = $row;
+                }
+
                 $remaining -= count($regionResults);
                 if ($remaining <= 0) {
                     break;
                 }
             }
+
+            if ($remaining <= 0) {
+                break;
+            }
+
+            if ($lastEndKey === '') {
+                // The last region of the keyspace: nothing follows it.
+                break;
+            }
+            if ($endKey !== '' && KeyOrder::gte($lastEndKey, $endKey)) {
+                // The requested range is covered.
+                break;
+            }
+            if (KeyOrder::lte($lastEndKey, $cursor)) {
+                // No forward progress: stop instead of asking PD for the same
+                // page again.
+                break;
+            }
+            if ($batchCount < $batchSize) {
+                // PD answered with fewer regions than requested, so the range
+                // holds no more.
+                break;
+            }
+
+            $cursor = $lastEndKey;
         }
 
         return $this->finalizeScanResults($results, $startKey, $endKey, $limit, $state);
@@ -593,7 +642,9 @@ final readonly class TxnReader
                 return $subResults;
             }, $classifier);
 
-            array_push($results, ...$batch);
+            foreach ($batch as $row) {
+                $results[] = $row;
+            }
 
             if ($pending > 0) {
                 $pending -= count($batch);

@@ -24,6 +24,7 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -112,9 +113,8 @@ final readonly class RawKvScanner
         }
 
         $executor = $this->createRetryExecutor();
-        $segments = $this->clipForwardSegments($startKey, $endKey);
 
-        return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+        return $this->scanRangeSequentially($executor, $startKey, $endKey, $limit, $keyOnly, $columnFamily);
     }
 
     /**
@@ -133,33 +133,16 @@ final readonly class RawKvScanner
 
         while (true) {
             $executor = $this->createRetryExecutor();
-            $segments = $this->clipForwardSegments($cursor, $endKey);
-
-            // A page spanning several regions keeps the #293 concurrent
-            // fan-out; a single-region page takes the sequential path.
-            $page = count($segments) > 1
-                ? $this->scanSegmentsInParallel(
-                    $executor,
-                    $segments,
-                    $endKey,
-                    $this->scanPageSize,
-                    $keyOnly,
-                    $columnFamily,
-                )
-                : $this->scanSegmentsSequentially(
-                    $executor,
-                    $segments,
-                    $this->scanPageSize,
-                    $keyOnly,
-                    $columnFamily,
-                );
+            $page = $this->scanPage($executor, $cursor, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
 
             if ($page === []) {
                 break;
             }
 
             $this->assertWithinScanLimit(count($results) + count($page));
-            array_push($results, ...$page);
+            foreach ($page as $row) {
+                $results[] = $row;
+            }
 
             if (count($page) < $this->scanPageSize) {
                 break;
@@ -177,19 +160,182 @@ final readonly class RawKvScanner
     }
 
     /**
-     * Enumerate the regions covering the forward range and clip them to it.
+     * Scan one page of at most $limit rows, starting at $cursor.
      *
-     * @return list<array{RegionInfo, string, string}>
+     * The regions covering the range are loaded in bounded batches (issue
+     * #282) and the page ends as soon as its row budget is spent, so a page
+     * that spans several regions costs one PD round trip per batch instead
+     * of one round trip for the whole keyspace. A batch covering several
+     * regions keeps the #293 concurrent fan-out; a single-region batch
+     * takes the sequential path.
+     *
+     * @param int $limit positive row budget
+     * @return array<array{key: string, value: ?string}>
      */
-    private function clipForwardSegments(string $startKey, string $endKey): array
-    {
-        $regions = $this->resolveScanRegions($startKey, $endKey);
+    private function scanPage(
+        RetryExecutor $executor,
+        string $cursor,
+        string $endKey,
+        int $limit,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
+        assert($limit > 0, 'scanPage() requires a positive row budget');
+
+        $results = [];
+        $remaining = $limit;
         $clipper = new RegionRangeClipper();
 
-        /** @var list<array{RegionInfo, string, string}> $segments */
-        $segments = iterator_to_array($clipper->clipForward($regions, $startKey, $endKey), false);
+        foreach ($this->regionBatches($cursor, $endKey, RegionScanBatch::forRowBudget($limit)) as $batch) {
+            /** @var list<array{RegionInfo, string, string}> $segments */
+            $segments = iterator_to_array($clipper->clipForward($batch, $cursor, $endKey), false);
+            if ($segments === []) {
+                continue;
+            }
 
-        return $segments;
+            $batchResults = count($segments) > 1
+                ? $this->scanSegmentsInParallel(
+                    $executor,
+                    $segments,
+                    $segments[count($segments) - 1][2],
+                    $remaining,
+                    $keyOnly,
+                    $columnFamily,
+                )
+                : $this->scanSegmentsSequentially(
+                    $executor,
+                    $segments,
+                    $remaining,
+                    $keyOnly,
+                    $columnFamily,
+                );
+
+            foreach ($batchResults as $row) {
+                $results[] = $row;
+            }
+
+            $remaining -= count($batchResults);
+            if ($remaining <= 0) {
+                break;
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Scan the forward range [startKey, endKey), one clipped sub-range after
+     * another, subtracting each region's yield from the remaining limit.
+     *
+     * The regions are loaded in bounded batches (issue #282): a scan whose
+     * row limit is satisfied by the first region asks PD for one batch of
+     * regions and stops there, instead of asking for every region covering
+     * the range.
+     *
+     * @param int $limit positive row budget
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function scanRangeSequentially(
+        RetryExecutor $executor,
+        string $startKey,
+        string $endKey,
+        int $limit,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
+        assert($limit > 0, 'scanRangeSequentially() requires a positive row budget');
+
+        $results = [];
+        $remaining = $limit;
+        $clipper = new RegionRangeClipper();
+
+        foreach ($this->regionBatches($startKey, $endKey, RegionScanBatch::forRowBudget($limit)) as $batch) {
+            /** @var list<array{RegionInfo, string, string}> $segments */
+            $segments = iterator_to_array($clipper->clipForward($batch, $startKey, $endKey), false);
+            if ($segments === []) {
+                continue;
+            }
+
+            $batchResults = $this->scanSegmentsSequentially($executor, $segments, $remaining, $keyOnly, $columnFamily);
+            foreach ($batchResults as $row) {
+                $results[] = $row;
+            }
+
+            $remaining -= count($batchResults);
+            if ($remaining <= 0) {
+                return $results;
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Enumerate the regions covering the key range [startKey, endKey) in
+     * bounded batches.
+     *
+     * The region cache is consulted first: when it already holds the
+     * complete chain the range is served locally, so a paginated scan issues
+     * no PD RPC per page (issue #293). Only an incomplete chain — a cold or
+     * partially warm cache, or a gap — falls back to PD, and then only for
+     * $batchSize regions at a time (issue #282): asking PD for the whole
+     * range answers with every region of the keyspace, which is tens of
+     * megabytes for a query that reads one region.
+     *
+     * The batches are yielded lazily, so a consumer that is satisfied by the
+     * first batch never triggers the next PD call. The next batch starts at
+     * the last region's end key, compared bytewise (issue #186).
+     *
+     * @param int $batchSize number of regions to request per PD call
+     * @return \Generator<int, list<RegionInfo>>
+     */
+    private function regionBatches(string $startKey, string $endKey, int $batchSize): \Generator
+    {
+        $cursor = $startKey;
+
+        while (true) {
+            $cached = $this->regionCache->getRegionsInRange($cursor, $endKey);
+            if ($cached !== []) {
+                // The cache holds the complete chain for the range, so this is
+                // the last batch and PD is not consulted at all.
+                yield RegionScanBatch::trimToCursor($cached, $cursor);
+
+                return;
+            }
+
+            $batch = array_values($this->pdClient->scanRegions($cursor, $endKey, $batchSize));
+            if ($batch === []) {
+                return;
+            }
+
+            foreach ($batch as $region) {
+                $this->regionCache->put($region);
+            }
+
+            yield RegionScanBatch::trimToCursor($batch, $cursor);
+
+            $lastEndKey = $batch[count($batch) - 1]->endKey;
+            if ($lastEndKey === '') {
+                // The last region of the keyspace: nothing follows it.
+                return;
+            }
+            if ($endKey !== '' && KeyOrder::gte($lastEndKey, $endKey)) {
+                // The requested range is covered.
+                return;
+            }
+            if (KeyOrder::lte($lastEndKey, $cursor)) {
+                // No forward progress: stop instead of asking PD for the same
+                // page again.
+                return;
+            }
+            if (count($batch) < $batchSize) {
+                // PD answered with fewer regions than requested, so the range
+                // holds no more.
+                return;
+            }
+
+            $cursor = $lastEndKey;
+        }
     }
 
     /**
@@ -242,7 +388,9 @@ final readonly class RawKvScanner
             }
 
             $this->assertWithinScanLimit(count($results) + count($page));
-            array_push($results, ...$page);
+            foreach ($page as $row) {
+                $results[] = $row;
+            }
 
             if (count($page) < $this->scanPageSize) {
                 break;
@@ -264,6 +412,14 @@ final readonly class RawKvScanner
      * is [endKey, startKey); enumerate it through the region cache like the
      * forward scan, then walk it in reverse.
      *
+     * PD's `ScanRegions` enumerates a range from its **lower** bound only,
+     * while the reverse scan consumes the regions from the **upper** bound
+     * down, so the chain cannot be consumed as it arrives: it is collected
+     * first and then walked downwards. The batch bound still caps every PD
+     * response (issue #282) — an unlimited request answers with every
+     * region of the keyspace at once, which can exceed the gRPC receive
+     * limit outright.
+     *
      * @param int $limit positive page budget (never the `0` "unbounded"
      *                   sentinel: the public API routes `limit: 0` to
      *                   {@see self::reverseScanUnbounded()}). Passing `0`
@@ -283,7 +439,9 @@ final readonly class RawKvScanner
 
         $executor = $this->createRetryExecutor();
 
-        $regions = array_reverse($this->resolveScanRegions($endKey, $startKey));
+        $regions = array_reverse(
+            $this->resolveScanRegions($endKey, $startKey, RegionScanBatch::MAX_REGIONS),
+        );
 
         $results = [];
         $remaining = $limit;
@@ -299,7 +457,9 @@ final readonly class RawKvScanner
                 true,
                 $columnFamily,
             );
-            array_push($results, ...$regionResults);
+            foreach ($regionResults as $row) {
+                $results[] = $row;
+            }
 
             $remaining -= count($regionResults);
             if ($remaining <= 0) {
@@ -334,26 +494,27 @@ final readonly class RawKvScanner
     }
 
     /**
-     * Enumerate the regions covering the forward key range [startKey, endKey).
+     * Collect the regions covering the key range [startKey, endKey).
      *
      * The region cache is consulted first: when it already holds the complete
      * chain the range is served locally, so a paginated scan issues no PD RPC
      * per page (issue #293). Only an incomplete chain — a cold or partially
-     * warm cache, or a gap — falls back to a single PD scanRegions() call
-     * whose result is then cached.
+     * warm cache, or a gap — falls back to PD, and then only $batchSize
+     * regions at a time (issue #282).
      *
+     * The list itself is complete: the reverse scan walks it from the top
+     * down and the concurrent batch scan dispatches one send per region.
+     *
+     * @param int $batchSize number of regions to request per PD call
      * @return list<RegionInfo>
      */
-    private function resolveScanRegions(string $startKey, string $endKey): array
+    private function resolveScanRegions(string $startKey, string $endKey, int $batchSize): array
     {
-        $cached = $this->regionCache->getRegionsInRange($startKey, $endKey);
-        if ($cached !== []) {
-            return $cached;
-        }
-
-        $regions = array_values($this->pdClient->scanRegions($startKey, $endKey, 0));
-        foreach ($regions as $region) {
-            $this->regionCache->put($region);
+        $regions = [];
+        foreach ($this->regionBatches($startKey, $endKey, $batchSize) as $batch) {
+            foreach ($batch as $region) {
+                $regions[] = $region;
+            }
         }
 
         return $regions;
@@ -364,6 +525,7 @@ final readonly class RawKvScanner
      * region's yield from the remaining limit.
      *
      * @param list<array{RegionInfo, string, string}> $segments
+     * @param int $limit positive row budget
      * @return array<array{key: string, value: ?string}>
      */
     private function scanSegmentsSequentially(
@@ -373,27 +535,28 @@ final readonly class RawKvScanner
         bool $keyOnly,
         string $columnFamily,
     ): array {
+        assert($limit > 0, 'scanSegmentsSequentially() requires a positive row budget');
+
         $results = [];
         $remaining = $limit;
 
         foreach ($segments as [, $scanStart, $scanEnd]) {
-            $regionLimit = $remaining === 0 ? PHP_INT_MAX : $remaining;
             $regionResults = $this->executeScanForRegion(
                 $executor,
                 $scanStart,
                 $scanEnd,
-                $regionLimit,
+                $remaining,
                 $keyOnly,
                 false,
                 $columnFamily,
             );
-            array_push($results, ...$regionResults);
+            foreach ($regionResults as $row) {
+                $results[] = $row;
+            }
 
-            if ($remaining > 0) {
-                $remaining -= count($regionResults);
-                if ($remaining <= 0) {
-                    break;
-                }
+            $remaining -= count($regionResults);
+            if ($remaining <= 0) {
+                break;
             }
         }
 
@@ -424,12 +587,13 @@ final readonly class RawKvScanner
      * are idempotent, so discarding a partial concurrent result is safe.
      *
      * @param list<array{RegionInfo, string, string}> $segments
+     * @param string $scanEnd exclusive end of the range the segments cover
      * @return array<array{key: string, value: ?string}>
      */
     private function scanSegmentsInParallel(
         RetryExecutor $executor,
         array $segments,
-        string $endKey,
+        string $scanEnd,
         int $limit,
         bool $keyOnly,
         string $columnFamily,
@@ -507,7 +671,9 @@ final readonly class RawKvScanner
                 }
 
                 $batch = $this->parseScanPairs($response, $keyOnly);
-                array_push($results, ...$batch);
+                foreach ($batch as $row) {
+                    $results[] = $row;
+                }
                 $remaining -= count($batch);
                 $lastIndex = $index;
                 $lastFreshEnd = $freshEnd;
@@ -529,20 +695,20 @@ final readonly class RawKvScanner
             && $remaining > 0
             && $lastFreshEnd !== ''
             && KeyOrder::gt($lastFreshEnd, $segments[$lastIndex][1])
-            && ($endKey === '' || KeyOrder::lt($lastFreshEnd, $endKey))
+            && ($scanEnd === '' || KeyOrder::lt($lastFreshEnd, $scanEnd))
         ) {
-            array_push(
-                $results,
-                ...$this->executeScanForRegion(
-                    $executor,
-                    $lastFreshEnd,
-                    $endKey,
-                    $remaining,
-                    $keyOnly,
-                    false,
-                    $columnFamily,
-                ),
+            $rest = $this->executeScanForRegion(
+                $executor,
+                $lastFreshEnd,
+                $scanEnd,
+                $remaining,
+                $keyOnly,
+                false,
+                $columnFamily,
             );
+            foreach ($rest as $row) {
+                $results[] = $row;
+            }
         }
 
         if (count($results) > $limit) {
@@ -773,7 +939,9 @@ final readonly class RawKvScanner
                 return $subResults;
             });
 
-            array_push($results, ...$batch);
+            foreach ($batch as $row) {
+                $results[] = $row;
+            }
 
             if ($pending > 0) {
                 $pending -= count($batch);
@@ -941,8 +1109,10 @@ final readonly class RawKvScanner
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         // Enumerate regions up-front (dispatch phase) so the cache is warm
-        // for every sub-range send; this mirrors scan()'s outer loop.
-        $regions = $this->resolveScanRegions($startKey, $endKey);
+        // for every sub-range send; this mirrors scan()'s outer loop. The
+        // regions are loaded in bounded batches (issue #282), so no single
+        // PD response holds every region of the range.
+        $regions = $this->resolveScanRegions($startKey, $endKey, RegionScanBatch::MAX_REGIONS);
 
         $segments = [];
         $freshEnds = [];
@@ -1018,7 +1188,9 @@ final readonly class RawKvScanner
                         $batch = $this->parseScanPairs($response, $keyOnly);
                     }
 
-                    array_push($results, ...$batch);
+                    foreach ($batch as $row) {
+                        $results[] = $row;
+                    }
                     $remaining -= count($batch);
                     $lastIndex = $index;
 
@@ -1050,7 +1222,9 @@ final readonly class RawKvScanner
                             false,
                             $columnFamily,
                         );
-                        array_push($results, ...$rest);
+                        foreach ($rest as $row) {
+                            $results[] = $row;
+                        }
                         $remaining -= count($rest);
                     }
                 }

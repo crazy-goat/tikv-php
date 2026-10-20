@@ -734,3 +734,50 @@ path whose invariants are already verifiable. Do not add one without a new
 finding — `BatchCommands` (#418) is the precedent for a genuinely experimental
 surface, and it is opt-in per option rather than a client-wide gate.
 
+
+## A scan's region list is loaded in bounded batches, and `ScanRegions` can only enumerate a range forwards (issue #282)
+
+Two decisions inside the #282 fix (GRPC-23) that should not be "simplified" away:
+
+1. **The number of regions a scan asks PD for is bounded, and the batch is
+   `min(row budget, 32)`.** A scan used to pass `limit = 0` to
+   `ScanRegions`, so a "first hundred rows" query over `['', '')` made PD
+   enumerate the whole keyspace — a multi-megabyte response and tens of
+   megabytes of `RegionInfo` objects for a query that reads one region. The
+   bound is the *row budget* because a region that contributes to a scan holds
+   at least one row, so a scan never needs more regions than it has rows left;
+   the ceiling of 32 keeps the wide scans that really do span many regions
+   within a few PD round trips. The region cache is still consulted first
+   (#293), so a warm chain costs no PD round trip at all.
+
+2. **The reverse scan still collects the whole chain of its range, and that is
+   a limitation of `ScanRegions` plus this client, not a dead end in PD's
+   API.** `ScanRegions` enumerates a range from its **lower** bound only —
+   there is no "last N regions of a range" in that RPC — while a reverse scan
+   consumes the regions from the **upper** bound downwards. The regions a
+   reverse scan needs therefore cannot be fetched *with `ScanRegions`*: they
+   are collected bottom-up (in bounded batches, so every PD response stays
+   small) and then walked downwards. PD itself does offer a backwards
+   lookup — `pdpb.PD/GetPrevRegion` (the vendored stub is
+   `src/Proto/Pdpb/PDClient.php:205`) and `QueryRegion` with `prev_keys` —
+   but this client does not implement it, so today the reverse scan pays for
+   the chain. That is a follow-up, not a dead end: adding
+   `getPrevRegion()` to `PdClientInterface`/`PdClient` would let
+   `reverseScanPage()` resolve the top region with one lookup and continue
+   downwards from there. Do not "fix" the current shape by asking PD for the
+   region above the upper bound: that region does not exist when the upper
+   bound sits exactly on a region boundary, which is the common case.
+
+Two smaller rules the same fix settled:
+
+- **The batch cursor is the last region's end key, and a region that starts
+  below it is trimmed to it.** A *split* between two `ScanRegions` calls is
+  harmless (the regions tile the keyspace and the half-open bounds mean the
+  next batch starts at the next region's start), but a *merge* produces a
+  region that spans the cursor — the part below it was read already and must
+  not be read twice, so the region is trimmed to the cursor
+  (`RegionScanBatch::trimToCursor()`). The trimmed region is a copy; the
+  original is what the region cache holds.
+- **The unbounded `array_push($results, ...$rows)` spreads are gone.** They
+  pushed up to 10 240 elements onto the VM stack per region; a foreach append
+  costs nothing and reads the same.
