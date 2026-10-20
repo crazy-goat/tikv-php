@@ -748,7 +748,9 @@ applied with unknown affected keys and re-check per key. deleteRange and
 checksum are idempotent and safe to retry whole; batchGet/batchDelete are
 idempotent per key; a batchPut whose key/value set is fixed is safe to
 re-issue as a whole — but non-idempotent values must not be retried blind
-(see [Batch Operations](operations.md#batch-operations)).
+(see [Batch Operations](operations.md#batch-operations)). The per-operation
+verdicts are in
+[Idempotency and Retry Safety](error-handling.md#idempotency-and-retry-safety).
 
 #### Store Not Found
 

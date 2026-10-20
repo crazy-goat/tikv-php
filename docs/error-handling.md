@@ -9,11 +9,12 @@ service.
 
 1. [Exception Hierarchy](#exception-hierarchy)
 2. [Caller Retryability](#caller-retryability)
-3. [RawKvClient Operations](#rawkvclient-operations)
-4. [Transaction Operations](#transaction-operations)
-5. [Recommended Catch Order](#recommended-catch-order)
-6. [Retry Budgets Behind Every Operation](#retry-budgets-behind-every-operation)
-7. [GC Safe Points and Long-Running Reads](#gc-safe-points-and-long-running-reads)
+3. [Idempotency and Retry Safety](#idempotency-and-retry-safety)
+4. [RawKvClient Operations](#rawkvclient-operations)
+5. [Transaction Operations](#transaction-operations)
+6. [Recommended Catch Order](#recommended-catch-order)
+7. [Retry Budgets Behind Every Operation](#retry-budgets-behind-every-operation)
+8. [GC Safe Points and Long-Running Reads](#gc-safe-points-and-long-running-reads)
 
 ## Exception Hierarchy
 
@@ -146,7 +147,7 @@ Verdict legend:
 | `RegionException` | **Retry if idempotent** — same reasoning; the client already invalidated the region cache and retried |
 | `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff |
 | `StoreNotFoundException` | **Do not retry blindly** — transient only after the stale cache entry expires (TTL/LRU sweep) or PD restores the store; the retry executor does *not* invalidate the region cache for it (it is not classified as a region error). A short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
-| `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md)) |
+| `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
 | `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()` for pending regions |
 
 ### Transaction::commit() and double-apply
@@ -191,7 +192,212 @@ For RawKV there is no transaction boundary: `put()`/`delete()` are naturally
 idempotent (same value rewritten), but `compareAndSwap()`,
 `putIfAbsent()` and counter-style read-modify-write patterns are **not** —
 after any exception their precondition is unknown, so re-read before
-re-applying.
+re-applying. The per-operation verdicts are in
+[Idempotency and Retry Safety](#idempotency-and-retry-safety).
+
+## Idempotency and Retry Safety
+
+[Caller Retryability](#caller-retryability) answers "may I retry this
+*exception*?". This section answers the other half: "may I repeat this
+*operation*?". The two are different questions. A `GrpcException` is
+retryable in the sense that the client already retried it — but repeating a
+`compareAndSwap()` is still wrong, because the operation itself is not
+idempotent.
+
+An **ambiguous failure** is one where the client cannot tell whether the
+request was applied: a gRPC deadline exceeded, a connection reset, or a
+[`RetryBudgetExhaustedException`](../src/Client/Retry/RetryBudgetExhaustedException.php)
+(the internal retry loop gave up). After such a failure the caller has to
+decide: *repeat the operation*, or *assume it was applied and verify*. The
+tables below give that verdict for every public operation of `RawKvClient`,
+`TxnKvClient` and `Transaction`, and for the `ScanIterator` `RawKvClient`
+hand out. The lower-level helpers behind them (`RawKvScanner`,
+`SstIngestor`, the connection layer) carry the verdict of the operation
+that uses them.
+
+Two questions are answered per operation:
+
+- **Idempotent** — does repeating the operation with the same arguments
+  converge to the same state? For a **write** that means the same result
+  ends up in the cluster; for a **read** it means the call has no side
+  effect at all — a read answers from the *current* state, so the answer
+  can of course differ when the data changed in between. Inside a
+  transaction the snapshot is fixed at `startTs`, so a repeated read
+  answers the same.
+- **Safe to retry after an ambiguous failure** — may the caller repeat the
+  operation without first re-reading the state?
+
+Verdict legend:
+
+- **Yes** — repeating the operation is safe; the state converges (a read
+  simply answers again).
+- **No** — repeating the operation can produce a *different* result than the
+  first attempt. Re-read the affected state and decide from that.
+- **With care** — repeating converges only under the condition stated in the
+  notes; outside it the call fails instead of converging.
+
+The Notes column narrows a verdict: it names the part that does *not*
+converge (a TTL that restarts on every attempt, a lock TTL that is
+extended) or the condition under which the operation converges at all. A
+narrowed verdict is still a verdict — the operation stays safe to repeat,
+only the timing it produces differs.
+
+### RawKV operations
+
+| Operation | Idempotent | Safe to retry after an ambiguous failure | Notes |
+|---|---|---|---|
+| `RawKvClient::get()` | Yes | Yes | Read-only. A repeated read returns the *current* value, which may differ from the first answer when a concurrent write landed in between |
+| `RawKvClient::getKeyTTL()` | Yes | Yes | Read-only. The TTL keeps counting down, so the second answer can be smaller |
+| `RawKvClient::batchGet()` | Yes | Yes | Read-only. A `BatchPartialFailureException` returns **no** results — re-run the whole call |
+| `RawKvClient::scan()`, `RawKvClient::scanPrefix()`, `RawKvClient::reverseScan()`, `RawKvClient::batchScan()` | Yes | Yes | Read-only. The rows are the same set the first call returned unless the data changed in between |
+| `RawKvClient::scanIterator()`, `RawKvClient::scanPrefixIterator()` | Yes | Yes | Read-only, but **lazy**: the failure surfaces from the iteration, not from the factory call. A new iterator starts again at the beginning of the range |
+| `ScanIterator::current()`, `ScanIterator::key()`, `ScanIterator::next()`, `ScanIterator::valid()`, `ScanIterator::rewind()` | Yes | Yes | Read-only. `next()` and `valid()` issue the scan RPCs, so an ambiguous failure surfaces from the iteration, not from the factory call — repeat the iteration from the beginning of the range (`rewind()` restarts the same iterator at the range's first key) |
+| `RawKvClient::checksum()` | Yes | Yes | Read-only. The merged CRC64-XOR covers the whole range because a failed region aborts the call with a `BatchPartialFailureException` instead of returning a partial result |
+| `RawKvClient::put()` | Yes | Yes | The same key/value is written again, so the final value is the same. With a TTL the **TTL restarts on every attempt** — the TTL travels as a relative number of seconds and TiKV computes the expiry when it applies the write — so a retry extends the key's lifetime. In atomic mode the write also carries `for_cas` and takes TiKV's atomic path, but it stays an unconditional overwrite of the same value |
+| `RawKvClient::delete()` | Yes | Yes | Deleting an already-deleted key is not an error |
+| `RawKvClient::batchPut()` | Yes | Yes | The same key/value pairs converge, and the TTL restarts on every attempt as for `put()`. A `BatchPartialFailureException` leaves an **unknown subset** written — re-run the whole batch |
+| `RawKvClient::batchDelete()` | Yes | Yes | Deleting an already-deleted key is not an error. A `BatchPartialFailureException` leaves an unknown subset deleted — re-run the whole batch |
+| `RawKvClient::deleteRange()` | Yes | Yes | The range is deleted region by region; re-running deletes what is left. A `BatchPartialFailureException` leaves an unknown subset deleted |
+| `RawKvClient::deletePrefix()` | Yes | Yes | A wrapper around `deleteRange()` |
+| `RawKvClient::ingest()` | Yes (same input) | **With care** | Re-run the **whole** call, never a part of it — see [Ingest is never retried for you](#ingest-is-never-retried-for-you). The TTL restarts on every attempt, exactly as for `put()`, so a retry extends the keys' lifetime |
+| `RawKvClient::compareAndSwap()` | **No** | **No** | See [The CAS and putIfAbsent retry hazard](#the-cas-and-putifabsent-retry-hazard) |
+| `RawKvClient::putIfAbsent()` | **No** | **No** | The same call as `compareAndSwap()` with `previous_not_exist = true` — see [The CAS and putIfAbsent retry hazard](#the-cas-and-putifabsent-retry-hazard) |
+| `RawKvClient::setAtomicForCAS()`, `RawKvClient::isAtomicForCAS()` | Yes | Yes | Client-local flag; no cluster state is touched |
+| `RawKvClient::setColumnFamily()`, `RawKvClient::getColumnFamily()` | Yes | Yes | Client-local setting; no cluster state is touched |
+| `RawKvClient::create()`, `RawKvClient::close()` | Yes | Yes | `create()` validates the options (`InvalidArgumentException` on a bad option) and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent — a second call does nothing |
+| `RawKvClient::getClusterId()`, `RawKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
+| `RawKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+
+### TxnKV operations
+
+| Operation | Idempotent | Safe to retry after an ambiguous failure | Notes |
+|---|---|---|---|
+| `TxnKvClient::begin()` | Yes | Yes | It mints a fresh start timestamp and returns a fresh transaction, so a retry produces a **new** transaction, never a continuation of the old one. A `TxnAbortedByGcException` means the start timestamp is permanently behind the GC safe point — begin again *later*, not again right now |
+| `TxnKvClient::beginOptimistic()` | Yes | Yes | Same as `begin()`: it mints a fresh start timestamp and returns a fresh transaction, so a retry produces a **new** transaction |
+| `TxnKvClient::beginPessimistic()` | Yes | Yes | Same as `begin()`: it mints a fresh start timestamp and returns a fresh transaction, so a retry produces a **new** transaction |
+| `TxnKvClient::holdGcSafePoint()` | Yes | Yes | Registering the same service safe point twice with the same arguments is the same registration — PD keeps the minimum safe point **across all service ids**, and a re-registration under the same service id replaces that id's entry |
+| `TxnKvClient::releaseGcSafePoint()` | Yes | Yes | A removal is idempotent; releasing a service safe point that is not registered changes nothing |
+| `TxnKvClient::create()`, `TxnKvClient::close()` | Yes | Yes | `create()` validates the options and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent |
+| `TxnKvClient::getClusterId()`, `TxnKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
+| `TxnKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `Transaction::get()`, `Transaction::batchGet()`, `Transaction::scan()` | Yes | Yes | Read-only inside the transaction's snapshot at `startTs`, so a repeated read sees the same version of the data |
+| `Transaction::set()`, `Transaction::delete()` | Yes (same value) | **With care** | The value is buffered locally, so the same call twice writes the same thing. But in the default eager pessimistic mode the physical lock is acquired *before* the call returns: a failed `set()`/`delete()` may have left a lock behind and leaves the transaction unwritable (`InvalidStateException` on the next write). Repeating therefore converges only while the transaction is still writable. The transaction cannot be continued — discard it and begin a new one |
+| `Transaction::commit()` | **No** | **No** | See [Transaction commit and the new-transaction rule](#transaction-commit-and-the-new-transaction-rule) |
+| `Transaction::rollback()` | Yes | **With care** | Rolling back an already-rolled-back transaction is a semantic no-op, but the client rejects it: `rollback()` requires an `Active` transaction and raises `InvalidStateException` otherwise. Retry only while `getStatus()` is still `Active` — and never after an `UndeterminedCommitException`, where the transaction was closed on purpose and must not be rolled back |
+| `Transaction::heartbeat()` | Yes | Yes | It only extends the primary lock's TTL, so repeating it grants another TTL — the lock outlives a single call, and nothing else changes. It requires a **writable** transaction (`InvalidStateException` otherwise) and a **pessimistic** one: an optimistic transaction holds no primary lock, so TiKV answers with a `KeyError` that surfaces as a retryable `TxnRetryableException` |
+| `Transaction::getTxnId()`, `Transaction::getStartTs()`, `Transaction::getCommitTs()`, `Transaction::getStatus()`, `Transaction::isPessimistic()`, `Transaction::getPriority()`, `Transaction::getWriteSet()`, `Transaction::getReadSet()` | Yes | Yes | Local state getters; no cluster state is touched |
+
+### The CAS and putIfAbsent retry hazard
+
+`compareAndSwap()` — and `putIfAbsent()`, which is the same call with
+`previous_not_exist = true` — is the one RawKV write that is **not**
+idempotent, and the client does not retry it on transport errors on purpose
+(#239). `RawKvAtomic::compareAndSwap()` installs a classifier that rethrows
+every `GrpcException` from inside the retry executor, so a deadline exceeded
+or a connection reset reaches the caller **unretried**. Region errors
+(`NotLeader`, `EpochNotMatch`, …) are different: they are rejected before
+the write is proposed, so the client still retries them automatically.
+
+The failure mode is the reason. The server may have applied the swap and lost
+the response; the client cannot tell, so it does not retry and leaves the
+decision to the caller. The caller must not retry blindly either:
+
+- **`compareAndSwap('counter', '5', '6')`.** The first attempt wrote `'6'`
+  and its response was lost. The retry compares `'6'` against the expected
+  `'5'` and answers `swapped: false` with `previousValue: '6'` — the caller
+  reads "somebody else changed the value", although it was its own first
+  attempt that changed it. A caller that reports this as a lost update has
+  lost a write.
+- **`putIfAbsent('lock:resource', 'owner-1')`.** The first attempt wrote
+  `'owner-1'`; the retry finds the key present and returns `'owner-1'` — the
+  caller concludes "the lock is held by somebody else" and walks away, while
+  it in fact holds the lock itself. A distributed-lock user must treat a
+  thrown exception as *indeterminate*, never as "not acquired".
+
+The recovery is the same in both cases: **re-read the key and decide from
+what you find.** If the value is already the one you wanted to write, the
+first attempt succeeded; if it is something else, somebody else won the race
+and you have to decide again. The CAS loop in
+[Compare And Swap](operations.md#compare-and-swap-cas) does exactly that.
+
+### Ingest is never retried for you
+
+`RawKvClient::ingest()` is the one write the client does **not** run through
+the retry executor: `SstIngestor::ingest()` has no `RetryExecutor`, so a
+region error or a transport error aborts the remaining regions and
+propagates.
+
+Three consequences:
+
+1. **The final content converges.** The same key/value pairs produce the same
+   data and every region is overwritten by its SST, so repeating the call is
+   not a double-apply. With a TTL the **TTL restarts on every attempt**,
+   exactly as for `put()`: the TTL travels as a relative number of seconds
+   and TiKV computes the expiry when it applies the write, so a re-run
+   extends the keys' lifetime — the values converge, the expiry does not.
+2. **The cluster may hold a partial import.** The regions ingested before the
+   failure keep their data; the rest was never written. Re-running the whole
+   call converges.
+3. **A killed process leaves the cluster in import mode.** The switch back to
+   normal mode runs in a `finally` block, so an exception is safe — but a
+   SIGKILL, an OOM kill or an execution-time abort is not, and every store
+   stays in import mode, which changes the behaviour of every client of the
+   cluster. See [Ingest](operations.md#ingest) for the recovery procedure.
+
+Practical rule: run `ingest()` in a supervised CLI process, size the batch so
+that you can afford to re-run it, and re-run the **whole** call after a
+failure — never a part of it.
+
+### Transaction commit and the new-transaction rule
+
+`Transaction::commit()` is not idempotent as a whole, and the client makes an
+asymmetry inside it that the caller never sees:
+
+- The **primary** region's `KvCommit` is deliberately **not** retried. A
+  transport failure there raises
+  [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php)
+  (#216): the commit may already be applied, so the transaction is closed and
+  is never rolled back. Re-issuing the commit with the same `start_version`
+  and `commit_version` would be safe on the wire, but the client cannot know
+  the outcome and the transaction object is finished.
+- The **secondary** regions' commits **are** retried automatically, because a
+  commit is idempotent for a fixed `start_version` + `commit_version`:
+  replaying it cannot write the data twice.
+
+**Guidance: after a failed `commit()`, begin a new transaction.** Never
+re-invoke `commit()` on the same object:
+
+- if the first attempt reached the commit point, the status is `Committed` and
+  a second `commit()` raises `InvalidStateException`;
+- if it did not, the conflicts have to be resolved against fresh reads
+  anyway;
+- if the outcome is undetermined, the write may be applied — re-read the keys
+  in a **new** transaction before re-applying, or you double-apply.
+
+```php
+use CrazyGoat\TiKV\Client\TxnKv\Exception\UndeterminedCommitException;
+
+const TXN_ATTEMPTS = 3;
+
+for ($attempt = 1; $attempt <= TXN_ATTEMPTS; $attempt++) {
+    $txn = $tikv->begin();      // a NEW transaction every round
+    try {
+        $txn->set('k', 'v');
+        $txn->commit();
+        break;
+    } catch (UndeterminedCommitException $e) {
+        // The commit may already be applied. Re-read the key in a NEW
+        // transaction and only re-apply it if it is not there.
+        if ($attempt === TXN_ATTEMPTS) {
+            throw $e;
+        }
+    }
+}
+```
+
+Conflicts and deadlocks are retried the same way — with a new transaction and
+a jittered delay; see
+[Retrying transactions safely](#retrying-transactions-safely).
 
 ## RawKvClient Operations
 

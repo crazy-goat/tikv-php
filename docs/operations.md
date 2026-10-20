@@ -286,6 +286,10 @@ exception. Either:
 call. `batchDelete` with a fixed key list is idempotent (missing keys are
 not an error) and may be retried whole.
 
+For the per-operation verdicts — which operations converge when repeated and
+which ones must not be repeated after an ambiguous failure — see
+[Idempotency and Retry Safety](error-handling.md#idempotency-and-retry-safety).
+
 **Deadline variant:** `BatchDeadlineExceededException` is thrown by
 `BatchAsyncExecutor` when an explicit wall-clock deadline (the
 `$deadlineMs` argument) expires; in-flight futures are cancelled, so the

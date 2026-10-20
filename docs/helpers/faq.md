@@ -631,6 +631,44 @@ implementation time and treat the issue's numbers as stale-by-default. Same
 class of trap as #376: an audit issue's premise can silently expire when a
 later PR changes the code it describes.
 
+The same rule applies to the per-operation idempotency table added for issue
+#409 [DOC-43]: the issue's own table named seven operation groups, while the
+real public surface is every method of `RawKvClient`, `TxnKvClient`,
+`Transaction` and the `ScanIterator` `RawKvClient` hands out — including the
+lazy ones and the accessors. Two distinctions that only the code shows:
+
+- **A handle is not the operation.** `RawKvClient::scanIterator()` /
+  `scanPrefixIterator()` validate their arguments and return an iterator;
+  the RPCs happen later, while the caller iterates. The failure therefore
+  surfaces from the iteration, and the "retry" is *create a new iterator*,
+  not *call the factory again*. `Transaction::commit()` is the mirror image:
+  the failure belongs to the commit, but the recovery belongs to the
+  transaction — after a failed `commit()` the answer is "begin a new
+  transaction", because the old object is closed.
+- **The commit asymmetry is invisible from the outside.** `Transaction::commit()`
+  looks like one call, but the client retries the *secondary* regions' commits
+  (a commit is idempotent for a fixed `start_version` + `commit_version`) and
+  deliberately does **not** retry the *primary* region's commit: a transport
+  failure there leaves the outcome undetermined, so `UndeterminedCommitException`
+  is raised and the transaction is closed without a rollback. Nothing in the
+  public API says so — it has to be written down.
+
+One more verdict that is not derivable from the request alone: `put()`,
+`batchPut()` and `ingest()` send the TTL as a *relative* number of seconds
+and TiKV computes the expiry when it applies the write, so **every attempt
+restarts the countdown** — a caller-side retry of a TTL write extends the
+key's lifetime rather than keeping the original deadline.
+
+A guard that keeps a documentation table exhaustive has to look for the
+**row**, not for the name: a guard that searches the whole section for
+`` `Class::method()` `` is satisfied by a prose mention, so deleting the
+row and keeping the sentence leaves it green. Parse the table rows, take
+the operation names from the first cell and read the verdict from the
+verdict cells — then a deleted row fails the suite, and so does a row whose
+verdict cell was emptied. The same guard must assert that the
+reflection-derived operation list is **not empty**: a renamed class or a
+changed namespace would otherwise leave it comparing `[]` with `[]`.
+
 ## TTL mode and TxnKV are mutually exclusive — say it at every enable-ttl recommendation
 
 TiKV with `[storage] enable-ttl = true` runs in V1TTL storage mode, which
