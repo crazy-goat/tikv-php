@@ -100,7 +100,7 @@ server) after enabling the extension.
 The library is **pre-1.0**. It follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), but before `1.0.0`
 a breaking change bumps the **minor** version — so a `0.x` release may break
-your code, and `0.8.0 → 0.9.0` is not a safe upgrade on its own.
+your code, and `0.9.0 → 0.10.0` is not a safe upgrade on its own.
 
 [`CHANGELOG.md`](CHANGELOG.md) marks every breaking change of the public API
 below with a **BREAKING** prefix and a migration note. A change that breaks a
@@ -109,23 +109,23 @@ migration note and needs no version bump of its own.
 
 ### Which version to require
 
-The current release is **v0.8.0**. Require the exact version, or allow patch
+The current release is **v0.9.0**. Require the exact version, or allow patch
 releases inside the current minor line only:
 
 ```json
 {
     "require": {
-        "crazy-goat/tikv-client": "~0.8.0"
+        "crazy-goat/tikv-client": "~0.9.0"
     }
 }
 ```
 
-`~0.8.0` (equivalently `^0.8.0` or `0.8.*`) resolves to `>=0.8.0 <0.9.0`, so
-it never pulls `0.9.0` — and therefore never pulls a breaking change. Use
-`"0.8.0"` instead when you want a reproducible build.
+`~0.9.0` (equivalently `^0.9.0` or `0.9.*`) resolves to `>=0.9.0 <0.10.0`, so
+it never pulls `0.10.0` — and therefore never pulls a breaking change. Use
+`"0.9.0"` instead when you want a reproducible build.
 
 Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
-`~0.8` all resolve to a range that includes `0.9.0` and every later release.
+`~0.9` all resolve to a range that includes `0.10.0` and every later release.
 
 The versions above follow the releases: every one of them is updated in the
 same pull request as the changelog section of the release, because the guard
