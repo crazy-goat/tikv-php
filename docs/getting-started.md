@@ -364,7 +364,8 @@ $txn->delete('account:2');
 // Batch read
 $values = $txn->batchGet(['account:1', 'account:2']);
 
-// Scan within transaction
+// Scan within transaction (limit: 0 = the whole range, up to 10240 rows;
+// a larger range throws ScanLimitExceededException instead of truncating)
 $results = $txn->scan('account:', 'account;');
 
 // Commit (2-phase: prewrite + commit)

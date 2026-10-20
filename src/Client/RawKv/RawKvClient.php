@@ -923,14 +923,23 @@ final class RawKvClient
      * Range scan over [startKey, endKey).
      *
      * `limit = 0` means **the whole range**: the call pages internally
-     * (`RawKvScanner::MAX_SCAN_LIMIT` rows per RPC) and collects every row,
-     * so it is no longer silently truncated at 10240 (issue #191). Because
-     * the whole result is still buffered in one PHP array, the total is
-     * bounded by `options['maxScanRows']` (default
-     * {@see RawKvClient::DEFAULT_MAX_SCAN_ROWS}); exceeding it throws
-     * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
-     * rather than truncating. For ranges larger than that, or to keep memory
-     * flat, use {@see RawKvClient::scanIterator()} instead.
+     * ({@see RawKvClient::MAX_SCAN_LIMIT} = 10240 rows per RPC) and collects
+     * every row, so it is no longer silently truncated at 10240 (issue #191).
+     * Because the whole result is still buffered in one PHP array, the total
+     * is bounded by `options['maxScanRows']` (default
+     * {@see RawKvClient::DEFAULT_MAX_SCAN_ROWS} = 100000); exceeding it
+     * throws {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
+     * rather than truncating (issue #440).
+     *
+     * **A scan never truncates silently** (issue #440). An unbounded scan
+     * that hits the `maxScanRows` guard throws, so a returned result is the
+     * whole range; a bounded scan (`limit > 0`) returns at most `limit` rows,
+     * so a result whose count equals the limit may be truncated — compare
+     * the count with the limit to find out.
+     *
+     * For ranges larger than `maxScanRows`, or to keep memory flat at all,
+     * use {@see RawKvClient::scanIterator()} instead: it pages the range with
+     * constant memory and has no row cap.
      *
      * @param int $limit Maximum rows to return; 0 = the whole range
      *                   (paginated internally, guarded by maxScanRows)
@@ -957,10 +966,17 @@ final class RawKvClient
     /**
      * Prefix scan: convenience wrapper around {@see RawKvClient::scan()}.
      *
-     * `limit = 0` returns the whole prefix (paginated internally and guarded
-     * by `options['maxScanRows']`, see {@see RawKvClient::scan()}); for large
-     * prefixes prefer {@see RawKvClient::scanPrefixIterator()}, which keeps
-     * memory to a single page.
+     * `limit = 0` returns the whole prefix (paginated internally at
+     * {@see RawKvClient::MAX_SCAN_LIMIT} = 10240 rows per RPC and guarded by
+     * `options['maxScanRows']`, see {@see RawKvClient::scan()}); exceeding
+     * that guard throws
+     * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
+     * instead of truncating (issue #440). A bounded scan (`limit > 0`)
+     * returns at most `limit` rows, so a result whose count equals the limit
+     * may be truncated.
+     *
+     * For large prefixes prefer {@see RawKvClient::scanPrefixIterator()},
+     * which pages the prefix with constant memory and has no row cap.
      *
      * @return array<array{key: string, value: ?string}>
      *
@@ -984,13 +1000,21 @@ final class RawKvClient
      *
      * `limit = 0` means **the whole range**: the call pages internally
      * (moving the descending upper bound to the lowest key of each full
-     * page) and collects every row (issue #191). The total is bounded by
+     * page, {@see RawKvClient::MAX_SCAN_LIMIT} = 10240 rows per RPC) and
+     * collects every row (issue #191). The total is bounded by
      * `options['maxScanRows']` (default
-     * {@see RawKvClient::DEFAULT_MAX_SCAN_ROWS}); exceeding it throws
-     * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
-     * rather than truncating. There is no reverse iterator, so for a very
-     * large reverse range raise `maxScanRows` consciously or page it in the
-     * caller.
+     * {@see RawKvClient::DEFAULT_MAX_SCAN_ROWS} = 100000); exceeding it
+     * throws {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
+     * rather than truncating (issue #440).
+     *
+     * **A scan never truncates silently** (issue #440). An unbounded scan
+     * that hits the `maxScanRows` guard throws; a bounded scan (`limit > 0`)
+     * returns at most `limit` rows, so a result whose count equals the limit
+     * may be truncated — compare the count with the limit to find out.
+     *
+     * There is no reverse iterator, so for a very large reverse range raise
+     * `maxScanRows` consciously or page it in the caller; the unbounded
+     * forward alternative is {@see RawKvClient::scanIterator()}.
      *
      * @param int $limit Maximum rows to return; 0 = the whole range
      *                   (paginated internally, guarded by maxScanRows)

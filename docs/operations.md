@@ -320,6 +320,12 @@ $results = $client->scan('startKey', 'endKey', limit: 100, keyOnly: false);
 
 **Returns:** `array<array{key: string, value: ?string}>`
 
+**Truncation is never silent.** An unbounded scan that hits the
+`options['maxScanRows']` guard throws `ScanLimitExceededException`, so a
+returned result is the whole range. A bounded scan (`limit > 0`) returns at
+most `limit` rows, so a result whose count equals the limit may be truncated —
+compare the count with the limit to find out.
+
 **Example:**
 
 ```php
@@ -357,6 +363,11 @@ $results = $client->scanPrefix('user:', limit: 100, keyOnly: false);
 
 **Returns:** `array<array{key: string, value: ?string}>`
 
+**Truncation is never silent.** An unbounded prefix scan that hits the
+`options['maxScanRows']` guard throws `ScanLimitExceededException`; a bounded
+scan (`limit > 0`) returns at most `limit` rows, so a result whose count
+equals the limit may be truncated.
+
 **Example:**
 
 ```php
@@ -391,6 +402,16 @@ silently truncating. The guard is evaluated per internally fetched page
 (after that page is buffered), so it is page-granular, not a strict per-row
 bound: a guard below the page size still reads a whole page before throwing,
 and `getScannedRows()` can exceed `getMaxRows()`.
+
+A **transactional** scan (`Transaction::scan()`) has a different, harder cap:
+it reads the range at the transaction's snapshot and does not page internally,
+so `limit: 0` returns the whole range up to
+`Transaction::MAX_SCAN_LIMIT` (10240) rows. A range with more rows than that
+throws `ScanLimitExceededException` as well — the result is never truncated
+silently — so page the range explicitly (an explicit `limit` plus the last key
+you received) when it is larger. The unbounded alternative is the RawKV
+iterator above, with the trade-off that it is a raw read: it does not observe
+the transaction's own buffered writes.
 
 To read a range larger than `maxScanRows`, or to keep memory flat at all,
 use the built-in **lazy scan iterator** instead of paging manually:
@@ -473,6 +494,12 @@ $results = $client->reverseScan($upperBound, $lowerBound, limit: 100, keyOnly: f
 - `keyOnly` (bool, optional): Return only keys
 
 **Returns:** `array<array{key: string, value: ?string}>`
+
+**Truncation is never silent.** An unbounded reverse scan that hits the
+`options['maxScanRows']` guard throws `ScanLimitExceededException`; a bounded
+scan (`limit > 0`) returns at most `limit` rows, so a result whose count
+equals the limit may be truncated. There is no reverse iterator — for a large
+reverse range raise the guard deliberately or page the range in the caller.
 
 **Example:**
 

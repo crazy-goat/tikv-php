@@ -143,6 +143,11 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // For an unbounded scan that matches more than options['maxScanRows'] rows
 // (default 100000) the client throws ScanLimitExceededException rather than
 // silently truncating; the iterators above have no such limit.
+//
+// A scan never truncates silently: an unbounded scan that hits its cap
+// throws, and a bounded scan (limit > 0) returns at most `limit` rows —
+// compare the returned count with the limit to see whether the range may
+// hold more.
 
 // Reverse scan (descending order)
 // Note the order: startKey = UPPER bound (exclusive), endKey = LOWER bound
@@ -320,8 +325,11 @@ writes, so `get()` after `set()` returns the new value without a round trip.
 They do *not* see other transactions' uncommitted data.
 
 > `Transaction::scan()` differs from `RawKvClient::scan()`: `limit: 0` means
-> "up to 10240 rows", not "the whole range" — a transactional scan does not
-> page internally. Pass an explicit `limit` when you need one.
+> "the whole range, up to 10240 rows" — a transactional scan does not page
+> internally. A range with more rows than that does **not** come back
+> truncated: the scan throws `ScanLimitExceededException` instead, so a
+> partial range is never mistaken for a complete one. Pass an explicit
+> `limit` when you need one.
 
 #### Optimistic vs pessimistic
 

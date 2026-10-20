@@ -19,6 +19,7 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -232,11 +233,21 @@ final readonly class TxnReader
      * without satisfying the row limit. Asking PD for the whole range
      * answers with every region of the keyspace, which is tens of megabytes
      * for a scan that reads one region.
-     *
+
+     * `limit: 0` asks for the whole range. The scan budget is then the
+     * per-transaction cap (`$maxScanLimit`, 10240 by default), and a range
+     * that holds more rows than the cap does **not** return a truncated
+     * result: the scan probes for one more row and throws
+     * {@see ScanLimitExceededException} when the range really holds more
+     * (issue #440). A scan with an explicit `limit > 0` returns at most that
+     * many rows, so the caller detects a possibly-truncated result by
+     * comparing the returned count with the limit.     *
      * @return array<array{key: string, value: ?string}>
      *
      * @throws InvalidArgumentException
      * @throws TiKvException
+     * @throws ScanLimitExceededException When `limit` is 0 and the range holds
+     *         more rows than the per-transaction scan cap
      */
     public function scan(
         string $startKey,
@@ -247,6 +258,10 @@ final readonly class TxnReader
         callable $classifier,
         int $maxScanLimit = 10240,
     ): array {
+        // `limit: 0` means "the whole range"; the scan budget is the cap and
+        // a range that exceeds it must fail loudly instead of returning a
+        // truncated result (issue #440).
+        $wholeRange = $limit === 0;
         $limit = $this->normalizeScanLimit($limit, $maxScanLimit);
 
         $results = [];
@@ -318,7 +333,71 @@ final readonly class TxnReader
             $cursor = $lastEndKey;
         }
 
-        return $this->finalizeScanResults($results, $startKey, $endKey, $limit, $state);
+        if ($wholeRange && $remaining <= 0) {
+            // The whole budget was spent: the range may hold rows the scan
+            // did not return. Probe before answering, so the caller learns
+            // that the result was truncated instead of trusting a partial
+            // range (issue #440).
+            $this->assertRangeNotTruncated($results, $endKey, $retryExecutor, $classifier, $maxScanLimit);
+        }
+
+        // The whole-range path is not capped again here: the cap bounds the
+        // TiKV read, while the write-set merge may add the transaction's own
+        // in-range keys, which must not be dropped (issue #440).
+        return $this->finalizeScanResults($results, $startKey, $endKey, $wholeRange ? null : $limit, $state);
+    }
+
+    /**
+     * Fail closed when an unbounded transactional scan spent its whole budget
+     * and the range holds rows the scan did not return (issue #440).
+     *
+     * Spending the budget does not prove that rows are missing — a range
+     * with exactly `maxScanLimit` rows is complete — so one extra row is
+     * probed for: a `KvScan` for a single row starting at the successor of
+     * the last key the scan returned. A row there means the result was
+     * truncated, and the scan throws {@see ScanLimitExceededException}
+     * instead of returning a partial range.
+     *
+     * @param list<array{key: string, value: ?string}> $results the rows the
+     *        scan returned
+     *
+     * @throws ScanLimitExceededException
+     */
+    private function assertRangeNotTruncated(
+        array $results,
+        string $endKey,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
+        int $maxScanLimit,
+    ): void {
+        if ($results === []) {
+            return;
+        }
+
+        // The probe starts after the highest key the scan returned — not
+        // after the last row: the rows of a region come back in ascending
+        // order, but the merge with the write set happens later and the
+        // probe must not depend on that.
+        $highestKey = $results[0]['key'];
+        foreach ($results as $row) {
+            if (KeyOrder::gt($row['key'], $highestKey)) {
+                $highestKey = $row['key'];
+            }
+        }
+
+        $cursor = KeyOrder::successor($highestKey);
+
+        if ($endKey !== '' && KeyOrder::gte($cursor, $endKey)) {
+            // The range ends at the last row the scan returned: nothing can
+            // follow it inside the range.
+            return;
+        }
+
+        $probe = $this->executeScanForRegion($cursor, $endKey, 1, $retryExecutor, $classifier, $maxScanLimit);
+
+        if ($probe !== []) {
+            throw ScanLimitExceededException::forTransactionScan($maxScanLimit, count($results));
+        }
     }
 
     /**
@@ -755,6 +834,10 @@ final readonly class TxnReader
      * Merge TiKV scan results with the local write set to enforce
      * read-your-writes semantics, then apply the limit.
      *
+     * A `null` limit means "no limit": the unbounded (`limit: 0`) path uses
+     * it, because the write-set merge must not drop the transaction's own
+     * in-range keys — the scan cap already bounds the TiKV read (issue #440).
+     *
      * @param array<array{key: string, value: ?string}> $results
      * @return array<array{key: string, value: ?string}>
      */
@@ -762,7 +845,7 @@ final readonly class TxnReader
         array $results,
         string $startKey,
         string $endKey,
-        int $limit,
+        ?int $limit,
         TransactionState $state,
     ): array {
         $tikvMap = [];
@@ -792,7 +875,7 @@ final readonly class TxnReader
 
         $merged = [];
         foreach ($allKeys as $key) {
-            if (count($merged) >= $limit) {
+            if ($limit !== null && count($merged) >= $limit) {
                 break;
             }
 

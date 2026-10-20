@@ -10,6 +10,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -50,8 +51,15 @@ final class Transaction
     /** Wall-clock deadline (ms) applied to this transaction's RetryExecutor. */
     private readonly int $retryDeadlineMs;
 
-    /** Maximum scan limit to prevent unbounded memory usage */
-    private const MAX_SCAN_LIMIT = 10240;
+    /**
+     * Maximum number of rows a transactional scan may return.
+     *
+     * It bounds the memory one scan may buffer; a range that holds more rows
+     * than this does not return a truncated result but throws
+     * {@see ScanLimitExceededException} (issue #440). It is also the largest
+     * `limit` a caller may pass.
+     */
+    public const MAX_SCAN_LIMIT = 10240;
 
     /**
      * ServerBusy backoff budget for the transaction retry loop, kept as an
@@ -116,9 +124,19 @@ final class Transaction
          * default timeout".
          */
         private readonly int $lockWaitTimeMs = self::DEFAULT_LOCK_WAIT_TIME_MS,
+        /**
+         * Row cap for a transactional scan (issue #440). Defaults to
+         * {@see self::MAX_SCAN_LIMIT}; a smaller value is a test seam, not a
+         * production knob — a transaction has no client options array to
+         * configure it through.
+         */
+        private readonly int $maxScanLimit = self::MAX_SCAN_LIMIT,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
+        }
+        if ($this->maxScanLimit < 1) {
+            throw new InvalidArgumentException('maxScanLimit must be >= 1');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         if ($lockWaitTimeMs < 0) {
@@ -293,6 +311,27 @@ final class Transaction
     }
 
     /**
+     * Range scan over [startKey, endKey) at the transaction's snapshot.
+     *
+     * `limit = 0` (the default) means **the whole range**: the scan reads
+     * the range up to {@see self::MAX_SCAN_LIMIT} rows (10240). A range that
+     * holds more rows than that does **not** return a truncated result — the
+     * scan detects the missing rows and throws {@see ScanLimitExceededException}
+     * instead (issue #440). Pass an explicit `limit` to read a known number
+     * of rows: the result then holds at most that many rows, and the caller
+     * detects a possibly-truncated result by comparing the returned count
+     * with the limit.
+     *
+     * A transactional scan has no iterator of its own; the unbounded
+     * alternative is {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::scanIterator()}
+     * (and {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::scanPrefixIterator()}
+     * for a prefix), which pages the range with constant memory — but it is a
+     * raw, non-snapshot read, so it does not observe the transaction's own
+     * buffered writes.
+     *
+     * @param int $limit Maximum rows to return; 0 = the whole range (capped
+     *                   at {@see self::MAX_SCAN_LIMIT} rows, a larger range
+     *                   throws instead of truncating)
      * @return array<array{key: string, value: ?string}>
      *
      * @throws InvalidArgumentException
@@ -301,6 +340,8 @@ final class Transaction
      * @throws TransactionConflictException
      * @throws RegionException
      * @throws GrpcException
+     * @throws ScanLimitExceededException When limit is 0 and the range holds
+     *         more than {@see self::MAX_SCAN_LIMIT} rows
      */
     public function scan(string $startKey, string $endKey, int $limit = 0): array
     {
@@ -320,7 +361,7 @@ final class Transaction
             $this->state,
             $this->retryExecutor(),
             $this->classifyError(...),
-            self::MAX_SCAN_LIMIT,
+            $this->maxScanLimit,
         );
     }
 

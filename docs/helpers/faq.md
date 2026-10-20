@@ -1835,6 +1835,39 @@ is the reference. `ScanIterator` is unchanged (it always passed a bounded
 `batchSize`). This supersedes the `0 → MAX_SCAN_LIMIT` note in the #332
 negative-limit entry above.
 
+## A scan cap that is *reached* is not a scan that was *truncated* — probe for one more row
+
+The RawKV and the transactional scan paths do **not** share a cap, and they
+must not share the rule for reaching it:
+
+- `RawKvScanner::scan()` pages the range internally when `limit: 0`, so its
+  `maxScanRows` guard fires only when the accumulated rows *exceed* the cap
+  (`assertWithinScanLimit()` compares `> $maxScanRows`). "The cap was
+  reached" and "rows are missing" are the same event there, because the scan
+  keeps reading until the range ends.
+- `Transaction::scan()` does not page: with `limit: 0` it reads the range up
+  to `Transaction::MAX_SCAN_LIMIT` (10240) rows and stops. Deciding "the
+  result is truncated" from the row count alone is wrong there — a range with
+  *exactly* 10240 rows is complete, and refusing it would reject a complete
+  read.
+
+So the transactional scan probes: one `KvScan` for a single row starting at
+`KeyOrder::successor()` of the last key it returned, and
+`ScanLimitExceededException` only when that probe finds a row
+(`TxnReader::assertRangeNotTruncated()`, issue #440). The probe costs one
+extra RPC, and only in the boundary case. Lesson: when a cap is a *memory*
+guard, compare with `>`; when it carries a *contract* ("this call returns the
+whole range"), the difference between "the cap was reached" and "rows are
+missing" has to be established, not assumed — and the second question cannot
+be answered from the row count alone.
+
+The same entry point also has a second, quieter truncation: the write-set
+merge. `finalizeScanResults()` used to apply the scan limit to the *merged*
+result, so a transaction whose write set held in-range keys could have them
+dropped once the TiKV read had filled the budget. The unbounded path no
+longer caps the merge — the cap bounds the TiKV read, and the transaction's
+own writes must stay visible (read-your-writes).
+
 ## The optimistic prewrite primary region is always processed first — the heartbeat guard only bites for async commit (TXN-13, #218)
 
 Issue #218 added a `$primaryLockWritten` guard before heartbeating the primary

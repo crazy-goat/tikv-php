@@ -494,6 +494,15 @@ page is buffered), so a guard smaller than the page size still reads a whole
 page before throwing. For very large ranges, or to keep memory flat, prefer
 `scanIterator()`, which keeps memory to a single page.
 
+A **transactional** scan (`Transaction::scan()`) does not page: it reads the
+range at the transaction's snapshot in one go, bounded by
+`Transaction::MAX_SCAN_LIMIT` (10240) rows. A range with more rows than that
+throws `ScanLimitExceededException` — the result is never truncated silently —
+so page the range explicitly (an explicit `limit` plus the last key you
+received) when it is larger. The RawKV iterator is the unbounded
+alternative, at the price of being a raw read that does not observe the
+transaction's own buffered writes.
+
 If you need whole pages rather than row-by-row iteration (e.g. for a worker
 queue), iterate and buffer rows yourself instead of computing "next key"
 arithmetic by hand:

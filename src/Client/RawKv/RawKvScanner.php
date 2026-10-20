@@ -102,6 +102,10 @@ final readonly class RawKvScanner
      * truncating. The cap is checked per fetched page (page-granular), not per
      * row, so a page may be buffered in full before the throw.
      *
+     * A bounded scan (`limit > 0`) returns at most `limit` rows, so a result
+     * whose count equals the limit may be truncated (issue #440). The
+     * unbounded, constant-memory alternative is {@see self::scanIterator()}.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
@@ -350,6 +354,11 @@ final readonly class RawKvScanner
      * thrown instead of silently truncating. Like the forward path, the cap
      * is checked per fetched page (page-granular), not per row.
      *
+     * A bounded scan (`limit > 0`) returns at most `limit` rows, so a result
+     * whose count equals the limit may be truncated (issue #440). There is
+     * no reverse iterator; the unbounded, constant-memory alternative for a
+     * forward range is {@see self::scanIterator()}.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     public function reverseScan(
@@ -486,6 +495,15 @@ final readonly class RawKvScanner
     }
 
     /**
+     * Prefix scan over [prefix, prefix-end).
+     *
+     * A convenience wrapper around {@see self::scan()}, so it shares that
+     * method's caps: `limit = 0` returns the whole prefix (paginated
+     * internally, guarded by {@see self::$maxScanRows}, which throws
+     * {@see ScanLimitExceededException} instead of truncating), and a bounded
+     * scan returns at most `limit` rows (issue #440). The unbounded,
+     * constant-memory alternative is {@see self::scanPrefixIterator()}.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     public function scanPrefix(string $prefix, int $limit, bool $keyOnly, string $columnFamily = ''): array

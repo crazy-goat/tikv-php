@@ -177,6 +177,52 @@ the loop can only continue while accumulated rows are below `maxScanRows`, so
 the guard also bounds the page count — even a server that ignores the
 continuation cursor cannot make `scan(limit: 0)` loop forever.
 
+## A scan that hits a cap throws; it never returns a partial range (issue #440)
+
+Issue #440 (DIV-04) closed the remaining silent truncation in the scan
+surface. The decision worth recording is the **shape of the contract**, not
+the diff:
+
+1. **A scan never truncates silently, and the return type does not change.**
+   The alternative shapes the issue listed were a result object with a
+   `truncated` flag and a per-call "did it truncate" method. Both change the
+   public API of four methods, and the flag would have to be threaded through
+   `RawKvScanner`, `RawKvClient` and `Transaction` for a fact the caller can
+   already derive. The existing `ScanLimitExceededException` was reused
+   instead: the return type stays `array<array{key: string, value: ?string}>`,
+   and a truncated result is signalled by an exception the caller can catch.
+   `ScanLimitExceededException::forTransactionScan()` exists only because the
+   RawKV wording names `options['maxScanRows']`, which does not apply to the
+   transactional cap; the type, the accessors (`getMaxRows()`,
+   `getScannedRows()`) and the "never retry" verdict are shared.
+2. **A bounded scan truncates by contract, an unbounded one may not.** With
+   an explicit `limit > 0` the caller asked for at most that many rows, so
+   the result is capped and the caller detects a possibly-truncated result by
+   comparing the count with the limit — that is documented, not thrown. With
+   `limit: 0` the call means "the whole range", so a cap that stops it early
+   is a failure, not a result.
+3. **The two scan surfaces keep their own cap, because they are different
+   operations.** The RawKV path pages the range internally (issue #191) and is
+   bounded by `options['maxScanRows']` (default 100000), a *memory* guard. The
+   transactional path reads at the transaction's snapshot and does not page,
+   so it is bounded by `Transaction::MAX_SCAN_LIMIT` (10240) — a *contract*
+   cap. Unifying them (teaching the transactional scan to page) would change
+   a snapshot read into a multi-RPC one, and the transaction's write-set merge
+   and lock handling with it; that is a bigger change than this issue
+   authorises, so the two caps stay and both are documented.
+4. **"The cap was reached" and "rows are missing" are different facts.** The
+   RawKV guard can compare `>` because the scan keeps reading until the range
+   ends. The transactional scan stops at the cap, so it probes — one `KvScan`
+   for a single row after the last key it returned — and throws only when
+   that probe finds a row. A range with exactly 10240 rows is complete and is
+   returned. The probe costs one extra RPC in the boundary case only.
+5. **The write-set merge is not capped on the unbounded path.** `finalizeScanResults()`
+   applied the scan limit to the *merged* result, so a transaction whose write
+   set held in-range keys could have them dropped once the TiKV read had
+   filled the budget — a second, quieter truncation of the same class. The
+   unbounded path passes no limit to the merge: the cap bounds the TiKV read,
+   and the transaction's own writes must stay visible (read-your-writes).
+
 ## All key ordering goes through `Client\Util\KeyOrder`, enforced by a PHPStan rule (issue #186)
 
 TiKV orders keys by unsigned byte value, PHP 8 compares two numeric strings
