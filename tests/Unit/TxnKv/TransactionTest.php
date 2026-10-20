@@ -4054,7 +4054,7 @@ class TransactionTest extends TestCase
 
         // The retry must use the post-split region and re-clip the range.
         $context = $capturedRequests[1]->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(2, $regionId);
         $this->assertSame('a', $capturedRequests[1]->getStartKey());
         $this->assertSame('k', $capturedRequests[1]->getEndKey());
@@ -4062,7 +4062,7 @@ class TransactionTest extends TestCase
         // A retry clipped to the fresh region must not silently drop the
         // remainder: the rest of the range is scanned afterwards.
         $context = $capturedRequests[2]->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(3, $regionId);
         $this->assertSame('k', $capturedRequests[2]->getStartKey());
         $this->assertSame('z', $capturedRequests[2]->getEndKey());
@@ -4163,7 +4163,7 @@ class TransactionTest extends TestCase
         $this->assertCount(3, $capturedRequests);
 
         $context = $capturedRequests[2]->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(3, $regionId);
         $this->assertSame('k', $capturedRequests[2]->getStartKey());
         $this->assertSame('z', $capturedRequests[2]->getEndKey());
@@ -4512,7 +4512,7 @@ class TransactionTest extends TestCase
             ): object {
                 if ($method === 'KvCommit' && $request instanceof \CrazyGoat\Proto\Kvrpcpb\CommitRequest) {
                     $context = $request->getContext();
-                    $regionId = $context !== null ? $context->getRegionId() : -1;
+                    $regionId = $context?->getRegionId() ?? -1;
                     $commitsByRegion[] = ['regionId' => $regionId, 'keys' => iterator_to_array($request->getKeys())];
                 }
                 return match ($method) {
@@ -4578,7 +4578,7 @@ class TransactionTest extends TestCase
             ): object {
                 if ($method === 'KvCommit' && $request instanceof \CrazyGoat\Proto\Kvrpcpb\CommitRequest) {
                     $context = $request->getContext();
-                    $regionId = $context !== null ? $context->getRegionId() : -1;
+                    $regionId = $context?->getRegionId() ?? -1;
                     if ($regionId === 2) {
                         $region2CallCount++;
                         if ($region2CallCount === 1) {
@@ -4760,7 +4760,7 @@ class TransactionTest extends TestCase
             ): object {
                 if ($method === 'KvCommit' && $request instanceof \CrazyGoat\Proto\Kvrpcpb\CommitRequest) {
                     $context = $request->getContext();
-                    $regionId = $context !== null ? $context->getRegionId() : -1;
+                    $regionId = $context?->getRegionId() ?? -1;
                     $commitVersions[$regionId] = $request->getCommitVersion();
                     if ($regionId === 2 && !$secondaryCommitFailed) {
                         $secondaryCommitFailed = true;

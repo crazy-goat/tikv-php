@@ -1910,8 +1910,13 @@ final readonly class TwoPhaseCommitter
                             }
                         }
 
-                        $hasRegionError = $lastRegionError instanceof \CrazyGoat\TiKV\Client\Exception\RegionException;
-                        if (!$needRetry && !$hasRegionError) {
+                        // $lastRegionError is only ever set to a non-null value
+                        // in the branch that catches a RegionException, and
+                        // that branch also sets $needRetry = true — so a
+                        // region error always implies a retry and the second
+                        // conjunct was redundant. PHPStan reports the negated
+                        // expression as always true. (#634)
+                        if (!$needRetry) {
                             break;
                         }
 

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bin/lint.sh` is green again with the newest dev dependencies: the redundant `$hasRegionError` conjunct is gone from the pessimistic-lock retry loop (`!$needRetry && !$hasRegionError` is equivalent to `!$needRetry`), and two test files use the nullsafe-coalesce form. No behaviour change. (#634)
+
 - A fatal `StoreNotFoundException` (a store of the cached region, such as its leader, was removed from PD) now drops that cached region, so the next request asks PD again instead of failing until the entry expires. A store that belongs to another region (for example the primary key's region during lock resolution) leaves the key's entry alone. The exception is still thrown. (#627)
 
 - **[GRPC-22]**: `RegionErrorHandler::check()` no longer ignores a populated `KeyError`. It now throws `RegionException` for a top-level `KeyError` and for a per-pair error on `RawScanResponse`, `RawBatchScanResponse`, `ScanResponse` and `BatchGetResponse` (previously only `RawBatchGetResponse`), so `RawKvScanner` no longer returns a key with an empty value when TiKV failed to read it. Transactional call sites keep their own lock-resolution and conflict handling and pass the new `keyErrorsHandledByCaller: true`. (#281)

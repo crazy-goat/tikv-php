@@ -1331,7 +1331,7 @@ class RawKvScannerTest extends TestCase
         $secondRequest = $capturedRequests[1];
         // The retry must use the post-split region and re-clip the range.
         $context = $secondRequest->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(2, $regionId);
         $this->assertSame('a', $secondRequest->getStartKey());
         $this->assertSame('k', $secondRequest->getEndKey());
@@ -1341,7 +1341,7 @@ class RawKvScannerTest extends TestCase
         $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[2]);
         $thirdRequest = $capturedRequests[2];
         $context = $thirdRequest->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(3, $regionId);
         $this->assertSame('k', $thirdRequest->getStartKey());
         $this->assertSame('z', $thirdRequest->getEndKey());
@@ -1442,7 +1442,7 @@ class RawKvScannerTest extends TestCase
         $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[2]);
         $continuation = $capturedRequests[2];
         $context = $continuation->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(3, $regionId);
         $this->assertSame('k', $continuation->getStartKey());
         $this->assertSame('z', $continuation->getEndKey());
@@ -1535,7 +1535,7 @@ class RawKvScannerTest extends TestCase
         // Reverse scans resolve the region on the range end ('a') and clip
         // the wire start (upper) key down to the post-split region's end.
         $context = $secondRequest->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(2, $regionId);
         $this->assertSame('k', $secondRequest->getStartKey());
         $this->assertSame('a', $secondRequest->getEndKey());
@@ -1545,7 +1545,7 @@ class RawKvScannerTest extends TestCase
         $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[2]);
         $thirdRequest = $capturedRequests[2];
         $context = $thirdRequest->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(3, $regionId);
         $this->assertSame('z', $thirdRequest->getStartKey());
         $this->assertSame('k', $thirdRequest->getEndKey());
@@ -1648,7 +1648,7 @@ class RawKvScannerTest extends TestCase
         $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[2]);
         $continuation = $capturedRequests[2];
         $context = $continuation->getContext();
-        $regionId = $context !== null ? $context->getRegionId() : -1;
+        $regionId = $context?->getRegionId() ?? -1;
         $this->assertSame(3, $regionId);
         $this->assertSame('z', $continuation->getStartKey());
         $this->assertSame('k', $continuation->getEndKey());
