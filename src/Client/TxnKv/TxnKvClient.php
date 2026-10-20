@@ -327,10 +327,13 @@ final class TxnKvClient
      *     lockWaitTimeMs?: int,
      * } $options
      *     `priority` maps onto the Kvrpcpb CommandPri enum: 0 = Normal
-     *     (default), 1 = Low, 2 = High. It is carried on the transaction's
-     *     prewrite, pessimistic-lock and commit RPCs (issue #441).
+     *     (default), 1 = Low, 2 = High. It is carried on the Context of
+     *     every read and write request the transaction sends — its reads
+     *     (get, batchGet, scan) as well as its prewrite, pessimistic-lock,
+     *     commit, heartbeat and rollback RPCs (issue #441, issue #336). The
+     *     lock-resolution RPCs are always Normal: they resolve locks of
+     *     other transactions.
      *     `lockWaitTimeMs` bounds how long TiKV waits for a contended
-     *     pessimistic lock (issue #443, DIV-07).
      */
     public function begin(array $options = []): Transaction
     {

@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 
 use CrazyGoat\Proto\Kvrpcpb\BatchGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\CommandPri;
 use CrazyGoat\Proto\Kvrpcpb\GetRequest;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
@@ -73,6 +74,13 @@ final readonly class TxnReader
         private LoggerInterface $logger = new NullLogger(),
         private ?RetryExecutor $retryExecutor = null,
         private ?\Closure $classifier = null,
+        /**
+         * Kvrpcpb CommandPri carried on every read request's Context
+         * (issue #336). Normal (0) is the proto3 default and is not
+         * serialized, so a transaction without a priority keeps the
+         * original wire bytes.
+         */
+        private int $priority = CommandPri::Normal,
     ) {
     }
 
@@ -105,6 +113,7 @@ final readonly class TxnReader
                     $this->replicaReadPolicy,
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
+                    priority: $this->priority,
                 );
                 $excludedStore = null;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
@@ -388,6 +397,7 @@ final readonly class TxnReader
             $region,
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
+            priority: $this->priority,
         );
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
@@ -515,6 +525,7 @@ final readonly class TxnReader
                     $this->replicaReadPolicy,
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
+                    priority: $this->priority,
                 );
                 $excludedStore = null;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);

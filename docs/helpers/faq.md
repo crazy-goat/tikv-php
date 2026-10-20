@@ -1793,3 +1793,30 @@ element of a PHPDoc-typed `int[]` is reported as
 assertion "always evaluates to true". Assert the element type through a
 `mixed`-typed helper (`@param mixed[] $ttls`), the pattern the repo already
 uses in `RawKvBatchDeadlineTest::timeoutMs()`.
+
+## A proto3 default is not serialized — an explicit `CommandPri::Normal` is wire-neutral
+
+`kvrpcpb.Context.priority` is a proto3 enum field, so the value `0`
+(`CommandPri::Normal`) is **omitted** from the serialized message: a context
+built with `setPriority(0)` produces byte-identical wire bytes to one where
+the setter was never called (verified against the generated PHP protobuf
+runtime). That is why `RegionContextFactory` sets the priority
+unconditionally — a request that never had a priority (every RawKV request)
+keeps its original bytes, and no request accidentally acquires a non-default
+value.
+
+The corollary is the trap: a `Context` is built in **two** places inside
+`RegionContextFactory` — the public `fromRegionInfo()` and the private
+`buildContext()` that `resolveTarget()` uses for the replica-read targets —
+so a new request path that builds its context by hand, or that forgets the
+`priority:` argument, silently drops the transaction's priority again. The
+transaction's *read* path was missing for a long time: the write path has
+carried the priority since #441, the read path only since #336 (issue
+#336). Pinned by `TransactionTest::testPriorityIsCarriedOnEveryRequestContext()`
+(the `KvGet`, `KvPrewrite` and `KvCommit` contexts),
+`::testPriorityIsCarriedOnEveryReadRequestContext()` (the `KvBatchGet` and
+`KvScan` contexts — the read path has three independent context-building
+call sites, and pinning only one of them would leave the other two free to
+drop the priority again) and
+`::testDefaultPriorityIsNotSerializedOnTheWire()` (a transaction without a
+priority produces byte-identical requests).

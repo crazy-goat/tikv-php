@@ -4,11 +4,20 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Kvrpcpb\CommandPri;
+use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
+use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
+use CrazyGoat\Proto\Kvrpcpb\GetRequest;
+use CrazyGoat\Proto\Kvrpcpb\GetResponse;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
+use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
@@ -16,6 +25,8 @@ use PHPUnit\Framework\TestCase;
 
 class TxnKvClientTest extends TestCase
 {
+    use MockGrpcCallAsyncShim;
+
     public function testCreateThrowsOnEmptyPdEndpoints(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -279,17 +290,89 @@ class TxnKvClientTest extends TestCase
     // begin() — priority propagation
     // ========================================================================
 
-    public function testBeginWithPriorityPropagatesToTransaction(): void
+    public function testBeginWithPriorityReachesTheRpcContext(): void
     {
+        // The priority option must reach the wire, not only the transaction
+        // object: the previous version of this test (then named
+        // testBeginWithPriorityPropagatesToTransaction) asserted
+        // $txn->getPriority() alone — a constructor round-trip that stayed
+        // green while the value never left the client (issue #336).
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(4000);
         $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->method('getRegion')->willReturn($this->testRegion());
+        $pdClient->method('getStore')->willReturn($this->testStore());
+
+        $capturedRequests = [];
         $grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($grpc);
+        $grpc->method('call')->willReturnCallback(
+            function (string $addr, string $service, string $method, mixed $request) use (&$capturedRequests): object {
+                if (in_array($method, ['KvGet', 'KvPrewrite', 'KvCommit'], true)) {
+                    $capturedRequests[$method] = $request;
+                }
+
+                return match ($method) {
+                    'KvGet' => new GetResponse(),
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $client = new TxnKvClient($pdClient, $grpc);
-        $txn = $client->begin(['priority' => 5]);
+        $txn = $client->begin(['pessimistic' => false, 'priority' => CommandPri::High]);
+        $txn->get('k1');
+        $txn->set('k1', 'v1');
+        $txn->commit();
 
-        $this->assertSame(5, $txn->getPriority());
+        $this->assertSame(CommandPri::High, $txn->getPriority());
+
+        $capturedMethods = array_keys($capturedRequests);
+        sort($capturedMethods);
+        $this->assertSame(['KvCommit', 'KvGet', 'KvPrewrite'], $capturedMethods);
+
+        $getRequest = $capturedRequests['KvGet'];
+        $this->assertInstanceOf(GetRequest::class, $getRequest);
+        $getContext = $getRequest->getContext();
+        $this->assertNotNull($getContext);
+        $this->assertSame(CommandPri::High, $getContext->getPriority(), 'priority missing on KvGet');
+
+        $prewriteRequest = $capturedRequests['KvPrewrite'];
+        $this->assertInstanceOf(PrewriteRequest::class, $prewriteRequest);
+        $prewriteContext = $prewriteRequest->getContext();
+        $this->assertNotNull($prewriteContext);
+        $this->assertSame(CommandPri::High, $prewriteContext->getPriority(), 'priority missing on KvPrewrite');
+
+        $commitRequest = $capturedRequests['KvCommit'];
+        $this->assertInstanceOf(CommitRequest::class, $commitRequest);
+        $commitContext = $commitRequest->getContext();
+        $this->assertNotNull($commitContext);
+        $this->assertSame(CommandPri::High, $commitContext->getPriority(), 'priority missing on KvCommit');
+    }
+
+    private function testRegion(): RegionInfo
+    {
+        return new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: '',
+            peers: [],
+        );
+    }
+
+    private function testStore(): Store
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+
+        return $store;
     }
 
     public function testBeginWithoutPriorityDefaultsToZero(): void

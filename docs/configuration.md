@@ -12,10 +12,11 @@ Complete guide to configuring the TiKV PHP Client for development and production
 6. [Replica Reads](#replica-reads)
 7. [Batch Commands Multiplexing (Experimental)](#batch-commands-multiplexing-experimental)
 8. [Fast Commit Modes (TxnKV)](#fast-commit-modes-txnkv)
-9. [Retry and Backoff](#retry-and-backoff)
-10. [Caching](#caching)
-11. [Timeouts](#timeouts)
-12. [Production Configuration](#production-configuration)
+9. [Transaction Priority (TxnKV)](#transaction-priority-txnkv)
+10. [Retry and Backoff](#retry-and-backoff)
+11. [Caching](#caching)
+12. [Timeouts](#timeouts)
+13. [Production Configuration](#production-configuration)
 
 ## Basic Configuration
 
@@ -771,6 +772,41 @@ sleeps, not the time the lock RPCs themselves take. Lower the value to keep a
 PHP worker slot free; raise it to let TiKV park the request instead of
 answering early and having the client send it again.
 
+## Transaction Priority (TxnKV)
+
+`TxnKvClient::begin()` accepts a `priority` option. It maps onto TiKV's
+`kvrpcpb.CommandPri` enum and is carried on the `Context` of every read and
+write request the transaction sends — its reads (`get`, `batchGet`, `scan`)
+and its prewrite, pessimistic-lock, commit, heartbeat and rollback RPCs — so
+TiKV's scheduler can separate the transaction from other traffic. The
+lock-resolution RPCs (`KvCheckTxnStatus`, `KvCheckSecondaryLocks`,
+`KvResolveLock`) are always sent with the Normal priority: they resolve
+locks of *other* transactions, not work of this one.
+
+```php
+$txn = $client->begin([
+    'priority' => 2, // 0 = Normal (default), 1 = Low, 2 = High
+]);
+```
+
+| Value | `CommandPri` | Effect                                                       |
+|-------|--------------|--------------------------------------------------------------|
+| `0`   | `Normal`     | Default. The proto3 default, so the field is not sent at all. |
+| `1`   | `Low`        | The requests are scheduled with a low priority.               |
+| `2`   | `High`       | The requests are scheduled with a high priority.              |
+
+The priority reaches the **read** requests (`KvGet`, `KvBatchGet`,
+`KvScan`) as well as the **write** requests (pessimistic lock, prewrite,
+commit, transaction heartbeat and rollback). A transaction without the
+option sends exactly the same bytes as before — `Normal` is the proto3
+default and is not serialized.
+
+Typical use: a batch job that must not compete with the online traffic
+begins its transactions with `'priority' => 1`, while the latency-sensitive
+path uses the default or `'priority' => 2`.
+
+The value is forwarded to TiKV unchanged — it is not validated, so use one
+of the three values above.
 ## Retry and Backoff
 
 ### Automatic Retry

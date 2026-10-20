@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Region;
 
 use Closure;
+use CrazyGoat\Proto\Kvrpcpb\CommandPri;
 use CrazyGoat\Proto\Kvrpcpb\Context;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
@@ -46,6 +47,10 @@ final class RegionContextFactory
      * @param int|null $excludedStoreId store id to exclude from replica
      *     selection — set to a store that previously answered DataIsNotReady
      *     so the next attempt falls back to another replica or the leader
+     * @param int $priority Kvrpcpb CommandPri carried on the Context
+     *     (issue #336). Normal (0) is the proto3 default and is therefore
+     *     not serialized — a request that never had a priority keeps its
+     *     original wire bytes.
      */
     public static function resolveTarget(
         RegionInfo $region,
@@ -53,10 +58,11 @@ final class RegionContextFactory
         Closure $storeLookup,
         ?int $excludedStoreId = null,
         ?CodecInterface $codec = null,
+        int $priority = CommandPri::Normal,
     ): ReplicaReadTarget {
         $leader = self::leaderPeer($region);
         $leaderTarget = new ReplicaReadTarget(
-            self::buildContext($region, $leader, false, $policy->staleRead, $codec),
+            self::buildContext($region, $leader, false, $policy->staleRead, $codec, $priority),
             $region->leaderStoreId,
         );
 
@@ -94,13 +100,24 @@ final class RegionContextFactory
         $peerInfo = $candidates[random_int(0, count($candidates) - 1)];
 
         return new ReplicaReadTarget(
-            self::buildContext($region, self::peerFromInfo($peerInfo), true, $policy->staleRead, $codec),
+            self::buildContext($region, self::peerFromInfo($peerInfo), true, $policy->staleRead, $codec, $priority),
             $peerInfo->storeId,
         );
     }
 
-    public static function fromRegionInfo(RegionInfo $region, ?CodecInterface $codec = null): Context
-    {
+    /**
+     * Build the Context of a request addressed to the region's leader.
+     *
+     * @param int $priority Kvrpcpb CommandPri carried on the Context
+     *     (issue #336). Normal (0) is the proto3 default and is not
+     *     serialized, so a request without a priority keeps its original
+     *     wire bytes.
+     */
+    public static function fromRegionInfo(
+        RegionInfo $region,
+        ?CodecInterface $codec = null,
+        int $priority = CommandPri::Normal,
+    ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
         $epoch->setVersion($region->epochVersion);
@@ -113,6 +130,7 @@ final class RegionContextFactory
         $ctx->setRegionId($region->regionId);
         $ctx->setRegionEpoch($epoch);
         $ctx->setPeer($peer);
+        $ctx->setPriority($priority);
         self::applyCodec($ctx, $codec);
 
         return $ctx;
@@ -124,6 +142,7 @@ final class RegionContextFactory
         bool $replicaRead,
         bool $staleRead,
         ?CodecInterface $codec = null,
+        int $priority = CommandPri::Normal,
     ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
@@ -135,6 +154,7 @@ final class RegionContextFactory
         $ctx->setPeer($peer);
         $ctx->setReplicaRead($replicaRead);
         $ctx->setStaleRead($staleRead);
+        $ctx->setPriority($priority);
         self::applyCodec($ctx, $codec);
 
         return $ctx;

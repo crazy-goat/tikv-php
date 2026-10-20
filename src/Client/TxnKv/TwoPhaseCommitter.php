@@ -202,10 +202,7 @@ final readonly class TwoPhaseCommitter
      */
     private function buildContext(RegionInfo $region): Context
     {
-        $context = RegionContextFactory::fromRegionInfo($region);
-        $context->setPriority($this->priority);
-
-        return $context;
+        return RegionContextFactory::fromRegionInfo($region, priority: $this->priority);
     }
 
     private function nowMs(): int

@@ -144,6 +144,7 @@ final class Transaction
             logger: $this->logger,
             retryExecutor: $this->retryExecutor(),
             classifier: $this->classifyError(...),
+            priority: $this->priority,
         );
 
         $this->committer = new TwoPhaseCommitter(

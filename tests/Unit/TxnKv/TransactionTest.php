@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\CommandPri;
+use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
+use CrazyGoat\Proto\Kvrpcpb\Context;
 use CrazyGoat\Proto\Kvrpcpb\Deadlock;
+use CrazyGoat\Proto\Kvrpcpb\GetRequest;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
@@ -19,6 +23,8 @@ use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
+use CrazyGoat\Proto\Metapb\Peer;
+use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -3656,6 +3662,233 @@ class TransactionTest extends TestCase
         $this->assertNotNull($commitContext);
         $this->assertSame(2, $prewriteContext->getPriority());
         $this->assertSame(2, $commitContext->getPriority());
+    }
+
+    public function testPriorityIsCarriedOnEveryRequestContext(): void
+    {
+        // The transaction's priority must reach the Context of EVERY request
+        // the transaction sends — the read (KvGet) as well as the writes
+        // (KvPrewrite, KvCommit). Before issue #336 only the write path
+        // carried it: the read path built its Context through
+        // RegionContextFactory::resolveTarget(), which never set the
+        // priority, so a transaction begun with 'priority' => High still
+        // had its reads scheduled as Normal inside TiKV.
+        $this->stubRegionAndStore();
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequests,
+            ): object {
+                if (in_array($method, ['KvGet', 'KvPrewrite', 'KvCommit'], true)) {
+                    $capturedRequests[$method] = $request;
+                }
+                return match ($method) {
+                    'KvGet' => new GetResponse(),
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false, 'priority' => CommandPri::High]);
+        $txn->get('k1');
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $capturedMethods = array_keys($capturedRequests);
+        sort($capturedMethods);
+        $this->assertSame(['KvCommit', 'KvGet', 'KvPrewrite'], $capturedMethods);
+
+        $getRequest = $capturedRequests['KvGet'];
+        $this->assertInstanceOf(GetRequest::class, $getRequest);
+        $getContext = $getRequest->getContext();
+        $this->assertNotNull($getContext);
+        $this->assertSame(CommandPri::High, $getContext->getPriority(), 'priority missing on KvGet');
+
+        $prewriteRequest = $capturedRequests['KvPrewrite'];
+        $this->assertInstanceOf(PrewriteRequest::class, $prewriteRequest);
+        $prewriteContext = $prewriteRequest->getContext();
+        $this->assertNotNull($prewriteContext);
+        $this->assertSame(CommandPri::High, $prewriteContext->getPriority(), 'priority missing on KvPrewrite');
+
+        $commitRequest = $capturedRequests['KvCommit'];
+        $this->assertInstanceOf(CommitRequest::class, $commitRequest);
+        $commitContext = $commitRequest->getContext();
+        $this->assertNotNull($commitContext);
+        $this->assertSame(CommandPri::High, $commitContext->getPriority(), 'priority missing on KvCommit');
+    }
+
+    public function testPriorityIsCarriedOnEveryReadRequestContext(): void
+    {
+        // The read path has three independent context-building call sites —
+        // KvGet, KvBatchGet and KvScan. Pinning only one of them would leave
+        // the other two free to drop the priority again (issue #336).
+        $this->stubRegionAndStore();
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequests,
+            ): object {
+                if (in_array($method, ['KvBatchGet', 'KvScan'], true)) {
+                    $capturedRequests[$method] = $request;
+                }
+                return match ($method) {
+                    'KvBatchGet' => new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse(),
+                    'KvScan' => new ScanResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false, 'priority' => CommandPri::High]);
+        $txn->batchGet(['k1', 'k2']);
+        $txn->scan('a', 'b', 10);
+
+        $capturedMethods = array_keys($capturedRequests);
+        sort($capturedMethods);
+        $this->assertSame(['KvBatchGet', 'KvScan'], $capturedMethods);
+
+        $batchGetRequest = $capturedRequests['KvBatchGet'];
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchGetRequest::class, $batchGetRequest);
+        $batchGetContext = $batchGetRequest->getContext();
+        $this->assertNotNull($batchGetContext);
+        $this->assertSame(CommandPri::High, $batchGetContext->getPriority(), 'priority missing on KvBatchGet');
+
+        $scanRequest = $capturedRequests['KvScan'];
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\ScanRequest::class, $scanRequest);
+        $scanContext = $scanRequest->getContext();
+        $this->assertNotNull($scanContext);
+        $this->assertSame(CommandPri::High, $scanContext->getPriority(), 'priority missing on KvScan');
+    }
+
+    public function testDefaultPriorityIsNormalOnEveryRequestContext(): void
+    {
+        // A transaction without a priority option must not put a
+        // non-default value on the wire: CommandPri::Normal (0) is the
+        // proto3 default, so the requests are byte-identical to the ones
+        // sent before the priority was wired in (issue #336).
+        $this->stubRegionAndStore();
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequests,
+            ): object {
+                if (in_array($method, ['KvGet', 'KvPrewrite', 'KvCommit'], true)) {
+                    $capturedRequests[$method] = $request;
+                }
+                return match ($method) {
+                    'KvGet' => new GetResponse(),
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->get('k1');
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $getRequest = $capturedRequests['KvGet'];
+        $this->assertInstanceOf(GetRequest::class, $getRequest);
+        $getContext = $getRequest->getContext();
+        $this->assertNotNull($getContext);
+        $this->assertSame(CommandPri::Normal, $getContext->getPriority());
+
+        $prewriteRequest = $capturedRequests['KvPrewrite'];
+        $this->assertInstanceOf(PrewriteRequest::class, $prewriteRequest);
+        $prewriteContext = $prewriteRequest->getContext();
+        $this->assertNotNull($prewriteContext);
+        $this->assertSame(CommandPri::Normal, $prewriteContext->getPriority());
+
+        $commitRequest = $capturedRequests['KvCommit'];
+        $this->assertInstanceOf(CommitRequest::class, $commitRequest);
+        $commitContext = $commitRequest->getContext();
+        $this->assertNotNull($commitContext);
+        $this->assertSame(CommandPri::Normal, $commitContext->getPriority());
+    }
+
+    public function testDefaultPriorityIsNotSerializedOnTheWire(): void
+    {
+        // CommandPri::Normal (0) is the proto3 default, so a Context built
+        // without a priority must not carry the field at all — the request
+        // bytes stay exactly what they were before issue #336. The reference
+        // Context is built by hand (not through RegionContextFactory), so the
+        // expectation is not derived from the code under test.
+        $this->stubRegionAndStore();
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvGet') {
+                    $capturedRequest = $request;
+                }
+                return match ($method) {
+                    'KvGet' => new GetResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->get('k1');
+
+        $this->assertInstanceOf(GetRequest::class, $capturedRequest);
+        $context = $capturedRequest->getContext();
+        $this->assertNotNull($context);
+
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+        $peer = new Peer();
+        $peer->setId(1);
+        $peer->setStoreId(1);
+        $reference = new Context();
+        $reference->setRegionId(1);
+        $reference->setRegionEpoch($epoch);
+        $reference->setPeer($peer);
+
+        $this->assertSame($reference->serializeToString(), $context->serializeToString());
+    }
+
+    /**
+     * Stub the region, the store and the TSO, so a transaction reaches the
+     * gRPC layer with a resolvable region.
+     */
+    private function stubRegionAndStore(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
     }
 
     public function testPriorityIsCarriedOnPessimisticLockContext(): void
