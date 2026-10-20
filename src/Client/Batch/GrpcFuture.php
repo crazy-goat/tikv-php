@@ -13,8 +13,19 @@ use Grpc\Call;
 final class GrpcFuture
 {
     private bool $completed = false;
+    private bool $settled = false;
     private ?Message $result = null;
-    private ?GrpcException $error = null;
+
+    /**
+     * The failure the call ended with, if any.
+     *
+     * Not only a {@see GrpcException}: a status that cannot be read and a
+     * response that cannot be deserialized raise one, but a receive batch
+     * that fails and a waiter that throws may raise anything at all. The
+     * original throwable is kept and rethrown unchanged, so a caller sees
+     * the same failure on every `wait()` of the same future.
+     */
+    private ?\Throwable $error = null;
 
     /**
      * @param class-string<Message> $responseClass
@@ -26,6 +37,17 @@ final class GrpcFuture
      * @param (\Closure(): void)|null $canceller Optional callback invoked
      *                                             when a waiter-backed future
      *                                             is cancelled.
+     * @param (\Closure(bool): void)|null $onSettled Invoked exactly once when the
+     *                                               call settles — the response
+     *                                               was read, the call failed, the
+     *                                               response could not be read, or
+     *                                               the future was cancelled. The
+     *                                               argument tells the caller
+     *                                               whether the call succeeded.
+     *                                               The channel cache uses the
+     *                                               hook to release the in-flight
+     *                                               slot of the channel the call
+     *                                               ran on (issue #278).
      */
     public function __construct(
         private readonly ?Call $call,
@@ -33,6 +55,7 @@ final class GrpcFuture
         private readonly string $responseClass,
         private readonly ?\Closure $waiter = null,
         private readonly ?\Closure $canceller = null,
+        private readonly ?\Closure $onSettled = null,
     ) {
     }
 
@@ -63,13 +86,27 @@ final class GrpcFuture
         return new self(null, Message::class, $waiter, $canceller);
     }
 
+    /**
+     * Wait for the response of the call and return it.
+     *
+     * Every exit path of this method settles the future exactly once: the
+     * response was read, the gRPC status was not OK, the status could not be
+     * read, the response could not be deserialized, the receive batch failed
+     * or the waiter threw. A path that did not settle would keep the
+     * channel's in-flight slot busy forever, and the channel could then
+     * never be evicted (issue #278).
+     *
+     * @throws GrpcException When the call failed or its response could not be read
+     * @throws \Throwable     The failure of the underlying call or of the waiter,
+     *                        rethrown unchanged
+     */
     public function wait(): Message
     {
         if ($this->completed) {
-            if ($this->error instanceof \CrazyGoat\TiKV\Client\Exception\GrpcException) {
+            if ($this->error instanceof \Throwable) {
                 throw $this->error;
             }
-            if (!$this->result instanceof \Google\Protobuf\Internal\Message) {
+            if (!$this->result instanceof Message) {
                 throw new GrpcException('Unexpected null result', GrpcStatusCode::Internal->value);
             }
             return $this->result;
@@ -77,41 +114,65 @@ final class GrpcFuture
 
         if ($this->waiter instanceof \Closure) {
             try {
-                $this->result = ($this->waiter)();
-            } catch (GrpcException $e) {
-                $this->error = $e;
-                $this->completed = true;
+                $result = ($this->waiter)();
+            } catch (\Throwable $e) {
+                // The waiter failed — with a gRPC error or with anything
+                // else: the call is over, so the in-flight slot of its
+                // channel has to be released (#278).
+                $this->fail($e);
                 throw $e;
             }
+            $this->result = $result;
             $this->completed = true;
+            $this->settle(true);
 
-            return $this->result;
+            return $result;
         }
 
         $call = $this->call;
         if (!$call instanceof \Grpc\Call) {
             // Unreachable: the constructor guarantees a Call or a waiter.
-            throw new GrpcException('GrpcFuture has no call and no waiter', GrpcStatusCode::Internal->value);
+            $error = new GrpcException('GrpcFuture has no call and no waiter', GrpcStatusCode::Internal->value);
+            $this->fail($error);
+
+            throw $error;
         }
 
-        $event = $call->startBatch([
-            \Grpc\OP_RECV_INITIAL_METADATA => true,
-            \Grpc\OP_RECV_MESSAGE => true,
-            \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
-        ]);
-
-        $status = GrpcResponseParser::extractStatus($event);
-
-        if ($status['code'] !== \Grpc\STATUS_OK) {
-            $this->error = new GrpcException($status['details'], $status['code']);
-            $this->completed = true;
-            throw $this->error;
+        try {
+            $event = $call->startBatch([
+                \Grpc\OP_RECV_INITIAL_METADATA => true,
+                \Grpc\OP_RECV_MESSAGE => true,
+                \Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+            ]);
+        } catch (\Throwable $e) {
+            // The receive batch failed (a closed channel, for instance):
+            // the call is over, so the in-flight slot of its channel has
+            // to be released even though no response will ever arrive.
+            $this->fail($e);
+            throw $e;
         }
 
-        $this->result = GrpcResponseParser::deserialize($event, $this->responseClass);
+        try {
+            $status = GrpcResponseParser::extractStatus($event);
+
+            if ($status['code'] !== \Grpc\STATUS_OK) {
+                throw new GrpcException($status['details'], $status['code']);
+            }
+
+            $result = GrpcResponseParser::deserialize($event, $this->responseClass);
+        } catch (\Throwable $e) {
+            // The status could not be read, or the response could not be
+            // deserialized: the call is over either way, so the in-flight
+            // slot of its channel has to be released (#278).
+            $this->fail($e);
+            throw $e;
+        }
+
+        $this->result = $result;
         $this->completed = true;
+        $this->settle(true);
 
-        return $this->result;
+        return $result;
     }
 
     public function cancel(): void
@@ -133,12 +194,60 @@ final class GrpcFuture
         // Swallow any throwable from the underlying call: cancel() must
         // never propagate, especially from __destruct() during shutdown.
         $call = $this->call;
-        if (!$call instanceof \Grpc\Call) {
+        if ($call instanceof \Grpc\Call) {
+            try {
+                $call->cancel();
+            } catch (\Throwable) {
+            }
+        }
+
+        $this->settle(false);
+    }
+
+    /**
+     * Record a failed call and release the channel's in-flight slot.
+     *
+     * Every failure path of {@see self::wait()} ends here: the future is
+     * completed (its outcome is known), the failure is remembered (a second
+     * `wait()` rethrows it) and the settlement hook fires exactly once
+     * (issue #278).
+     */
+    private function fail(\Throwable $error): void
+    {
+        $this->error = $error;
+        $this->completed = true;
+        $this->settle(false);
+    }
+
+    /**
+     * Fire the settlement hook exactly once.
+     *
+     * A future can reach the settled state twice — a `wait()` that failed
+     * followed by a `cancel()`, or a `cancel()` followed by a `wait()` — and
+     * the hook must not run twice: the channel cache counts it as the
+     * release of one in-flight call, and a double release would free a
+     * slot that another call still occupies (issue #278).
+     *
+     * @param bool $success Whether the call completed successfully
+     */
+    private function settle(bool $success): void
+    {
+        if ($this->settled) {
             return;
         }
+
+        $this->settled = true;
+
+        $onSettled = $this->onSettled;
+        if (!$onSettled instanceof \Closure) {
+            return;
+        }
+
         try {
-            $call->cancel();
+            $onSettled($success);
         } catch (\Throwable) {
+            // The hook is bookkeeping: it must never change the outcome
+            // of the call it observes.
         }
     }
 

@@ -1820,3 +1820,48 @@ call sites, and pinning only one of them would leave the other two free to
 drop the priority again) and
 `::testDefaultPriorityIsNotSerializedOnTheWire()` (a transaction without a
 priority produces byte-identical requests).
+
+## A cached gRPC channel must never be closed while calls run on it — `maxChannels` is a soft cap (#278)
+
+`Grpc\Channel::close()` destroys the underlying channel, not just the PHP-side
+reference: every call still running on it dies with it. `GrpcClient`'s LRU
+eviction used to close the least recently used channel whenever the cache was
+at capacity, with no idea whether calls were still running on it — so a batch
+that fanned out over more stores than `maxChannels` (default 64) holds closed
+the channel of a store whose sub-request was still in flight, and the wait
+phase then read the response against a destroyed channel. Rule (issue #278,
+GRPC-19): every cache entry counts the calls dispatched on its channel, and
+the LRU eviction, the idle eviction and `closeChannel()` skip busy channels.
+`closeChannel()` (which `RetryExecutor` calls to force a reconnect) removes the
+entry from the cache right away — the next call gets a fresh channel — but
+defers the actual `close()` until the last in-flight call settles.
+`maxChannels` is therefore a **soft** cap: when every cached channel is busy
+the cache grows past it, and the overshoot is logged at warning level.
+
+Two implementation traps:
+
+- The in-flight counter is released by a settlement hook, and a future can
+  settle twice (a failed `wait()` followed by a `cancel()`, or a `cancel()`
+  followed by a `wait()`). `GrpcFuture` therefore fires its `onSettled` hook
+  exactly once and the counter is clamped at zero — a double release would
+  free a slot another call still occupies.
+- The hook has to fire on **every** exit path of `wait()`, not only on the
+  happy one. A path that does not settle keeps the channel busy for as long
+  as the failed future is alive — the channel can then never be evicted, and
+  the cache overshoots the soft cap on every new address. The paths that
+  matter are the ones that fail *after* the response arrived: a status that
+  cannot be read, a response that cannot be deserialized, a receive batch
+  that throws, and a waiter that throws something that is not a
+  `GrpcException`. Every one of them ends in the same `fail()` helper, which
+  records the failure, completes the future and settles it.
+- A busy channel that leaves the cache must be remembered somewhere, or it
+  leaks (it is never closed). `GrpcClient` keeps those in a separate
+  `$pendingCloses` list and compares the channels **by identity**, not by
+  `spl_object_id()`: an object id is reused once the channel it belonged to is
+  gone, and a late settle must not release a slot of a different channel.
+
+Caveat: the protection only covers calls issued through
+`GrpcClient::callAsync()`. `RawKvBatch`'s V1 path still builds
+`\Grpc\Call` itself on a raw `getChannel()` handle, so its calls are not
+counted — that path is routed through `callAsync()` by GRPC-14 (#273), which
+is still open.

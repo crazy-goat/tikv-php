@@ -20,8 +20,26 @@ use Psr\Log\NullLogger;
 
 final class GrpcClient implements GrpcClientInterface
 {
-    /** @var array<string, array{channel: Channel, lastUsed: float, createdAt: float}> */
+    /**
+     * Cached channels, keyed by address.
+     *
+     * `inFlight` counts the calls that were dispatched on the channel but
+     * have not settled yet. A channel with in-flight calls is never
+     * destroyed: closing it would kill the running calls (issue #278).
+     *
+     * @var array<string, array{channel: Channel, lastUsed: float, createdAt: float, inFlight: int}>
+     */
     private array $channels = [];
+
+    /**
+     * Channels that left the cache while calls were still running on them.
+     *
+     * Their close is deferred until the last in-flight call settles, so an
+     * eviction never destroys a running call (issue #278).
+     *
+     * @var array<int, array{address: string, channel: Channel, inFlight: int}>
+     */
+    private array $pendingCloses = [];
 
     private bool $closed = false;
 
@@ -57,6 +75,16 @@ final class GrpcClient implements GrpcClientInterface
      *                            an InvalidStateException is thrown if no TLS credentials
      *                            are available. Set this to false to ensure all connections
      *                            use TLS.
+     * @param int $maxChannels Soft cap on the number of cached channels (default 64).
+     *                         The cache may exceed it while every cached channel
+     *                         has in-flight calls: a channel with live calls is never
+     *                         closed, because closing it would destroy those calls
+     *                         (issue #278). Exceeding the cap is logged at warning
+     *                         level — raise the cap when the log shows up, it means
+     *                         the workload touches more stores than the cap allows.
+     *                         The cap is a constructor argument, so only a directly
+     *                         built client can raise it: a client built by
+     *                         `RawKvClient::create()` uses the default of 64.
      * @param int $maxReceiveMessageBytes grpc.max_receive_message_length channel argument
      *                                    in bytes (default 64 MB). The gRPC C core default
      *                                    is 4 MB, which scans/batch reads at MAX_SCAN_LIMIT
@@ -287,7 +315,19 @@ final class GrpcClient implements GrpcClientInterface
             \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
         ]);
 
-        return new GrpcFuture($call, $responseClass);
+        // The call is live on the channel from here on. Count it as
+        // in-flight so that no eviction can close the channel under it
+        // (issue #278); the counter is released when the future settles
+        // — successfully, with an error, or on cancellation.
+        $this->markInFlight($address, $channel);
+
+        return new GrpcFuture(
+            $call,
+            $responseClass,
+            onSettled: function (bool $success) use ($channel): void {
+                $this->releaseInFlight($channel);
+            },
+        );
     }
 
     public function __destruct()
@@ -301,29 +341,51 @@ final class GrpcClient implements GrpcClientInterface
 
         while ($this->channels !== []) {
             $address = array_key_first($this->channels);
-            $this->closeChannelEntry($address);
+            $channel = $this->channels[$address]['channel'];
             unset($this->channels[$address]);
+            $this->closeChannelObject($address, $channel);
         }
+
+        // Channels that left the cache while calls were still running on
+        // them: the client is shutting down, so they are closed now
+        // instead of waiting for their last call to settle.
+        foreach ($this->pendingCloses as $entry) {
+            $this->closeChannelObject($entry['address'], $entry['channel']);
+        }
+        $this->pendingCloses = [];
     }
 
+    /**
+     * Close the channel cached for an address.
+     *
+     * A channel that still has in-flight calls is not closed (issue #278):
+     * it leaves the cache — so the next call for that address gets a
+     * fresh channel — and the close is deferred until its last in-flight
+     * call settles. `RetryExecutor` calls this to force a reconnect; the
+     * reconnect happens immediately, the destruction of the old channel
+     * waits for the calls that are still running on it.
+     */
     public function closeChannel(string $address): void
     {
         if ($this->closed) {
             return;
         }
 
-        if (isset($this->channels[$address])) {
-            $this->logger->debug('Channel closed', ['address' => $address]);
-            try {
-                $this->channels[$address]['channel']->close();
-            } catch (\Throwable $e) {
-                $this->logger->error('Failed to close gRPC channel', [
-                    'address' => $address,
-                    'exception' => $e,
-                ]);
-            }
-            unset($this->channels[$address]);
+        if (!isset($this->channels[$address])) {
+            return;
         }
+
+        $entry = $this->channels[$address];
+        unset($this->channels[$address]);
+
+        if ($entry['inFlight'] > 0) {
+            $this->deferChannelClose($address, $entry);
+
+            return;
+        }
+
+        $this->logger->debug('Channel closed', ['address' => $address]);
+        $this->closeChannelObject($address, $entry['channel']);
     }
 
     public function getChannel(string $address): Channel
@@ -344,8 +406,8 @@ final class GrpcClient implements GrpcClientInterface
                     'address' => $address,
                     'exception' => $e,
                 ]);
-                $this->closeChannelEntry($address);
-                unset($this->channels[$address]);
+                $this->evictChannel($address);
+
                 return $this->createChannel($address, $now);
             }
 
@@ -360,8 +422,7 @@ final class GrpcClient implements GrpcClientInterface
                     'address' => $address,
                     'state' => $state,
                 ]);
-                $this->closeChannelEntry($address);
-                unset($this->channels[$address]);
+                $this->evictChannel($address);
             } else {
                 // Update last-used timestamp
                 $this->channels[$address]['lastUsed'] = $now;
@@ -388,60 +449,181 @@ final class GrpcClient implements GrpcClientInterface
 
     /**
      * Evict channels that have been idle longer than the configured TTL.
+     *
+     * A channel with in-flight calls is never evicted: its idle time says
+     * nothing about the calls that are still running on it, and closing it
+     * would destroy them (issue #278).
      */
     private function evictIdleChannels(float $now): void
     {
         $idleThreshold = $now - ($this->idleTtlMs / 1000);
 
         foreach ($this->channels as $address => $entry) {
+            if ($entry['inFlight'] > 0) {
+                continue;
+            }
+
             if ($entry['lastUsed'] < $idleThreshold) {
                 $this->logger->debug('Evicting idle channel', [
                     'address' => $address,
                     'idleSeconds' => round($now - $entry['lastUsed'], 1),
                 ]);
-                $this->closeChannelEntry($address);
-                unset($this->channels[$address]);
+                $this->evictChannel($address);
             }
         }
     }
 
     /**
      * If the channel cache is at capacity, evict the least recently used channel.
+     *
+     * `maxChannels` is a soft cap: a channel with in-flight calls is never
+     * evicted, so when every cached channel is busy the cache is allowed to
+     * grow past the cap instead of destroying running calls (issue #278).
+     * The overshoot is logged at warning level, because it means the
+     * workload touches more stores than the cap allows.
      */
     private function enforceMaxChannels(): void
     {
         if (count($this->channels) < $this->maxChannels) {
             return;
         }
-        // Find the least recently used channel.
-        // Guaranteed to find one since count($this->channels) >= maxChannels >= 1.
-        $lruAddress = array_key_first($this->channels);
-        $lruTime = $this->channels[$lruAddress]['lastUsed'];
+
+        // Find the least recently used channel that has no live calls.
+        $lruAddress = null;
+        $lruTime = PHP_FLOAT_MAX;
         foreach ($this->channels as $address => $entry) {
+            if ($entry['inFlight'] > 0) {
+                continue;
+            }
             if ($entry['lastUsed'] < $lruTime) {
                 $lruTime = $entry['lastUsed'];
                 $lruAddress = $address;
             }
         }
+
+        if ($lruAddress === null) {
+            $this->logger->warning('Channel cache at capacity but all channels are busy; exceeding soft cap', [
+                'maxChannels' => $this->maxChannels,
+                // The size of the cache, not the number of busy channels:
+                // every cached channel is busy in this branch.
+                'cachedChannels' => count($this->channels),
+            ]);
+
+            return;
+        }
+
         $this->logger->debug('Evicting LRU channel to enforce max channels', [
             'address' => $lruAddress,
             'maxChannels' => $this->maxChannels,
         ]);
-        $this->closeChannelEntry($lruAddress);
-        unset($this->channels[$lruAddress]);
+        $this->evictChannel($lruAddress);
     }
 
     /**
-     * Close a channel entry by address, catching and logging any exceptions.
+     * Remove a channel from the cache and close it.
+     *
+     * A channel that still has in-flight calls is not closed (issue #278):
+     * it leaves the cache and its close is deferred until the last
+     * in-flight call settles.
      */
-    private function closeChannelEntry(string $address): void
+    private function evictChannel(string $address): void
     {
         if (!isset($this->channels[$address])) {
             return;
         }
 
+        $entry = $this->channels[$address];
+        unset($this->channels[$address]);
+
+        if ($entry['inFlight'] > 0) {
+            $this->deferChannelClose($address, $entry);
+
+            return;
+        }
+
+        $this->closeChannelObject($address, $entry['channel']);
+    }
+
+    /**
+     * Move a busy channel out of the cache and remember to close it later.
+     *
+     * @param array{channel: Channel, lastUsed: float, createdAt: float, inFlight: int} $entry
+     */
+    private function deferChannelClose(string $address, array $entry): void
+    {
+        $this->pendingCloses[spl_object_id($entry['channel'])] = [
+            'address' => $address,
+            'channel' => $entry['channel'],
+            'inFlight' => $entry['inFlight'],
+        ];
+
+        $this->logger->debug('Channel close deferred until in-flight calls settle', [
+            'address' => $address,
+            'inFlight' => $entry['inFlight'],
+        ]);
+    }
+
+    /**
+     * Count a call that was just dispatched on a channel.
+     */
+    private function markInFlight(string $address, Channel $channel): void
+    {
+        if (!isset($this->channels[$address]) || $this->channels[$address]['channel'] !== $channel) {
+            // The cached channel was replaced between the lookup and the
+            // dispatch: there is no entry left to count the call on.
+            return;
+        }
+
+        $this->channels[$address]['inFlight']++;
+    }
+
+    /**
+     * Release the in-flight slot of a channel whose call just settled.
+     *
+     * The counter never drops below zero: a double settle — a failed
+     * `wait()` followed by a `cancel()`, for instance — must not make a
+     * busy channel look idle and evictable (issue #278).
+     */
+    private function releaseInFlight(Channel $channel): void
+    {
+        // The channels are compared by identity, not by their object id:
+        // an id is reused once the channel it belonged to is gone, and a
+        // late settle must not release a slot of a different channel.
+        foreach ($this->pendingCloses as $id => $entry) {
+            if ($entry['channel'] !== $channel) {
+                continue;
+            }
+
+            $remaining = max(0, $entry['inFlight'] - 1);
+
+            if ($remaining === 0) {
+                unset($this->pendingCloses[$id]);
+                $this->closeChannelObject($entry['address'], $entry['channel']);
+
+                return;
+            }
+
+            $this->pendingCloses[$id]['inFlight'] = $remaining;
+
+            return;
+        }
+
+        foreach ($this->channels as $address => $entry) {
+            if ($entry['channel'] === $channel) {
+                $this->channels[$address]['inFlight'] = max(0, $entry['inFlight'] - 1);
+
+                return;
+            }
+        }
+    }
+
+    /**
+     * Close a gRPC channel, catching and logging any exceptions.
+     */
+    private function closeChannelObject(string $address, Channel $channel): void
+    {
         try {
-            $this->channels[$address]['channel']->close();
+            $channel->close();
         } catch (\Throwable $e) {
             $this->logger->error('Failed to close gRPC channel', [
                 'address' => $address,
@@ -493,6 +675,7 @@ final class GrpcClient implements GrpcClientInterface
             'channel' => $channel,
             'lastUsed' => $now,
             'createdAt' => $now,
+            'inFlight' => 0,
         ];
 
         return $channel;

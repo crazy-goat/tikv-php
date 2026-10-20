@@ -4,11 +4,15 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
+use CrazyGoat\Proto\Kvrpcpb\RawGetRequest;
+use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Tests\Unit\Region\TestLogger;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LogLevel;
 
 class GrpcClientTest extends TestCase
 {
@@ -329,6 +333,235 @@ class GrpcClientTest extends TestCase
         $client->close();
     }
 
+    // ========================================================================
+    // In-flight call tracking (issue #278)
+    // ========================================================================
+
+    public function testBusyChannelsAreNotEvictedWhenTheSoftCapIsExceeded(): void
+    {
+        $logger = new TestLogger();
+        $client = new GrpcClient($logger, maxChannels: 2);
+
+        // Un-awaited calls on two addresses: both channels are busy from
+        // now on, and nothing closes them before the futures settle.
+        $futureA = $client->callAsync(
+            '127.0.0.1:1',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+        $futureB = $client->callAsync(
+            '127.0.0.1:2',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+
+        $channels = $this->readChannels($client);
+        $channelA = $channels['127.0.0.1:1'];
+        $channelB = $channels['127.0.0.1:2'];
+
+        $this->assertSame(2, $client->getChannelCount());
+        $this->assertSame(1, $this->inFlightCount($client, '127.0.0.1:1'));
+        $this->assertSame(1, $this->inFlightCount($client, '127.0.0.1:2'));
+
+        // The third address does not fit under the cap any more, but both
+        // cached channels carry a call: they must not be closed.
+        $client->getChannel('127.0.0.1:3');
+
+        $this->assertSame(3, $client->getChannelCount());
+        $channels = $this->readChannels($client);
+        $this->assertArrayHasKey('127.0.0.1:1', $channels);
+        $this->assertArrayHasKey('127.0.0.1:2', $channels);
+        $this->assertFalse($this->isChannelClosed($channelA));
+        $this->assertFalse($this->isChannelClosed($channelB));
+
+        $warnings = array_map(
+            static fn (array $record): string => $record['message'],
+            $logger->records(LogLevel::WARNING),
+        );
+        $this->assertContains(
+            'Channel cache at capacity but all channels are busy; exceeding soft cap',
+            $warnings,
+        );
+
+        unset($futureA, $futureB);
+        $client->close();
+    }
+
+    public function testSettledChannelIsEvictedNormally(): void
+    {
+        $client = new GrpcClient(maxChannels: 2);
+
+        $futureA = $client->callAsync(
+            '127.0.0.1:1',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+        $futureB = $client->callAsync(
+            '127.0.0.1:2',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+
+        $channels = $this->readChannels($client);
+        $channelA = $channels['127.0.0.1:1'];
+        $channelB = $channels['127.0.0.1:2'];
+
+        $client->getChannel('127.0.0.1:3');
+        $this->assertSame(3, $client->getChannelCount());
+
+        // Settle the call on the first address. The endpoint is dead, so
+        // the receive fails — but the call is over either way.
+        try {
+            $futureA->wait();
+        } catch (GrpcException) {
+        }
+
+        $this->assertSame(0, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        // The first address is idle again and the least recently used one,
+        // so the next address evicts it.
+        $client->getChannel('127.0.0.1:4');
+
+        $channels = $this->readChannels($client);
+        $this->assertArrayNotHasKey('127.0.0.1:1', $channels);
+        $this->assertTrue($this->isChannelClosed($channelA));
+
+        // The second address still carries a call: it survives the eviction.
+        $this->assertArrayHasKey('127.0.0.1:2', $channels);
+        $this->assertFalse($this->isChannelClosed($channelB));
+
+        unset($futureA, $futureB);
+        $client->close();
+    }
+
+    public function testInFlightCounterIsReleasedWhenTheCallSettles(): void
+    {
+        $client = new GrpcClient();
+
+        $future = $client->callAsync(
+            '127.0.0.1:1',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+        $this->assertSame(1, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        try {
+            $future->wait();
+        } catch (GrpcException) {
+        }
+
+        $this->assertSame(0, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        $client->close();
+    }
+
+    public function testInFlightCounterIsReleasedOnCancellationAndNeverGoesNegative(): void
+    {
+        $client = new GrpcClient();
+
+        $future = $client->callAsync(
+            '127.0.0.1:1',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+        $this->assertSame(1, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        $future->cancel();
+        $this->assertSame(0, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        // A double settle must not push the counter below zero.
+        $future->cancel();
+        try {
+            $future->wait();
+        } catch (GrpcException) {
+        }
+        $this->assertSame(0, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        $client->close();
+    }
+
+    /**
+     * A failed wait releases the in-flight slot exactly once.
+     *
+     * The failure a real channel can produce is a gRPC status other than
+     * OK (the endpoint is dead here); the paths that fail while the
+     * response is read — a status that cannot be read, a response that
+     * cannot be deserialized — need a server that answers with such a
+     * response and are pinned in `GrpcFutureTest`, which drives the
+     * settlement hook itself.
+     */
+    public function testInFlightCounterIsReleasedOnceWhenTheCallFailsAndIsThenCancelled(): void
+    {
+        $client = new GrpcClient();
+
+        $future = $client->callAsync(
+            '127.0.0.1:1',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+        $this->assertSame(1, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        try {
+            $future->wait();
+        } catch (GrpcException) {
+        }
+
+        $this->assertSame(0, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        // The failed call is over: cancelling it must not release a
+        // second slot — another call may occupy it.
+        $future->cancel();
+        $this->assertSame(0, $this->inFlightCount($client, '127.0.0.1:1'));
+
+        $client->close();
+    }
+
+    public function testCloseChannelDefersTheCloseUntilTheCallSettles(): void
+    {
+        $client = new GrpcClient();
+
+        $future = $client->callAsync(
+            '127.0.0.1:1',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+
+        $channels = $this->readChannels($client);
+        $channel = $channels['127.0.0.1:1'];
+
+        // The address leaves the cache right away — the next call gets a
+        // fresh channel — but the busy channel is not destroyed.
+        $client->closeChannel('127.0.0.1:1');
+        $this->assertSame(0, $client->getChannelCount());
+        $this->assertFalse($this->isChannelClosed($channel));
+
+        // The last call settles: now the channel can go.
+        try {
+            $future->wait();
+        } catch (GrpcException) {
+        }
+
+        $this->assertTrue($this->isChannelClosed($channel));
+
+        $client->close();
+    }
+
     /**
      * @param array<string, \Grpc\Channel> $channels
      */
@@ -342,6 +575,7 @@ class GrpcClientTest extends TestCase
                 'channel' => $channel,
                 'lastUsed' => $now,
                 'createdAt' => $now,
+                'inFlight' => 0,
             ];
         }
         $prop->setValue($this->client, $entries);
@@ -350,15 +584,62 @@ class GrpcClientTest extends TestCase
     /**
      * @return array<string, \Grpc\Channel>
      */
-    private function readChannels(): array
+    private function readChannels(?GrpcClient $client = null): array
     {
-        $prop = new \ReflectionProperty(GrpcClient::class, 'channels');
-        /** @var array<string, array{channel: \Grpc\Channel, lastUsed: float, createdAt: float}> $entries */
-        $entries = $prop->getValue($this->client);
         $channels = [];
-        foreach ($entries as $addr => $entry) {
+        foreach ($this->readChannelEntries($client ?? $this->client) as $addr => $entry) {
             $channels[$addr] = $entry['channel'];
         }
         return $channels;
+    }
+
+    /**
+     * The raw cache entries, in-flight counters included (issue #278).
+     *
+     * @return array<string, array{channel: \Grpc\Channel, lastUsed: float, createdAt: float, inFlight: int}>
+     */
+    private function readChannelEntries(GrpcClient $client): array
+    {
+        $prop = new \ReflectionProperty(GrpcClient::class, 'channels');
+        /** @var array<string, array{channel: \Grpc\Channel, lastUsed: float, createdAt: float, inFlight: int}> $entries */
+        $entries = $prop->getValue($client);
+
+        return $entries;
+    }
+
+    /**
+     * The number of calls that were dispatched on a cached channel and have
+     * not settled yet.
+     */
+    private function inFlightCount(GrpcClient $client, string $address): int
+    {
+        $entries = $this->readChannelEntries($client);
+
+        return $entries[$address]['inFlight'] ?? 0;
+    }
+
+    /**
+     * Whether a gRPC channel was destroyed.
+     *
+     * `Grpc\Channel::close()` destroys the underlying channel, and every
+     * later call on it fails — ext-grpc reports that as a RuntimeException.
+     */
+    private function isChannelClosed(\Grpc\Channel $channel): bool
+    {
+        try {
+            $channel->getConnectivityState();
+        } catch (\Throwable) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private function rawGetRequest(): RawGetRequest
+    {
+        $request = new RawGetRequest();
+        $request->setKey('test');
+
+        return $request;
     }
 }

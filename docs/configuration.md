@@ -1252,6 +1252,25 @@ The client maintains persistent gRPC channels:
 - Automatic connection management
 - No explicit connection pool configuration needed
 
+The pool caches 64 channels by default — the `maxChannels` cap of `GrpcClient`.
+The cap is **soft**: a channel that still carries calls is never closed,
+because closing it would destroy those calls. When every cached channel is
+busy — a batch that fans out over more stores than the cap holds — the pool
+grows past the cap until the calls settle, and the overshoot is logged at
+warning level:
+
+```
+Channel cache at capacity but all channels are busy; exceeding soft cap
+```
+
+That warning is the signal that the workload touches more stores than the cap
+allows. The pool does not shrink back on its own when the calls settle: the
+eviction removes one least-recently-used idle channel per new address, and a
+channel that stays unused is dropped after the idle TTL (10 minutes by
+default). `maxChannels` is a constructor argument of `GrpcClient`; a client
+built by `RawKvClient::create()` uses the default of 64, because the factory
+does not expose the knob yet.
+
 ### Resource Limits
 
 Consider PHP's resource limits:
