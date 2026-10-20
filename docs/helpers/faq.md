@@ -1911,3 +1911,55 @@ The printed path must point into the scratch tree. A test that fails on
 "Failed asserting that 0 is greater than 0" (the unbounded `ScanRegions`
 request) is a regression guard; "Class … not found" is a broken scratch
 tree.
+
+## Counting gRPC cancellations in a test: `GrpcFuture::__destruct()` always cancels, so keep your own reference
+
+`GrpcFuture::__destruct()` calls `cancel()` unconditionally, and `cancel()`
+sets `completed = true` before it invokes the canceller — so a future that
+was never cancelled by the code under test is still cancelled once, when it
+is garbage collected. A test that counts cancellations therefore sees the
+same number whether the executor cancelled the future or the destructor
+did, **unless the test reads the counter while the future is still alive**:
+keep the future in a local variable of the test method, or return the
+counter as a snapshot (PHP copies the array on `return`) before the future
+is released. Reading the counter after the future has been dropped counts
+the destructor's cancellation too. The same trap applies to a `Call` mock
+with `expects($this->once())->method('cancel')` — the executor's local
+`$futures` array is freed while the exception unwinds, so the destructor
+fires *before* the mock is verified and the expectation passes even though
+nothing cancelled the call. Use `GrpcFuture::fromWaiter($waiter, $canceller)`
+with a counter array and keep the future in a local variable.
+
+## The batch executor cancels on a deadline breach and on an unexpected throwable — not on a `TiKvException`
+
+`BatchAsyncExecutor::executeParallel()` accumulates a `TiKvException` and
+**keeps awaiting** the other regions, so that the resulting
+`BatchPartialFailureException` can report every success; the futures that
+were still in flight are awaited, not cancelled. The two paths that cancel
+the un-awaited futures are the deadline breach (dispatch or wait phase) and
+an **unexpected throwable** escaping the wait phase (anything that is not a
+`TiKvException`, e.g. a `\RuntimeException`). A test that wants to observe
+"the un-awaited futures are cancelled after a batch failure" must therefore
+drive one of those two paths — the deadline, or a non-`TiKvException` from a
+region's wait — and not a plain region error. Note that the batch deadline
+is off by default (`TimeoutConfig::$batchDeadlineMs = 0`), so the
+throwable-escape path is the only one a default client can reach.
+
+## An audit issue's premise can expire: the slow-log wrapper has kept the inner future since #183
+
+Issue #340 ([TEST-20]) described `RawKvBatch::wrapWithLogging()` as
+rebuilding the decorated future with `CheckedGrpcFuture::fromCallable()`
+"without an inner future", which would make `CheckedGrpcFuture::inner()`
+return `null` and let the slow log disable the batch cancellation. That was
+true of the code the audit was written against; PR #565 (#183) had already
+fixed it — `fromCallable()` takes an optional `?GrpcFuture $inner`, and
+`wrapWithLogging()` passes `$inner->inner()` so the decorated future stays
+cancellable. The same audit issue also assumed the executor cancels the
+remaining futures on the first region failure, which #183 changed on
+purpose (see the entry above). Both halves of the premise had expired, so
+the deliverable was the missing **test**, not a production fix: the test
+pins the current contract and fails when the inner future is dropped again
+(verified by reverting `wrapWithLogging()` to pass `null`). When an audit
+issue names line numbers and a mechanism, check both against the current
+source before implementing the suggested fix — the same trap as the
+"error-handling docs must be derived from source" entry above.

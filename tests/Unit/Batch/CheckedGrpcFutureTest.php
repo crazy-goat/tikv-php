@@ -85,6 +85,46 @@ class CheckedGrpcFutureTest extends TestCase
         $checked->waitForExecutor();
     }
 
+    /**
+     * Issue #340 [TEST-20]: a decorator built with fromCallable() has to
+     * keep the decorated future's inner GrpcFuture reachable.
+     *
+     * RawKvBatch::wrapWithLogging() rebuilds the future it decorates as
+     * fromCallable() whenever a SlowLogConfig is set, and
+     * BatchAsyncExecutor::cancelAll() cancels the in-flight futures of a
+     * failed batch through CheckedGrpcFuture::inner(). A wrapper that drops
+     * the inner future therefore turns the slow log into "no cancellation
+     * at all" — the gRPC calls of a failed batch would leak exactly when
+     * the process is under stress.
+     */
+    public function testFromCallableWithInnerFutureKeepsCancellationCapability(): void
+    {
+        /** @var array<string, int> $cancels */
+        $cancels = [];
+
+        $inner = GrpcFuture::fromWaiter(
+            static fn(): RawGetResponse => new RawGetResponse(),
+            static function () use (&$cancels): void {
+                $cancels['inner'] = ($cancels['inner'] ?? 0) + 1;
+            },
+        );
+
+        $checked = CheckedGrpcFuture::fromCallable(
+            static fn(): RawGetResponse => new RawGetResponse(),
+            $inner,
+        );
+
+        // The inner future stays reachable, and the completion state is the
+        // inner future's — not the wrapper's.
+        self::assertSame($inner, $checked->inner());
+        self::assertFalse($checked->isCompleted());
+
+        $checked->cancel();
+
+        self::assertSame(['inner' => 1], $cancels);
+        self::assertTrue($checked->isCompleted());
+    }
+
     public function testCancelDoesNotThrowOrThrow(): void
     {
         // fromGrpcFuture: cancel reaches the underlying GrpcFuture.

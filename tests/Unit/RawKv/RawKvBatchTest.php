@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\Proto\Metapb\Store;
@@ -20,17 +21,23 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
 use Grpc\Call;
+use Monolog\Handler\TestHandler;
+use Monolog\Level;
+use Monolog\Logger;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 class RawKvBatchTest extends TestCase
@@ -40,6 +47,7 @@ class RawKvBatchTest extends TestCase
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
     private PdClientInterface&MockObject $pdClient;
+    private RegionResolver $regionResolver;
     private RawKvBatch $batch;
 
     protected function setUp(): void
@@ -48,11 +56,11 @@ class RawKvBatchTest extends TestCase
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->pdClient = $this->createMock(PdClientInterface::class);
 
-        $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
+        $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
         $this->batch = new RawKvBatch(
             $this->grpc,
-            $regionResolver,
+            $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
         );
@@ -436,6 +444,263 @@ class RawKvBatchTest extends TestCase
         ]);
 
         $this->assertRetryBudgetExhaustedWithTransportError($future);
+    }
+
+    // ========================================================================
+    // Issue #340 [TEST-20]: enabling the slow log must not disable the
+    // cancellation of the batch futures it decorates.
+    //
+    // RawKvBatch::wrapWithLogging() rebuilds the future it decorates as
+    // CheckedGrpcFuture::fromCallable() whenever a SlowLogConfig is set.
+    // BatchAsyncExecutor::cancelAll() cancels the in-flight futures of a
+    // failed batch through CheckedGrpcFuture::inner(), so the rebuilt
+    // future has to keep the decorated future's inner GrpcFuture
+    // reachable. A wrapper that dropped it would turn the slow log into
+    // "no cancellation at all" — the gRPC calls of a failed batch would
+    // leak exactly when the process is under stress.
+    //
+    // The composition is driven the way RawKvBatch builds it (see
+    // docs/helpers/faq.md, "RawKvBatch hardcodes `new Call(...)`"): the
+    // futures are handed to BatchAsyncExecutor::executeParallel(), which
+    // is where the cancellation happens.
+    // ========================================================================
+
+    public function testSlowLogEnabledStillAllowsFutureCancellation(): void
+    {
+        $withoutSlowLog = $this->cancellationsAfterBatchFailure(null);
+        $withSlowLog = $this->cancellationsAfterBatchFailure(
+            new SlowLogConfig(batchReadThresholdMs: 1),
+        );
+
+        // Enabling the slow log must not change the cancellation behaviour
+        // of the batch futures at all.
+        self::assertSame($withoutSlowLog, $withSlowLog);
+        // The un-awaited future of region 3 was cancelled exactly once; the
+        // completed future of region 1 was left alone.
+        self::assertSame(['region-3' => 1], $withSlowLog);
+    }
+
+    /**
+     * Run a three-region batch in which region 2's wait fails, and return
+     * the cancellations the executor performed.
+     *
+     * The failure is a throwable that is not a TiKvException: a
+     * TiKvException is accumulated and the executor keeps awaiting the
+     * other regions (so that the partial failure can report every success),
+     * while an unexpected throwable escapes the wait phase — and the
+     * executor cancels the futures that were never awaited before it
+     * propagates (see BatchAsyncExecutor::executeParallel()).
+     *
+     * @return array<string, int> the number of cancellations per future
+     */
+    private function cancellationsAfterBatchFailure(?SlowLogConfig $slowLogConfig): array
+    {
+        /** @var array<string, int> $cancels */
+        $cancels = [];
+        $batch = $this->batchWithSlowLog($slowLogConfig);
+
+        // Region 1 answers, region 2's wait fails, region 3 is still in
+        // flight and must be cancelled.
+        $region1 = $this->resolvingFuture(new RawBatchGetResponse(), $cancels, 'region-1');
+        $region3 = $this->pendingFuture($cancels, 'region-3');
+
+        $regionCalls = [
+            1 => fn(): CheckedGrpcFuture => CheckedGrpcFuture::fromGrpcFuture($region1),
+            2 => fn(): CheckedGrpcFuture => CheckedGrpcFuture::fromCallable(
+                static function (): never {
+                    throw new \RuntimeException('region 2 failed');
+                },
+            ),
+            3 => fn(): CheckedGrpcFuture => $this->wrapWithLogging(
+                $batch,
+                CheckedGrpcFuture::fromGrpcFuture($region3),
+                'batch_read',
+                'k3',
+            ),
+        ];
+
+        $caught = null;
+        try {
+            (new BatchAsyncExecutor(new NullLogger()))->executeParallel($regionCalls);
+        } catch (\Throwable $e) {
+            $caught = $e;
+        }
+
+        if (!$caught instanceof \RuntimeException) {
+            self::fail('Expected the batch failure to propagate');
+        }
+        self::assertSame('region 2 failed', $caught->getMessage());
+
+        return $cancels;
+    }
+
+    public function testSlowLogWarningIsEmittedWhenThresholdExceeded(): void
+    {
+        $handler = new TestHandler();
+        $batch = $this->batchWithSlowLog(
+            new SlowLogConfig(batchReadThresholdMs: 1),
+            new Logger('tikv-test', [$handler]),
+        );
+
+        $future = $this->wrapWithLogging(
+            $batch,
+            CheckedGrpcFuture::fromCallable(static function (): RawBatchGetResponse {
+                usleep(20_000); // 20 ms — above the 1 ms threshold
+
+                return new RawBatchGetResponse();
+            }),
+            'batch_read',
+            'k1',
+        );
+
+        $future->waitForExecutor();
+
+        $records = $handler->getRecords();
+        self::assertCount(1, $records);
+        $record = $records[0];
+        self::assertSame(Level::Warning, $record->level);
+        self::assertSame('Slow TiKV operation', $record->message);
+        self::assertSame('batch_read', $record->context['operation']);
+        self::assertSame(1, $record->context['threshold_ms']);
+        self::assertGreaterThan(1, $record->context['duration_ms']);
+    }
+
+    public function testSlowLogNotEmittedBelowThreshold(): void
+    {
+        $handler = new TestHandler();
+        $batch = $this->batchWithSlowLog(
+            new SlowLogConfig(batchReadThresholdMs: 60_000),
+            new Logger('tikv-test', [$handler]),
+        );
+
+        $future = $this->wrapWithLogging(
+            $batch,
+            CheckedGrpcFuture::fromCallable(static fn(): RawBatchGetResponse => new RawBatchGetResponse()),
+            'batch_read',
+            'k1',
+        );
+
+        $future->waitForExecutor();
+
+        self::assertSame([], $handler->getRecords());
+    }
+
+    public function testSlowLogRedactsTheKey(): void
+    {
+        $handler = new TestHandler();
+        $batch = $this->batchWithSlowLog(
+            new SlowLogConfig(batchReadThresholdMs: 1),
+            new Logger('tikv-test', [$handler]),
+        );
+
+        $rawKey = 'user_email:alice@example.com';
+
+        $future = $this->wrapWithLogging(
+            $batch,
+            CheckedGrpcFuture::fromCallable(static function (): RawBatchGetResponse {
+                usleep(20_000); // 20 ms — above the 1 ms threshold
+
+                return new RawBatchGetResponse();
+            }),
+            'batch_read',
+            $rawKey,
+        );
+
+        $future->waitForExecutor();
+
+        $records = $handler->getRecords();
+        self::assertCount(1, $records);
+        $record = $records[0];
+        $loggedKey = $record->context['key'];
+        if (!is_string($loggedKey)) {
+            self::fail('The slow-log context must carry the key as a string');
+        }
+        self::assertSame(KeyRedactor::redact($rawKey), $loggedKey);
+        self::assertStringNotContainsString($rawKey, $loggedKey);
+        self::assertStringNotContainsString($rawKey, $record->message);
+    }
+
+    /**
+     * A batch with the slow log enabled — or a plain batch when no
+     * SlowLogConfig is given.
+     */
+    private function batchWithSlowLog(
+        ?SlowLogConfig $slowLogConfig,
+        ?LoggerInterface $logger = null,
+    ): RawKvBatch {
+        return new RawKvBatch(
+            $this->grpc,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            $logger ?? new NullLogger(),
+            $slowLogConfig,
+        );
+    }
+
+    /**
+     * Apply RawKvBatch's slow-log wrapper to a future.
+     *
+     * The wrapper is private, and the transport it decorates cannot be
+     * injected (RawKvBatch hand-rolls `new \Grpc\Call(...)`), so the seam
+     * is the private method itself — the same reflection-over-a-private-
+     * seam pattern the other RawKvBatch tests use.
+     */
+    private function wrapWithLogging(
+        RawKvBatch $batch,
+        CheckedGrpcFuture $inner,
+        string $operation,
+        string $key,
+    ): CheckedGrpcFuture {
+        $method = new \ReflectionMethod(RawKvBatch::class, 'wrapWithLogging');
+
+        /** @var CheckedGrpcFuture $wrapped */
+        $wrapped = $method->invoke($batch, $inner, $operation, $key);
+
+        return $wrapped;
+    }
+
+    /**
+     * A future that resolves to the given response when it is awaited.
+     *
+     * @param array<string, int> $cancels counts the cancellations of this future
+     */
+    private function resolvingFuture(
+        RawBatchGetResponse $response,
+        array &$cancels,
+        string $name,
+    ): GrpcFuture {
+        return GrpcFuture::fromWaiter(
+            static fn(): RawBatchGetResponse => $response,
+            $this->canceller($cancels, $name),
+        );
+    }
+
+    /**
+     * A future that never resolves: awaiting it is a bug, and the test
+     * fails loudly instead of hanging.
+     *
+     * @param array<string, int> $cancels counts the cancellations of this future
+     */
+    private function pendingFuture(array &$cancels, string $name): GrpcFuture
+    {
+        return GrpcFuture::fromWaiter(
+            static function (): never {
+                throw new \RuntimeException('The pending future must not be awaited');
+            },
+            $this->canceller($cancels, $name),
+        );
+    }
+
+    /**
+     * A canceller that records the cancellation of the named future.
+     *
+     * @param array<string, int> $cancels counts the cancellations
+     */
+    private function canceller(array &$cancels, string $name): \Closure
+    {
+        return static function () use (&$cancels, $name): void {
+            $cancels[$name] = ($cancels[$name] ?? 0) + 1;
+        };
     }
 
     private function kvPair(string $key, string $value): KvPair
