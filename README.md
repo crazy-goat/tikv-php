@@ -732,65 +732,57 @@ try {
 
 ## Project Structure
 
+The tree below is verified against the filesystem by
+`tests/Unit/Docs/ReadmeProjectStructureTest.php`: every directory under
+`src/Client/`, every test suite and every example script has to appear in it,
+and every file, directory or class it names has to exist. A new package
+therefore fails the unit suite until the tree names it.
+
+The tree is a map, not a file inventory. It names the test suites and not the
+directories below `tests/Unit/`, and it names the generated protobuf packages
+the library uses most and not all of them — the rest come with the proto
+submodule and change with it, so they are not checked for completeness.
+
 ```
 src/
 ├── Client/
-│   ├── Batch/
-│   │   ├── BatchAsyncExecutor.php   # Concurrent fan-out with deadline-bounded collection
-│   │   ├── CheckedGrpcFuture.php    # Lazy region-error check around dispatch futures
-│   │   └── GrpcFuture.php           # Async gRPC operations
-│   ├── Cache/
-│   │   ├── RegionCache.php          # Region metadata cache
-│   │   └── StoreCache.php           # Store address cache
-│   ├── Connection/
-│   │   └── PdClient.php             # PD discovery & region routing
-│   ├── Grpc/
-│   │   └── GrpcClient.php           # Low-level gRPC wrapper
-│   ├── RawKv/
-│   │   ├── RawKvClient.php          # Main client (20+ operations)
-│   │   ├── CasResult.php            # CompareAndSwap result
-│   │   ├── ChecksumResult.php       # Checksum result
-│   │   ├── ScanIterator.php         # Lazy auto-paginating scan iterator
-│   │   └── Dto/                     # Shared DTOs (KeyValue)
-│   ├── Region/
-│   │   ├── RegionResolver.php       # Region resolution & caching
-│   │   ├── RegionContextFactory.php  # Region context factory
-│   │   ├── RegionRangeClipper.php   # Range clipping
-│   │   ├── RegionGrouper.php        # Group keys by region
-│   │   ├── RegionErrorHandler.php   # Region error checking
-│   │   └── Dto/                     # Region DTOs (RegionInfo, PeerInfo)
-│   ├── Retry/
-│   │   └── BackoffType.php          # Retry backoff strategies
-│   ├── TxnKv/
-│   │   ├── TxnKvClient.php          # Transactional client (create/begin)
-│   │   ├── Transaction.php          # Transaction (get/set/commit/rollback)
-│   │   ├── TxnReader.php            # Snapshot reads at startTs
-│   │   ├── TwoPhaseCommitter.php    # Prewrite, commit, locks, heartbeat
-│   │   ├── LockResolver.php         # Conflict/lock resolution
-│   │   ├── TransactionState.php     # Mutable transaction state machine
-│   │   ├── TransactionStatus.php    # Active/Committed/RolledBack/Undetermined
-│   │   └── Exception/               # Conflict, deadlock, lock-wait, GC, undetermined
-│   └── Tls/
-│       ├── TlsConfig.php            # TLS configuration
-│       └── TlsConfigBuilder.php     # TLS builder
-└── Proto/                           # Generated protobuf classes
-    ├── Kvrpcpb/                     # TiKV request/response
-    ├── Pdpb/                        # PD request/response
-    └── Tikvpb/                      # gRPC service stubs
+│   ├── Batch/                         # Concurrent fan-out across regions
+│   │   └── BatchCommands/             # BatchCommands multiplexing over a bidi stream
+│   ├── Cache/                         # Region and store metadata caches
+│   ├── Codec/                         # Key encoding (CodecV1, CodecV2, MemComparableCodec)
+│   ├── Connection/                    # PD client, keyspace resolver, TSO oracle
+│   ├── Exception/                     # Exception hierarchy (TiKvException, GrpcException, RegionException)
+│   ├── Grpc/                          # Low-level gRPC transport, deadlines, timeouts
+│   ├── Observability/                 # Metrics collection (MetricsInterface, NoOpMetrics)
+│   ├── RawKv/                         # RawKV API (RawKvClient, RawKvCrud, RawKvBatch, RawKvScanner)
+│   │   └── Dto/                       # RawKV DTOs (RegionInfoMapper)
+│   ├── Region/                        # Region resolution, grouping, range clipping
+│   │   └── Dto/                       # Region DTOs (RegionInfo, PeerInfo, ReplicaReadTarget)
+│   ├── Retry/                         # Retry executor (RetryExecutor, Backoff, ErrorClassifier)
+│   ├── Tls/                           # TLS configuration
+│   ├── TxnKv/                         # Transactional API (TxnKvClient, Transaction, TwoPhaseCommitter)
+│   │   └── Exception/                 # Transaction exceptions (TransactionConflictException, DeadlockException)
+│   └── Util/                          # Key ordering and redaction (KeyOrder, KeyRedactor)
+└── Proto/                             # Generated protobuf classes (Kvrpcpb, Pdpb, Tikvpb, …)
+    ├── Kvrpcpb/                       # TiKV request/response
+    ├── Pdpb/                          # PD request/response
+    └── Tikvpb/                        # gRPC service stubs
 
 tests/
-├── Unit/                            # Unit tests
-└── E2E/                             # End-to-end tests
+├── Unit/                              # Unit tests
+├── Integration/                       # Integration tests
+├── E2E/                               # End-to-end tests
+└── phpstan/                           # PHPStan bootstrap (protobuf class alias)
 
 examples/
-├── basic.php                        # Basic CRUD example
-├── batch.php                        # Batch operations example
-├── scan.php                         # Scanning examples
-├── txn.php                          # Transactions with conflict retry
-├── ttl.php                          # TTL operations example
-├── atomic.php                       # Atomic operations example
-├── tls.php                          # TLS configuration example
-└── logging.php                      # PSR-3 logging example
+├── basic.php                          # Basic CRUD example
+├── batch.php                          # Batch operations example
+├── scan.php                           # Scanning examples
+├── txn.php                            # Transactions with conflict retry
+├── ttl.php                            # TTL operations example
+├── atomic.php                         # Atomic operations example
+├── tls.php                            # TLS configuration example
+└── logging.php                        # PSR-3 logging example
 ```
 
 ## Available Commands (Makefile)

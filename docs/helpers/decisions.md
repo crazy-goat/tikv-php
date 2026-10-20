@@ -870,3 +870,39 @@ instead of changing the behaviour:
    "Optimistic vs pessimistic" section, `docs/getting-started.md` and the
    `begin()` docblock — including the note that it differs from the official
    clients, so the divergence is a documented decision rather than a surprise.
+
+## The README project-structure tree is checked by a unit test, not by review (issue #410)
+
+A documentation tree drifts silently: nothing fails when a package is added,
+a class is renamed or a DTO is deleted, and the tree is the reader's first map
+of the codebase. `tests/Unit/Docs/ReadmeProjectStructureTest.php` therefore
+parses the tree out of `README.md` and compares it with the filesystem. Four
+decisions inside it are worth keeping:
+
+1. **The completeness check covers `src/Client/`, the test suites and the
+   example scripts — and not the whole of `src/`.** The protobuf packages
+   under `src/Proto/` are generated from the proto submodule and change with
+   it, so demanding that the README list all of them would make the tree
+   drift for a reason no reader cares about. The three packages the tree does
+   name are still checked for existence, and the README marks the list as
+   partial (an ellipsis in the tree line) so that a reader cannot take three
+   packages for the whole set. The tree is a map, not a file inventory: it
+   names the test suites and not the directories below `tests/Unit/`, and the
+   README says so.
+2. **A word in parentheses in a tree comment is a class name** (when it starts
+   with an uppercase letter and contains a lowercase one) and has to exist
+   under `src/Client/` or be a generated protobuf package. This is what keeps
+   the tree from advertising a type the API does not have — the defect
+   `Dto/KeyValue` was: a class that existed on disk but that nothing used,
+   advertised as a shared DTO. Prose in parentheses stays lowercase, and an
+   acronym ("PD", "TLS", "GC") is ignored.
+3. **The comparison itself is tested.** A comparison that always answers "no
+   drift" would keep the suite green while the tree rots, so
+   `testTheGuardReportsDriftInBothDirections()` drives it with a synthetic
+   tree and asserts that both an omitted and a stale directory are reported.
+4. **The removal of `Dto/KeyValue` is announced as a breaking change.** The
+   class was public API of seven released versions (v0.1.0 … v0.8.0), so the
+   `### Removed` entry in `CHANGELOG.md` says both that the class was public
+   and that its removal breaks a consumer that instantiated it directly. No
+   deprecation cycle precedes it: no API ever returned the class, and
+   `docs/release-workflow.md` allows breaking changes before `1.0.0`.
