@@ -1678,3 +1678,17 @@ limitation was real, and both became false the moment the limitation was
 fixed. When an issue removes a documented limitation, grep the repo for the
 limitation's phrasing (`only the first`, `not supported`, `Future versions`)
 before finishing — docblocks and `docs/*.md` drift independently of tests.
+
+## `unlink()` needs write permission on the **parent directory**, not on the file
+
+Issue #355 assumed that a `chmod 0000` fixture was what broke the temp-directory
+cleanup of `TlsConfigBuilderTest`. It was not: on POSIX, deleting a file is
+authorised by the **write permission of the directory that contains it**, not by
+the permissions of the file itself. `unlink()` on a `chmod 0000` file inside a
+writable directory succeeds. The real cause of the leak was a non-recursive
+`glob($dir . '/*')` in `tearDown()`: a nested directory was passed to `unlink()`
+(which fails with "Operation not permitted") and the following `rmdir()` then
+failed with "Directory not empty". Restoring the file mode alone would have
+silenced nothing. When a cleanup leaks a directory, look at the **shape** of the
+tree (nested directories, symlinks) before you look at file modes — and remove
+the tree recursively.

@@ -20,15 +20,11 @@ class TlsConfigBuilderTest extends TestCase
 
     protected function tearDown(): void
     {
-        if (is_dir($this->tempDir)) {
-            $files = glob($this->tempDir . '/*');
-            if ($files !== false) {
-                foreach ($files as $file) {
-                    unlink($file);
-                }
-            }
-            rmdir($this->tempDir);
+        if (!is_dir($this->tempDir)) {
+            return;
         }
+
+        $this->removeTree($this->tempDir);
     }
 
     // ========================================================================
@@ -270,8 +266,13 @@ class TlsConfigBuilderTest extends TestCase
         $this->expectExceptionMessage('Cannot read TLS file');
 
         // We don't assert that path is absent because realpath() returns false for unreadable files
-        (new TlsConfigBuilder())
-            ->withCaCertFile($path);
+        try {
+            (new TlsConfigBuilder())
+                ->withCaCertFile($path);
+        } finally {
+            // Restore the mode, so the fixture never outlives the test.
+            chmod($path, 0644);
+        }
     }
 
     // ========================================================================
@@ -422,7 +423,12 @@ class TlsConfigBuilderTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('looks like a file path but the file does not exist or is not readable');
 
-        (new TlsConfigBuilder())->withCaCert($path);
+        try {
+            (new TlsConfigBuilder())->withCaCert($path);
+        } finally {
+            // Restore the mode, so the fixture never outlives the test.
+            chmod($path, 0644);
+        }
     }
 
     public function testWithCaCertNonPemStringThrows(): void
@@ -450,5 +456,65 @@ class TlsConfigBuilderTest extends TestCase
         $config = (new TlsConfigBuilder())->withCaCert($pem)->build();
 
         $this->assertSame($pem, $config->caCert);
+    }
+
+    // ========================================================================
+    // Cleanup: the temporary directory must not survive the test
+    // ========================================================================
+
+    public function testTearDownRemovesNestedDirectoriesAndUnreadableFiles(): void
+    {
+        $nested = $this->tempDir . '/sub/deeper';
+        mkdir($nested, 0777, true);
+        $file = $nested . '/unreadable.crt';
+        file_put_contents($file, 'content');
+        chmod($file, 0000);
+
+        $this->tearDown();
+
+        $this->assertDirectoryDoesNotExist($this->tempDir);
+    }
+
+    /**
+     * Remove a directory with everything in it.
+     *
+     * The directory itself is removed as well, sub-directories are removed
+     * recursively (a plain unlink() cannot delete a directory), and every file
+     * is made readable again first, so a fixture that was made unreadable on
+     * purpose cannot survive the cleanup and leave the temporary directory
+     * behind.
+     */
+    private function removeTree(string $dir): void
+    {
+        chmod($dir, 0755);
+
+        $entries = scandir($dir);
+        if ($entries === false) {
+            return;
+        }
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $path = $dir . '/' . $entry;
+
+            // A symlink is removed as a link, never followed into its target.
+            if (is_link($path)) {
+                unlink($path);
+                continue;
+            }
+
+            if (is_dir($path)) {
+                $this->removeTree($path);
+                continue;
+            }
+
+            chmod($path, 0644);
+            unlink($path);
+        }
+
+        rmdir($dir);
     }
 }

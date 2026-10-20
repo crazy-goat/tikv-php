@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bin/lint.sh`: one entry point for PHPCS, Rector, PHPStan, shellcheck and hadolint (`--fix` applies the fixers first). `composer lint` and `composer lint:fix` call it, and the CI `lint` job runs only this script. (#617)
 - `bin/worktree.sh`, `bin/worktree-done.sh`, `bin/worktree-setup.sh` and `bin/worktree-teardown.sh` for one isolated worktree (and compose project) per issue. (#617)
 
+### Tests
+
+- `TlsConfigBuilderTest` no longer leaves a `tikv-test-*` directory behind in the system temp directory and no longer emits `unlink`/`rmdir` warnings: the cleanup removes the tree recursively and the unreadable fixtures restore their file mode before the test ends. (#355)
+
 ### Changed
 
 - `workflow.md` moved to `docs/workflow.md` and replaced by the shared crazy-goat workflow; `bin/pick-issue.sh` is the shared version. (#617)
