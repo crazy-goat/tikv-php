@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Cache;
 
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
@@ -33,9 +34,30 @@ class RegionCache implements RegionCacheInterface
 
     private int $putCountSinceSweep = 0;
 
+    /**
+     * Whether this cache emits its debug records at all.
+     *
+     * The debug lines of the lookup paths carry a redacted key, and
+     * building that redaction costs a `substr` + `bin2hex` + `sprintf` per
+     * lookup — work the cache used to do on every hit even when the logger
+     * discarded the record (issue #300). The decision is taken once, at
+     * construction: {@see DebugLogging} asks the logger whether it handles
+     * the debug level at all, so neither a `NullLogger` nor a
+     * level-filtered logger (a Monolog logger at `INFO`, the "production"
+     * recipe in `docs/configuration.md`) pays for a context that is
+     * discarded.
+     *
+     * The answer is frozen with the flag: the logger is `readonly`, so it
+     * cannot be swapped, but its *level* can change at runtime and the
+     * cache does not ask again. Configure the logger before the client is
+     * built — see `docs/configuration.md`.
+     */
+    private readonly bool $debugEnabled;
+
     public function __construct(private readonly int $ttlSeconds = 600, private readonly int $jitterSeconds = 60, private readonly int $maxEntries = 10000, private readonly int $sweepInterval = 100, private readonly LoggerInterface $logger = new NullLogger(), private ?MetricsInterface $metrics = null)
     {
         $this->priorityState = random_int(1, PHP_INT_MAX);
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     public function __clone()
@@ -80,32 +102,34 @@ class RegionCache implements RegionCacheInterface
             $node = $this->strictPredecessor($node->startKey);
         }
         if (!$node instanceof RegionBoundaryNode) {
-            $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
+            $this->debugMiss($key);
             return null;
         }
 
         $entry = $this->entriesById[$node->regionId] ?? null;
         if (!$entry instanceof RegionEntry) {
-            $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
+            $this->debugMiss($key);
             return null;
         }
 
         if ($this->isExpired($entry)) {
             $this->removeById($entry->region->regionId);
-            $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
+            $this->debugMiss($key);
             return null;
         }
 
         if ($entry->region->endKey !== '' && KeyOrder::gte($key, $entry->region->endKey)) {
-            $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
+            $this->debugMiss($key);
             return null;
         }
 
         $this->touch($entry->region->regionId);
-        $this->logger->debug('Region cache hit', [
-            'key' => KeyRedactor::redact($key),
-            'regionId' => $entry->region->regionId,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Region cache hit', [
+                'key' => KeyRedactor::redact($key),
+                'regionId' => $entry->region->regionId,
+            ]);
+        }
 
         return $this->resolveRegionInfo($entry);
     }
@@ -123,26 +147,32 @@ class RegionCache implements RegionCacheInterface
      * `getByKey()`.
      *
      * The debug lines carry the region ID only, and that is deliberate: there
-     * is no key here to redact, and `getByKey()`'s equivalent line spends
-     * ~1.1 µs of every hit inside `KeyRedactor::redact()` building a string a
-     * `NullLogger` discards — a cost this method does not have to pay.
+     * is no key here to redact, and `getByKey()`'s equivalent line builds the
+     * same redaction — but only when the cache emits debug records at all
+     * (issue #300), a cost this method does not have to pay.
      */
     public function getById(int $regionId): ?RegionInfo
     {
         $entry = $this->entriesById[$regionId] ?? null;
         if (!$entry instanceof RegionEntry) {
-            $this->logger->debug('Region cache miss by id', ['regionId' => $regionId]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Region cache miss by id', ['regionId' => $regionId]);
+            }
             return null;
         }
 
         if ($this->isExpired($entry)) {
             $this->removeById($regionId);
-            $this->logger->debug('Region cache miss by id', ['regionId' => $regionId]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Region cache miss by id', ['regionId' => $regionId]);
+            }
             return null;
         }
 
         $this->touch($regionId);
-        $this->logger->debug('Region cache hit by id', ['regionId' => $regionId]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Region cache hit by id', ['regionId' => $regionId]);
+        }
 
         return $this->resolveRegionInfo($entry);
     }
@@ -198,7 +228,9 @@ class RegionCache implements RegionCacheInterface
         if ($region->leaderStoreId === 0) {
             $this->removeById($region->regionId);
             $this->removeOverlapping($region);
-            $this->logger->debug('Region without a leader not cached', ['regionId' => $region->regionId]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Region without a leader not cached', ['regionId' => $region->regionId]);
+            }
 
             return;
         }
@@ -272,12 +304,14 @@ class RegionCache implements RegionCacheInterface
             $this->putCountSinceSweep = 0;
         }
 
-        $this->logger->debug('Region cached', [
-            'regionId' => $region->regionId,
-            'startKey' => KeyRedactor::redact($region->startKey),
-            'endKey' => KeyRedactor::redact($region->endKey),
-            'ttl' => $entry->expiresAt - $this->now(),
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Region cached', [
+                'regionId' => $region->regionId,
+                'startKey' => KeyRedactor::redact($region->startKey),
+                'endKey' => KeyRedactor::redact($region->endKey),
+                'ttl' => $entry->expiresAt - $this->now(),
+            ]);
+        }
     }
 
     /**
@@ -363,7 +397,7 @@ class RegionCache implements RegionCacheInterface
             $removed++;
         }
 
-        if ($removed > 0) {
+        if ($removed > 0 && $this->debugEnabled) {
             $this->logger->debug('Swept expired region entries', ['removed' => $removed]);
         }
 
@@ -381,7 +415,9 @@ class RegionCache implements RegionCacheInterface
             return;
         }
 
-        $this->logger->debug('Evicting LRU region from cache', ['regionId' => $lruId]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Evicting LRU region from cache', ['regionId' => $lruId]);
+        }
         $this->removeById((int) $lruId);
     }
 
@@ -439,9 +475,11 @@ class RegionCache implements RegionCacheInterface
             }
 
             $next = $this->boundaryAfterKey($candidate->startKey);
-            $this->logger->debug('Removing superseded overlapping region from cache', [
-                'regionId' => $candidate->regionId,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Removing superseded overlapping region from cache', [
+                    'regionId' => $candidate->regionId,
+                ]);
+            }
             $this->removeById($candidate->regionId);
             $candidate = $next;
         }
@@ -917,5 +955,19 @@ class RegionCache implements RegionCacheInterface
             endKey: $entry->region->endKey,
             peers: $entry->region->peers,
         );
+    }
+
+    /**
+     * Emit the debug record of a cache miss.
+     *
+     * The context — and the redaction it needs — is built only when the
+     * cache emits debug records at all (issue #300), so a lookup that
+     * misses does not build a redacted key for a logger that discards it.
+     */
+    private function debugMiss(string $key): void
+    {
+        if ($this->debugEnabled) {
+            $this->logger->debug('Region cache miss', ['key' => KeyRedactor::redact($key)]);
+        }
     }
 }

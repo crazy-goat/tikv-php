@@ -762,6 +762,30 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::DEBUG));
 $logger->pushHandler(new StreamHandler('/var/log/tikv.log', Logger::WARNING));
 ```
 
+The region cache asks the logger **once** whether it can emit a `debug`
+record at all, and it builds the log context of a debug record only when the
+answer is yes. A logger that discards the debug records — the default
+`NullLogger`, a Monolog logger above the `DEBUG` level, or any logger that
+answers "no" to Monolog's `isHandling()` — therefore costs nothing on the hot
+path, where the context of a region-cache record carries a redacted key. The
+other components (the lock resolver, the transaction committer, the store
+cache) still build their context unconditionally.
+
+A logger that cannot be asked (a plain PSR-3 logger without a level API) is
+assumed to handle `debug`, so a record is never lost. A `NullLogger`
+*subclass* is assumed to handle `debug` as well, unless it keeps psr/log's
+own `log()` and `debug()` implementations: psr/log does not declare that
+class `final`, so a subclass that overrides either method may record what
+it receives.
+
+The answer is taken **once**, when the client is built, and it is not
+re-examined afterwards. A logger that is reconfigured at runtime — a Monolog
+handler whose level is lowered to `DEBUG`, say — keeps the answer the client
+was given: the cache stays quiet, and a logger that was at `DEBUG` and is
+raised to `INFO` keeps building a context that is discarded. Configure the
+logger's level and handlers **before** you create the client, and create a
+new client after you change them.
+
 ### What Gets Logged
 
 The client logs:

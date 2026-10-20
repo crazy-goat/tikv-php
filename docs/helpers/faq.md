@@ -2190,3 +2190,102 @@ same way. `tests/Unit/TxnKv/TxnKvFanoutTest.php` asserts a wall-clock bound
 (`assertLessThan(12, $elapsedMs)`) and fails intermittently on a loaded
 machine; that is a test-suite defect to fix on its own, not something the
 mutation configuration can absorb.
+
+## A token-scanning guard test must recognise how `token_get_all()` spells a property, an operator and a keyword
+
+The guard tests of this repo (e.g. `ExceptionMessageRedactionGuardTest`,
+`RegionCacheDebugGuardTest`) read the source with `token_get_all()` instead
+of a regex, and three spellings of that API cost an afternoon if you do not
+know them:
+
+- **A property name is a `T_STRING`, not a `T_VARIABLE`.** `$this->debugEnabled`
+  tokenises as `T_VARIABLE('$this')`, `T_OBJECT_OPERATOR`, `T_STRING('debugEnabled')`.
+  A guard that looks for `T_VARIABLE` with the value `'$debugEnabled'` never
+  matches and reports every call site as unguarded — or, worse, matches
+  nothing and passes vacuously.
+- **`T_OBJECT_OPERATOR` is an *array* token.** The single-character tokens
+  (`(`, `)`, `{`, `}`) come back as plain strings, but `->` has its own token
+  id and comes back as `[T_OBJECT_OPERATOR, '->', line]`. Comparing it with
+  the `T_OBJECT_OPERATOR` **constant** (an `int`) is therefore always false;
+  compare `$token[0] === T_OBJECT_OPERATOR` on the array element.
+- **A keyword is matched by its token id, not by its text.** `T_IF` is the
+  only reliable way to find a statement; searching for the text `if` also
+  matches the `if` of a comment or of a string literal.
+
+The second trap is the dangerous one: a guard that finds *no* call sites
+passes. Give such a test a witness assertion (the repo's
+`NoInfiniteDeadlineGuardTest` carries an `assertSame(2, …)` for exactly this
+reason) or check that it fails when a guard is removed from the source.
+
+## A PHPCS exclude pattern of `*.cache` silently excludes every path that contains "cache"
+
+`phpcs.xml.dist` excludes `*.cache` (meant for the `.phpunit.cache`
+directory), but PHPCS turns an exclude pattern into a **case-insensitive,
+unanchored** regular expression — `*` becomes `.*`, the pattern is wrapped
+in backticks and gets the `i` flag (`Filters/Filter::shouldIgnorePath()`).
+`*.cache` therefore matches every path that contains "cache" *anywhere*, and
+the `tests/Unit/Cache/` directory matches through its own name: **none of
+the files of that directory is linted**, although they sit inside the
+`<file>tests</file>` entry.
+
+`RegionCacheTest.php` (1 violation) and `StoreCacheTest.php` (23) carry
+pre-existing PSR-1 violations ("Each class must be in a file by itself") that
+the lint run never sees, and a new test file under `tests/Unit/Cache/` can
+violate PSR-12 without anybody noticing.
+
+What to do:
+
+- Keep the test doubles in `tests/Unit/Support/` (one class per file — the
+  repo convention) instead of next to the test that uses them, so the file
+  stays PSR-1 clean even while the linter does not look at it.
+- To see what the linter would say about an excluded directory, copy
+  `phpcs.xml.dist` with the pattern changed to something that cannot match
+  (`*.cacheX`) and run PHPCS with that ruleset:
+  `vendor/bin/phpcs --standard=/tmp/phpcs-test.xml tests/Unit/Cache`.
+- Narrowing the pattern (e.g. `*.phpunit.cache`) uncovers the violations
+  above and is a change of its own — it touches files that have nothing to
+  do with the issue at hand.
+
+## A `NullLogger` subclass may record: deciding from `log()` alone silences it
+
+`Psr\Log\NullLogger` is **not** `final`, and psr/log's `NullLogger` extends
+`AbstractLogger`, whose `debug()` routes to `log()`. A subclass that
+overrides `log()` therefore receives the debug records, and a subclass that
+overrides `debug()` records them directly while its `log()` still discards.
+Deciding "does this logger discard everything?" from the `log()` method
+alone therefore silences the second shape: the client stops calling
+`debug()`, and the records that subclass used to get are gone.
+
+The rule that keeps such an optimisation honest is the strict one: **a
+logger counts as discarding only when it is known to discard every
+record**. For `NullLogger` that means the logger keeps psr/log's own `log()`
+*and* `debug()` implementations; a subclass that overrides either one is
+treated as a logger that handles the debug level. The client then builds a
+context it may not need, but no record is ever lost.
+
+`ReflectionMethod::getDeclaringClass()` tells you *which* class declares a
+method, so "is this still psr/log's implementation?" is answered by "is
+`NullLogger` an instance of that declaring class?" —
+`is_a(NullLogger::class, $declaringClass->getName(), true)`. A class that
+is neither `NullLogger` nor one of its parents is a user class that
+overrode the method. Checking one method and not the other is the trap:
+psr/log's `debug()` is inherited from `AbstractLogger`, not from
+`NullLogger`.
+
+## A guard that asks the logger once freezes the answer
+
+An optimisation that asks a logger a question ("do you handle the debug
+level?") and caches the answer takes the answer **once**, at construction —
+that is the whole point, since the question must not be asked on the hot
+path. The consequence is that the answer goes stale when the *logger* is
+reconfigured: a Monolog handler whose level is lowered to `DEBUG` after the
+client was built is not noticed (the client stays quiet), and a logger at
+`DEBUG` whose handler is raised to `INFO` keeps building a context that is
+discarded. The logger object itself cannot be swapped — it is `readonly` —
+but its level can.
+
+Say so where the behaviour is documented (`docs/configuration.md`), and say
+what the user has to do: configure the logger's level and handlers before
+the client is built, and build a new client after changing them. A
+limitation that is only described in the commit message is a limitation
+that the next integrator re-discovers the hard way.
