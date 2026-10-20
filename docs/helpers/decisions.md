@@ -39,11 +39,39 @@ All work happens on feature branches; merges go through squash-merged PRs.
 Static analysis runs at level 9 and every source file must declare strict
 types. PSR-12 + Slevomat coding standard (enforced by PHPCS).
 
-## No enforced coverage floor
+## The coverage floor is enforced, and it is a ratchet (issue #362)
 
-Unlike some related projects, CI does not enforce a minimum coverage
-percentage. Coverage is collected (PCOV, `grpc-unit-tests` job) but is
-informational only.
+CI enforces a **minimum line coverage** for the `Unit` + `Grpc` suites. The threshold lives in
+exactly one place, `DEFAULT_COVERAGE_FLOOR` in `bin/check-coverage.php`, and it is a **ratchet**:
+it is set a little below the measured coverage and only ever moves up. `composer test:coverage`
+runs the same suites under a coverage driver and applies the same threshold, so a red build is
+reproducible locally; the CI job additionally uploads the Clover report as the `coverage-clover`
+artifact.
+
+Three decisions are worth keeping:
+
+1. **The metric is the line coverage of the hand-written code, not of the whole tree.**
+   `phpunit.xml` excludes the generated `src/Proto` classes from the `<source>` set. They are
+   ~62 % of the executable lines of `src/`, they are not written by hand and nobody writes tests
+   for them, so counting them would make the floor measure the generated code instead of the
+   client (the same tree measures 42 % with them and 87 % without). The issue's own baselines
+   (58.4 % for `Unit`, 70.2 % for `Unit` + `Grpc`) are only reproducible on this metric — measured
+   on the audit-time tree (2026-08-08) the whole-tree numbers were 14.6 % and 18.3 %.
+2. **The floor is checked in the existing `grpc-unit-tests` job, not in a new one.** That job
+   already installs PCOV and `ext-grpc`, so it can run the combined suites in one process and
+   produce one report covering the whole client; the `unit-tests` matrix keeps running the `Unit`
+   suite on every PHP version without coverage, so the matrix is not slowed down.
+3. **The threshold is below the measurement, never above it.** A floor above the current coverage
+   fails the build immediately; the shipped floor is 87.0 %, set against a measured 87.6 % (PCOV,
+   PHP 8.4 — the measurement moves with the tree, the floor only moves up). PCOV and Xdebug measure
+   the same metric within a few tenths of a point (0.3 points apart on the tree the floor was set
+   on), so the same floor holds whichever driver a contributor has installed.
+
+The floor is deliberately *not* a quality target for new code: it is a regression guard. A change
+that drops the coverage fails CI until either the missing tests are added or the floor is
+explicitly lowered — and lowering it is a visible act, because the value lives in
+`bin/check-coverage.php` and `tests/Unit/Bin/CoverageFloorCheckTest.php` reads it back from there
+(a report a tenth of a point below it has to fail).
 
 ## PHP support: >= 8.2, CI matrix 8.2–8.4
 

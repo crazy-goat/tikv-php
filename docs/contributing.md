@@ -319,6 +319,9 @@ vendor/bin/phpunit --filter RawKvClientTest
 
 # Run with coverage
 vendor/bin/phpunit --coverage-html coverage/
+
+# Run the suites CI measures, then check the coverage floor
+composer test:coverage
 ```
 
 Writing unit tests:

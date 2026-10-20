@@ -3,6 +3,7 @@ parameters:
     paths:
         - src/Client
         - tests
+        - bin
     excludePaths:
         - src/Proto
     bootstrapFiles:

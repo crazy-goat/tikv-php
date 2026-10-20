@@ -239,11 +239,26 @@ for RawKV, tears it down with `-v`, then boots a V1 cluster
 available via `docker-compose -f docker-compose.yml -f
 docker-compose.txnkv.yml up`.
 
-## grpc-unit-tests collects coverage, but there is no gate
+## Coverage is enforced: the floor lives in `bin/check-coverage.php`
 
-CI runs the Grpc testsuite with `--coverage-xml` under PCOV, but no
-coverage floor is enforced anywhere (`composer.json` has no
-`coverage:check`). Don't block PRs on coverage percentages.
+CI runs the `Unit` and `Grpc` suites together under PCOV in the `grpc-unit-tests` job, uploads the
+Clover report as the `coverage-clover` artifact and fails the build when the line coverage drops
+below the floor. The floor is `DEFAULT_COVERAGE_FLOOR` in `bin/check-coverage.php` (87.0 %) and it
+is a ratchet — it only moves up. `composer test:coverage` runs the same suites and the same
+check, so a red build is reproducible locally.
+
+Two traps when measuring coverage:
+
+1. **The metric excludes the generated `src/Proto` classes.** `phpunit.xml` excludes them from the
+   `<source>` set; they are ~62 % of the executable lines of `src/` and are not hand-written, so
+   counting them would report 42 % instead of 87 % for the same run.
+2. **A local run needs a coverage driver.** PCOV wins over Xdebug when both are installed
+   (`SebastianBergmann\CodeCoverage\Driver\Selector` checks PCOV first), and the two measure the
+   same metric within a few tenths of a point — but only with Xdebug in coverage mode
+   (`xdebug.mode=coverage`; the default `develop` mode makes PHPUnit report "No code coverage
+   driver is available"). `composer test:coverage` passes `-d xdebug.mode=coverage` for that
+   reason. `ext-grpc` is required too: the `Grpc` suite mocks `\Grpc\Call`, which is a hard error
+   (not a skip) without the extension.
 
 ## Every TiKV `*_ts` protobuf field must be a PD TSO timestamp, never a monotonic-clock value
 
@@ -702,12 +717,17 @@ Facts verified empirically (PHPUnit 11.5.55, PR #484 for #323/#358/#359):
    gated. The pattern used in PR #484: whole classes that mock `Call` move to
    the `Grpc` testsuite (`phpunit.xml` `<file>` entries + `<exclude>` from
    `Unit`); tests that are pure PHP (drive the executor with
-   `CheckedGrpcFuture::fromCallable`, no `Call`) stay in `Unit` ungated and
-   also join the Grpc suite as `<file>` entries so the Grpc coverage run
-   (PCOV) exercises the code paths they cover.
-4. `php -n vendor/bin/phpunit --testsuite Unit --fail-on-skipped` is the
+   `CheckedGrpcFuture::fromCallable`, no `Call`) stay in `Unit` ungated.
+4. A file may belong to **one** selected suite per run. Listing the same file
+   in two suites that are selected together (the CI coverage job runs
+   `Unit,Grpc`) makes PHPUnit emit the test-runner warning "Cannot add file …
+   as it was already added to test suite …", and the run then **exits 1** even
+   though every test passed. `ParallelRangeOpsCapTest` and
+   `CheckedGrpcFutureRetryableDispatchTest` were listed in both suites until
+   issue #362; they now live in `Unit` only, which the coverage job runs too.
+5. `php -n vendor/bin/phpunit --testsuite Unit --fail-on-skipped` is the
    faithful local simulation of CI's unit job (php -n = no extensions).
-5. XML comment gotcha hit while documenting this: XML comments cannot
+6. XML comment gotcha hit while documenting this: XML comments cannot
    contain `--` — the phrase `--testsuite` inside an XML comment breaks
    parsing with "Double hyphen within comment". Use "testsuite selector".
 

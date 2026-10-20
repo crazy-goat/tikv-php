@@ -50,6 +50,7 @@
         "test": "phpunit",
         "test:unit": "phpunit --testsuite Unit",
         "test:grpc": "phpunit --testsuite Grpc --fail-on-skipped --no-coverage",
+        "test:coverage": "php -d xdebug.mode=coverage vendor/bin/phpunit --testsuite Unit,Grpc --fail-on-skipped --coverage-clover=coverage.xml && php bin/check-coverage.php coverage.xml",
         "test:e2e": "phpunit --testsuite E2E-RawKV --no-coverage",
         "mutation": "infection",
         "mutation:show": "infection --show-mutations",

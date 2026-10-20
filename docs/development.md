@@ -586,6 +586,24 @@ and neither reads the other's configuration.
 
 [#362]: https://github.com/crazy-goat/tikv-php/issues/362
 
+### Coverage Lane
+
+The `Unit` and `Grpc` suites are also run together under a coverage driver, and the result is
+checked against a coverage floor:
+
+```bash
+composer test:coverage
+```
+
+The script needs `ext-grpc` and a coverage driver (PCOV, or Xdebug with `xdebug.mode=coverage` —
+the script passes that mode itself). It writes the Clover report to `coverage.xml` and then runs
+`bin/check-coverage.php`, which fails when the line coverage is below
+`DEFAULT_COVERAGE_FLOOR` in that script. CI runs the same two commands in the `grpc-unit-tests`
+job and uploads the Clover report as the `coverage-clover` artifact.
+
+The floor is a ratchet: it is set below the measured coverage and only moves up. The generated
+protobuf classes in `src/Proto/` are excluded from the coverage source set (see `phpunit.xml`),
+so the number describes the hand-written client code.
 ### E2E Test Patterns
 
 **Test Isolation:**

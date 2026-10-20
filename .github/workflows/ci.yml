@@ -113,7 +113,7 @@ jobs:
         timeout-minutes: 5
 
   grpc-unit-tests:
-    name: gRPC Unit Tests (PHP 8.4)
+    name: Unit + gRPC Tests and Coverage (PHP 8.4)
     needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -138,9 +138,25 @@ jobs:
       - name: Install dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
-      - name: Run gRPC unit tests
-        run: ./vendor/bin/phpunit --testsuite Grpc --testdox --fail-on-skipped --coverage-xml=coverage-xml
-        timeout-minutes: 5
+      # Both suites run in one job so that the Clover report covers the whole
+      # client (the Grpc suite needs ext-grpc, which the unit-tests matrix
+      # job does not install). The matrix job above still runs the Unit suite
+      # on every PHP version without coverage.
+      - name: Run unit and gRPC unit tests with coverage
+        run: ./vendor/bin/phpunit --testsuite Unit,Grpc --testdox --fail-on-skipped --coverage-clover=coverage.xml
+        timeout-minutes: 10
+
+      - name: Check coverage floor
+        run: php bin/check-coverage.php coverage.xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-clover
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14
 
   integration-tests:
     name: Integration Tests (PHP 8.4)

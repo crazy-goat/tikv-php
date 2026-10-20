@@ -19,7 +19,7 @@ Everything is written in English (code, comments, docs, commits, issues).
 | `tests/E2E/` | End-to-end suites, need a TiKV cluster (Docker) |
 | `phpstan/` | Custom PHPStan rules |
 | `scripts/` | `test-e2e.sh`, `test-e2e-apiv2.sh`, `generate-proto.sh`, `test.sh` |
-| `bin/` | `lint.sh`, `pick-issue.sh`, `worktree*.sh` |
+| `bin/` | `lint.sh`, `pick-issue.sh`, `check-coverage.php`, `worktree*.sh` |
 | `docs/` | User and developer docs, `docs/helpers/` knowledge base (FAQ, decisions), process docs |
 | `benchmarks/`, `examples/` | Benchmarks and runnable examples |
 
@@ -42,6 +42,7 @@ composer cs | cs-fix | phpstan | rector | rector:fix   # single tools
 composer test:unit         # Unit suite, no cluster, no ext-grpc
 composer test:grpc         # Grpc suite, needs ext-grpc, skips are failures
 vendor/bin/phpunit --testsuite Integration
+composer test:coverage     # Unit+Grpc under a coverage driver, then the coverage floor
 
 # E2E (Docker, see below)
 make test-e2e              # RawKV on the V1TTL cluster, then TxnKV on the V1 cluster
@@ -99,6 +100,12 @@ the unit matrix, `grpc-unit-tests`, `integration-tests`, `e2e-tests` and `e2e-te
 for code changes. `ci-ok` aggregates the results and is the check to require. The `lint` job does
 the setup (PHP, Composer, hadolint) and runs only `bin/lint.sh`. Workflow runs of external
 contributors need maintainer approval (repository setting); there is no custom actor gate.
+
+The `grpc-unit-tests` job runs the `Unit` and `Grpc` suites together under PCOV, uploads the Clover
+report as the `coverage-clover` artifact and enforces the coverage floor with
+`bin/check-coverage.php`. The floor is a ratchet: it lives in `DEFAULT_COVERAGE_FLOOR` in that
+script and only moves up. `composer test:coverage` reproduces the same run and the same check
+locally (it needs `ext-grpc` and a coverage driver: PCOV, or Xdebug in `coverage` mode).
 
 ## Conventions
 

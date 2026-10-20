@@ -2,10 +2,11 @@
 <ruleset name="TikvClient">
     <description>TiKV PHP client coding standard based on PSR-12 with Slevomat additions</description>
 
-    <!-- Scan src/Client, phpstan and tests directories (exclude auto-generated Proto) -->
+    <!-- Scan src/Client, phpstan, tests and bin directories (exclude auto-generated Proto) -->
     <file>src/Client</file>
     <file>phpstan</file>
     <file>tests</file>
+    <file>bin</file>
 
     <!-- Exclude vendor and cache -->
     <exclude-pattern>vendor/*</exclude-pattern>
