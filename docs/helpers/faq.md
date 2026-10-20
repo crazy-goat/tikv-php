@@ -2132,3 +2132,41 @@ warning as well. `ConnectionFactory::buildSlowLogConfig()` never throws: a
 non-array `slowLog` value, or a non-int threshold, is silently ignored (the
 default wins), unlike `options['tls']` and `options['grpc']`, which fail
 closed.
+
+## Infection forces `stopOnDefect="true"` — one PHP warning truncates the whole mutation score
+
+Infection builds its own PHPUnit configuration for the initial (coverage) run
+and always writes `stopOnDefect="true"` into it
+(`XmlConfigurationManipulator::setStopOnFailureOrDefect()`), overriding whatever
+`phpunit.xml` says — there is no CLI flag to turn it off. `stopOnDefect`
+stops the run at the first *defect*, and a PHP warning is a defect even when
+`failOnWarning` is off.
+
+Consequence: if the test suite triggers a PHP warning, the initial run stops
+there, the coverage report covers only the tests that ran before it, and the
+measured mutation score becomes a function of where the random test order
+happened to stop. The same scope measured 308, 554, 689, 1059, 1621 and 1721
+mutants on six consecutive runs of `src/Client/TxnKv/` + `src/Client/Region/`.
+`--do-not-fail-on-warning` does not help: it keeps the *exit code* at 0, so
+Infection does not abort — it silently continues with the truncated coverage
+and reports a much lower score.
+
+Two ways out, in order of preference:
+
+1. Make the suite warning-free. The warning is usually a real bug:
+   `src/Client/Tls/TlsConfigBuilder.php:174` calls `file_get_contents()` on a
+   file it has not checked for readability.
+2. Exclude the warning-triggering test class from the mutation run with a
+   negative `--filter` (PHPUnit's `--filter` takes a regex, so a negative
+   lookahead works). `infection.json` does this for `TlsConfigBuilderTest`;
+   it covers `src/Client/Tls/`, which is outside the mutation scope, so the
+   measured score is unchanged (verified: the covered lines of every mutated
+   file are identical with and without the filter).
+
+The same mechanism applies to a *failing* test: `stopOnDefect` stops the run
+at the first failure too, and a truncated run does not fail — it reports a
+lower score. So a flaky test makes the mutation score unstable in exactly the
+same way. `tests/Unit/TxnKv/TxnKvFanoutTest.php` asserts a wall-clock bound
+(`assertLessThan(12, $elapsedMs)`) and fails intermittently on a loaded
+machine; that is a test-suite defect to fix on its own, not something the
+mutation configuration can absorb.

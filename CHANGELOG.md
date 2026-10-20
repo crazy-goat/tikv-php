@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 
 - `TlsConfigBuilderTest` no longer leaves a `tikv-test-*` directory behind in the system temp directory and no longer emits `unlink`/`rmdir` warnings: the cleanup removes the tree recursively and the unreadable fixtures restore their file mode before the test ends. (#355)
+- Mutation testing with [Infection](https://infection.github.io/): `infection/infection` is a dev dependency, `infection.json` holds the scope (`src/Client/TxnKv/`, `src/Client/Region/`), the `Unit`-suite test lane (no `ext-grpc` needed) and the MSI floor, `composer mutation` runs the analysis locally, and a nightly/on-demand CI job (`.github/workflows/mutation.yml`) enforces the floor. The floor starts at the score of the first full run — 72% (1854 mutants, 100% mutation code coverage; the same scope measures 73% on 1868 mutants today) — and is ratcheted up from there. (#363)
 
 ### Changed
 

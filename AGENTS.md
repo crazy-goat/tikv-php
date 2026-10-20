@@ -47,10 +47,17 @@ vendor/bin/phpunit --testsuite Integration
 make test-e2e              # RawKV on the V1TTL cluster, then TxnKV on the V1 cluster
 make test-e2e-apiv2        # API V2 suite on its own cluster
 
+# Mutation testing (Infection, needs a coverage driver: PCOV or Xdebug)
+composer mutation          # run the analysis and enforce the MSI floor
+composer mutation:show     # same, but print the surviving mutants
+
 make help                  # all make targets (install, up, down, clean, shell, example, proto-generate)
 ```
 
 The Makefile calls `docker-compose` (v1 syntax); CI and the scripts use `docker compose`.
+
+The mutation scope is `src/Client/TxnKv/` and `src/Client/Region/` (see `infection.json` and
+`docs/development.md`); its CI job runs nightly and on demand, not on every pull request.
 
 ## Docker Compose
 

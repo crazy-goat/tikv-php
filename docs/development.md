@@ -524,6 +524,68 @@ composer test:grpc
 
 CI runs the same suite on PHP 8.4 with `extensions: grpc` and `coverage: pcov`, using `--fail-on-skipped` so a missing extension fails the job instead of producing skipped tests.
 
+### Mutation Testing
+
+Mutation testing answers a question coverage cannot: *would the test suite
+notice if the production logic were inverted?* [Infection](https://infection.github.io/)
+rewrites the code under test (one mutant per mutation operator) and re-runs the
+covering tests; a mutant that survives is a hole in the test suite.
+
+```bash
+composer mutation        # run the analysis and enforce the MSI floor
+composer mutation:show   # same, but print the surviving mutants
+```
+
+The configuration lives in `infection.json`:
+
+- **Scope**: `src/Client/TxnKv/` and `src/Client/Region/` — the two areas
+  where an inverted production decision is the most expensive. Widen
+  `source.directories` as the score is ratcheted up.
+- **Test suite**: the `Unit` suite only (`--testsuite=Unit`). It needs no
+  `ext-grpc`, so the mutation run works everywhere; the `Grpc` and `E2E`
+  suites are out of scope.
+- **Floor**: `minMsi` / `minCoveredMsi` are the *Mutation Score Index* the
+  run must reach. The floor is the score of the **first full run** — **72%**
+  (1854 mutants: 1326 killed, 10 errors, 10 timeouts, 508 escaped, 100%
+  mutation code coverage) — and is ratcheted up from there. It is never
+  lowered to make a failing run pass. The measurement was taken on macOS
+  with PHP 8.5; the nightly job runs Linux with PHP 8.4 and PCOV, and the
+  killed/escaped split moves by a handful of mutants between environments
+  (a mutant that times out on one machine is killed on another). The same
+  scope measures 73% on 1868 mutants after the last update, so the floor
+  sits one point below the current score. If the first nightly run reports
+  a lower score, re-measure on the runner and set the floor to that value
+  **once** — from then on it only goes up.
+- **Timing**: Infection needs a coverage driver (PCOV or Xdebug) and re-runs
+  the covering test file per mutant, so a full run takes about ten minutes,
+  not seconds.
+
+Two details of the configuration are not obvious:
+
+1. `--do-not-fail-on-warning --do-not-fail-on-risky` keep PHPUnit's exit
+   code semantics identical to the rest of the project, where a warning does
+   not fail the run.
+2. The `--filter` expression keeps `TlsConfigBuilderTest` out of the initial
+   run. It deliberately reads an unreadable file, and the resulting PHP
+   warning is a *defect* for PHPUnit — Infection forces
+   `stopOnDefect="true"` into the PHPUnit configuration it generates, so the
+   initial run would stop at that warning and the coverage report — and with
+   it the measured score — would depend on where the random test order
+   happened to stop. The class covers `src/Client/Tls/`, which is outside the
+   mutation scope, so excluding it does not change the measured score.
+
+CI runs the analysis nightly and on demand (`.github/workflows/mutation.yml`),
+not on every pull request: the run is slow and the score is a ratchet, so it
+matters when it *drops*, not on every commit. The required `ci-ok` check is
+unchanged.
+
+The mutation floor and the coverage floor ([#362]) are two independent CI
+quality gates: coverage answers "is the code exercised?", mutation answers
+"does the exercise notice a wrong result?". They configure different tools
+and neither reads the other's configuration.
+
+[#362]: https://github.com/crazy-goat/tikv-php/issues/362
+
 ### E2E Test Patterns
 
 **Test Isolation:**

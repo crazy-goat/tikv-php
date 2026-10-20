@@ -1,0 +1,23 @@
+{
+    "$schema": "vendor/infection/infection/resources/schema.json",
+    "source": {
+        "directories": [
+            "src/Client/TxnKv",
+            "src/Client/Region"
+        ]
+    },
+    "logs": {
+        "text": "infection.log",
+        "summary": "infection-summary.log"
+    },
+    "mutators": {
+        "@default": true
+    },
+    "testFramework": "phpunit",
+    "testFrameworkOptions": "--do-not-fail-on-warning --do-not-fail-on-risky --testsuite=Unit --filter=/^(?!.*TlsConfigBuilderTest).*$/",
+    "timeout": 60,
+    "threads": "max",
+    "tmpDir": ".infection-tmp",
+    "minMsi": 72,
+    "minCoveredMsi": 72
+}

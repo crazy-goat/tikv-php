@@ -1,0 +1,63 @@
+name: Mutation
+
+# Mutation testing is a ratchet, not a pull-request gate: it is slow (every
+# mutant re-runs the covering test file) and the score only matters when it
+# drops. It therefore runs nightly and on demand, and NOT on every pull
+# request — the `ci-ok` gate stays fast and deterministic. A pull request that
+# lowers the score is caught by the next nightly run.
+on:
+  schedule:
+    # Nightly. Off the hour on purpose: the top of the hour is the busiest slot
+    # on GitHub's scheduler and the job is long.
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutation:
+    name: Mutation Testing (MSI floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          # The gRPC extension is required by composer.json, so it has to be
+          # installed even though the mutation run uses the `Unit` suite only
+          # (which mocks every gRPC call). PCOV is the coverage driver.
+          extensions: grpc
+          coverage: pcov
+        env:
+          COMPOSER_PROCESS_TIMEOUT: 0
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.composer/cache
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run mutation testing
+        run: composer mutation
+
+      - name: Upload the mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infection-report
+          path: |
+            infection.log
+            infection-summary.log

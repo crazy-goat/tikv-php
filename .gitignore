@@ -18,6 +18,7 @@ repomix-output.xml
 /coverage-html/
 /coverage.xml
 /coverage-clover.xml
+/.infection-tmp/
 /findings.md
 /review.md
 /.env.worktree

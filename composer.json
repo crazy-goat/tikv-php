@@ -11,6 +11,7 @@
         "psr/log": "^3.0"
     },
     "require-dev": {
+        "infection/infection": "^0.31",
         "phpunit/phpunit": "^11.0",
         "squizlabs/php_codesniffer": "^3.9 || ^4.0",
         "slevomat/coding-standard": "^8.15",
@@ -22,8 +23,10 @@
         "audit": {
             "block-insecure": true
         },
+        "process-timeout": 3600,
         "allow-plugins": {
-            "dealerdirect/phpcodesniffer-composer-installer": true
+            "dealerdirect/phpcodesniffer-composer-installer": true,
+            "infection/extension-installer": false
         }
     },
     "autoload": {
@@ -48,6 +51,8 @@
         "test:unit": "phpunit --testsuite Unit",
         "test:grpc": "phpunit --testsuite Grpc --fail-on-skipped --no-coverage",
         "test:e2e": "phpunit --testsuite E2E-RawKV --no-coverage",
+        "mutation": "infection",
+        "mutation:show": "infection --show-mutations",
         "pick-issue": "bash bin/pick-issue.sh",
         "rector": "rector process --dry-run",
         "rector:fix": "rector process"
