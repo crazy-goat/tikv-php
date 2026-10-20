@@ -937,6 +937,45 @@ single seam — its output is the effective channel key material — and it is
 unit-tested via reflection in the Unit suite (`GrpcClientChannelArgsTest`)
 without ext-grpc, since no real channel is created.
 
+## ext-grpc's persistent channels are shared and reference-counted (#283)
+
+`Grpc\Channel` keys its process-global persistent-channel table on the
+target, a SHA-1 of the channel arguments and a SHA-1 of the credentials
+(`ChannelCredentials::createInsecure()` returns `null`, so a plaintext
+channel contributes no credentials hash — a TLS and a plaintext client for
+the same address therefore never share a channel). Two handles built from
+the same key share **one** underlying `grpc_channel` — as long as the key is
+in that table: ext-grpc persists **one channel per target** by default, and a
+channel created beyond that bound is private to its handle ("The number of
+channel for the target is maxed out bounded"). Measured: two handles
+on one target open a single TCP connection. `Channel::close()` is a
+reference-count decrement (`php_grpc_channel_unref()`), **not** a destroy —
+the channel survives until its last holder releases it, and the persistent
+table is one of those holders. Consequences worth remembering:
+
+- closing one `GrpcClient` cannot invalidate a channel another
+  `GrpcClient` holds — the audit finding GRPC-24 assumed otherwise, and the
+  assumption was verified false against the deployed extension (grpc 1.83.0;
+  the persistent-channel code is unchanged in the oldest supported release,
+  1.57, so the conclusion holds across the supported range);
+- a shared channel is always in the persistent table (a channel that is not
+  persisted is never shared), so `close()` is safe even for a channel nobody
+  else holds;
+- `GrpcClient::closeChannel()` does **not** force a reconnect: the persistent
+  entry survives and the next `getChannel()` reuses the same underlying
+  channel. The idle and the LRU eviction have the same effect — they drop
+  the cached handle, not the connection;
+- `GrpcClient::close()` does **not** release the TCP connection either: the
+  persistent entry keeps the channel alive until the process ends (or until
+  the per-target bound drops the entry);
+- `Grpc\Call` keeps a reference to the PHP `Grpc\Channel` object, and
+  `Call::startBatch()` throws `RuntimeException("startBatch Error. Channel is
+  closed")` once that object was closed — so closing a channel that still
+  carries in-flight calls breaks them. Issue #278 therefore defers the close
+  of a busy channel in `closeChannel()` and in the idle and the LRU
+  eviction; `close()` closes the channels it deferred when the client shuts
+  down, which ends the calls that were still running on them.
+
 ## The issue's suggested fix can silently differ from what the test suite needs — reflection seams over protected methods
 
 Issue #265 suggested asserting channel args "via a seam or a protected
@@ -2014,8 +2053,14 @@ priority produces byte-identical requests).
 
 ## A cached gRPC channel must never be closed while calls run on it — `maxChannels` is a soft cap (#278)
 
-`Grpc\Channel::close()` destroys the underlying channel, not just the PHP-side
-reference: every call still running on it dies with it. `GrpcClient`'s LRU
+`Grpc\Channel::close()` drops this client's reference to the underlying
+channel, not just the PHP-side handle: the channel itself is reference-counted
+and stays alive while another holder (or the extension's own persistent table)
+still has it. A call, however, dies with the PHP `Grpc\Channel` object it was
+built on — `Call::startBatch()` then throws `RuntimeException("startBatch
+Error. Channel is closed")` — so closing a channel that still carries
+in-flight calls breaks them, whatever the channel's own reference count says
+(see the ext-grpc entry above for the verified semantics). `GrpcClient`'s LRU
 eviction used to close the least recently used channel whenever the cache was
 at capacity, with no idea whether calls were still running on it — so a batch
 that fanned out over more stores than `maxChannels` (default 64) holds closed

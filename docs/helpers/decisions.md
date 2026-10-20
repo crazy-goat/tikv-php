@@ -808,6 +808,42 @@ Do not collapse the three bounds into one value: the 30 s wall clock is the
 binding one for a `ServerBusy` storm (1–2 s sleeps), the sleep budgets are what
 bound a millisecond-scale retry storm that no wall clock would catch.
 
+## The ext-grpc channel semantics are verified, not assumed (issue #283)
+
+Issue #283 ("isolate `Grpc\Channel` instances across `GrpcClient` objects")
+assumed that `Channel::close()` destroys the underlying channel, so that
+closing one client invalidated the channel another client held. Verified
+against the deployed extension (grpc 1.83.0, `src/php/ext/grpc/channel.c`),
+that assumption is false: `close()` is a reference-count decrement
+(`php_grpc_channel_unref()`), the process-global persistent table is itself a
+holder of the channel, and a shared channel is always persisted — so closing
+one client cannot destroy a channel another client holds.
+
+The decisions that follow:
+
+1. **Do not work around a hazard that does not exist.** `force_new` was
+   rejected — it would give up the cross-request connection reuse for a
+   hazard that does not exist — and dropping the PHP-side reference instead of
+   `close()` was rejected as behaviourally identical to `close()` in that
+   version (both are the same refcount decrement) while deleting the tests
+   that cover the error handling of the close path.
+2. **Pin the verified semantics with a regression test**
+   (`tests/Unit/Grpc/GrpcClientChannelIsolationTest.php`), so a future
+   extension that turns `close()` into a destroy fails the suite instead of
+   silently breaking a second client.
+3. **Document what the API does, not what it promises.** `closeChannel()`
+   drops the cached handle but does not force a reconnect (the persistent
+   entry survives, so the next call reuses the same underlying channel and
+   the same TCP connection), and `close()` does not release the TCP
+   connection (the persistent entry keeps it warm until the process ends).
+   Both are now stated as they are.
+
+The ownership model that answers "who closes what" — a transport belongs to
+whoever created it, `options['grpcClient']` injects a borrowed one, and the
+transport options are rejected next to it — was decided in issue #407 and is
+documented in `README.md` and `docs/configuration.md`; it is not repeated
+here.
+
 ## The four Percolator invariants of the TxnKV path (issue #182)
 
 Closing the root-cause issue #182, whose four findings (TXN-01, TXN-02, TXN-04,

@@ -10,6 +10,7 @@
             <directory>tests/Unit</directory>
             <exclude>tests/Unit/Grpc/GrpcClientTest.php</exclude>
             <exclude>tests/Unit/Grpc/GrpcClientTimevalDeadlineTest.php</exclude>
+            <exclude>tests/Unit/Grpc/GrpcClientChannelIsolationTest.php</exclude>
             <exclude>tests/Unit/Grpc/RawKvBatchTimevalDeadlineTest.php</exclude>
             <exclude>tests/Unit/Batch/GrpcFutureTest.php</exclude>
             <exclude>tests/Unit/RawKv/RawKvBatchTest.php</exclude>
@@ -33,6 +34,7 @@
                  both suites (the CI coverage job). -->
             <file>tests/Unit/Grpc/GrpcClientTest.php</file>
             <file>tests/Unit/Grpc/GrpcClientTimevalDeadlineTest.php</file>
+            <file>tests/Unit/Grpc/GrpcClientChannelIsolationTest.php</file>
             <file>tests/Unit/Grpc/RawKvBatchTimevalDeadlineTest.php</file>
             <file>tests/Unit/Batch/GrpcFutureTest.php</file>
             <file>tests/Unit/RawKv/RawKvBatchTest.php</file>

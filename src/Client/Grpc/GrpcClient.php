@@ -34,6 +34,44 @@ use Psr\Log\NullLogger;
  * assembled by hand (`new RawKvClient($pdClient, $grpc)`) closes the
  * transport it was given unless `ownsGrpcClient: false` is passed. See
  * {@see GrpcClientInterface::close()}.
+ *
+ * ## ext-grpc channel semantics (issue #283)
+ *
+ * ext-grpc keeps a **process-global** table of persistent channels, keyed by
+ * the target, a hash of the channel arguments and a hash of the credentials.
+ * Two `Grpc\Channel` objects built from the same key therefore share **one**
+ * underlying `grpc_channel` — as long as the key is in that table. The table
+ * is bounded **per target** (one persisted channel per target by default), so
+ * a channel created beyond that bound is private to its handle: ext-grpc logs
+ * "The number of channel for the target is maxed out bounded" and does not
+ * persist it. A private channel is never shared, so it is never at risk
+ * either.
+ *
+ * Verified against the deployed extension (grpc 1.83.0,
+ * `src/php/ext/grpc/channel.c`); the persistent-channel code is unchanged in
+ * the oldest supported release (1.57), so the statement holds across the
+ * supported range:
+ *
+ * - the persistent key is `target + sha1(channel arguments) + sha1(credentials)`.
+ *   `ChannelCredentials::createInsecure()` returns `null`, so a plaintext
+ *   channel is keyed by target and arguments only, while a TLS channel adds
+ *   the credentials hash — a TLS and a plaintext client for the same address
+ *   never share a channel;
+ * - `Channel::close()` is a **reference-count decrement**
+ *   (`php_grpc_channel_unref()`), not a destroy: the underlying channel
+ *   survives until its last holder releases it, and the persistent table is
+ *   one of those holders.
+ *
+ * A shared channel is always in the persistent table (a channel that is not
+ * persisted is never shared), so `close()`, the idle eviction and the LRU
+ * eviction of one client can never destroy a channel another client holds —
+ * they only drop this client's own reference to it.
+ *
+ * The eviction paths leave a channel that still carries in-flight calls
+ * alone (issue #278): `closeChannel()` and the idle and LRU evictions take
+ * the channel out of the cache and defer its close until the last call
+ * settles. `close()` is the exception — it closes the channels it deferred,
+ * so shutting a client down ends the calls that were still running on them.
  */
 final class GrpcClient implements GrpcClientInterface
 {
@@ -366,6 +404,26 @@ final class GrpcClient implements GrpcClientInterface
         $this->close();
     }
 
+    /**
+     * Release every channel this client opened.
+     *
+     * "Release" means this client's handles: ext-grpc keeps the underlying
+     * channel in its process-global persistent table, so the TCP connection
+     * stays warm in the process (until the process ends or the per-target
+     * persist bound drops the entry). This call does not tear the connection
+     * down.
+     *
+     * Closing this client never invalidates a channel another client in the
+     * same process holds: ext-grpc reference-counts the underlying channel,
+     * so the channel stays alive until its last holder releases it
+     * (issue #283).
+     *
+     * The channels whose close was deferred because they still carried
+     * in-flight calls (issue #278) are closed here: shutting a client down
+     * ends the calls that were still running on them.
+     *
+     * @see GrpcClientInterface::close() for who may call this.
+     */
     public function close(): void
     {
         $this->closed = true;
@@ -391,10 +449,20 @@ final class GrpcClient implements GrpcClientInterface
      *
      * A channel that still has in-flight calls is not closed (issue #278):
      * it leaves the cache — so the next call for that address gets a
-     * fresh channel — and the close is deferred until its last in-flight
-     * call settles. `RetryExecutor` calls this to force a reconnect; the
-     * reconnect happens immediately, the destruction of the old channel
-     * waits for the calls that are still running on it.
+     * fresh handle — and the close is deferred until its last in-flight
+     * call settles.
+     *
+     * A fresh **handle** is not a fresh connection: ext-grpc keeps the
+     * channel in its process-global persistent table, so the next
+     * `getChannel()` resolves to the same underlying `grpc_channel` and
+     * the same TCP connection (verified against grpc 1.83.0). The table is
+     * bounded per target, so a channel that was created beyond that bound is
+     * private to its handle — closing it really does release it. gRPC's own
+     * reconnection after a broken connection is unaffected by this.
+     *
+     * No-op if the client has already been closed.
+     *
+     * @param string $address Channel address to close
      */
     public function closeChannel(string $address): void
     {

@@ -616,6 +616,41 @@ $txn = TxnKvClient::create(['127.0.0.1:2379'], $logger, $options);
 // The application owns $grpc:
 $grpc->close();
 ```
+
+`options['metrics']` stays a client-side option: it backs the client-side
+counters (region cache, retries) of every client, injected transport or not.
+The transport's own RPC counters follow the transport — pass the same backend
+to it (`new GrpcClient(metrics: $metrics)`) to get them everywhere.
+
+#### What closing a transport really does
+
+ext-grpc keeps a **process-global** table of persistent channels, keyed by the
+target, a hash of the channel arguments and a hash of the credentials. Two
+`Grpc\Channel` objects built from the same key therefore share **one**
+underlying `grpc_channel` — as long as the key is in that table. The table is
+bounded **per target** (one persisted channel per target by default), so a
+channel created beyond that bound is private to its handle: ext-grpc logs "The
+number of channel for the target is maxed out bounded" and does not persist
+it. A private channel is never shared, so it is never at risk either.
+
+`Channel::close()` is a **reference-count decrement**
+(`php_grpc_channel_unref()`), not a destroy: the underlying channel survives
+until its last holder releases it, and the persistent table is one of those
+holders. So closing one client never invalidates a channel another client
+holds — it only drops that client's own reference to it. Verified against the
+deployed extension (grpc 1.83.0; the persistent-channel code is unchanged in
+the oldest supported release, 1.57).
+
+Two consequences for the API:
+
+- `close()` releases this client's handles; the TCP connection stays warm in
+  the process (until the process ends or the per-target persist bound drops
+  the entry). It does not tear the connection down.
+- `closeChannel()` drops the cached handle but does **not** force a
+  reconnect: the persistent entry survives, so the next call reuses the same
+  underlying channel and the same TCP connection. Forcing a real reconnect
+  needs a new persistent entry.
+
 ### PSR-3 Logging
 
 ```php

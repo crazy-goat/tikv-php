@@ -24,6 +24,12 @@ use Grpc\Channel;
  * rest of the library already spells "disabled" (`TimeoutConfig`'s
  * `batchDeadlineMs = 0`), and because a call site must be able to decide
  * per call.
+ *
+ * The ext-grpc semantics behind {@see GrpcClientInterface::close()} — a
+ * `Grpc\Channel` is reference-counted and kept in ext-grpc's process-global
+ * persistent table — are documented on {@see GrpcClient}: closing one
+ * transport never invalidates a channel another transport in the same process
+ * holds (issue #283).
  */
 interface GrpcClientInterface
 {
@@ -109,7 +115,7 @@ interface GrpcClientInterface
     ): Message;
 
     /**
-     * Close all open channels and release resources.
+     * Close all open channels of this client.
      *
      * **Ownership.** The transport belongs to whoever created it:
      *
@@ -123,6 +129,12 @@ interface GrpcClientInterface
      *   given a transport it did not create and closes it here anyway — pass
      *   `ownsGrpcClient: false` to keep the ownership with the application.
      *
+     * "Close" means this client's handles: ext-grpc keeps the underlying
+     * channel in its process-global persistent table, so the TCP connection
+     * stays warm in the process (verified against grpc 1.83.0) — this call
+     * does not tear the connection down, and it never invalidates a channel
+     * another transport in the same process holds (issue #283).
+     *
      * Closing twice is safe: the second call is a no-op. Every call on a
      * closed transport throws
      * {@see \CrazyGoat\TiKV\Client\Exception\InvalidStateException}.
@@ -130,7 +142,14 @@ interface GrpcClientInterface
     public function close(): void;
 
     /**
-     * Close a single channel by address, forcing reconnect on next call.
+     * Close a single channel by address.
+     *
+     * The cached handle for that address is dropped, so the next call gets a
+     * new `Grpc\Channel` object — but **not** a new connection: ext-grpc
+     * keeps the channel in its process-global persistent table, so the new
+     * handle resolves to the same underlying `grpc_channel` and the same TCP
+     * connection (verified against grpc 1.83.0). Forcing a real reconnect
+     * needs a new persistent entry and is a separate concern.
      *
      * No-op if the client has already been closed.
      *

@@ -30,6 +30,14 @@ final readonly class ConnectionBundle
      * @param (Closure(string): bool)|null $storeHostPolicy
      * @param list<string> $pdEndpoints
      * @param list<int>|null $allowedStorePorts null = unrestricted
+     * @param TlsConfig|null $tlsConfig null when the transport was injected
+     *        through `options['grpcClient']` — the TLS configuration of an
+     *        injected transport is its own, and the factory builds none
+     *        (issue #283).
+     * @param MetricsInterface $metrics the client-side metrics backend
+     *        (region cache, retries). With an injected transport the
+     *        transport's own RPC counters follow that transport — the factory
+     *        cannot change them (issue #283).
      * @param bool $ownsGrpcClient true when the factory built the transport
      *        and the client may close it; false when the application supplied
      *        it (options['grpcClient']) and stays its owner

@@ -122,6 +122,19 @@ final class ConnectionFactory
             $grpc = $suppliedGrpc;
             $tlsConfig = null;
             $ownsGrpcClient = false;
+
+            // options['metrics'] is a client-side option: it always backs
+            // the client-side counters (region cache, retries). The
+            // transport's own RPC counters follow the transport, which was
+            // built with its own backend — the factory cannot change it.
+            // Announced so the split is never silent, but only when the
+            // option was actually given (issue #283).
+            if (isset($options['metrics'])) {
+                $resolvedLogger->debug(
+                    "options['metrics'] backs the client-side counters only: the injected "
+                    . 'gRPC transport keeps its own metrics backend',
+                );
+            }
         } else {
             $tlsConfig = self::buildTlsConfig($options);
 
