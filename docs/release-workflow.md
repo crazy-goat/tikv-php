@@ -43,6 +43,16 @@ In `CHANGELOG.md`:
 - Update the compare links at the bottom, if the file has them.
 - Bump the version in files that carry it (`composer.json` does not need it, but
   `package.json`, `version.go`, extension headers do). See `AGENTS.md`.
+- Cross-check the README against the section you are writing: every capability
+  in the new `CHANGELOG.md` section has to appear under **Implemented
+  Operations** in `README.md` (or already under **Completed** in its
+  **Roadmap**), and nothing that is still planned may be listed there as
+  shipped. Every item of the **Planned** list of the roadmap must have an
+  open issue and must not be shipped yet: drop an item from the list once its
+  issue is closed, and add an item when a new feature-gap issue is opened
+  whose work is still to be done. The list is curated, not a mirror of the
+  open issues — it holds the open feature-gap issues, and an issue whose
+  work already shipped stays out of it even while the issue is still open.
 
 Open a PR titled `chore: release vX.Y.Z`, wait for `ci-ok`, squash merge
 (`gh pr merge --squash --delete-branch`). Push the branch with an explicit ref:
@@ -101,6 +111,7 @@ Make sure the next milestone exists. Milestones in this repository are minor ver
 
 - [ ] Milestone has no open issues, CI is green
 - [ ] CHANGELOG section `[X.Y.Z] - date` written, `[Unreleased]` is empty
+- [ ] README "Implemented Operations" and "Roadmap" cross-checked against the new CHANGELOG section
 - [ ] Release PR merged
 - [ ] Annotated tag `vX.Y.Z` pushed
 - [ ] GitHub Release exists with the CHANGELOG notes
