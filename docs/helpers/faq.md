@@ -2036,3 +2036,31 @@ disjoint by construction, and print the RPC count in a benchmark or test that
 builds such a layout — it is the cheapest possible check that the layout is a
 layout. This bit `benchmarks/TxnCommitLatencyBenchmark.php` while it was being
 written (issue #431).
+
+## The `slowLog` option is RawKV-only, and its warning is written out five times
+
+`options['slowLog']` (shipped in #31, documented in #396) is parsed by
+`ConnectionFactory::buildSlowLogConfig()` for **both** clients, but only the
+RawKV path is instrumented: nothing under `src/Client/TxnKv/` takes a
+`SlowLogConfig`, so `TxnKvClient::create(['slowLog' => …])` accepts the option
+and never emits a warning. There is also no threshold for SST ingest —
+`SlowLogConfig::getThreshold('ingest')` falls into the `default => 0` arm, and
+`RawKvClient::OP_INGEST` is not wired to any measurement.
+
+The warning itself (`Slow TiKV operation`, context `operation`, `key`,
+`duration_ms`, `threshold_ms`) is written out **five times**: four identical
+`measure()` copies (`RawKvCrud`, `RawKvAtomic`, `RawKvScanner`,
+`RawKvRangeOps`) plus one `wrapWithLogging()` (`RawKvBatch`). Rewording the
+message or the context keys therefore means editing five places — and the
+documentation quotes the message verbatim. The `key` in the context is the
+operation's anchor key: the key itself for a single-key read or write, the
+**first key of the batch** for a batch operation, and the range anchor
+otherwise (the scan cursor, the exclusive upper bound of a reverse scan, the
+per-region sub-range start of a range operation).
+
+A threshold of `0` disables that operation type — the guard is
+`if ($threshold <= 0)`, so a *negative* threshold silently disables the
+warning as well. `ConnectionFactory::buildSlowLogConfig()` never throws: a
+non-array `slowLog` value, or a non-int threshold, is silently ignored (the
+default wins), unlike `options['tls']` and `options['grpc']`, which fail
+closed.

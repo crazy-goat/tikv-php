@@ -772,7 +772,21 @@ $options = [
     'allowInsecure' => false,     // Fail closed: refuse a plaintext channel
     'maxChannels' => 64,          // Open gRPC channels kept at the same time
     'idleTtlMs' => 600000,        // Idle time before an unused channel is evicted
-];
+
+    // Slow-operation logging (opt-in): a PSR-3 warning is logged when an
+    // operation takes longer than its threshold (milliseconds). Without this
+    // key, slow logging is off entirely; a threshold of 0 (or a negative one)
+    // disables that one operation type.
+    // See docs/configuration.md#slow-operation-logging.
+    'slowLog' => [
+        'readThresholdMs'        => 100,  // default 100  (get, getKeyTTL)
+        'writeThresholdMs'       => 200,  // default 200  (put, delete, CAS)
+        'batchReadThresholdMs'   => 500,  // default 500  (batchGet)
+        'batchWriteThresholdMs'  => 500,  // default 500  (batchPut, batchDelete)
+        'scanThresholdMs'        => 1000, // default 1000 (scan, batchScan)
+        'deleteRangeThresholdMs' => 2000, // default 2000 (deleteRange)
+        'checksumThresholdMs'    => 3000, // default 3000 (checksum)
+    ],];
 
 $client = RawKvClient::create(
     pdEndpoints: ['127.0.0.1:2379'],
@@ -783,6 +797,10 @@ $client = RawKvClient::create(
 
 The full list of options lives in [docs/configuration.md](docs/configuration.md).
 
+The `slowLog` option logs a warning with the message `Slow TiKV operation` and
+the operation type, the redacted key, the duration and the threshold — see
+[Slow Operation Logging](docs/configuration.md#slow-operation-logging) for the
+full reference.
 ### TiKV Configuration
 
 For TTL support, enable it in tikv.toml:

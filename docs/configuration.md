@@ -768,7 +768,7 @@ The client logs:
 
 - **DEBUG**: Connection attempts, cache operations, request details
 - **INFO**: Successful operations, region cache hits/misses
-- **WARNING**: Retry attempts, region invalidations
+- **WARNING**: Retry attempts, region invalidations, slow operations (only when the `slowLog` option is enabled — see [Slow Operation Logging](#slow-operation-logging))
 - **ERROR**: Failed operations, exhausted retries, fatal errors
 
 ### Structured Logging
@@ -797,6 +797,76 @@ $logger->pushHandler(new StreamHandler('/var/log/tikv.log', Logger::DEBUG));
 // Critical alerts to Slack/Email (using Monolog handlers)
 $logger->pushHandler(new SlackWebhookHandler(...));
 ```
+
+### Slow Operation Logging
+
+**Off by default.** Slow-operation logging is opt-in: without the `slowLog`
+option the client measures nothing and logs nothing. Enable it by passing the
+option to `RawKvClient::create()`:
+
+```php
+$client = RawKvClient::create(
+    pdEndpoints: ['127.0.0.1:2379'],
+    logger: $logger,
+    options: [
+        'slowLog' => [
+            'readThresholdMs'        => 100,  // default 100
+            'writeThresholdMs'       => 200,  // default 200
+            'batchReadThresholdMs'   => 500,  // default 500
+            'batchWriteThresholdMs'  => 500,  // default 500
+            'scanThresholdMs'        => 1000, // default 1000
+            'deleteRangeThresholdMs' => 2000, // default 2000
+            'checksumThresholdMs'    => 3000, // default 3000
+        ],
+    ],
+);
+```
+
+Every key is optional and keeps its default when it is omitted. A threshold of
+`0` — or any negative value — disables the warning for that operation type,
+so `'readThresholdMs' => 0` silences the read warning while the other six stay
+active. Omitting the whole `slowLog` key disables slow logging entirely.
+
+| Option key               | Default | Operations covered                                                                    |
+|--------------------------|---------|---------------------------------------------------------------------------------------|
+| `readThresholdMs`        | 100     | `get()`, `getKeyTTL()`                                                                 |
+| `writeThresholdMs`       | 200     | `put()`, `delete()`, `compareAndSwap()`, `putIfAbsent()`                              |
+| `batchReadThresholdMs`   | 500     | `batchGet()`                                                                           |
+| `batchWriteThresholdMs`  | 500     | `batchPut()`, `batchDelete()`                                                          |
+| `scanThresholdMs`        | 1000    | `scan()`, `scanPrefix()`, `reverseScan()`, `batchScan()`, `scanIterator()`, `scanPrefixIterator()` |
+| `deleteRangeThresholdMs` | 2000    | `deleteRange()`, `deletePrefix()`                                                      |
+| `checksumThresholdMs`    | 3000    | `checksum()`                                                                           |
+
+There is **no threshold for SST ingest** (`ingest()`): it is never measured, so
+no warning is emitted for it.
+
+When an operation takes longer than its threshold, the client emits a PSR-3
+**warning** with the message `Slow TiKV operation` and this context:
+
+| Context field  | Meaning                                                                                                                                                     |
+|----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `operation`    | The operation type: `read`, `write`, `batch_read`, `batch_write`, `scan`, `delete_range` or `checksum`.                                                      |
+| `key`          | The redacted key (`KeyRedactor::redact()`) — the first 8 bytes in hex plus the total length, with an ellipsis after the hex when the key is longer than 8 bytes, e.g. `"7573657231" (5 bytes)` for a short key and `"757365725f656d61... (28 bytes)` for a longer one. It is the key the operation is anchored on: the key itself for a single-key read or write, the **first key of the batch** for a batch operation, and the key the range starts at for a scan or range operation (the exclusive upper bound for a reverse scan, the start of the per-region sub-range when the range spans regions). |
+| `duration_ms`  | The measured duration in milliseconds, rounded to two decimals.                                                                                               |
+| `threshold_ms` | The threshold that was exceeded, in milliseconds.                                                                                                            |
+
+An emitted line therefore looks like this (the prefix depends on the logger's
+formatter):
+
+```
+WARNING  Slow TiKV operation  {"operation":"scan","key":"\"7573657231\" (5 bytes)","duration_ms":1420.5,"threshold_ms":1000}
+```
+
+The duration is measured around the RPC: for the batch fan-outs it covers the
+wait for the responses (the round-trip latency), not the dispatch.
+
+The warning is emitted through the PSR-3 logger passed to `create()`, so it
+appears only when that logger's level includes `warning`.
+
+`slowLog` is a RawKV feature. `TxnKvClient::create()` accepts the option (the
+shared connection layer parses it for both clients), but the transactional path
+carries no slow-operation instrumentation, so no warning is emitted for
+transactions.
 
 ## Replica Reads
 
