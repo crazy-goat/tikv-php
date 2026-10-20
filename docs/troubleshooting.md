@@ -554,7 +554,9 @@ budget — long-running transaction, or a genuinely stuck lock.
 **Solution:** Increase `maxBackoffMs` only if the holder is legitimately
 slow; otherwise retry in a new transaction. The competing key is redacted in
 the message; call `getKey()` for the actual key if your log pipeline is
-allowed to see it.
+allowed to see it. `begin(['lockWaitTimeMs' => N])` tunes how long *one*
+lock request may block on the server (default 1000 ms); it never exceeds the
+remaining budget (issue #443).
 
 #### Txn Retryable (Lock Resolved Mid-Operation)
 

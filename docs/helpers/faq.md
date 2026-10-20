@@ -343,6 +343,31 @@ true. Unit-test tip: pass a small `maxBackoffMs` (e.g. 100) to
 without sleeping the full default 20 s budget — and `maxBackoffMs = 0`
 hits the `remainingMs <= 0` guard after the very first locked response.
 
+## `PessimisticLockRequest.wait_timeout` has three meanings, and 0 is not "no wait"
+
+The protobuf field carries **milliseconds** and its zero value is *not*
+"do not wait": `0` means "use TiKV's own default timeout"
+(`pessimistic-txn.wait-for-lock-timeout`, 1 s by default), a negative value
+means "do not wait at all", and only a positive value is a real wait. So a
+client that wants to bound the wait must send a positive number — sending 0
+silently hands the decision back to the server (issue #443, DIV-07, which is
+also the case the audit finding quoted: the field was never set at all).
+
+The client derives the value from the remaining lock-wait budget, like
+client-go's `calculateEffectiveWaitTime`: the value sent to TiKV is
+`min(lockWaitTimeMs, remaining budget)`, so it never exceeds the budget and
+shrinks as the budget is consumed. The budget that shrinks is the **backoff**
+budget of the key group (`maxBackoffMs` minus the sleep already spent), not
+the wall clock — the group's RPC time is not part of it, so the total
+occupancy of a contended key is the budget plus the server-side waits of the
+attempts, not `maxBackoffMs` alone.
+
+Note that the issue's *first* acceptance criterion ("exhausting the budget
+raises `LockWaitTimeoutException` instead of continuing to prewrite") was
+already satisfied by #219/#500 before #443 was worked on — an audit issue's
+premise can expire while it waits in the milestone (the same trap as #394).
+The remaining gap was the missing `wait_timeout` and the missing knob.
+
 ## Retry closures must re-resolve the region inside the loop — scans resolve on the sub-range start, reverse scans on the sub-range end
 
 `RetryExecutor` invalidates the region cache and switches leader hints on

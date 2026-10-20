@@ -114,6 +114,21 @@ final readonly class TwoPhaseCommitter
     private const ROLLBACK_MAX_REGROUPS = 10;
 
     /**
+     * Default pessimistic-lock wait timeout handed to TiKV
+     * (issue #443, DIV-07). It matches TiKV's own
+     * `pessimistic-txn.wait-for-lock-timeout` default (1 s), so the default
+     * behaviour is unchanged — but the value belongs to the client now, and
+     * it is configurable per transaction.
+     */
+    public const DEFAULT_LOCK_WAIT_TIME_MS = 1000;
+
+    /**
+     * `PessimisticLockRequest.wait_timeout` value that asks TiKV not to wait
+     * at all (the protobuf's "negative means no wait").
+     */
+    private const LOCK_WAIT_NO_WAIT_MS = -1;
+
+    /**
      * Maximum number of keys for a transaction to stay eligible for one-phase
      * commit (mirrors client-go's onePCKeysLimit). 1PC is additionally
      * restricted to a single region.
@@ -156,6 +171,13 @@ final readonly class TwoPhaseCommitter
          * not `callable`: PHP properties cannot be typed callable.
          */
         private ?\Closure $clock = null,
+        /**
+         * How long TiKV may wait for a contended pessimistic lock, in
+         * milliseconds (issue #443, DIV-07). 0 means "use TiKV's own
+         * default timeout"; the effective per-attempt value is derived
+         * from the remaining lock-wait budget.
+         */
+        private int $lockWaitTimeMs = self::DEFAULT_LOCK_WAIT_TIME_MS,
     ) {
     }
 
@@ -1533,6 +1555,11 @@ final readonly class TwoPhaseCommitter
      * Build one region's PessimisticLockRequest (shared by the #291
      * first-attempt fan-out dispatch and the in-loop retry attempts).
      *
+     * `wait_timeout` tells TiKV how long it may block on a contended key
+     * before it answers with a "locked" error (issue #443, DIV-07); the
+     * value is derived from the remaining lock-wait budget, see
+     * {@see self::effectiveLockWaitTimeoutMs()}.
+     *
      * @param Mutation[] $mutations
      */
     private function buildPessimisticLockRequest(
@@ -1541,6 +1568,7 @@ final readonly class TwoPhaseCommitter
         string $primary,
         int $forUpdateTs,
         bool $isFirstLock,
+        int $waitTimeoutMs,
     ): PessimisticLockRequest {
         $request = new PessimisticLockRequest();
         $request->setContext($this->buildContext($region));
@@ -1550,9 +1578,39 @@ final readonly class TwoPhaseCommitter
         $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
         $request->setForUpdateTs($forUpdateTs);
         $request->setIsFirstLock($isFirstLock);
+        $request->setWaitTimeout($waitTimeoutMs);
         $request->setReturnValues(true);
 
         return $request;
+    }
+
+    /**
+     * Effective `PessimisticLockRequest.wait_timeout` for one attempt
+     * (issue #443, DIV-07). Mirrors client-go's `calculateEffectiveWaitTime`:
+     * the value handed to TiKV is `min(lockWaitTimeMs, remaining budget)`, so
+     * it never exceeds the budget and shrinks as the budget is consumed. The
+     * budget counts the backoff sleeps, not the RPC time, so the total
+     * occupancy of a contended key is the budget plus the server-side waits
+     * of the attempts.
+     *
+     * @param int $elapsedMs backoff already spent on this key group
+     */
+    private function effectiveLockWaitTimeoutMs(int $elapsedMs): int
+    {
+        if ($this->lockWaitTimeMs === 0) {
+            // 0 is the protobuf's "use TiKV's own default timeout" — there
+            // is no client-side value to shrink.
+            return 0;
+        }
+
+        $remainingMs = $this->maxBackoffMs - $elapsedMs;
+        if ($remainingMs <= 0) {
+            // The budget is spent: ask TiKV to answer immediately instead of
+            // blocking on a lock the client is no longer willing to wait for.
+            return self::LOCK_WAIT_NO_WAIT_MS;
+        }
+
+        return min($this->lockWaitTimeMs, $remainingMs);
     }
 
     /**
@@ -1570,6 +1628,7 @@ final readonly class TwoPhaseCommitter
      * regroup counters (issue #503 review).
      *
      * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
+     * @param int $waitTimeoutMs effective wait timeout for the first attempt
      * @return array{0: array<int, GrpcFuture>, 1: array<int, Mutation[]>}
      */
     private function dispatchPessimisticLockFirstAttempts(
@@ -1577,6 +1636,7 @@ final readonly class TwoPhaseCommitter
         string $primary,
         int $forUpdateTs,
         bool $isFirstLock,
+        int $waitTimeoutMs,
     ): array {
         $firstGroupIndex = array_key_first($keysByRegion);
         $firstAttempts = [];
@@ -1601,6 +1661,7 @@ final readonly class TwoPhaseCommitter
                 $primary,
                 $forUpdateTs,
                 $isFirstLock && $groupIndex === $firstGroupIndex,
+                $waitTimeoutMs,
             );
 
             $this->logger->debug('PessimisticLock', [
@@ -1735,6 +1796,7 @@ final readonly class TwoPhaseCommitter
                 $primary,
                 $forUpdateTs,
                 $isFirstLock,
+                $this->effectiveLockWaitTimeoutMs(0),
             );
 
             try {
@@ -1799,6 +1861,7 @@ final readonly class TwoPhaseCommitter
                                     $primary,
                                     $forUpdateTs,
                                     $isFirstLock,
+                                    $this->effectiveLockWaitTimeoutMs($elapsedMs),
                                 );
 
                                 $this->logger->debug('PessimisticLock', [

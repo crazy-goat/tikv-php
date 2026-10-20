@@ -304,4 +304,60 @@ class TxnKvClientTest extends TestCase
 
         $this->assertSame(0, $txn->getPriority());
     }
+
+    // ========================================================================
+    // begin() — pessimistic-lock wait timeout (issue #443, DIV-07)
+    // ========================================================================
+
+    public function testBeginWithLockWaitTimePropagatesToTransaction(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->begin(['lockWaitTimeMs' => 250]);
+        $property = new \ReflectionProperty(Transaction::class, 'lockWaitTimeMs');
+
+        $this->assertSame(250, $property->getValue($txn));
+    }
+
+    public function testBeginWithoutLockWaitTimeUsesTheDefault(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->begin();
+        $property = new \ReflectionProperty(Transaction::class, 'lockWaitTimeMs');
+
+        $this->assertSame(Transaction::DEFAULT_LOCK_WAIT_TIME_MS, $property->getValue($txn));
+    }
+
+    public function testBeginRejectsNonIntLockWaitTime(): void
+    {
+        $client = new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['lockWaitTimeMs'] must be an int");
+        $client->begin(['lockWaitTimeMs' => '250']); // @phpstan-ignore argument.type
+    }
+
+    public function testBeginRejectsNegativeLockWaitTime(): void
+    {
+        $client = new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['lockWaitTimeMs'] must be >= 0");
+        $client->begin(['lockWaitTimeMs' => -1]);
+    }
 }

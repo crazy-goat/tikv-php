@@ -93,6 +93,18 @@ final class TxnKvClient
     public const OPT_EAGER_PESSIMISTIC_LOCKS = 'eagerPessimisticLocks';
 
     /**
+     * begin() options[] key for the pessimistic-lock wait timeout in
+     * milliseconds (issue #443, DIV-07): how long TiKV may block on a
+     * contended key before it answers with a "locked" error, which the
+     * client then retries within its lock-wait budget. Default:
+     * {@see Transaction::DEFAULT_LOCK_WAIT_TIME_MS} (1000 ms, the same value
+     * TiKV applies by default). 0 means "let TiKV use its own default
+     * timeout" — the only value that is not shrunk as the budget is
+     * consumed. Must be >= 0.
+     */
+    public const OPT_LOCK_WAIT_TIME_MS = 'lockWaitTimeMs';
+
+    /**
      * options[] key for the maximum staleness (ms) of the low-resolution
      * TSO timestamp cache (issue #420, GAP-06). Used only by
      * staleness-tolerant consumers (lock resolution `current_ts`);
@@ -312,10 +324,13 @@ final class TxnKvClient
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
+     *     lockWaitTimeMs?: int,
      * } $options
      *     `priority` maps onto the Kvrpcpb CommandPri enum: 0 = Normal
      *     (default), 1 = Low, 2 = High. It is carried on the transaction's
      *     prewrite, pessimistic-lock and commit RPCs (issue #441).
+     *     `lockWaitTimeMs` bounds how long TiKV waits for a contended
+     *     pessimistic lock (issue #443, DIV-07).
      */
     public function begin(array $options = []): Transaction
     {
@@ -326,6 +341,7 @@ final class TxnKvClient
         $enable1Pc = $this->resolveEnableFlag($options, self::OPT_ENABLE_1PC);
         $enableAsyncCommit = $this->resolveEnableFlag($options, self::OPT_ENABLE_ASYNC_COMMIT);
         $eagerPessimisticLocks = $this->resolveEagerPessimisticLocks($options);
+        $lockWaitTimeMs = $this->resolveLockWaitTimeMs($options);
 
         $startTs = $this->pdClient->getTimestamp();
 
@@ -369,6 +385,7 @@ final class TxnKvClient
             enable1Pc: $enable1Pc,
             enableAsyncCommit: $enableAsyncCommit,
             eagerPessimisticLocks: $eagerPessimisticLocks,
+            lockWaitTimeMs: $lockWaitTimeMs,
         );
     }
 
@@ -416,6 +433,35 @@ final class TxnKvClient
                 self::OPT_EAGER_PESSIMISTIC_LOCKS,
                 get_debug_type($value),
             ));
+        }
+
+        return $value;
+    }
+
+    /**
+     * Resolve the begin() option 'lockWaitTimeMs' (see
+     * {@see self::OPT_LOCK_WAIT_TIME_MS}): how long TiKV may wait for a
+     * contended pessimistic lock, in milliseconds. 0 means "use TiKV's own
+     * default timeout"; a negative value is rejected.
+     *
+     * @param array<string, mixed> $options
+     */
+    private function resolveLockWaitTimeMs(array $options): int
+    {
+        if (!array_key_exists(self::OPT_LOCK_WAIT_TIME_MS, $options)) {
+            return Transaction::DEFAULT_LOCK_WAIT_TIME_MS;
+        }
+
+        $value = $options[self::OPT_LOCK_WAIT_TIME_MS];
+        if (!is_int($value)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be an int (milliseconds), %s given",
+                self::OPT_LOCK_WAIT_TIME_MS,
+                get_debug_type($value),
+            ));
+        }
+        if ($value < 0) {
+            throw new InvalidArgumentException("options['lockWaitTimeMs'] must be >= 0");
         }
 
         return $value;

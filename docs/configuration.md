@@ -738,6 +738,39 @@ Details:
   never applies an unsafe fast commit, it just answers with a decline and the
   client proceeds with two-phase commit.
 
+## Pessimistic Lock Wait Timeout (TxnKV)
+
+A pessimistic-lock request tells TiKV how long it may block on a contended
+key before it answers with a "locked" error, which the client then retries
+inside its lock-wait budget (`maxBackoffMs`). The wait is configured per
+transaction, on `begin()` (issue #443, DIV-07):
+
+```php
+$txn = $client->begin([
+    'lockWaitTimeMs' => 1000, // default; 0 = "let TiKV use its own default"
+]);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `lockWaitTimeMs` | `1000` (the same timeout TiKV applies by default, `pessimistic-txn.wait-for-lock-timeout`) | How long TiKV may wait for a contended key, in milliseconds. `0` means "use TiKV's own default timeout" — the only value that is not shrunk as the budget is consumed. Must be `>= 0`; anything else throws `InvalidArgumentException`. |
+
+The value is sent as `PessimisticLockRequest.wait_timeout` and is
+`min(lockWaitTimeMs, remaining lock-wait budget)`: it never exceeds the
+budget and shrinks as the budget is consumed (client-go's
+`calculateEffectiveWaitTime`). TiKV caps the wait at its own
+`pessimistic-txn.wait-for-lock-timeout` (1000 ms by default), so a larger
+`lockWaitTimeMs` does not make the server wait longer. When the budget runs
+out, the transaction fails with `LockWaitTimeoutException` — it never
+proceeds to prewrite without the lock.
+
+The wait is a **per-request** wait: the client retries inside the budget, so
+the total time a contended key can block a worker is the budget **plus** the
+server-side waits of the attempts — the budget counts the client's backoff
+sleeps, not the time the lock RPCs themselves take. Lower the value to keep a
+PHP worker slot free; raise it to let TiKV park the request instead of
+answering early and having the client send it again.
+
 ## Retry and Backoff
 
 ### Automatic Retry

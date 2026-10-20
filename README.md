@@ -210,6 +210,7 @@ $txnClient = TxnKvClient::create(['127.0.0.1:2379']);   // same options as RawKv
 $txn = $txnClient->begin([          // pessimistic by default
     'pessimistic' => true,          // false = optimistic (locks at commit)
     'priority'    => 0,             // 0 Normal (default), 1 Low, 2 High
+    'lockWaitTimeMs' => 1000,       // how long TiKV may wait for a contended lock
 ]);
 
 $txn->set('account:1', '100');
@@ -264,6 +265,14 @@ pessimistic read's per-key `for_update_ts` is reused by the matching write, and
 prewrite keeps `DO_CONSTRAINT_CHECK` as a safety net. The legacy deferred pass
 is available as `begin(['eagerPessimisticLocks' => false])`, which moves the
 lock pass to `commit()`.
+
+`begin(['lockWaitTimeMs' => N])` bounds how long TiKV waits for a contended
+key before it answers with a "locked" error (default 1000 ms, the timeout
+TiKV applies by default). The value sent to TiKV is
+`min(lockWaitTimeMs, remaining lock-wait budget)`: it never exceeds the budget
+and shrinks as the budget is consumed. When the budget runs out the
+transaction fails with `LockWaitTimeoutException` instead of committing
+without the lock. See [Configuration](docs/configuration.md#pessimistic-lock-wait-timeout-txnkv).
 
 #### Isolation, timestamps and status
 

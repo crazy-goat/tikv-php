@@ -70,6 +70,13 @@ final class Transaction
      */
     public const DEFAULT_RETRY_DEADLINE_MS = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS;
 
+    /**
+     * Default pessimistic-lock wait timeout (issue #443, DIV-07). Alias of
+     * the canonical TwoPhaseCommitter constant; do not introduce further
+     * copies.
+     */
+    public const DEFAULT_LOCK_WAIT_TIME_MS = TwoPhaseCommitter::DEFAULT_LOCK_WAIT_TIME_MS;
+
     public function __construct(
         private readonly string $txnId,
         private readonly int $startTs,
@@ -103,11 +110,22 @@ final class Transaction
         private array $readTsByKey = [],
         /** Whether pessimistic set/delete acquire their lock before returning. */
         private readonly bool $eagerPessimisticLocks = true,
+        /**
+         * How long TiKV may wait for a contended pessimistic lock, in
+         * milliseconds (issue #443, DIV-07). 0 means "use TiKV's own
+         * default timeout".
+         */
+        private readonly int $lockWaitTimeMs = self::DEFAULT_LOCK_WAIT_TIME_MS,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
+        if ($lockWaitTimeMs < 0) {
+            // A negative wait_timeout means "do not wait at all" in TiKV, so
+            // it would silently change the meaning of the option (issue #443).
+            throw new InvalidArgumentException('lockWaitTimeMs must be >= 0');
+        }
         $this->state = new TransactionState();
 
         $this->reader = new TxnReader(
@@ -142,6 +160,7 @@ final class Transaction
             enable1Pc: $this->enable1Pc,
             enableAsyncCommit: $this->enableAsyncCommit,
             logger: $this->logger,
+            lockWaitTimeMs: $this->lockWaitTimeMs,
         );
     }
 
