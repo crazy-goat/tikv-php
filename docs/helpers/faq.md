@@ -1745,3 +1745,26 @@ assertions). Three consequences for the test suite:
    negative assertion is only meaningful when the cache **and** a region ID
    are both passed to `check()` — with `$regionId === null` the handler cannot
    invalidate anything and the expectation would be vacuous.
+
+## A TTL array shorter than the pair list breaks the `int[]` contract — the count check belongs in the public helper
+
+`RawKvSplitter::splitPairsIntoBatches()` used to pad a short TTL array with
+`null` (`Undefined array key` warning, `null` in the `int[]` result). That
+breaks the declared `int[]` contract, and the `null` reaches the caller's
+`RawBatchPutRequest::setTtls()`, which rejects it with a protobuf type error
+(`Cannot convert '' to integer` with the C extension, `Expect integer.` with
+the pure-PHP runtime the CI `unit-tests` job uses) — TiKV's own proto comment
+says a `ttls`/`pairs` length mismatch "will return an error". The failure was
+therefore loud but confusing, not silent data loss. The count check belongs in
+the public static helper itself (it throws `InvalidArgumentException: TTL array
+count (N) must match pair count (M)` since #345), not only in its one caller
+(`RawKvBatch::batchPut()`), because the method is public and anybody can call
+it. A test that asserted the defective behaviour ("3 ttls for 3 pairs, the
+first one is 60") pinned the bug and had to be replaced, not kept.
+
+PHPStan trap when writing the replacement guard: `assertIsInt($ttl)` on an
+element of a PHPDoc-typed `int[]` is reported as
+`staticMethod.alreadyNarrowedType` — the type is already `int`, so the
+assertion "always evaluates to true". Assert the element type through a
+`mixed`-typed helper (`@param mixed[] $ttls`), the pattern the repo already
+uses in `RawKvBatchDeadlineTest::timeoutMs()`.

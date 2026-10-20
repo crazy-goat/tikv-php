@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\RawKv;
 
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 
 final class RawKvSplitter
 {
@@ -47,6 +48,9 @@ final class RawKvSplitter
      * @param KvPair[] $pairs
      * @param int[] $ttls
      * @return array<array{pairs: KvPair[], ttls: int[]}>
+     *
+     * @throws InvalidArgumentException If a non-empty TTL array does not
+     *         contain exactly one TTL per pair.
      */
     public static function splitPairsIntoBatches(array $pairs, int $maxCount, int $maxBytes, array $ttls = []): array
     {
@@ -56,6 +60,18 @@ final class RawKvSplitter
         $hasTtls = $ttls !== [];
         if ($hasTtls) {
             $ttls = array_values($ttls);
+            // A TTL array that does not cover every pair would emit `null`
+            // for the missing entries. That breaks the declared `int[]`
+            // contract and makes the caller's `setTtls()` fail with a
+            // confusing protobuf type error, so fail closed here instead
+            // of padding (issue #345).
+            if (count($ttls) !== count($pairs)) {
+                throw new InvalidArgumentException(sprintf(
+                    'TTL array count (%d) must match pair count (%d)',
+                    count($ttls),
+                    count($pairs),
+                ));
+            }
         }
 
         $batches = [];

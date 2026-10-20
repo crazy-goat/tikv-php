@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -127,20 +128,28 @@ class RawKvSplitterTest extends TestCase
         $this->assertSame([30, 40], $result[1]['ttls']);
     }
 
-    public function testSplitPairsIntoBatchesWithPartialTtlsEmitsWarning(): void
+    public function testSplitPairsIntoBatchesRejectsTtlArrayShorterThanPairs(): void
     {
-        $pairs = [
-            $this->createKvPair('k1', 'v1'),
-            $this->createKvPair('k2', 'v2'),
-            $this->createKvPair('k3', 'v3'),
-        ];
-        // TTL array shorter than pairs — triggers undefined array key at RawKvSplitter:72
-        // PHP emits a warning but continues with null values for missing indices
-        $result = RawKvSplitter::splitPairsIntoBatches($pairs, 10, 100, [60]);
-        $this->assertCount(1, $result);
-        $this->assertCount(3, $result[0]['pairs']);
-        $this->assertCount(3, $result[0]['ttls']);
-        $this->assertSame(60, $result[0]['ttls'][0]);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('TTL array count (1) must match pair count (3)');
+
+        RawKvSplitter::splitPairsIntoBatches($this->threePairs(), 10, 100, [60]);
+    }
+
+    public function testSplitPairsIntoBatchesRejectsTtlArrayLongerThanPairs(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('TTL array count (4) must match pair count (3)');
+
+        RawKvSplitter::splitPairsIntoBatches($this->threePairs(), 10, 100, [60, 70, 80, 90]);
+    }
+
+    public function testEveryEmittedTtlIsAnInteger(): void
+    {
+        $result = RawKvSplitter::splitPairsIntoBatches($this->threePairs(), 2, 100, [1, 2, 3]);
+        foreach ($result as $batch) {
+            $this->assertEveryTtlIsAnInteger($batch['ttls']);
+        }
     }
 
     public function testSplitPairsIntoBatchesTtlsAlignWithNonSequentialKeys(): void
@@ -187,5 +196,27 @@ class RawKvSplitterTest extends TestCase
         $pair->setKey($key);
         $pair->setValue($value);
         return $pair;
+    }
+
+    /**
+     * @param mixed[] $ttls
+     */
+    private function assertEveryTtlIsAnInteger(array $ttls): void
+    {
+        foreach ($ttls as $ttl) {
+            self::assertIsInt($ttl, 'a TTL must never be null — the splitter declares int[]');
+        }
+    }
+
+    /**
+     * @return KvPair[]
+     */
+    private function threePairs(): array
+    {
+        return [
+            $this->createKvPair('k1', 'v1'),
+            $this->createKvPair('k2', 'v2'),
+            $this->createKvPair('k3', 'v3'),
+        ];
     }
 }
