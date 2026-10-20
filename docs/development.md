@@ -844,6 +844,23 @@ which "zero PD calls" does not convey. Read that file's header note before
 quoting its CPU numbers — the issue's original 33.85 ms figure was taken
 against the pre-#289 `RegionCache` and no longer reproduces.
 
+The transaction commit benchmark measures the commit latency of a
+multi-region transaction, with the two-phase-commit RPCs fanned out across
+regions and with one RPC at a time (issue #431):
+
+```bash
+php benchmarks/TxnCommitLatencyBenchmark.php
+```
+
+Both columns run the same client code path against a fake store with a fixed
+per-RPC latency, so they differ only in *when* the requests are sent: the
+fan-out keeps the waiting time at one round trip per phase, while the
+one-at-a-time shape pays one round trip per region and per phase. The `RPCs`
+column is the check that the fan-out changes the timing and not the traffic —
+it must stay `fan-out/sequential` and equal. The benchmark also sweeps the
+region count (1, 2, 5, 10, 20), because the whole point is how the two curves
+diverge.
+
 For other operations, create focused benchmark classes under
 `tests/Benchmark/`:
 

@@ -781,3 +781,32 @@ Two smaller rules the same fix settled:
 - **The unbounded `array_push($results, ...$rows)` spreads are gone.** They
   pushed up to 10 240 elements onto the VM stack per region; a foreach append
   costs nothing and reads the same.
+
+## The parallel prewrite reports its aggregated failure, it does not throw it (issue #431, GAP-17)
+
+The prewrite fan-out (issue #291, PERF-04) collects every failing region into
+a `BatchPartialFailureException` and rethrows the **first failing region's own
+error**, so the sequential "abort at the first failing region" contract holds
+and `docs/error-handling.md`'s exception list for `Transaction::commit()` stays
+accurate — it does not mention `BatchPartialFailureException`, and callers
+catching `GrpcException` or `RegionException` around `commit()` keep working.
+
+Issue #431 asked for the partial failures to be "aggregated and retried per
+region". Both halves were already in place: the fan-out waits for its
+in-flight calls (so one region's failure neither cancels nor hides its peers'
+responses) and each region retries on its own through its own `RetryExecutor`
+loop. What was missing was the third step: the aggregate was **dropped**
+together with the rethrown error, so a failure in several regions looked like a
+single-region one — and the aggregate's own keys are group indices, which
+identify no region. The aggregate is now logged with the identity of every
+failed region before the first error is rethrown.
+
+Do not "improve" this by throwing the aggregate: that changes the exception
+type of every multi-region prewrite failure and breaks the callers the
+first-error contract was written for. If the aggregate ever becomes part of the
+public contract, it needs a documented accessor on the transaction path, a
+`docs/error-handling.md` update and a migration note — not a silent change of
+the thrown type. Pinned by `tests/Unit/TxnKv/TxnKvFanoutTest.php`
+(`testFailingRegionsAreAllObservedAndTheFirstErrorSurfaces`,
+`::testFailingRegionIsRetriedOnItsOwnWhilePeersAreNotResent`,
+`::testAggregatedPrewriteFailureNamesEveryFailingRegion`).

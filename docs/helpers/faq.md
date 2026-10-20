@@ -2007,3 +2007,32 @@ label. Four lessons:
    with a file key) dies with `TLS file has disallowed extension ""`. Copying
    the single-value description to the pair is wrong — read the whole method,
    not its helper.
+
+## An audit issue's "this loop is sequential" premise expires — read the tree before re-implementing
+
+Issue #431 (GAP-17) was filed against a `TwoPhaseCommitter` that prewrote and
+committed region by region; by the time it was picked up, #291 (PERF-04) had
+already fanned both phases out with `BatchAsyncExecutor::executeParallel()`,
+and the file had grown from ~700 to ~2000 lines — the issue's line numbers
+(113-118, 350-360, 520) pointed at unrelated code. Same trap as "Error-handling
+docs must be derived from source, not from the issue text": an audit issue's
+premise is stale by default. Before implementing, grep the tree for the
+mechanism the issue proposes reusing (`BatchAsyncExecutor::executeParallel()`)
+and check the cited line numbers against the current file; then decide what is
+*actually* missing — here it was the benchmark and the coverage of the
+partial-failure path, not the fan-out itself.
+
+## A region layout built from variable-width keys ("k1", "k10") makes the regions overlap — the cache then drops one of them
+
+`RegionCache::put()` removes every cached entry whose range overlaps the
+incoming one (issue #238). A layout that gives region *i* the range
+`["k{i}", "k{i}\xff")` is not a layout once *i* reaches 10: `"k10"` sorts
+INSIDE region 1's range `["k1", "k1\xff")` (byte 2 is `'0'` against `'\xff'`),
+so putting region 10 removes region 1 from the cache. The symptom is silent —
+the client resolves the keys to the surviving regions, the RPC count drops (a
+20-region transaction sends 30 RPCs instead of 40) and nothing fails. Zero-pad
+the key to a fixed width (`sprintf('key%03d', $i)`), which makes the ranges
+disjoint by construction, and print the RPC count in a benchmark or test that
+builds such a layout — it is the cheapest possible check that the layout is a
+layout. This bit `benchmarks/TxnCommitLatencyBenchmark.php` while it was being
+written (issue #431).

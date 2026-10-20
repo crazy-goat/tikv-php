@@ -413,6 +413,15 @@ final readonly class TwoPhaseCommitter
          * so their server-side latencies overlap. The first failing region
          * is rethrown in dispatch order, preserving the sequential
          * "abort at the first failing region" exception semantics.
+         *
+         * A partial failure is aggregated, not truncated (issue #431,
+         * GAP-17): the executor waits for every in-flight region and
+         * collects each region's failure, so one region's error neither
+         * cancels its peers nor hides them. The aggregate is logged with
+         * the identity of every failing region (the exception's own keys
+         * are group indices, which name no region) and the error of the
+         * first failing group in dispatch order — the one the sequential
+         * loop would have thrown — is rethrown.
          */
         $prewriteSecondaries = function () use (
             $secondaryGroups,
@@ -449,6 +458,8 @@ final readonly class TwoPhaseCommitter
                     $this->timeoutConfig->batchDeadlineMs,
                 );
             } catch (BatchPartialFailureException $e) {
+                $this->logPrewritePartialFailure($e, $secondaryGroups);
+
                 throw $e->getFirstRegionError();
             }
 
@@ -921,6 +932,41 @@ final readonly class TwoPhaseCommitter
             $firstKey,
             $classifier,
         );
+    }
+
+    /**
+     * Report the aggregated failures of a parallel prewrite fan-out
+     * (issue #431, GAP-17).
+     *
+     * `BatchPartialFailureException::getRegionErrors()` is keyed by the
+     * index of the failed call in the fan-out, and the fan-out's calls are
+     * the secondary groups in dispatch order — so the index maps back to
+     * the group, and with it to the region that failed. Without this the
+     * aggregate would be dropped together with the rethrown first error,
+     * and a failure in several regions would look like a single-region
+     * one.
+     *
+     * @param list<array{region: RegionInfo, mutations: Mutation[], isPrimary: bool, firstKey: string}> $secondaryGroups
+     */
+    private function logPrewritePartialFailure(
+        BatchPartialFailureException $failure,
+        array $secondaryGroups,
+    ): void {
+        $regionErrors = $failure->getRegionErrors();
+        $failedRegions = [];
+        foreach (array_keys($regionErrors) as $index) {
+            $group = $secondaryGroups[$index] ?? null;
+            $failedRegions[] = [
+                'regionId' => $group === null ? null : $group['region']->regionId,
+                'error' => $regionErrors[$index]->getMessage(),
+            ];
+        }
+
+        $this->logger->warning('Prewrite fan-out failed for some regions', [
+            'failedRegions' => count($regionErrors),
+            'totalRegions' => $failure->getTotalRegions(),
+            'errors' => $failedRegions,
+        ]);
     }
 
     /**

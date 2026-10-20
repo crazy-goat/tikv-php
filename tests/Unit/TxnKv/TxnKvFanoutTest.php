@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
+use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
@@ -19,16 +23,24 @@ use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\AbstractLogger;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 /**
- * Fan-out tests for issue #291 (PERF-04): the transactional RPC paths
- * (prewrite, secondary commit, batchGet) must dispatch one RPC per region
- * before awaiting any of them, so per-region latencies overlap.
+ * Fan-out tests for issue #291 (PERF-04) and issue #431 (GAP-17): the
+ * transactional RPC paths (prewrite, secondary commit, batchGet) must
+ * dispatch one RPC per region before awaiting any of them, so per-region
+ * latencies overlap.
  *
  * Uses a hand-written GrpcClientInterface fake (not a PHPUnit mock) that
  * records the dispatch and wait times of every RPC and models server-side
  * latency between the two phases — the seam that makes client-side fan-out
  * measurable in a unit test.
+ *
+ * #431 adds the partial-failure half of the fan-out: a region that fails
+ * must not abort its peers, and the retry must be scoped to the region that
+ * failed.
  */
 final class TxnKvFanoutTest extends TestCase
 {
@@ -96,6 +108,7 @@ final class TxnKvFanoutTest extends TestCase
         array $regions,
         FanoutFakeGrpc $grpc,
         array $options = [],
+        LoggerInterface $logger = new NullLogger(),
     ): Transaction {
         $regionCache = new RegionCache();
         // Pre-populate the region cache so per-key region resolution during
@@ -123,6 +136,7 @@ final class TxnKvFanoutTest extends TestCase
             regionCache: $regionCache,
             lockResolver: $lockResolver,
             regionResolver: $regionResolver,
+            logger: $logger,
             enable1Pc: $options['onePc'] ?? false,
             enableAsyncCommit: $options['asyncCommit'] ?? false,
         );
@@ -395,5 +409,251 @@ final class TxnKvFanoutTest extends TestCase
         $this->expectException(GrpcException::class);
         $this->expectExceptionMessage('boom');
         $txn->commit();
+    }
+
+    /**
+     * AC (issue #431, GAP-17): the parallel prewrite aggregates the
+     * per-region failures instead of aborting at the first one.
+     *
+     * Two of the three regions fail. Every region's request must still be
+     * dispatched and awaited — the fan-out waits for its in-flight calls so
+     * the failure of one region is observed together with its peers' — and
+     * the error that surfaces is the one the sequential loop would have
+     * thrown first (issue #291's first-error contract).
+     */
+    public function testFailingRegionsAreAllObservedAndTheFirstErrorSurfaces(): void
+    {
+        $regions = $this->makeRegions(3);
+        $this->stubPdClient($regions);
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request): Message {
+                if ($method === 'KvPrewrite') {
+                    $keys = self::requestKeys($request);
+                    foreach (['k1', 'k2'] as $failing) {
+                        if (in_array($failing, $keys, true)) {
+                            // A fatal gRPC status: the region error is not
+                            // retried, so the test does not wait for the
+                            // retry budget.
+                            throw new GrpcException(
+                                "prewrite failed on {$failing}",
+                                GrpcStatusCode::InvalidArgument->value,
+                            );
+                        }
+                    }
+                }
+
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+        $txn = $this->createTransaction($regions, $grpc);
+
+        for ($i = 0; $i < 3; $i++) {
+            $txn->set("k{$i}", "v{$i}");
+        }
+
+        try {
+            $txn->commit();
+            self::fail('the failing prewrite must abort the commit');
+        } catch (GrpcException $e) {
+            self::assertSame('gRPC error: prewrite failed on k1', $e->getMessage());
+        }
+
+        // Every region's prewrite was dispatched and awaited — the fan-out
+        // did not cancel the peer region when the first one failed.
+        $prewriteDispatches = array_values(array_filter(
+            $grpc->dispatchLog,
+            static fn(array $e): bool => $e['method'] === 'KvPrewrite',
+        ));
+        $prewriteWaits = array_values(array_filter(
+            $grpc->waitLog,
+            static fn(array $e): bool => $e['method'] === 'KvPrewrite',
+        ));
+        self::assertCount(3, $prewriteDispatches);
+        self::assertCount(3, $prewriteWaits, 'the peer region must still be awaited');
+
+        // The commit phase was never reached.
+        self::assertSame(0, count(array_filter(
+            $grpc->dispatchLog,
+            static fn(array $e): bool => $e['method'] === 'KvCommit',
+        )));
+    }
+
+    /**
+     * AC (issue #431, GAP-17): a failing region is retried on its own.
+     *
+     * The region that answers a retryable region error (epoch not match) is
+     * re-dispatched by that region's own retry loop; the regions that
+     * succeeded are NOT re-sent. The retry is therefore scoped to the
+     * failing region instead of re-running the whole fan-out.
+     */
+    public function testFailingRegionIsRetriedOnItsOwnWhilePeersAreNotResent(): void
+    {
+        $regions = $this->makeRegions(3);
+        $this->stubPdClient($regions);
+
+        /** @var array<string, int> $prewriteCalls */
+        $prewriteCalls = [];
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request) use (&$prewriteCalls): Message {
+                if ($method === 'KvPrewrite') {
+                    $keys = self::requestKeys($request);
+                    $key = $keys[0] ?? '';
+                    $prewriteCalls[$key] = ($prewriteCalls[$key] ?? 0) + 1;
+                    if ($key === 'k1' && $prewriteCalls[$key] === 1) {
+                        $error = new Error();
+                        $error->setMessage('epoch not match');
+                        $error->setEpochNotMatch(new EpochNotMatch());
+
+                        $response = new PrewriteResponse();
+                        $response->setRegionError($error);
+
+                        return $response;
+                    }
+                }
+
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+        $txn = $this->createTransaction($regions, $grpc);
+
+        for ($i = 0; $i < 3; $i++) {
+            $txn->set("k{$i}", "v{$i}");
+        }
+
+        $txn->commit();
+
+        // Only the failing region was re-sent; the peers were not.
+        self::assertEquals(
+            ['k0' => 1, 'k1' => 2, 'k2' => 1],
+            $prewriteCalls,
+            'the retry must be scoped to the failing region',
+        );
+
+        // The commit phase sent one request per region, as usual.
+        $commitDispatches = array_values(array_filter(
+            $grpc->dispatchLog,
+            static fn(array $e): bool => $e['method'] === 'KvCommit',
+        ));
+        self::assertCount(3, $commitDispatches);
+    }
+
+    /**
+     * AC (issue #431, GAP-17): the aggregated partial failure is reported
+     * with the identity of EVERY failing region.
+     *
+     * The exception the commit path throws is the first failing region's
+     * own error (issue #291's first-error contract), so the aggregate that
+     * the fan-out built is the only place where the other regions' failures
+     * can survive. It must name every failed region — the aggregate's own
+     * keys are group indices, which identify no region.
+     */
+    public function testAggregatedPrewriteFailureNamesEveryFailingRegion(): void
+    {
+        $regions = $this->makeRegions(3);
+        $this->stubPdClient($regions);
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request): Message {
+                if ($method === 'KvPrewrite') {
+                    $keys = self::requestKeys($request);
+                    foreach (['k1', 'k2'] as $failing) {
+                        if (in_array($failing, $keys, true)) {
+                            throw new GrpcException(
+                                "prewrite failed on {$failing}",
+                                GrpcStatusCode::InvalidArgument->value,
+                            );
+                        }
+                    }
+                }
+
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+
+        $logger = new class extends AbstractLogger {
+            /** @var list<array{message: string, context: array<string, mixed>}> */
+            public array $records = [];
+
+            /**
+             * @param mixed                $level
+             * @param array<string, mixed> $context
+             */
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                $this->records[] = ['message' => (string) $message, 'context' => $context];
+            }
+        };
+
+        $txn = $this->createTransaction($regions, $grpc, [], $logger);
+        for ($i = 0; $i < 3; $i++) {
+            $txn->set("k{$i}", "v{$i}");
+        }
+
+        try {
+            $txn->commit();
+            self::fail('the failing prewrite must abort the commit');
+        } catch (GrpcException) {
+            // The thrown error is asserted by the sibling test; here only the
+            // aggregate matters.
+        }
+
+        $reports = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['message'] === 'Prewrite fan-out failed for some regions',
+        ));
+        self::assertCount(1, $reports, 'the aggregated failure must be reported once');
+
+        $context = $reports[0]['context'];
+        self::assertSame(2, $context['failedRegions']);
+        self::assertSame(2, $context['totalRegions']);
+        self::assertSame(
+            [
+                ['regionId' => 101, 'error' => 'gRPC error: prewrite failed on k1'],
+                ['regionId' => 102, 'error' => 'gRPC error: prewrite failed on k2'],
+            ],
+            $context['errors'],
+        );
+    }
+
+    /**
+     * The keys a request carries, so a responder can tell the regions apart.
+     *
+     * @return list<string>
+     */
+    private static function requestKeys(Message $request): array
+    {
+        if ($request instanceof PrewriteRequest) {
+            $keys = [];
+            foreach ($request->getMutations() as $mutation) {
+                $keys[] = $mutation->getKey();
+            }
+
+            return $keys;
+        }
+
+        if ($request instanceof CommitRequest) {
+            $keys = [];
+            foreach ($request->getKeys() as $key) {
+                $keys[] = $key;
+            }
+
+            return $keys;
+        }
+
+        return [];
     }
 }
