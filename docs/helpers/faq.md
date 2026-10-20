@@ -458,6 +458,29 @@ reference implementation of each workaround.
   forever on a pipe nobody writes (hangs with no error). Split the data
   once per item with parameter expansion (`${var//"$SEP"/$'\n'}`) and
   iterate the pieces with a here-string (`<<<`).
+  **Update (#461):** the script no longer uses process substitution *at
+  all*. The label lookup is a `case` pattern over the `\x1f`-joined field
+  (`case "$SEP$1$SEP" in *"$SEP$2$SEP"*)` — pure parameter expansion, no
+  descriptor and no fork; the title-signal table is an array, not a
+  here-string; the JSON step reads a plain file. `tests/Unit/Bin/
+  PickIssueScriptGuardTest.php` fails if a process substitution comes back.
+  The generic lesson is the one the incident paid for: on bash 3.2 a
+  `<( ... )` inside a loop is a descriptor leak, and once the descriptor
+  table is full the next `fork` wedges inside the macOS post-fork handler
+  (`xpc_atfork_child` → `setenv` → `malloc`), where `SIGTERM` is ignored —
+  that is how four runs of the script burned 100 % CPU for 21 h and had to
+  be killed with `kill -9`.
+- **A command substitution per iteration is a fork per iteration.**
+  `score_line()` read the wall clock with `date +%s` for every issue; it is
+  now read once for the whole run and passed in. The same reasoning applies
+  to any helper called from a per-item loop: a `$(...)` is a fork, and a
+  fork on a full descriptor table is the wedge above.
+- **bash 3.2 is unsupported, but only warned about.** The script detects
+  `BASH_VERSINFO` and prints a warning on stderr below bash 4; bash 5 is
+  the supported environment (`brew install bash`). It warns instead of
+  aborting because the script is descriptor-safe on 3.2 now, and the macOS
+  system bash is the default interpreter on the platform the incident was
+  reported from.
 - **`IFS=$'\t' read` collapses empty fields.** Tab is IFS whitespace, so
   `a<TAB><TAB>b` parses as two fields, not three — an issue without
   labels shifted `created_at`/`comments` and produced invalid JSON. Use a

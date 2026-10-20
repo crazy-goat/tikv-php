@@ -34,16 +34,25 @@ bin/pick-issue.sh --milestone=v1.2.0
 bin/pick-issue.sh --json          # machine-readable, for agents
 ```
 
-The script needs only `gh`. It finds the **lowest open milestone**, scores its
-open issues from labels, title, age and comment count (it never reads issue
-bodies, so it is cheap for an agent), and prints the top candidates with the
-score breakdown. You still make the final pick. Blocked issues
-(`status:blocked`, `status:needs-info`) are ranked last.
+The script needs `gh` (plus coreutils and bash 5+). It finds the **lowest open
+milestone**, scores its open issues from labels, title, age and comment count (it
+never reads issue bodies, so it is cheap for an agent), and prints the top
+candidates with the score breakdown. You still make the final pick. Blocked
+issues (`status:blocked`, `status:needs-info`) are ranked last.
 
 - **Release gate:** when the lowest milestone has no open issues left, the script
   exits with code **3** and prints `RELEASE NEEDED`. Stop. Cut the release first
   (see [release-workflow.md](release-workflow.md)), then run the script again.
   Do not take issues from a higher milestone.
+- **Detached runs:** launch the script through a 60-second watchdog, so a hang
+  cannot outlive the session (issue #461):
+  - Linux / GNU coreutils: `timeout 60 bin/pick-issue.sh …`
+  - macOS without coreutils: `perl -e 'alarm 60; exec @ARGV' bin/pick-issue.sh …`
+    (or `brew install coreutils` and use `gtimeout 60 bin/pick-issue.sh …`)
+
+  The macOS system bash 3.2
+  is unsupported — the script warns on stderr and continues; install bash 5
+  (`brew install bash`) for a supported environment.
 - Read the issue, including **Where to start** and **Definition of done**.
 
 ## 2. Create a worktree

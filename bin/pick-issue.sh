@@ -10,9 +10,25 @@
 # Shared script: the source of truth is standard/pick-issue.sh in crazy-goat/.github;
 # repositories carry an identical copy in bin/pick-issue.sh.
 #
-# Requires: bash 3.2+, the `gh` CLI (installed and authenticated),
-# standard coreutils. No PHP, no Python, no standalone jq — all JSON
-# projection uses gh's built-in --jq.
+# Requires: bash 5+ (bash 4 works; the macOS system bash 3.2 is
+# unsupported and only warned about — see the version guard below), the `gh`
+# CLI (installed and authenticated), standard coreutils. No PHP, no Python,
+# no standalone jq — all JSON projection uses gh's built-in --jq.
+#
+# Maintenance notes (issue #461):
+#   - Never rewrite this file in place while a run is live. Write the new
+#     text to a temporary file and `mv` it over this path, so a running
+#     script never reads a half-written file.
+#   - Launch it detached through a 60-second watchdog, so a hang is capped
+#     at one minute instead of running for hours:
+#     Linux/GNU:   timeout 60 bin/pick-issue.sh …
+#     macOS:       perl -e 'alarm 60; exec @ARGV' bin/pick-issue.sh …
+#     (macOS with `brew install coreutils`: gtimeout 60 bin/pick-issue.sh …)
+#   - Do not use process substitution. bash 3.2 leaks its file descriptors
+#     inside loops, and a full descriptor table wedges the next fork in the
+#     macOS post-fork handler: four runs of this script burned 100 % CPU for
+#     21 h (issue #461). tests/Unit/Bin/PickIssueScriptGuardTest.php fails
+#     if one comes back.
 #
 # Usage: bin/pick-issue.sh [options]
 #
@@ -57,9 +73,38 @@
 
 set -euo pipefail
 
+# --- bash version guard ---------------------------------------------------
+# bash 3.2 (the macOS system bash) leaks process-substitution file
+# descriptors inside loops, and a full descriptor table wedges the next
+# fork inside the macOS post-fork handler: four runs of this script burned
+# 100 % CPU for 21 h (issue #461). The script no longer uses process
+# substitution anywhere, but bash 5 is the supported environment, so the
+# guard warns loudly instead of failing — a macOS user without Homebrew's
+# bash still gets candidates, on an unsupported interpreter.
+BASH_MAJOR="${BASH_VERSINFO[0]:-0}"
+if [ "$BASH_MAJOR" -lt 4 ]; then
+    echo "pick-issue.sh: warning: bash ${BASH_VERSION} is unsupported; bash 5 is the supported environment (issue #461)." >&2
+    echo "  bash 3.2 leaks process-substitution file descriptors inside loops; install bash 5 (e.g. 'brew install bash')." >&2
+fi
+
+# --- file-descriptor limit ------------------------------------------------
+# Defence in depth (issue #461): a leaked descriptor must not be able to
+# exhaust the limit. Only raise it — a higher limit already in place stays.
+nofile_limit="$(ulimit -n 2>/dev/null || echo 0)"
+case "$nofile_limit" in
+    '' | *[!0-9]*) : ;;
+    *)
+        if [ "$nofile_limit" -lt 4096 ]; then
+            ulimit -S -n 4096 2>/dev/null || true
+        fi
+        ;;
+esac
+
 DEFAULT_REPO=""   # empty = the repository of the current directory (gh repo view)
 
-# NB: bash 3.2 only — no mapfile, no associative arrays, no ${var,,}.
+# NB: the script stays compatible with bash 3.2 — no mapfile, no
+# associative arrays, no ${var,,} — so it still runs on the macOS system
+# bash, where the version guard above only warns.
 # Title-signal regexes rely on nocasematch instead of inline /i flags.
 
 EXIT_OK=0
@@ -103,16 +148,16 @@ json_escape() {
         sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/${soh}/\\\\n/g"
 }
 
-# Label membership test. $1 is a NEWLINE-joined label list (pre-split once
-# per issue by score_line), $2 the needle. Literal comparison — robust
-# against glob characters in label names. Uses a here-string (not a process
-# substitution) so it is safe inside long loops on bash 3.2, which leaks
-# process-substitution file descriptors until the enclosing loop ends.
+# Label membership test. $1 is the \x1f-joined label list of one issue,
+# $2 the needle. Pure parameter expansion: no file descriptor, no fork, no
+# subshell. The old read-loop over a here-string was already safe on bash
+# 3.2, but the case form cannot leak a descriptor at all. The needle is
+# quoted inside the pattern, so glob characters in a label name are matched
+# literally.
 has_label() {
-    local one
-    while IFS= read -r one; do
-        [ "$one" = "$2" ] && return 0
-    done <<< "$1"
+    case "$SEP$1$SEP" in
+        *"$SEP$2$SEP"*) return 0 ;;
+    esac
     return 1
 }
 
@@ -129,6 +174,10 @@ Options:
   --json              machine-readable output (JSON on stdout)
   --json=BOOL         as above, explicit true/false
   -h, --help          show this help
+
+Requirements:
+  bash 5+ (bash 3.2 is unsupported and warned about), the gh CLI
+  (installed and authenticated), standard coreutils.
 
 Exit codes:
   0  candidates printed
@@ -208,23 +257,20 @@ parse_args() {
 
 # Score one issue (fields from a \x1f-separated line) and print:
 #   score\x1fnumber\x1ftitle\x1flabels_field\x1frationale\x1fage_days\x1fcomments
+# $6 is the wall clock, read once for the whole run by the caller: a `date`
+# fork per issue was one fork too many (issue #461).
 score_line() {
-    local number="$1" title="$2" labels_field="$3" created_at="$4" comments="$5"
+    local number="$1" title="$2" labels_field="$3" created_at="$4" comments="$5" now_epoch="$6"
     local score=0
     local breakdown=""
     local entry tlabel tweight
-
-    # Split the \x1f-joined labels into a newline-joined list — once, not
-    # per lookup (parameter expansion, no subprocesses).
-    local labels_list
-    labels_list="${labels_field//$SEP/$'\n'}"
 
     # Type labels: first (most valuable) match wins.
     for entry in "type:bug:50" "type:security:45" "type:feature:20" \
         "type:performance:15" "type:refactor:10" "type:tests:8" "type:docs:8"; do
         tlabel="${entry%:*}"
         tweight="${entry##*:}"
-        if has_label "$labels_list" "$tlabel"; then
+        if has_label "$labels_field" "$tlabel"; then
             score=$((score + tweight))
             breakdown="$breakdown $tlabel +$tweight"
             break
@@ -234,7 +280,7 @@ score_line() {
         "priority:medium:12" "priority:low:3"; do
         tlabel="${entry%:*}"
         tweight="${entry##*:}"
-        if has_label "$labels_list" "$tlabel"; then
+        if has_label "$labels_field" "$tlabel"; then
             score=$((score + tweight))
             breakdown="$breakdown $tlabel +$tweight"
         fi
@@ -244,17 +290,23 @@ score_line() {
         "status:blocked:-100" "status:needs-info:-100"; do
         tlabel="${entry%:*}"
         tweight="${entry##*:}"
-        if has_label "$labels_list" "$tlabel"; then
+        if has_label "$labels_field" "$tlabel"; then
             score=$((score + tweight))
             breakdown="$breakdown meta:$tlabel $tweight"
         fi
     done
 
-    # Title signals (case-insensitive).
-    local title_signals=$'leak:leak:25\ncrash-risk:crash|segfault|fatal|panic|corrupt:30\nsecurity:security|auth|authentication|authorization|xss|csrf|injection:20\nperformance:performance|perf|benchmark:15\ndead-code:dead code|unused|never throw:5'
+    # Title signals (case-insensitive). The table is an array, not a
+    # here-string: iterating it opens no descriptor and forks nothing.
+    local title_signals=(
+        "leak:leak:25"
+        "crash-risk:crash|segfault|fatal|panic|corrupt:30"
+        "security:security|auth|authentication|authorization|xss|csrf|injection:20"
+        "performance:performance|perf|benchmark:15"
+        "dead-code:dead code|unused|never throw:5"
+    )
     local line signame pat pts rest
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
+    for line in "${title_signals[@]}"; do
         signame="${line%%:*}"
         rest="${line#*:}"
         pat="${rest%:*}"
@@ -263,11 +315,10 @@ score_line() {
             score=$((score + pts))
             breakdown="$breakdown title:$signame +$pts"
         fi
-    done <<<"$title_signals"
+    done
 
     # Age: older issues deserve attention, +0.2/day capped at 20.
-    local now_epoch created_epoch days age_pts
-    now_epoch="$(date +%s)"
+    local created_epoch days age_pts
     created_epoch="$(iso_to_epoch "$created_at")" || created_epoch=0
     days=0
     age_pts=0
@@ -319,6 +370,11 @@ print_json() {
 
     sep=""
     local s num title csv rationale days cmts lbs labels_json
+    # The shown issues are read from a plain file, not from a process
+    # substitution: bash 3.2 leaks those descriptors inside loops and the
+    # leak wedged four runs of this script (issue #461).
+    local shown_file="$TMP_DIR/shown.tsv"
+    head -n "$shown" "$scored" >"$shown_file"
     while IFS="$SEP" read -r s num title csv rationale days cmts; do
         # Reset per issue — an unlabeled issue must not inherit the
         # previous issue's labels.
@@ -333,7 +389,7 @@ print_json() {
             "$sep" "$num" "$(json_escape "$title")" "$labels_json" \
             "$s" "$(json_escape "$rationale")" "$days" "$cmts"
         sep=","
-    done < <(head -n "$shown" "$scored")
+    done <"$shown_file"
 
     printf '  ]\n}\n'
 }
@@ -449,12 +505,15 @@ main() {
         exit "$EXIT_GH_ERROR"
     fi
 
-    # 6. Score every issue.
+    # 6. Score every issue. The wall clock is read once for the whole run
+    #    — one fork — instead of once per issue (issue #461).
+    local now_epoch
+    now_epoch="$(date +%s)"
     local scored="$TMP_DIR/scored.tsv"
     : >"$scored"
     local number created_at comments labels_field
     while IFS="$SEP" read -r number title created_at comments labels_field; do
-        score_line "$number" "$title" "$labels_field" "$created_at" "$comments" >>"$scored"
+        score_line "$number" "$title" "$labels_field" "$created_at" "$comments" "$now_epoch" >>"$scored"
     done <"$issues_file"
 
     # 7. Rank: highest score first, ties by lowest issue number.
