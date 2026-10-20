@@ -684,6 +684,67 @@ verdict cell was emptied. The same guard must assert that the
 reflection-derived operation list is **not empty**: a renamed class or a
 changed namespace would otherwise leave it comparing `[]` with `[]`.
 
+## The 0.x semver facts: Composer's caret is patch-only, and a finding's `[Unreleased]` anchor expires
+
+Two facts about the pre-1.0 line, learned while publishing the stability
+policy (issue #406):
+
+1. **Composer resolves a caret constraint on a `0.x` version to the patch
+   range of that minor line.** `^0.8`, `^0.8.0` and `~0.8.0` all mean
+   `>=0.8.0 <0.9.0`; the caret only widens past the minor line when the
+   leftmost non-zero digit is not 0. So the constraint that admits the next
+   minor — and therefore a breaking change — is `^0`, `0.*` or `*` (plus the
+   two-segment tilde `~0.8`, which means `>=0.8 <1.0.0`), **not** `^0.8`.
+   An audit finding that warns "teams will configure `^0.2` and be surprised"
+   is therefore wrong about the tool it names. Check the resolved range
+   (`Composer\Semver\Semver::satisfies()`, or `composer why-not`) before
+   repeating such a claim in the documentation.
+
+2. **A finding's `[Unreleased]` anchor expires when the release is cut.**
+   Issue #406 pointed at `CHANGELOG.md:95` and `:106` inside `[Unreleased]`;
+   by the time it was worked on, v0.4.0 had been released and both entries
+   (the `RawKv` → `Region` namespace move, #111, and the
+   `setAtomicForCAS(true)` prerequisite for CAS, #103) sat in the released
+   section. Grep for the content, not for the line number, and mark the entry
+   where it lives now — the released section is still the honest place for
+   it, because that is the version a consumer upgrades from.
+
+## A guard test only guards where CI runs it — the `docs-regex` decides that
+
+The `changes` job (`.github/workflows/ci.yml`) classifies a pull request as
+documentation-only when **every** changed file matches its `docs-regex`, and
+then skips the unit tests. The default `docs-regex` of the shared workflow
+counts every `*.md` as documentation; this repository narrows it to
+`AGENTS.md`, `LICENSE*`, the issue templates, the pull request template and
+`.gitignore`, so a change in `README.md`, in `docs/**` **or in
+`CHANGELOG.md`** already runs the unit tests. The concrete list lives in the
+workflow file — this entry states the rule, the file carries the list.
+
+The trap: a guard test that **reads** a file has to run when that file
+changes. While the stability policy was being published (issue #406),
+`CHANGELOG.md` was still in the `docs-regex`, so the release pull request —
+which touches the changelog and nothing else — was classified as
+documentation-only and the guard never ran there; the mismatch surfaced in
+the next unrelated code pull request, months away from its cause. The
+changelog was removed from the `docs-regex` in the very change that published
+the policy. Two rules follow:
+
+1. A file that a guard test reads must be **outside** the `docs-regex`, so the
+   guard runs in the pull request that changes the file. The rule is
+   machine-checked for the changelog: `StabilityPolicyGuardTest` fails when
+   the `docs-regex` of the workflow classifies `CHANGELOG.md` as
+   documentation-only.
+2. A guard that compares documentation with the *current* release has to fail
+   **at** the release cut, and the release pull request has to update the
+   documentation in the same commit (`docs/release-workflow.md` lists the
+   step). A guard that "follows the next release" is only useful if it is
+   executed there.
+
+The price of the rule: a changelog-only pull request is a "code change" and
+runs the whole matrix, the two Docker E2E jobs included. That is deliberate —
+a release pull request runs the matrix anyway (it touches `README.md`), and
+the guard belongs to the required `ci-ok` gate, where a failure blocks the
+merge.
 ## TTL mode and TxnKV are mutually exclusive — say it at every enable-ttl recommendation
 
 TiKV with `[storage] enable-ttl = true` runs in V1TTL storage mode, which

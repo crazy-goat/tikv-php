@@ -95,6 +95,102 @@ php -r 'echo phpversion("grpc"), PHP_EOL;'
 The reported version must be 1.57 or newer. Restart PHP-FPM (or your web
 server) after enabling the extension.
 
+## Stability and versioning
+
+The library is **pre-1.0**. It follows
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html), but before `1.0.0`
+a breaking change bumps the **minor** version — so a `0.x` release may break
+your code, and `0.8.0 → 0.9.0` is not a safe upgrade on its own.
+
+[`CHANGELOG.md`](CHANGELOG.md) marks every breaking change of the public API
+below with a **BREAKING** prefix and a migration note. A change that breaks a
+class outside that surface is announced as **Breaking change:** with a
+migration note and needs no version bump of its own.
+
+### Which version to require
+
+The current release is **v0.8.0**. Require the exact version, or allow patch
+releases inside the current minor line only:
+
+```json
+{
+    "require": {
+        "crazy-goat/tikv-client": "~0.8.0"
+    }
+}
+```
+
+`~0.8.0` (equivalently `^0.8.0` or `0.8.*`) resolves to `>=0.8.0 <0.9.0`, so
+it never pulls `0.9.0` — and therefore never pulls a breaking change. Use
+`"0.8.0"` instead when you want a reproducible build.
+
+Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
+`~0.8` all resolve to a range that includes `0.9.0` and every later release.
+
+The versions above follow the releases: every one of them is updated in the
+same pull request as the changelog section of the release, because the guard
+test reads the latest released version from `CHANGELOG.md` and fails until
+every version of this section names the current release or the one that
+follows it. The step is on the
+[release checklist](docs/release-workflow.md#checklist).
+
+### Public API
+
+These are covered by the stability promise: they may only change in a way
+that keeps existing, correct code working.
+
+| Surface | What it covers |
+|---|---|
+| `RawKv\RawKvClient` | every public method — the RawKV entry point |
+| `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `close()` — the TxnKV entry point |
+| `TxnKv\Transaction` | every public method — the transaction handle |
+| `RawKv\CasResult`, `RawKv\ChecksumResult` | the result DTOs of `compareAndSwap()` and `checksum()` |
+| `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
+| `TxnKv\TransactionStatus` | the enum returned by `Transaction::getStatus()` |
+| `Exception\*` | `TiKvException` and every subclass, plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
+| `TxnKv\Exception\*` | the six transaction exceptions: `DeadlockException`, `LockWaitTimeoutException`, `TransactionConflictException`, `TxnAbortedByGcException`, `TxnRetryableException`, `UndeterminedCommitException` |
+| `Retry\RetryBudgetExhaustedException` | thrown when the internal retry budget is exhausted |
+| `Retry\ErrorKind` | the enum behind `RegionException::$errorKind` — the typed variant of a region error |
+| `Observability\MetricsInterface` | the metrics backend you implement and pass as `options['metrics']` |
+| `Observability\InMemoryMetrics` | the ready-made in-process backend, for tests and benchmarks |
+| `Region\ReplicaReadMode`, `Region\ReplicaReadPolicy` | the values you pass as `options['replicaRead']` |
+| the documented `options[]` keys | every key documented in the [configuration guide](docs/configuration.md) — `tls`, `timeout`, `metrics`, `apiVersion`, `keyspace`, `replicaRead`, `batchCommands`, `maxScanRows`, `maxConcurrency`, `tsoPoolSize`, … |
+
+The namespaces above are relative to `CrazyGoat\TiKV\Client\`. One class
+outside that namespace is part of the promise as well:
+`CrazyGoat\Proto\Errorpb\NotLeader`, the message behind
+`RegionException::$notLeader`.
+
+### Internal
+
+Every other class of `src/Client/` is internal: it may change in **any**
+release, with no version bump and no `BREAKING` note, because it is not part
+of the contract.
+
+- the namespaces `Batch\`, `Cache\`, `Codec\`, `Connection\`, `Grpc\`,
+  `Tls\`, `Util\`;
+- `Region\` — except `Region\ReplicaReadMode` and `Region\ReplicaReadPolicy`,
+  which the table above covers;
+- `Observability\NoOpMetrics` — the default backend `getMetrics()` returns
+- `Observability\DebugLogging` — the internal probe that decides whether a logger can emit a `debug` record
+  when no `options['metrics']` is configured; write against
+  `Observability\MetricsInterface`, which is covered;
+- `RawKv\Dto\` (the `RegionInfoMapper` helper) and `RawKv\RawKvSplitter`;
+- the collaborators behind the entry points: `RawKv\RawKvCrud`,
+  `RawKv\RawKvAtomic`, `RawKv\RawKvBatch`, `RawKv\RawKvScanner`,
+  `RawKv\RawKvRangeOps`, `RawKv\SstIngestor`, `TxnKv\TxnReader`,
+  `TxnKv\TwoPhaseCommitter`, `TxnKv\LockResolver`, `TxnKv\TransactionState`,
+  `TxnKv\RollbackRegroupSignal`;
+- `Retry\` — except `Retry\RetryBudgetExhaustedException` and
+  `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
+  `Retry\BackoffType`, `Retry\ErrorClassifier` and `Retry\RetryExecutor`;
+- the generated protobuf and gRPC classes under `src/Proto/` — except
+  `Errorpb\NotLeader`, which the promise covers.
+
+The advanced extension points — `Retry\RetryExecutor` and `Retry\BackoffType`
+in [Custom Retry (Advanced)](docs/configuration.md#custom-retry-advanced), and
+`Tls\TlsConfigBuilder` — are documented, but they are internal like the
+rest: they change whenever the internals they wrap change.
 ## Usage
 
 ### Basic CRUD Operations

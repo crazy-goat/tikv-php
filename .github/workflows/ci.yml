@@ -20,10 +20,12 @@ jobs:
     with:
       # tests/Unit/Docs/AtomicModeDocumentationGuardTest.php and
       # tests/Unit/Docs/ExtGrpcRequirementGuardTest.php scan README.md and
-      # docs/**/*.md, so changes to them need the unit tests and must not
-      # count as docs-only.
-      docs-regex: '^(CHANGELOG\.md|AGENTS\.md|LICENSE.*|\.github/ISSUE_TEMPLATE/.*|\.github/pull_request_template\.md|\.gitignore)$'
-
+      # docs/**/*.md, and tests/Unit/Docs/StabilityPolicyGuardTest.php scans
+      # README.md, CHANGELOG.md and this workflow file, so changes to them
+      # need the unit tests and must not count as docs-only. CHANGELOG.md is
+      # therefore not in the regex: the stability guard has to run in the
+      # release pull request, which changes the changelog and nothing else.
+      docs-regex: '^(AGENTS\.md|LICENSE.*|\.github/ISSUE_TEMPLATE/.*|\.github/pull_request_template\.md|\.gitignore)$'
   docs:
     name: Docs
     uses: crazy-goat/.github/.github/workflows/docs-check.yml@main

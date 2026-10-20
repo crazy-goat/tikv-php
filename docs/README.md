@@ -12,6 +12,7 @@ New to TiKV PHP Client? Start here:
 - **[Configuration](configuration.md)** - Client configuration options, TLS, timeouts, logging
 - **[Operations](operations.md)** - Complete guide to all RawKV operations
 - **[Advanced Features](advanced.md)** - Production-ready patterns and optimization
+- **[Stability and versioning](../README.md#stability-and-versioning)** - Which classes the stability promise covers, and which Composer constraint to use
 
 ### For Developers
 
