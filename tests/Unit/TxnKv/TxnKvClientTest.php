@@ -178,6 +178,174 @@ class TxnKvClientTest extends TestCase
     }
 
     // ========================================================================
+    // beginOptimistic() / beginPessimistic() — issue #439
+    // ========================================================================
+
+    public function testBeginOptimisticCreatesAnOptimisticTransaction(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->beginOptimistic();
+
+        $this->assertFalse($txn->isPessimistic());
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(6000, $txn->getStartTs());
+    }
+
+    public function testBeginPessimisticCreatesAPessimisticTransaction(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(7000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->beginPessimistic();
+
+        $this->assertTrue($txn->isPessimistic());
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(7000, $txn->getStartTs());
+    }
+
+    public function testBeginOptimisticKeepsTheOtherBeginOptions(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(8000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->beginOptimistic(['priority' => 5]);
+
+        $this->assertFalse($txn->isPessimistic());
+        $this->assertSame(5, $txn->getPriority());
+    }
+
+    public function testBeginPessimisticKeepsTheOtherBeginOptions(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(9000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->beginPessimistic(['priority' => 2]);
+
+        $this->assertTrue($txn->isPessimistic());
+        $this->assertSame(2, $txn->getPriority());
+    }
+
+    public function testBeginOptimisticAcceptsARedundantPessimisticOption(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(10000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->beginOptimistic(['pessimistic' => false]);
+
+        $this->assertFalse($txn->isPessimistic());
+    }
+
+    public function testBeginOptimisticRejectsAContradictingPessimisticOption(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(11000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("beginOptimistic() fixes the transaction mode");
+        $client->beginOptimistic(['pessimistic' => true]);
+    }
+
+    public function testBeginPessimisticRejectsAContradictingPessimisticOption(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(12000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("beginPessimistic() fixes the transaction mode");
+        $client->beginPessimistic(['pessimistic' => false]);
+    }
+
+    public function testBeginOptimisticThrowsAfterClose(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+
+        $this->expectException(ClientClosedException::class);
+        $client->beginOptimistic();
+    }
+
+    public function testBeginOptimisticReportsTheClosedClientBeforeAContradictingOption(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+
+        // The closed client comes first, exactly as in begin(): the mode
+        // check must not hide the reason why no transaction can be started.
+        $this->expectException(ClientClosedException::class);
+        $client->beginOptimistic(['pessimistic' => true]);
+    }
+
+    public function testBeginOptimisticSharesTheValidationOfBegin(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(13000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+
+        // The option handling stays in begin(), so the new entry points
+        // reject a malformed option with the same error as begin() does.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['enable1Pc'] must be a bool");
+        $client->beginOptimistic(['enable1Pc' => 'yes']); // @phpstan-ignore argument.type
+    }
+
+    public function testBeginPessimisticForwardsTheLockWaitTime(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(14000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->beginPessimistic(['lockWaitTimeMs' => 250]);
+        $property = new \ReflectionProperty(Transaction::class, 'lockWaitTimeMs');
+
+        $this->assertSame(250, $property->getValue($txn));
+    }
+
+    public function testBeginOptimisticForwardsTheLockWaitTime(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(15000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->beginOptimistic(['lockWaitTimeMs' => 250]);
+        $property = new \ReflectionProperty(Transaction::class, 'lockWaitTimeMs');
+
+        $this->assertSame(250, $property->getValue($txn));
+    }
+
+    // ========================================================================
     // Cluster ID
     // ========================================================================
 

@@ -144,7 +144,7 @@ final class RawKvClient
 **Key Design Patterns**:
 - **Unit of Work**: Transaction tracks write set and read set
 - **Two-Phase Commit**: Prewrite → Commit protocol
-- **Factory Pattern**: `TxnKvClient::begin()` creates Transaction instances
+- **Factory Pattern**: `TxnKvClient::begin()`, `beginOptimistic()` and `beginPessimistic()` create Transaction instances
 - **Strategy Pattern**: Optimistic vs pessimistic mode selection
 
 **Public Interface**:
@@ -154,7 +154,9 @@ final class TxnKvClient
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self;
     
     // Transaction lifecycle
-    public function begin(array $options = []): Transaction;  // options: pessimistic (bool), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int)
+    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int)
+    public function beginOptimistic(array $options = []): Transaction;   // begin() with pessimistic = false
+    public function beginPessimistic(array $options = []): Transaction;  // begin() with pessimistic = true
     public function close(): void;
 }
 
@@ -189,7 +191,7 @@ final class Transaction
 ```
 Optimistic Transaction                   Pessimistic Transaction
 ┌──────────────────────┐                ┌──────────────────────┐
-│  begin()              │                │  begin(pessimistic)  │
+│  beginOptimistic()   │                │  beginPessimistic()  │
 │  startTs = TSO        │                │  startTs = TSO        │
 └──────────┬───────────┘                └──────────┬───────────┘
            │                                       │

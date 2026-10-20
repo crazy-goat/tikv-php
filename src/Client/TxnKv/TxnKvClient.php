@@ -342,6 +342,18 @@ final class TxnKvClient
     }
 
     /**
+     * Begin a new transaction.
+     *
+     * The transaction mode defaults to **pessimistic**: `pessimistic` is
+     * `true` unless the caller passes it explicitly. That is the opposite of
+     * the TiKV documentation and of client-go and client-rust, where
+     * optimistic is the default (issue #439). The default is kept as it is,
+     * because changing it is a breaking change that belongs in a major
+     * release — new code should state the mode with
+     * {@see self::beginOptimistic()} or {@see self::beginPessimistic()},
+     * which are thin wrappers over this method and share its option
+     * handling.
+     *
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
@@ -350,6 +362,9 @@ final class TxnKvClient
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
      * } $options
+     *     `pessimistic` selects the transaction mode: true (the default)
+     *     takes the physical lock inside set()/delete(), false defers it to
+     *     commit().
      *     `priority` maps onto the Kvrpcpb CommandPri enum: 0 = Normal
      *     (default), 1 = Low, 2 = High. It is carried on the Context of
      *     every read and write request the transaction sends — its reads
@@ -414,6 +429,98 @@ final class TxnKvClient
             eagerPessimisticLocks: $eagerPessimisticLocks,
             lockWaitTimeMs: $lockWaitTimeMs,
         );
+    }
+
+    /**
+     * Begin a new transaction in optimistic mode.
+     *
+     * A thin wrapper over {@see self::begin()} that fixes the transaction
+     * mode: the physical locks are taken during the prewrite at commit()
+     * instead of inside set()/delete() (issue #439). Every other option is
+     * handled by begin(), so the two entry points cannot drift apart.
+     *
+     * The mode belongs to the method: a `pessimistic` entry in $options that
+     * contradicts it is rejected with an InvalidArgumentException instead of
+     * being silently overridden.
+     *
+     * `lockWaitTimeMs` bounds how long TiKV waits for a contended lock
+     * (issue #443, DIV-07). It has **no effect** in the optimistic mode: the
+     * transaction takes no pessimistic lock, so it never waits for one.
+     *
+     * @param array{
+     *     pessimistic?: bool,
+     *     priority?: int,
+     *     enable1Pc?: bool,
+     *     enableAsyncCommit?: bool,
+     *     eagerPessimisticLocks?: bool,
+     *     lockWaitTimeMs?: int,
+     * } $options
+     */
+    public function beginOptimistic(array $options = []): Transaction
+    {
+        return $this->beginWithMode($options, false, 'beginOptimistic()');
+    }
+
+    /**
+     * Begin a new transaction in pessimistic mode.
+     *
+     * A thin wrapper over {@see self::begin()} that fixes the transaction
+     * mode: the physical lock of each key is taken inside set()/delete(),
+     * before the call returns (issue #439). Every other option is handled by
+     * begin(), so the two entry points cannot drift apart.
+     *
+     * The mode belongs to the method: a `pessimistic` entry in $options that
+     * contradicts it is rejected with an InvalidArgumentException instead of
+     * being silently overridden.
+     *
+     * `lockWaitTimeMs` bounds how long TiKV waits for a contended
+     * pessimistic lock before it answers with a "locked" error (issue #443,
+     * DIV-07).
+     *
+     * @param array{
+     *     pessimistic?: bool,
+     *     priority?: int,
+     *     enable1Pc?: bool,
+     *     enableAsyncCommit?: bool,
+     *     eagerPessimisticLocks?: bool,
+     *     lockWaitTimeMs?: int,
+     * } $options
+     */
+    public function beginPessimistic(array $options = []): Transaction
+    {
+        return $this->beginWithMode($options, true, 'beginPessimistic()');
+    }
+
+    /**
+     * Begin a transaction with a fixed mode, through begin() so that the
+     * option handling and the validation stay in one place (issue #439).
+     *
+     * The closed-client check comes first, so a closed client is reported as
+     * such and not as a contradicting option — the same order begin() uses.
+     *
+     * @param array{
+     *     pessimistic?: bool,
+     *     priority?: int,
+     *     enable1Pc?: bool,
+     *     enableAsyncCommit?: bool,
+     *     eagerPessimisticLocks?: bool,
+     *     lockWaitTimeMs?: int,
+     * } $options
+     */
+    private function beginWithMode(array $options, bool $pessimistic, string $method): Transaction
+    {
+        $this->ensureOpen();
+
+        if (array_key_exists('pessimistic', $options) && (bool) $options['pessimistic'] !== $pessimistic) {
+            throw new InvalidArgumentException(sprintf(
+                "%s fixes the transaction mode; options['pessimistic'] must not contradict it",
+                $method,
+            ));
+        }
+
+        $options['pessimistic'] = $pessimistic;
+
+        return $this->begin($options);
     }
 
     /**

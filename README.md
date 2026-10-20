@@ -282,6 +282,10 @@ $txn = $txnClient->begin([          // pessimistic by default
     'lockWaitTimeMs' => 1000,       // how long TiKV may wait for a contended lock
 ]);
 
+// ... or state the mode explicitly (recommended):
+// $txn = $txnClient->beginPessimistic();
+// $txn = $txnClient->beginOptimistic();
+
 $txn->set('account:1', '100');
 $txn->commit();                     // prewrite + commit; or $txn->rollback()
 
@@ -318,7 +322,26 @@ They do *not* see other transactions' uncommitted data.
 
 #### Optimistic vs pessimistic
 
-`pessimistic` defaults to **true**.
+`pessimistic` defaults to **true** — a transaction started with `begin()` is a
+**pessimistic** one. That is the opposite of the TiKV documentation and of
+client-go and client-rust, where optimistic is the default; the difference is
+tracked in issue #439. The default is kept for now (changing it is a breaking
+change that belongs in a major release), so state the mode explicitly in new
+code:
+
+```php
+// pessimistic — the physical lock is taken inside set()/delete()
+$txn = $txnClient->beginPessimistic();
+
+// optimistic — the physical lock is taken during the prewrite at commit()
+$txn = $txnClient->beginOptimistic();
+```
+
+Both are thin wrappers over `begin()`: they accept the same options
+(`priority`, `enable1Pc`, `enableAsyncCommit`, `eagerPessimisticLocks`,
+`lockWaitTimeMs`) and go through the same option handling. `lockWaitTimeMs`
+matters in the pessimistic mode only — an optimistic transaction takes no
+pessimistic lock, so it never waits for one.
 
 | | Pessimistic (default) | Optimistic |
 |---|---|---|

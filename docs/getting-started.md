@@ -318,15 +318,18 @@ use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 $txnClient = TxnKvClient::create(['127.0.0.1:2379']);
 
 try {
-    // Pessimistic transaction (default). The value stays buffered until
-    // commit(), but the physical lock is taken before set()/delete()
-    // returns, carrying the timestamp of the preceding read (or a fresh one
-    // if there was no read). An intervening commit is therefore reported as
-    // a conflict at the write instead of being silently overwritten.
-    $txn = $txnClient->begin(['pessimistic' => true]);
+    // Pessimistic transaction (the default of begin()). The value stays
+    // buffered until commit(), but the physical lock is taken before
+    // set()/delete() returns, carrying the timestamp of the preceding read
+    // (or a fresh one if there was no read). An intervening commit is
+    // therefore reported as a conflict at the write instead of being
+    // silently overwritten.
+    $txn = $txnClient->beginPessimistic();
     
     // Optimistic transaction — locks only on commit
-    // $txn = $txnClient->begin(['pessimistic' => false]);
+    // $txn = $txnClient->beginOptimistic();
+    // The `pessimistic` option still selects the mode:
+    // $txn = $txnClient->begin(['pessimistic' => false]);  // same as beginOptimistic()
     
     // ... use the transaction ...
     
@@ -335,11 +338,20 @@ try {
 }
 ```
 
+> `begin()` on its own starts a **pessimistic** transaction — the opposite of
+> the TiKV documentation and of client-go and client-rust, where optimistic is
+> the default (issue #439). The default stays as it is for now, so state the
+> mode with `beginPessimistic()` / `beginOptimistic()` in new code. Both are
+> thin wrappers over `begin()` and accept the same options (`priority`,
+> `enable1Pc`, `enableAsyncCommit`, `eagerPessimisticLocks`,
+> `lockWaitTimeMs`).
+
 ### Basic Transaction Operations
 
 ```php
-// Start a transaction
-$txn = $txnClient->begin();
+// Start a transaction (pessimistic by default — use beginOptimistic() for
+// the optimistic mode)
+$txn = $txnClient->beginPessimistic();
 
 // Read (snapshot at startTs)
 $value = $txn->get('account:1');
@@ -365,7 +377,7 @@ $txn->commit();
 ### Transfer Example (ACID Guarantee)
 
 ```php
-$txn = $txnClient->begin(['pessimistic' => true]);
+$txn = $txnClient->beginPessimistic();
 
 try {
     $fromBalance = (int) $txn->get('account:alice');
@@ -399,6 +411,9 @@ try {
 | Best for | High contention | Low contention |
 | Default lock TTL | 30 seconds | 3 seconds |
 | Use case | Financial transfers | Caching, config |
+
+> **Note:** `begin()` starts a **pessimistic** transaction (the default),
+> `beginOptimistic()` an optimistic one — see the note above.
 
 > **Note:** values remain buffered until `commit()`, but the default eager
 > pessimistic mode acquires each key's physical lock before `set()` or

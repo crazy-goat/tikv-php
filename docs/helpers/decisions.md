@@ -842,3 +842,31 @@ README ("Connection Lifetime and Transport Ownership") and
 `docs/configuration.md` ("Sharing One Transport Between Clients" plus the
 manual-construction snippet). Keep them in sync — the contradiction #407 had to
 fix was a snippet sitting next to the rule and breaking it.
+
+## The transaction mode is stated explicitly, but `begin()` keeps its pessimistic default (issue #439)
+
+Issue #439 (DIV-03) recorded the divergence from the official clients:
+`TxnKvClient::begin()` defaults `pessimistic` to **true**, while the TiKV
+documentation, client-go and client-rust make **optimistic** the default. The
+decision here is to keep the default and to remove the ambiguity from new code
+instead of changing the behaviour:
+
+1. **The default stays pessimistic.** Flipping it is a breaking change and
+   belongs in a major release with a CHANGELOG migration note, not in a
+   patch-level issue. The default is part of the Percolator invariants recorded
+   above (`begin()`'s `pessimistic` default is pinned by
+   `TxnKvClientTest::testBeginDefaultsToPessimistic`), so it is not an
+   incidental implementation detail either.
+2. **`beginOptimistic()` and `beginPessimistic()` are thin wrappers over
+   `begin()`**, not a second implementation of it: the option handling, the
+   validation and the transaction construction stay in one place, so the three
+   entry points cannot drift apart. The mode is the only thing they fix.
+3. **A contradicting `pessimistic` option is rejected, not overridden.** The
+   mode belongs to the method that names it, so `beginOptimistic(['pessimistic'
+   => true])` throws an `InvalidArgumentException` instead of silently
+   ignoring half of its own arguments. A redundant, agreeing value is
+   accepted.
+4. **The default is documented where a reader meets it** — the README's
+   "Optimistic vs pessimistic" section, `docs/getting-started.md` and the
+   `begin()` docblock — including the note that it differs from the official
+   clients, so the divergence is a documented decision rather than a surprise.
