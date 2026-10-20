@@ -731,6 +731,76 @@ Facts verified empirically (PHPUnit 11.5.55, PR #484 for #323/#358/#359):
    contain `--` — the phrase `--testsuite` inside an XML comment breaks
    parsing with "Double hyphen within comment". Use "testsuite selector".
 
+## A PHPUnit suite selector that matches nothing exits 0 — use `--fail-on-empty-test-suite`
+
+Facts verified empirically (PHPUnit 11.5.57, issue #361):
+
+1. `--testsuite` accepts a **comma-separated list** — `--testsuite
+   E2E-RawKV,E2E-TxnKV` runs both suites in one process (the list is split on
+   `,` in `TextUI/Configuration/Xml/TestSuiteMapper.php`). Both the
+   `--testsuite X` and the `--testsuite=X` spelling work. The list buys
+   nothing for the end-to-end suites, though: they need cluster modes of
+   their own, so one cluster cannot serve two of them (V1TTL for RawKV, V1
+   for TxnKV, API V2 for ApiV2 — see AGENTS.md and
+   [TxnKV Fails on a TTL-Enabled Cluster](../troubleshooting.md#txnkv-fails-on-a-ttl-enabled-cluster)).
+2. A selector that matches **no** suite prints "No tests executed!" and exits
+   **0**. That is how issue #361 found `composer test:e2e`: the script
+   selected a suite named `E2E`, which `phpunit.xml` never declared (the
+   suites are `E2E-RawKV`, `E2E-TxnKV` and `E2E-ApiV2`). The premise expired
+   before v0.8.0 — PR #594 renamed the selector to `E2E-RawKV` — so no
+   released version had a green no-op E2E command. The lesson stands: an
+   audit issue's premise can silently expire when a later PR changes the
+   code it describes (see "Error-handling docs must be derived from source,
+   not from the issue text" above).
+3. `--fail-on-empty-test-suite` is the flag that turns that into a non-zero
+   exit code ("Signal failure using shell exit code when no tests were
+   run"). It is available in every `^11.0` (verified in 11.0.0).
+   `--fail-on-skipped` is **not** a substitute: it says nothing about an empty
+   selection.
+4. `--fail-on-skipped` is the wrong tool for the E2E suites: they skip
+   legitimately (`tests/E2E/PdFailoverE2ETest.php` skips without Docker
+   access, `tests/E2E/TxnKvE2ETest.php` skips without `proc_open`), so it
+   would turn an ordinary developer machine into a red run.
+5. **A skipped test counts as a test, so `--fail-on-empty-test-suite` does
+   not fire on it.** Measured: `phpunit --testsuite E2E-ApiV2
+   --fail-on-empty-test-suite` prints "Tests: 4, Assertions: 0, Skipped: 4"
+   and exits **0** — a green run that tested nothing, the very failure mode
+   the flag was added for. The API V2 suite skips itself unless
+   `TIKV_API_VERSION=2` is set (`tests/E2E/ApiV2E2ETest.php`), so a runner
+   that leaves the variable out turns the lane into a no-op. The lane that
+   owns the suite (`scripts/test-e2e-suite.sh`) therefore sets
+   `TIKV_API_VERSION=2` itself, requires `TIKV_ALT_KEYSPACE` (the second
+   keyspace the suite compares against — without it one test skips) and adds
+   `--fail-on-skipped`, which is safe there because the suite has no
+   legitimate skip once the environment is set. `scripts/test-e2e-apiv2.sh`
+   (the Docker lane) does the same.
+6. A missing cluster is loud anyway, and it is fast: `tests/E2E/ClusterProbe.php`
+   asks PD for its member list before the first test of a class and **fails**
+   the class when PD does not answer. Without the probe every single test
+   spent the client's whole retry budget (measured: 18.8 s) before it
+   reported the connection error, so the 242 end-to-end tests needed about an
+   hour to print their summary. The probe fails instead of skips on purpose:
+   a skipped suite looks exactly like a suite that tested nothing.
+7. The probe's message has to name the endpoint **and** the way out: the
+   default `pd:2379` is a Docker Compose service name and resolves only
+   inside the compose network, so a run on the host needs
+   `PD_ENDPOINTS=localhost:<published PD port>`. A message that only says
+   "make up starts the cluster" sends a developer who already started it in
+   circles.
+8. The rules are pinned by `tests/Unit/Ci/TestSuiteSelectorGuardTest.php`, which
+   scans `composer.json`, `scripts/*.sh`, the `Makefile`, the
+   `docker-compose*.yml` files and `.github/workflows/*.yml`:
+   - every `--testsuite` selector must name a suite `phpunit.xml` declares;
+   - every PHPUnit invocation must pass `--fail-on-empty-test-suite` — by
+     name (`phpunit`) as well as by path (`vendor/bin/phpunit`);
+   - every end-to-end suite must be selected by some runner, so none is
+     quietly forgotten;
+   - no single PHPUnit invocation may select two end-to-end suites, because
+     they need cluster modes of their own and such a run could never be
+     green;
+   - a runner that selects the API V2 suite must run it with
+     `TIKV_API_VERSION=2`, so the lane cannot skip its whole suite.
+
 ## Rector version drift: local rector ≠ CI rector (no committed composer.lock)
 
 The repo has **no committed `composer.lock`**, so CI's `composer install`

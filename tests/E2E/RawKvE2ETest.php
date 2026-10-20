@@ -39,6 +39,7 @@ class RawKvE2ETest extends TestCase
     public static function setUpBeforeClass(): void
     {
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        ClusterProbe::assertPdReachable($pdEndpoints);
         self::$client = RawKvClient::create($pdEndpoints);
     }
 

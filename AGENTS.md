@@ -18,7 +18,7 @@ Everything is written in English (code, comments, docs, commits, issues).
 | `tests/Integration/` | `Integration` suite, no cluster needed |
 | `tests/E2E/` | End-to-end suites, need a TiKV cluster (Docker) |
 | `phpstan/` | Custom PHPStan rules |
-| `scripts/` | `test-e2e.sh`, `test-e2e-apiv2.sh`, `generate-proto.sh`, `test.sh` |
+| `scripts/` | `test-e2e.sh`, `test-e2e-apiv2.sh`, `test-e2e-suite.sh`, `generate-proto.sh`, `test.sh` |
 | `bin/` | `lint.sh`, `pick-issue.sh`, `check-coverage.php`, `worktree*.sh` |
 | `docs/` | User and developer docs, `docs/helpers/` knowledge base (FAQ, decisions), process docs |
 | `benchmarks/`, `examples/` | Benchmarks and runnable examples |
@@ -46,6 +46,10 @@ composer test:coverage     # Unit+Grpc under a coverage driver, then the coverag
 
 # E2E (Docker, see below)
 make test-e2e              # RawKV on the V1TTL cluster, then TxnKV on the V1 cluster
+composer test:e2e          # the same run, through composer
+composer test:e2e:raw      # RawKV suite only, needs a running V1TTL cluster
+composer test:e2e:txn      # TxnKV suite only, needs a running V1 cluster
+composer test:e2e:apiv2    # API V2 suite only, needs an API V2 cluster
 make test-e2e-apiv2        # API V2 suite on its own cluster
 
 # Mutation testing (Infection, needs a coverage driver: PCOV or Xdebug)
@@ -55,10 +59,21 @@ composer mutation:show     # same, but print the surviving mutants
 make help                  # all make targets (install, up, down, clean, shell, example, proto-generate)
 ```
 
-The Makefile calls `docker-compose` (v1 syntax); CI and the scripts use `docker compose`.
+The Makefile calls `docker-compose` (v1 syntax); CI uses `docker compose`, and the scripts
+prefer it too (`scripts/lib/compose.sh` falls back to the v1 binary when the v2 plugin is
+missing).
 
 The mutation scope is `src/Client/TxnKv/` and `src/Client/Region/` (see `infection.json` and
 `docs/development.md`); its CI job runs nightly and on demand, not on every pull request.
+
+The per-mode scripts (`composer test:e2e:raw`, `test:e2e:txn`, `test:e2e:apiv2`) run
+PHPUnit on the **host**, against a cluster that is already up. They reach PD through
+`PD_ENDPOINTS`; the default `pd:2379` is a compose service name and resolves only inside
+the compose network, so on the host use the published port
+(`PD_ENDPOINTS=localhost:${PD_PORT:-2379}`). The API V2 lane additionally needs
+`TIKV_ALT_KEYSPACE` (a second keyspace that must exist in the cluster) and sets
+`TIKV_API_VERSION=2` itself, so it cannot skip its whole suite and report a green run
+that tested nothing.
 
 ## Docker Compose
 

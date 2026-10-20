@@ -31,7 +31,7 @@ test: test-unit test-e2e
 # Run unit tests only (no TiKV required)
 test-unit:
 	@echo "Running unit tests..."
-	docker-compose run --rm php-client vendor/bin/phpunit --testsuite Unit --testdox
+	docker-compose run --rm php-client vendor/bin/phpunit --testsuite Unit --testdox --fail-on-empty-test-suite
 
 # Run E2E tests with TiKV cluster
 test-e2e:

@@ -100,6 +100,66 @@ E2E suites (`E2E-RawKV`, `E2E-TxnKV`) spin up real TiKV clusters via docker
 compose — they only run when relevant paths change (`src/`, `tests/E2E/`,
 docker/composer files, CI workflow).
 
+## A test runner that selects nothing must exit non-zero, and the E2E entry point runs the suites one after the other (issue #361)
+
+Three decisions that belong together, because either one alone leaves the
+other half of the bug open:
+
+1. **Every PHPUnit invocation in the repository passes
+   `--fail-on-empty-test-suite`.** PHPUnit answers a suite selector that
+   matches nothing with "No tests executed!" and exit code **0**, so a
+   renamed suite is indistinguishable from a passing run. The flag turns
+   that into a non-zero exit code. It is deliberately *not*
+   `--fail-on-skipped` for the suites as a whole: the E2E suites skip
+   legitimately (no Docker socket for the PD-failover tests, no `proc_open`
+   for the concurrency test), so that flag would make an ordinary developer
+   machine red.
+2. **`composer test:e2e` runs the two end-to-end suites one after the
+   other, each against the cluster mode it needs** — it delegates to
+   `scripts/test-e2e.sh` (`make test-e2e`), which starts the V1TTL cluster
+   for `E2E-RawKV`, tears it down, starts the V1 cluster
+   (`docker-compose.txnkv.yml`) for `E2E-TxnKV` and runs each suite in its
+   own PHPUnit process. A single PHPUnit run cannot do that: the suites
+   need cluster modes of their own (V1TTL for RawKV, V1 for TxnKV, API V2
+   for ApiV2), so one cluster cannot serve two of them and a run that
+   selects both would be red by construction. The per-mode scripts
+   `composer test:e2e:raw`, `composer test:e2e:txn` and
+   `composer test:e2e:apiv2` run one suite against a cluster that is
+   already up; they share `scripts/test-e2e-suite.sh`, which owns the
+   environment each suite needs.
+3. **A missing cluster fails fast instead of failing late.** Without a
+   cluster every end-to-end test used to spend the client's whole retry
+   budget (measured: 18.8 s) before it reported the connection error, so
+   the 242 end-to-end tests needed about an hour to print their summary.
+   `tests/E2E/ClusterProbe.php` asks PD for its member list before the
+   first test of a class and fails the class when PD does not answer — a
+   failure, not a skip, because a skipped suite looks exactly like a suite
+   that tested nothing.
+
+The fourth decision closes the remaining hole of the first one: **a skipped
+test counts as a test, so `--fail-on-empty-test-suite` does not fire on
+it.** The API V2 suite skips every one of its tests unless
+`TIKV_API_VERSION=2` is set, so a runner that leaves the variable out
+turns the lane into a green no-op (measured: "Tests: 4, Skipped: 4", exit
+**0**). The runners that own the lane therefore set the environment
+themselves — `scripts/test-e2e-suite.sh` exports `TIKV_API_VERSION=2`,
+requires `TIKV_ALT_KEYSPACE` (the second keyspace the suite compares
+against) and adds `--fail-on-skipped`, which is safe there because the
+suite has no legitimate skip once the environment is set;
+`scripts/test-e2e-apiv2.sh` does the same for the Docker lane. The
+alternative — dropping the per-mode command and pointing at the lane's
+runner — would have left the host-side entry point unexplained.
+
+The rules are machine-enforced, not a convention:
+`tests/Unit/Ci/TestSuiteSelectorGuardTest.php` fails when a `--testsuite`
+selector used in `composer.json`, in `scripts/*.sh`, in the `Makefile`, in
+the `docker-compose*.yml` files or in the CI workflow names a suite
+`phpunit.xml` does not declare, when a PHPUnit invocation runs without
+`--fail-on-empty-test-suite`, when no runner selects an end-to-end suite,
+when a single invocation selects two end-to-end suites that need different
+cluster modes, or when a runner selects the API V2 suite without running it
+with `TIKV_API_VERSION=2`.
+
 ## `scan(limit: 0)`'s `maxScanRows` guard is per fetched page, not per row (issue #191)
 
 Review of the #191 branch (`RawKvScanner::assertWithinScanLimit()`) confirmed

@@ -109,6 +109,7 @@ make test
 # Or separately:
 make test-unit      # Unit tests only (fast)
 make test-e2e       # E2E tests (requires TiKV)
+composer test:e2e   # the same end-to-end run, through composer
 ```
 
 Expected output includes a non-zero Unit and E2E test count (the exact count
@@ -361,6 +362,9 @@ volumes on exit), so a separate `make up` is not required for the full run:
 # Run RawKV E2E, then switch to V1 and run TxnKV E2E
 make test-e2e
 
+# The same run through composer
+composer test:e2e
+
 # Or manually run the RawKV suite inside the Compose network
 # (start the default V1TTL cluster first)
 make up
@@ -370,6 +374,55 @@ docker-compose run --rm php-client \
 # TxnKV uses the V1 cluster override and is run by make test-e2e
 # (do not point the TxnKV container at a V1TTL cluster)
 ```
+
+**The suites need different cluster modes, so a single-cluster run of both
+ends red.** `E2E-RawKV` needs the V1TTL cluster (`tikv.toml`,
+`enable-ttl = true`); `E2E-TxnKV` needs the V1 cluster
+(`docker-compose.txnkv.yml`, no TTL); `E2E-ApiV2` needs the API V2 cluster
+(`docker-compose.apiv2.yml`). A TTL-enabled cluster rejects transactional
+requests and a cluster without TTL rejects TTL requests, so one cluster
+cannot serve two of these suites — see
+[TxnKV Fails on a TTL-Enabled Cluster](troubleshooting.md#txnkv-fails-on-a-ttl-enabled-cluster).
+
+That is why the entry points are split:
+
+| Command | Cluster it needs | What it runs |
+|---|---|---|
+| `composer test:e2e` (or `make test-e2e`) | Docker; it starts and switches both clusters itself | the complete run: `E2E-RawKV` against the V1TTL cluster, then `E2E-TxnKV` against the V1 cluster |
+| `composer test:e2e:raw` | a running **V1TTL** cluster at `$PD_ENDPOINTS` | the `E2E-RawKV` suite only |
+| `composer test:e2e:txn` | a running **V1** cluster (no TTL) at `$PD_ENDPOINTS` | the `E2E-TxnKV` suite only |
+| `composer test:e2e:apiv2` | a running **API V2** cluster at `$PD_ENDPOINTS`, plus `$TIKV_ALT_KEYSPACE` | the `E2E-ApiV2` suite only |
+
+The per-mode scripts run PHPUnit on the **host**, so `$PD_ENDPOINTS` has to name an
+endpoint the host can reach. The default, `pd:2379`, is a Docker Compose service name
+and resolves only inside the compose network; on the host use the published PD port:
+
+```bash
+PD_ENDPOINTS=localhost:${PD_PORT:-2379} composer test:e2e:raw
+```
+
+The API V2 lane needs a second keyspace that already exists in the cluster (the
+suite proves that the same user key stays isolated per keyspace). Create it once
+and name it in `TIKV_ALT_KEYSPACE`:
+
+```bash
+docker compose exec -T pd wget -qO- \
+  --header='Content-Type: application/json' \
+  --post-data='{"name":"php-e2e-alt"}' \
+  http://127.0.0.1:2379/pd/api/v2/keyspaces
+
+TIKV_ALT_KEYSPACE=php-e2e-alt PD_ENDPOINTS=localhost:${PD_PORT:-2379} \
+  composer test:e2e:apiv2
+```
+
+Every one of these commands fails when it runs nothing: a selection that
+matches no test is a non-zero exit code, not a green run that tested
+nothing. The API V2 lane cannot report a green run that skipped its whole
+suite either — the script sets `TIKV_API_VERSION=2` itself and treats a
+skipped test as a failure. Without a cluster the end-to-end suites fail fast
+(the cluster probe in `tests/E2E/ClusterProbe.php` asks PD whether it is
+there), so a missing cluster is reported in seconds instead of after an hour
+of retries.
 
 Writing E2E tests:
 

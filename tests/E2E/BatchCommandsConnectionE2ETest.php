@@ -26,6 +26,8 @@ final class BatchCommandsConnectionE2ETest extends TestCase
         if (getenv('TIKV_ADDR') !== false && getenv('TIKV_ADDR') !== '') {
             self::$storeAddress = (string) getenv('TIKV_ADDR');
         }
+
+        ClusterProbe::assertStoreReachable(self::$storeAddress);
     }
 
     public function testEmptyPingRoundTripReceivesResponse(): void

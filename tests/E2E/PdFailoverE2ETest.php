@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\E2E;
 
-use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
-use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use PHPUnit\Framework\TestCase;
 
@@ -48,9 +46,6 @@ final class PdFailoverE2ETest extends TestCase
     /** @var list<string> PD endpoints (single PD node in the local compose) */
     private static array $pdEndpoints = ['pd:2379'];
 
-    /** Lightweight PD probe used for the cluster-availability skip. */
-    private static ?PdClientInterface $pdProbe = null;
-
     public static function setUpBeforeClass(): void
     {
         $env = getenv('PD_ENDPOINTS');
@@ -58,28 +53,23 @@ final class PdFailoverE2ETest extends TestCase
             self::$pdEndpoints = explode(',', (string) $env);
         }
 
+        // Fail fast when there is no cluster at all: without it every test
+        // would spend the client's retry budget before it reported the
+        // connection error (issue #361).
+        ClusterProbe::assertPdReachable(self::$pdEndpoints);
+
         self::$client = TxnKvClient::create(self::$pdEndpoints);
-        self::$pdProbe = ConnectionFactory::create(self::$pdEndpoints)->pdClient;
     }
 
     public static function tearDownAfterClass(): void
     {
         self::$client?->close();
         self::$client = null;
-        self::$pdProbe = null;
     }
 
     protected function setUp(): void
     {
         if (!self::$client instanceof TxnKvClient) {
-            $this->markTestSkipped('TiKV cluster not available');
-        }
-
-        // Consistent with the other E2E tests: skip when the cluster is
-        // unreachable instead of failing.
-        try {
-            $this->pdClient()->getTimestamp();
-        } catch (\Throwable) {
             $this->markTestSkipped('TiKV cluster not available');
         }
 
@@ -174,13 +164,6 @@ final class PdFailoverE2ETest extends TestCase
 
         // Note: file_exists(), not is_file() — is_file() is false for sockets.
         return file_exists('/var/run/docker.sock');
-    }
-
-    private function pdClient(): PdClientInterface
-    {
-        self::assertInstanceOf(PdClientInterface::class, self::$pdProbe);
-
-        return self::$pdProbe;
     }
 
     /**

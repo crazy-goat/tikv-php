@@ -109,7 +109,7 @@ jobs:
         run: composer install --no-interaction --prefer-dist --no-progress --ignore-platform-req=ext-grpc
 
       - name: Run unit tests
-        run: ./vendor/bin/phpunit --testsuite Unit --testdox --fail-on-skipped --no-coverage
+        run: ./vendor/bin/phpunit --testsuite Unit --testdox --fail-on-skipped --fail-on-empty-test-suite --no-coverage
         timeout-minutes: 5
 
   grpc-unit-tests:
@@ -143,7 +143,7 @@ jobs:
       # job does not install). The matrix job above still runs the Unit suite
       # on every PHP version without coverage.
       - name: Run unit and gRPC unit tests with coverage
-        run: ./vendor/bin/phpunit --testsuite Unit,Grpc --testdox --fail-on-skipped --coverage-clover=coverage.xml
+        run: ./vendor/bin/phpunit --testsuite Unit,Grpc --testdox --fail-on-skipped --fail-on-empty-test-suite --coverage-clover=coverage.xml
         timeout-minutes: 10
 
       - name: Check coverage floor
@@ -185,7 +185,7 @@ jobs:
         run: composer install --no-interaction --prefer-dist --no-progress
 
       - name: Run integration tests
-        run: ./vendor/bin/phpunit --testsuite Integration --testdox --fail-on-skipped --no-coverage
+        run: ./vendor/bin/phpunit --testsuite Integration --testdox --fail-on-skipped --fail-on-empty-test-suite --no-coverage
         timeout-minutes: 5
 
   e2e-tests:
@@ -258,7 +258,7 @@ jobs:
         run: |
           docker compose run --rm \
             -e PD_ENDPOINTS=pd:2379 \
-            php-client vendor/bin/phpunit --testsuite E2E-RawKV --testdox --no-coverage
+            php-client vendor/bin/phpunit --testsuite E2E-RawKV --testdox --fail-on-empty-test-suite --no-coverage
         timeout-minutes: 10
 
       - name: Cleanup V1ttl cluster
@@ -321,7 +321,7 @@ jobs:
         run: |
           docker compose run --rm --no-deps \
             -e PD_ENDPOINTS=pd:2379 \
-            php-client vendor/bin/phpunit --testsuite E2E-TxnKV --testdox --no-coverage
+            php-client vendor/bin/phpunit --testsuite E2E-TxnKV --testdox --fail-on-empty-test-suite --no-coverage
         timeout-minutes: 10
 
       - name: Cleanup V1 cluster

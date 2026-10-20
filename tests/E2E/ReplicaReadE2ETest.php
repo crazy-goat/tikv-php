@@ -31,6 +31,7 @@ class ReplicaReadE2ETest extends TestCase
         $pdEndpoints = getenv(self::PD_ENDPOINTS)
             ? explode(',', (string) getenv(self::PD_ENDPOINTS))
             : ['pd:2379'];
+        ClusterProbe::assertPdReachable($pdEndpoints);
         self::$leaderClient = RawKvClient::create($pdEndpoints);
     }
 

@@ -10,6 +10,11 @@ set -euo pipefail
 
 COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.apiv2.yml)
 
+# Docker Compose v2 ships as a `docker` plugin; the v1 binary is the
+# fallback for installations that still have it.
+# shellcheck source=scripts/lib/compose.sh
+. "$(dirname "$0")/lib/compose.sh"
+
 # A second, non-default keyspace: the suite proves that identical user keys
 # stay isolated once the keyspace ID becomes part of the encoded key.
 PRIMARY_KEYSPACE="${TIKV_KEYSPACE:-php-e2e-primary}"
@@ -20,7 +25,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 compose() {
-    docker compose "${COMPOSE_FILES[@]}" --profile test "$@"
+    "${COMPOSE[@]}" "${COMPOSE_FILES[@]}" --profile test "$@"
 }
 
 # shellcheck disable=SC2329 # invoked by the EXIT trap
@@ -87,12 +92,16 @@ create_keyspace "$ALT_KEYSPACE"
 echo ""
 echo -e "${YELLOW}Step 5: Running API V2 E2E tests...${NC}"
 TEST_EXIT_CODE=0
+# --fail-on-skipped: the environment above leaves the suite without a
+# legitimate skip, so a skipped test means the lane did not test what it
+# claims to test (issue #361).
 compose run --rm --no-deps \
     -e PD_ENDPOINTS=pd:2379 \
     -e TIKV_API_VERSION=2 \
     -e TIKV_KEYSPACE="$PRIMARY_KEYSPACE" \
     -e TIKV_ALT_KEYSPACE="$ALT_KEYSPACE" \
-    php-test vendor/bin/phpunit --testsuite E2E-ApiV2 --testdox --no-coverage ||
+    php-test vendor/bin/phpunit --testsuite E2E-ApiV2 --testdox --fail-on-skipped \
+    --fail-on-empty-test-suite --no-coverage ||
     TEST_EXIT_CODE=$?
 
 echo ""

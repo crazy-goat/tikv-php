@@ -44,12 +44,12 @@ fi
 
 # Run Unit tests
 print_section "Running Unit Tests..."
-vendor/bin/phpunit --testsuite Unit --testdox
+vendor/bin/phpunit --testsuite Unit --testdox --fail-on-empty-test-suite
 UNIT_EXIT=$?
 
 # Run Integration tests (if any)
 print_section "Running Integration Tests..."
-vendor/bin/phpunit --testsuite Integration --testdox || true
+vendor/bin/phpunit --testsuite Integration --testdox --fail-on-empty-test-suite || true
 
 # Summary
 echo ""

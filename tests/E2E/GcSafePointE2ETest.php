@@ -32,6 +32,8 @@ final class GcSafePointE2ETest extends TestCase
             ? explode(',', (string) getenv('PD_ENDPOINTS'))
             : ['pd:2379'];
 
+        ClusterProbe::assertPdReachable($pdEndpoints);
+
         self::$txnClient = TxnKvClient::create($pdEndpoints);
         self::$pdClient = ConnectionFactory::create($pdEndpoints)->pdClient;
     }

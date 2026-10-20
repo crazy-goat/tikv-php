@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\E2E;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use PHPUnit\Framework\TestCase;
+use Throwable;
 
 /**
  * API V2 smoke coverage. Run with docker-compose.apiv2.yml; it is skipped in
@@ -32,6 +33,9 @@ final class ApiV2E2ETest extends TestCase
             'apiVersion' => 2,
             'keyspace' => getenv('TIKV_KEYSPACE') ?: 'DEFAULT',
         ];
+
+        ClusterProbe::assertPdReachable($pdEndpoints);
+
         self::$raw = RawKvClient::create($pdEndpoints, options: $options);
         self::$txn = TxnKvClient::create($pdEndpoints, options: $options);
         self::$altKeyspace = (getenv('TIKV_ALT_KEYSPACE') ?: '') ?: null;
@@ -103,10 +107,24 @@ final class ApiV2E2ETest extends TestCase
         }
 
         $key = 'php-api-v2-keyspace-' . uniqid();
-        $alt = RawKvClient::create(
-            getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'],
-            options: ['apiVersion' => 2, 'keyspace' => $altKeyspace],
-        );
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+
+        try {
+            $alt = RawKvClient::create(
+                $pdEndpoints,
+                options: ['apiVersion' => 2, 'keyspace' => $altKeyspace],
+            );
+        } catch (Throwable $e) {
+            // PD only reads keyspaces, it does not create them: a keyspace
+            // that does not exist has to be created before the suite runs.
+            $this->fail(sprintf(
+                'The alternate keyspace "%s" could not be loaded: %s. The keyspace has to exist '
+                . 'in the cluster before the suite runs (scripts/test-e2e-apiv2.sh creates it).',
+                $altKeyspace,
+                $e->getMessage(),
+            ));
+        }
+
         try {
             $alt->put($key, 'alt-value');
             // Same user key, different keyspace ID: it must not resolve.
