@@ -1715,3 +1715,33 @@ failed with "Directory not empty". Restoring the file mode alone would have
 silenced nothing. When a cleanup leaks a directory, look at the **shape** of the
 tree (nested directories, symlinks) before you look at file modes — and remove
 the tree recursively.
+
+## PHPUnit counts a verified mock as one assertion — `expectNotToPerformAssertions()` asserts nothing and back-fires
+
+`expects($this->never())->method('invalidate')` is verified after the test
+method returns, and PHPUnit counts that verification as **one assertion per
+mock object** (measured on PHPUnit 11.5.57: a test with one mock and no
+`assert*()` call is not risky, and a test with two mocks reports two
+assertions). Three consequences for the test suite:
+
+1. `expectNotToPerformAssertions()` is a suppression, never an assertion — it
+   cannot fail, so it catches no regression. It also back-fires whenever the
+   test verifies a mock: the mock verification already counted as an
+   assertion, so PHPUnit reports "This test is not expected to perform
+   assertions but performed 1 assertion". The trigger is the **mock**, not the
+   position of the call: a test without a mock is silenced by the call, a
+   mock-only test is not.
+2. On a mock-only test it back-fires: "This test is not expected to perform
+   assertions but performed 1 assertion" — exactly the two risky tests the
+   `Grpc` suite reports from `GrpcFutureTest`. Deleting the suppression is
+   enough there; the mock expectation already is the assertion.
+3. The shape that replaces it for a "nothing must happen" contract is the
+   pair: the mock states the contract (`expects($this->never())->method('invalidate')`),
+   a normal assertion states the observable outcome
+   (`assertNull($response->getRegionError())`). Issue #354 applied that pair to
+   every happy-path test of `RegionErrorHandlerTest`; injecting an
+   unconditional `$cache->invalidate($regionId, 'region_error')` into
+   `RegionErrorHandler::check()` makes all eight of them fail. Note that the
+   negative assertion is only meaningful when the cache **and** a region ID
+   are both passed to `check()` — with `$regionId === null` the handler cannot
+   invalidate anything and the expectation would be vacuous.

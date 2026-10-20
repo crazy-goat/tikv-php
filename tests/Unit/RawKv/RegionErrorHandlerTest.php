@@ -35,7 +35,12 @@ class RegionErrorHandlerTest extends TestCase
     {
         $response = new RawPutResponse();
 
-        RegionErrorHandler::check($response);
+        // A clean response must never drop the region from the cache: an
+        // invalidation here would flush the cache on every healthy RPC.
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->never())->method('invalidate');
+
+        RegionErrorHandler::check($response, $cache, 42);
 
         self::assertNull($response->getRegionError());
     }
@@ -44,7 +49,10 @@ class RegionErrorHandlerTest extends TestCase
     {
         $response = new RawGetResponse();
 
-        RegionErrorHandler::check($response);
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->never())->method('invalidate');
+
+        RegionErrorHandler::check($response, $cache, 42);
 
         self::assertNull($response->getRegionError());
     }
@@ -117,7 +125,10 @@ class RegionErrorHandlerTest extends TestCase
     {
         $response = new \stdClass();
 
-        RegionErrorHandler::check($response);
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->never())->method('invalidate');
+
+        RegionErrorHandler::check($response, $cache, 42);
 
         self::assertInstanceOf(\stdClass::class, $response);
     }
@@ -285,7 +296,10 @@ class RegionErrorHandlerTest extends TestCase
         $response = new RawBatchPutResponse();
         $response->setError('');
 
-        RegionErrorHandler::check($response);
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->never())->method('invalidate');
+
+        RegionErrorHandler::check($response, $cache, 42);
 
         self::assertSame('', $response->getError());
     }
@@ -295,7 +309,10 @@ class RegionErrorHandlerTest extends TestCase
         $response = new RawBatchDeleteResponse();
         $response->setError('');
 
-        RegionErrorHandler::check($response);
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->never())->method('invalidate');
+
+        RegionErrorHandler::check($response, $cache, 42);
 
         self::assertSame('', $response->getError());
     }
@@ -395,7 +412,10 @@ class RegionErrorHandlerTest extends TestCase
         $response = new RawBatchGetResponse();
         $response->setPairs([$pair]);
 
-        RegionErrorHandler::check($response);
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->never())->method('invalidate');
+
+        RegionErrorHandler::check($response, $cache, 42);
 
         self::assertFalse($pair->hasError());
     }
@@ -501,7 +521,10 @@ class RegionErrorHandlerTest extends TestCase
         $response->setError($keyError);
         $response->setPairs([$this->errorPair('k')]);
 
-        RegionErrorHandler::check($response, keyErrorsHandledByCaller: true);
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->never())->method('invalidate');
+
+        RegionErrorHandler::check($response, $cache, 42, keyErrorsHandledByCaller: true);
 
         self::assertSame($keyError, $response->getError());
     }
@@ -553,7 +576,10 @@ class RegionErrorHandlerTest extends TestCase
         $response = new ScanResponse();
         $response->setPairs([$this->errorPair('txn-key')]);
 
-        RegionErrorHandler::check($response, keyErrorsHandledByCaller: true);
+        $cache = $this->createMock(RegionCacheInterface::class);
+        $cache->expects($this->never())->method('invalidate');
+
+        RegionErrorHandler::check($response, $cache, 42, keyErrorsHandledByCaller: true);
 
         self::assertCount(1, $response->getPairs());
     }
