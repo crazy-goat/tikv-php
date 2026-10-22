@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Documentation
+
+- The FAQ entry "`unlink()` needs write permission on the **parent directory**, not on the file" quoted only the macOS/BSD failure message of `unlink()` called on a directory ("Operation not permitted"). On Linux — the platform the CI runners use — the same call fails with `EISDIR` ("Is a directory", verified on PHP 8.4). The entry now names the errno and both platform wordings, so it is correct on every platform the suite runs on. (#666)
+
 ## [v0.9.0] - 2026-10-21
 
 ### Added
