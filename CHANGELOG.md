@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- `RegionErrorHandler::check()` spells its cache guard with the imported short name (`$cache instanceof RegionCacheInterface`) instead of the fully-qualified interface name, and the first paragraph of its docblock now states the NotLeader exception that the same docblock describes further down: a NotLeader error at a site owned by a `RetryExecutor` is left cached even when a cache and a region id are passed. The guard is not always true — it is the null check of the optional `$cache` (`testRegionErrorWithoutCacheDoesNotThrowFromInvalidation()` pins it) — and it stays an `instanceof` because Rector's `FlipTypeControlToUseExclusiveTypeRector` rewrites `$cache !== null` back into it. No behaviour change. (#680)
+
 ## [v0.9.0] - 2026-10-21
 
 ### Added

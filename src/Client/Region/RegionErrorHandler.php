@@ -33,8 +33,10 @@ final class RegionErrorHandler
      * instead of a silently accepted response.
      *
      * When a $cache and $regionId are provided, the region is invalidated
-     * from the cache before the exception is thrown. This is the consistent
-     * behaviour expected by Transaction and LockResolver callers.
+     * from the cache before the exception is thrown — except for a NotLeader
+     * error at a site owned by a RetryExecutor, which is left cached (see
+     * below). This is the consistent behaviour expected by Transaction and
+     * LockResolver callers.
      *
      * NotLeader ownership depends on where check() runs:
      *
@@ -68,7 +70,7 @@ final class RegionErrorHandler
                 $isNotLeader = $regionError->getNotLeader() !== null;
                 if (
                     (!$isNotLeader || !$notLeaderOwnedByRetryExecutor)
-                    && $cache instanceof \CrazyGoat\TiKV\Client\Cache\RegionCacheInterface
+                    && $cache instanceof RegionCacheInterface
                     && $regionId !== null
                 ) {
                     $cache->invalidate($regionId, $isNotLeader ? 'not_leader' : 'region_error');

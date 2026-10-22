@@ -2498,3 +2498,16 @@ what the user has to do: configure the logger's level and handlers before
 the client is built, and build a new client after changing them. A
 limitation that is only described in the commit message is a limitation
 that the next integrator re-discovers the hard way.
+
+## An `instanceof` of a parameter's own nullable type is its null check, and Rector keeps it that way
+
+`RegionErrorHandler::check()` takes `?RegionCacheInterface $cache` and guards the
+invalidation with `$cache instanceof RegionCacheInterface`. That is not an
+always-true check: it is the only thing that stops `$cache->invalidate()` from
+being called on `null` when a caller passes a region id without a cache
+(`testRegionErrorWithoutCacheDoesNotThrowFromInvalidation()` pins it). Do not
+rewrite it as `$cache !== null` either: Rector's
+`FlipTypeControlToUseExclusiveTypeRector` flips a null comparison of an
+object-typed variable into an `instanceof`, so `bin/lint.sh` fails until the
+`instanceof` is back. Spell it with the imported short name — Rector writes the
+fully-qualified name when it does the flip itself. (#680)
