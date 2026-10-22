@@ -2103,9 +2103,10 @@ so a new request path that builds its context by hand, or that forgets the
 `priority:` argument, silently drops the transaction's priority again. The
 transaction's *read* path was missing for a long time: the write path has
 carried the priority since #441, the read path only since #336 (issue
-#336). Pinned by `TransactionTest::testPriorityIsCarriedOnEveryRequestContext()`
+#336). Pinned by
+`TransactionTest::testPriorityIsCarriedOnGetPrewriteAndCommitContexts()`
 (the `KvGet`, `KvPrewrite` and `KvCommit` contexts),
-`::testPriorityIsCarriedOnEveryReadRequestContext()` (the `KvBatchGet` and
+`::testPriorityIsCarriedOnBatchGetAndScanContexts()` (the `KvBatchGet` and
 `KvScan` contexts — the read path has three independent context-building
 call sites, and pinning only one of them would leave the other two free to
 drop the priority again) and

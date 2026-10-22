@@ -3664,7 +3664,7 @@ class TransactionTest extends TestCase
         $this->assertSame(2, $commitContext->getPriority());
     }
 
-    public function testPriorityIsCarriedOnEveryRequestContext(): void
+    public function testPriorityIsCarriedOnGetPrewriteAndCommitContexts(): void
     {
         // The transaction's priority must reach the Context of EVERY request
         // the transaction sends — the read (KvGet) as well as the writes
@@ -3724,7 +3724,7 @@ class TransactionTest extends TestCase
         $this->assertSame(CommandPri::High, $commitContext->getPriority(), 'priority missing on KvCommit');
     }
 
-    public function testPriorityIsCarriedOnEveryReadRequestContext(): void
+    public function testPriorityIsCarriedOnBatchGetAndScanContexts(): void
     {
         // The read path has three independent context-building call sites —
         // KvGet, KvBatchGet and KvScan. Pinning only one of them would leave
@@ -3830,8 +3830,10 @@ class TransactionTest extends TestCase
         // CommandPri::Normal (0) is the proto3 default, so a Context built
         // without a priority must not carry the field at all — the request
         // bytes stay exactly what they were before issue #336. The reference
-        // Context is built by hand (not through RegionContextFactory), so the
-        // expectation is not derived from the code under test.
+        // request (and its Context) is built by hand (not through
+        // RegionContextFactory), so the expectation is not derived from the
+        // code under test. The whole serialized request is compared, not only
+        // its Context, so a stray field anywhere in the request is caught too.
         $this->stubRegionAndStore();
 
         $capturedRequest = null;
@@ -3853,7 +3855,7 @@ class TransactionTest extends TestCase
                 };
             });
 
-        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn = $this->createTransaction(['pessimistic' => false, 'startTs' => 1000]);
         $txn->get('k1');
 
         $this->assertInstanceOf(GetRequest::class, $capturedRequest);
@@ -3870,8 +3872,12 @@ class TransactionTest extends TestCase
         $reference->setRegionId(1);
         $reference->setRegionEpoch($epoch);
         $reference->setPeer($peer);
+        $referenceRequest = new GetRequest();
+        $referenceRequest->setContext($reference);
+        $referenceRequest->setKey('k1');
+        $referenceRequest->setVersion(1000);
 
-        $this->assertSame($reference->serializeToString(), $context->serializeToString());
+        $this->assertSame($referenceRequest->serializeToString(), $capturedRequest->serializeToString());
     }
 
     /**
