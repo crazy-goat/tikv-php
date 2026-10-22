@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- The comment stripper of `PickIssueScriptGuardTest` honours backslash escapes outside single quotes, so a `\"` inside a double-quoted string no longer closes the string. Before, a `#` that followed whitespace after such an escaped quote was read as the start of a comment and the rest of the line was cut away — a process substitution later on that line would have slipped past the guard of #461. A data-provider test pins the quoting rules, including that case. (#662)
+
 ## [v0.9.0] - 2026-10-21
 
 ### Added

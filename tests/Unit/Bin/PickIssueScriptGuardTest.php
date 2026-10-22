@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Bin;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -42,8 +43,9 @@ use PHPUnit\Framework\TestCase;
  * The scan reads the script's *code* (comments stripped), so the prose that
  * documents the rule cannot trip the rule. The comment stripper is a
  * quote-aware approximation of the shell's own rule — a `#` starts a comment
- * when it is outside quotes and at the start of a word — which is exact for
- * this script (it contains no escaped quote inside a double-quoted string).
+ * when it is outside quotes and at the start of a word — that also honours
+ * backslash escapes outside single quotes (`\"` inside a double-quoted string
+ * does not close it). testStripCommentFollowsTheShellQuotingRules() pins it.
  */
 class PickIssueScriptGuardTest extends TestCase
 {
@@ -138,6 +140,35 @@ class PickIssueScriptGuardTest extends TestCase
         );
     }
 
+    #[DataProvider('stripCommentProvider')]
+    public function testStripCommentFollowsTheShellQuotingRules(string $line, string $expected): void
+    {
+        self::assertSame($expected, $this->stripComment($line));
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function stripCommentProvider(): iterable
+    {
+        yield 'comment after code' => ['foo # bar', 'foo '];
+        yield 'whole-line comment' => ['# bar', ''];
+        yield 'hash inside a word' => ['echo a#b', 'echo a#b'];
+        yield 'hash in a parameter expansion' => ['n=${#items[@]}', 'n=${#items[@]}'];
+        yield 'hash inside double quotes' => ['echo "a # b" # c', 'echo "a # b" '];
+        yield 'hash inside single quotes' => ["echo 'a # b' # c", "echo 'a # b' "];
+        yield 'escaped quote inside double quotes' => [
+            'echo "a \\" # b" <(cat) # c',
+            'echo "a \\" # b" <(cat) ',
+        ];
+        yield 'escaped backslash before the closing double quote' => [
+            'echo "a \\\\" # c',
+            'echo "a \\\\" ',
+        ];
+        yield 'backslash is literal inside single quotes' => ["echo 'a \\' # c", "echo 'a \\' "];
+        yield 'escaped quote outside quotes' => ['echo \\" # c', 'echo \\" '];
+    }
+
     /**
      * The script's source with every comment removed.
      */
@@ -185,7 +216,8 @@ class PickIssueScriptGuardTest extends TestCase
 
     /**
      * Cut a line at its comment: a `#` starts a comment when it is outside
-     * quotes and at the start of a word.
+     * quotes and at the start of a word. A backslash outside single quotes
+     * escapes the next character.
      */
     private function stripComment(string $line): string
     {
@@ -194,6 +226,14 @@ class PickIssueScriptGuardTest extends TestCase
 
         for ($i = 0; $i < $length; $i++) {
             $char = $line[$i];
+
+            // A backslash escapes the next character everywhere except
+            // inside single quotes, so `\"` never closes a double-quoted
+            // string and never opens one.
+            if ($char === '\\' && $quote !== "'") {
+                $i++;
+                continue;
+            }
 
             if ($quote !== null) {
                 if ($char === $quote) {
