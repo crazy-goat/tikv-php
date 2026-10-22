@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- `RawKvBatchUnresolvedKeyTest` and `CommitPrewriteKeyCoverageTest` no longer probe whether the fail-closed contract of #244 is implemented. The probe kept a branch for the "not implemented yet" case — `expectNotToPerformAssertions()` plus an `E_USER_WARNING` — that could never run once #244 merged, and that would have turned a regression of the contract into a passing run that skipped the real assertions. Each file now pins the contract directly with a `testResolverFailsClosedForAKeyOutsideTheReturnedRegions()` that expects the `TiKvException` of `RegionResolver::batchResolveRegions()`, and the dependent tests run unconditionally. (#682)
+
 ## [v0.9.0] - 2026-10-21
 
 ### Added

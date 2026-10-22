@@ -8,6 +8,7 @@ use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
@@ -26,10 +27,10 @@ use PHPUnit\Framework\TestCase;
  * while staying in the write set, so the commit phase either referenced a
  * key TiKV never saw, or the write was silently lost.
  *
- * Note: the fail-closed contract is implemented by issue #244 (PR #531),
- * which is not merged yet. The guarded tests below probe whether that fix
- * is present and warn (instead of failing) until it merges; they then
- * permanently pin the contract.
+ * The tests build on the fail-closed contract of issue #244 (PR #531):
+ * RegionResolver::batchResolveRegions() throws for a key outside the
+ * regions PD returned. testResolverFailsClosedForAKeyOutsideTheReturnedRegions()
+ * pins that contract directly.
  */
 final class CommitPrewriteKeyCoverageTest extends TestCase
 {
@@ -189,6 +190,21 @@ final class CommitPrewriteKeyCoverageTest extends TestCase
     }
 
     /**
+     * The fail-closed contract of issue #244 the test below builds on:
+     * batchResolveRegions() throws for a key outside the returned regions
+     * instead of omitting it from the result.
+     */
+    public function testResolverFailsClosedForAKeyOutsideTheReturnedRegions(): void
+    {
+        $this->pdClient->method('scanRegions')->willReturn([$this->region(1, '', 'm')]);
+        $this->regionCache->method('put');
+
+        $this->expectException(TiKvException::class);
+
+        $this->regionResolver->batchResolveRegions(['z']);
+    }
+
+    /**
      * Issue #329 criterion: a key whose region cannot be resolved must not
      * be dropped from prewrite while remaining in the write set (the commit
      * phase would then reference a key TiKV never saw). Under the fail-closed
@@ -201,22 +217,6 @@ final class CommitPrewriteKeyCoverageTest extends TestCase
         // does not cover 'z' (e.g. the PD scan-bound bug fixed by #244).
         $this->pdClient->method('scanRegions')->willReturn([$this->region(1, '', 'm')]);
         $this->regionCache->method('put');
-
-        // Probe whether the fail-closed contract (issue #244) is implemented.
-        try {
-            $this->regionResolver->batchResolveRegions(['z']);
-        } catch (\CrazyGoat\TiKV\Client\Exception\TiKvException) {
-            $failClosed = true;
-        }
-        if (!($failClosed ?? false)) {
-            $this->expectNotToPerformAssertions();
-            trigger_error(
-                'Fail-closed contract not implemented yet (issue #244, PR #531); '
-                . 'this test pins the issue #329 criteria and activates once #244 merges.',
-                E_USER_WARNING,
-            );
-            return;
-        }
 
         [$txn, $getRequests] = $this->makeTransactionAndCaptureRpcs();
         $txn->set('a', 'v1');

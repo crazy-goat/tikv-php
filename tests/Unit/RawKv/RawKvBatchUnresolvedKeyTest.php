@@ -23,10 +23,10 @@ use Psr\Log\NullLogger;
  * so a skipped key means the write was never sent while the caller observed
  * success (silent data loss).
  *
- * Note: the fail-closed contract is implemented by issue #244 (PR #531),
- * which is not merged yet. The guarded tests below probe whether that fix
- * is present and warn (instead of failing) until it merges; they then
- * permanently pin the contract.
+ * The tests build on the fail-closed contract of issue #244 (PR #531):
+ * RegionResolver::batchResolveRegions() throws for a key outside the
+ * regions PD returned. testResolverFailsClosedForAKeyOutsideTheReturnedRegions()
+ * pins that contract directly.
  */
 final class RawKvBatchUnresolvedKeyTest extends TestCase
 {
@@ -47,41 +47,6 @@ final class RawKvBatchUnresolvedKeyTest extends TestCase
             new TimeoutConfig(),
             new NullLogger(),
         );
-    }
-
-    /**
-     * Probe whether the fail-closed contract of issue #244 is implemented:
-     * batchResolveRegions() must throw for a key outside the returned
-     * regions instead of omitting it from the result.
-     * @return bool true when the contract is implemented — the caller
-     *              proceeds; false when it is pending — the caller stops
-     *              after the emitted warning
-     */
-    private function requireFailClosedContract(): bool
-    {
-        $region = $this->region(1, 'a', 'm');
-        $this->pdClient->method('scanRegions')->willReturn([$region]);
-        $this->regionCache->method('put');
-
-        $resolver = new RegionResolver($this->pdClient, $this->regionCache);
-        try {
-            $resolver->batchResolveRegions(['z']);
-        } catch (TiKvException) {
-            return true; // fail-closed: implemented — run the real assertions
-        }
-
-        // Fail-closed contract not implemented yet (issue #244, PR #531):
-        // emit a non-failing warning naming the pending contract and stop.
-        // (markTestSkipped() is not an option — the CI `unit-tests` job runs
-        // with --fail-on-skipped, so a skip would break the build.)
-        $this->expectNotToPerformAssertions();
-        trigger_error(
-            'Fail-closed contract not implemented yet (issue #244, PR #531); '
-            . 'this test pins the issue #329 criteria and activates once #244 merges.',
-            E_USER_WARNING,
-        );
-
-        return false;
     }
 
     /**
@@ -120,6 +85,22 @@ final class RawKvBatchUnresolvedKeyTest extends TestCase
     }
 
     /**
+     * The fail-closed contract of issue #244 the tests below build on:
+     * batchResolveRegions() throws for a key outside the returned regions
+     * instead of omitting it from the result.
+     */
+    public function testResolverFailsClosedForAKeyOutsideTheReturnedRegions(): void
+    {
+        $this->pdClient->method('scanRegions')->willReturn([$this->region(1, 'a', 'm')]);
+        $this->regionCache->method('put');
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage($this->expectedRedactedKeyFragment('z'));
+
+        (new RegionResolver($this->pdClient, $this->regionCache))->batchResolveRegions(['z']);
+    }
+
+    /**
      * Issue #329 criterion: batchPut must either send every key or raise an
      * exception — never return normally having sent only a subset.
      *
@@ -129,10 +110,6 @@ final class RawKvBatchUnresolvedKeyTest extends TestCase
      */
     public function testBatchPutThrowsWhenAKeyCannotBeResolved(): void
     {
-        if (!$this->requireFailClosedContract()) {
-            return;
-        }
-
         $this->pdClient->method('scanRegions')->willReturn([$this->region(1, 'a', 'm')]);
         $this->regionCache->method('put');
         $this->grpc->expects($this->never())->method('getChannel');
@@ -155,10 +132,6 @@ final class RawKvBatchUnresolvedKeyTest extends TestCase
      */
     public function testBatchPutSendsResolvableNeighboursOfUnresolvableKey(): void
     {
-        if (!$this->requireFailClosedContract()) {
-            return;
-        }
-
         $this->pdClient->method('scanRegions')->willReturn([$this->region(1, 'a', 'm')]);
         $this->regionCache->method('put');
 
