@@ -132,9 +132,12 @@ final class ErrorClassifier
             return null;
         }
 
-        // Generic exception type checks
+        // Generic exception type checks. An unmapped RegionException (no typed
+        // ErrorKind) is fatal by default: unknown errors must not be retried
+        // (issue #251, REG-20). Retryable cases are enumerated explicitly
+        // above and via the typed ErrorKind path.
         if ($e instanceof RegionException) {
-            return BackoffType::RegionMiss;
+            return null;
         }
 
         return null;

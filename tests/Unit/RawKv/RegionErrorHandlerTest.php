@@ -23,6 +23,7 @@ use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\WriteConflict;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -341,7 +342,7 @@ class RegionErrorHandlerTest extends TestCase
         try {
             RegionErrorHandler::check($response);
             $this->fail('Expected RegionException for per-pair KeyError');
-        } catch (RegionException $e) {
+        } catch (KeyErrorException $e) {
             self::assertStringContainsString('BatchGet', $e->getMessage());
             self::assertStringContainsString($expectedFragment, $e->getMessage());
             // Raw key bytes must never reach the exception message; only the
@@ -458,7 +459,7 @@ class RegionErrorHandlerTest extends TestCase
         try {
             RegionErrorHandler::check($response);
             $this->fail('Expected RegionException for per-pair KeyError');
-        } catch (RegionException $e) {
+        } catch (KeyErrorException $e) {
             $message = $e->getMessage();
             $this->assertStringNotContainsString($rawKey, $message);
             $this->assertStringContainsString(KeyRedactor::redact($rawKey), $message);
@@ -483,7 +484,7 @@ class RegionErrorHandlerTest extends TestCase
         $response = new RawBatchGetResponse();
         $response->setPairs([$okPair, $errPair]);
 
-        $this->expectException(RegionException::class);
+        $this->expectException(KeyErrorException::class);
         $this->expectExceptionMessage('retryable: too old');
 
         RegionErrorHandler::check($response);
@@ -534,7 +535,7 @@ class RegionErrorHandlerTest extends TestCase
         $response = new RawScanResponse();
         $response->setKvs([$this->errorPair('scan-key')]);
 
-        $this->expectException(RegionException::class);
+        $this->expectException(KeyErrorException::class);
         $this->expectExceptionMessage('per-pair error');
 
         RegionErrorHandler::check($response);
@@ -545,7 +546,7 @@ class RegionErrorHandlerTest extends TestCase
         $response = new RawBatchScanResponse();
         $response->setKvs([$this->errorPair('scan-key')]);
 
-        $this->expectException(RegionException::class);
+        $this->expectException(KeyErrorException::class);
 
         RegionErrorHandler::check($response);
     }
@@ -555,7 +556,7 @@ class RegionErrorHandlerTest extends TestCase
         $response = new ScanResponse();
         $response->setPairs([$this->errorPair('txn-key')]);
 
-        $this->expectException(RegionException::class);
+        $this->expectException(KeyErrorException::class);
         $this->expectExceptionMessage('per-pair error');
 
         RegionErrorHandler::check($response);
@@ -566,7 +567,7 @@ class RegionErrorHandlerTest extends TestCase
         $response = new BatchGetResponse();
         $response->setPairs([$this->errorPair('txn-key')]);
 
-        $this->expectException(RegionException::class);
+        $this->expectException(KeyErrorException::class);
 
         RegionErrorHandler::check($response);
     }

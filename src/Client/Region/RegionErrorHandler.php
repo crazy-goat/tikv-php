@@ -11,6 +11,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 
@@ -114,10 +115,11 @@ final class RegionErrorHandler
 
         foreach ($pairs as $pair) {
             if ($pair->hasError()) {
-                throw new RegionException(
-                    operation: $response instanceof RawBatchGetResponse ? 'BatchGet' : 'PerPairError',
-                    message: self::describeKeyError($pair->getKey(), $pair->getError()),
-                );
+                throw new KeyErrorException(sprintf(
+                    '%s failed: %s',
+                    $response instanceof RawBatchGetResponse ? 'BatchGet' : 'PerPairError',
+                    self::describeKeyError($pair->getKey(), $pair->getError()),
+                ));
             }
         }
     }

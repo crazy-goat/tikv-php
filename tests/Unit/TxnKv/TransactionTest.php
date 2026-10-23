@@ -4793,7 +4793,7 @@ class TransactionTest extends TestCase
         $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
         $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
         $regionError = new \CrazyGoat\Proto\Errorpb\Error();
-        $regionError->setMessage('transient not leader');
+        $regionError->setMessage('NotLeader');
 
         // Fail the FIRST commit on region 2, then succeed.
         $region2CallCount = 0;

@@ -295,10 +295,9 @@ class ErrorClassifierTest extends TestCase
         );
     }
 
-    public function testRegionExceptionWithoutKindReturnsRegionMiss(): void
+    public function testRegionExceptionWithoutKindIsFatal(): void
     {
-        $this->assertSame(
-            BackoffType::RegionMiss,
+        $this->assertNull(
             ErrorClassifier::classify(new RegionException('test', 'region error')),
         );
     }

@@ -292,30 +292,28 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
      * and is deliberately NOT reclassified in #183; the test pins it so a
      * future classification change is a conscious decision (see CHANGELOG).
      */
-    public function testBareBatchErrorStringRegionExceptionIsRetriedAsRegionMiss(): void
+    public function testBareBatchErrorStringRegionExceptionIsFatal(): void
     {
         $attempts = 0;
         $terminal = new RegionException('BatchRequest', 'ttl is not enabled, but get put request with ttl');
-        $ok = new RawBatchGetResponse();
 
-        $dispatch = function () use (&$attempts, $terminal, $ok): CheckedGrpcFuture {
+        $dispatch = function () use (&$attempts, $terminal): CheckedGrpcFuture {
             $attempts++;
-            if ($attempts === 1) {
-                return $this->throwingFuture($terminal);
-            }
-
-            return $this->successFuture($ok);
+            return $this->throwingFuture($terminal);
         };
 
         $this->regionCache->method('getByKey')->willReturn($this->region());
-        // RegionMiss classification runs the standard retry_region_error
-        // invalidation path once, before the second attempt succeeds.
-        $this->regionCache->expects($this->once())->method('invalidate');
 
         $future = CheckedGrpcFuture::fromRetryableDispatch($dispatch, $this->createRetryExecutor(), 'k1');
 
-        self::assertSame($ok, $future->waitForExecutor());
-        self::assertSame(2, $attempts, 'a bare BatchRequest RegionException is retried as RegionMiss');
+        try {
+            $future->waitForExecutor();
+            self::fail('Expected the fatal RegionException to propagate');
+        } catch (RegionException $e) {
+            self::assertSame($terminal->getMessage(), $e->getMessage());
+        }
+
+        self::assertSame(1, $attempts, 'an unmapped BatchRequest RegionException is fatal and not retried');
     }
 
     /**
