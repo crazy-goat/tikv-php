@@ -261,6 +261,21 @@ class RawKvClientTest extends TestCase
         RawKvClient::create(['pd:2379'], options: ['metrics' => new \stdClass()]);
     }
 
+    public function testReapIdleChannelsForwardsToTheTransport(): void
+    {
+        $this->grpc->expects($this->once())->method('reapIdleChannels');
+
+        $this->client->reapIdleChannels();
+    }
+
+    public function testReapIdleChannelsIsANoOpAfterClose(): void
+    {
+        $this->grpc->expects($this->never())->method('reapIdleChannels');
+
+        $this->client->close();
+        $this->client->reapIdleChannels();
+    }
+
     public function testCloseIsIdempotent(): void
     {
         $this->client->close();
