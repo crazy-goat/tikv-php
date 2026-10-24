@@ -46,7 +46,7 @@ final class PdRegionContainmentTest extends TestCase
     {
         yield 'key equal to endKey' => ['1000', '', '1000'];
         yield 'bytewise above endKey' => ['200', '', '1000'];
-        yield 'bytewise below startKey' => ['1000', '2', '3'];
+        yield 'bytewise below startKey' => ['100', '20', ''];
         yield 'bytewise "99" is above "100"' => ['99', '', '100'];
     }
 
