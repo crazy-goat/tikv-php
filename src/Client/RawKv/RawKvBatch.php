@@ -18,7 +18,6 @@ use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
-use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -421,17 +420,11 @@ final readonly class RawKvBatch
     /**
      * The batch deadline in milliseconds, always strictly positive.
      *
-     * `TimeoutConfig` documents `0` as "no deadline" for the store fields, and
-     * `GrpcClient` honours that sentinel — which is exactly why this method
-     * must not hand its value on unchanged: the batch fan-out does NOT go
-     * through `GrpcClient::call()`, it forwards the value to
-     * `callAsync()` (the three `execute*ForRegionAsync()` methods), which reads
-     * `0` as the explicit "no deadline" opt-out, whereas the fan-out used to
-     * hand-roll `new Call(...)` and turn the same `0` into an already-expired
-     * `new Timeval(0)`. A non-positive configuration therefore
-     * resolves to the same conservative library default `GrpcClient` applies
-     * to a call site with no opinion (`null`), so no batch sub-request can
-     * arm a deadline that never expires (issue #184).
+     * `TimeoutConfig` rejects a non-positive value outright (issue #276,
+     * GRPC-17), so this method can only ever see a positive one — the
+     * configuration is the single source of truth. The fan-out forwards the
+     * value to `GrpcClient::callAsync()`, which derives the deadline and
+     * rejects a non-positive timeout again (issue #273).
      *
      * The return type is `int`, not `?int`: the previous `?:` over a nullable
      * helper was one `match` arm away from arming an unbounded deadline in
@@ -445,7 +438,7 @@ final readonly class RawKvBatch
      */
     private function timeoutMs(string $operationType): int
     {
-        $configured = match ($operationType) {
+        return match ($operationType) {
             'batch_read' => $this->timeoutConfig->batchReadTimeoutMs,
             'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
             default => throw new InvalidArgumentException(sprintf(
@@ -453,8 +446,6 @@ final readonly class RawKvBatch
                 $operationType,
             )),
         };
-
-        return $configured > 0 ? $configured : GrpcClient::DEFAULT_TIMEOUT_MS;
     }
 
     // ========================================================================

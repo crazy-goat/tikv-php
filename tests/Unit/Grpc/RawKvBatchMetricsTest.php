@@ -10,6 +10,7 @@ use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -149,6 +150,29 @@ final class RawKvBatchMetricsTest extends TestCase
             $this->assertSame(1, $metrics->getRpcStarted(self::OPERATION));
             $this->assertSame(1, $metrics->getRpcFailed(self::OPERATION));
             $this->assertSame(0, $metrics->getRpcSucceeded(self::OPERATION));
+        } finally {
+            $grpc->close();
+        }
+    }
+
+    public function testNonPositiveTimeoutIsRejectedBeforeAnyRpcIsMetered(): void
+    {
+        $metrics = new InMemoryMetrics();
+        $grpc = new GrpcClient(metrics: $metrics);
+
+        try {
+            $grpc->callAsync(
+                self::DEAD_ADDRESS,
+                'tikvpb.Tikv',
+                'RawBatchGet',
+                new RawBatchGetRequest(),
+                RawBatchGetResponse::class,
+                timeoutMs: 0,
+            );
+            $this->fail('Expected InvalidArgumentException for a zero timeout');
+        } catch (InvalidArgumentException) {
+            $this->assertSame(0, $metrics->getRpcStarted(self::OPERATION));
+            $this->assertSame(0, $grpc->getChannelCount());
         } finally {
             $grpc->close();
         }

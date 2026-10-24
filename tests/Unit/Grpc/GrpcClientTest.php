@@ -7,10 +7,12 @@ namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 use CrazyGoat\Proto\Kvrpcpb\RawGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Tests\Unit\Region\TestLogger;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LogLevel;
 
@@ -79,6 +81,41 @@ class GrpcClientTest extends TestCase
             \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
             timeoutMs: 1000,
         );
+    }
+
+    /**
+     * A non-positive timeout is a configuration error (issue #276, GRPC-17):
+     * it used to produce an infinite deadline, which the gRPC C core never
+     * expires and PHP cannot interrupt.
+     */
+    #[DataProvider('provideNonPositiveTimeouts')]
+    public function testCallWithANonPositiveTimeoutThrows(int $timeoutMs): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('timeoutMs must be greater than 0, got %d', $timeoutMs));
+
+        $request = new \CrazyGoat\Proto\Kvrpcpb\RawGetRequest();
+        $request->setKey('test');
+
+        $this->client->call(
+            '127.0.0.1:20160',
+            'tikvpb.Tikv',
+            'RawGet',
+            $request,
+            \CrazyGoat\Proto\Kvrpcpb\RawGetResponse::class,
+            timeoutMs: $timeoutMs,
+        );
+    }
+
+    /**
+     * @return array<string, array{int}>
+     */
+    public static function provideNonPositiveTimeouts(): array
+    {
+        return [
+            'zero' => [0],
+            'negative' => [-1],
+        ];
     }
 
     public function testCloseContinuesAfterChannelCloseThrows(): void
