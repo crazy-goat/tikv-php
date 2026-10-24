@@ -756,6 +756,28 @@ public function isAtomicForCAS(): bool;                 // current state of the 
 flag on every `RawPut`/`RawDelete` request it sends (single-key and batch),
 which is what selects TiKV's atomic code path on the store.
 
+**Scope:** the flag is a switch of the client instance. It affects all put and
+delete writes of that instance, not only the CAS calls. `compareAndSwap()` and
+`putIfAbsent()` require the flag. These methods send `for_cas` while the flag
+is on:
+
+- `put()`
+- `delete()`
+- `batchPut()`
+- `batchDelete()`
+
+`deleteRange()`, `deletePrefix()` and `ingest()` do not send the flag. Reads do
+not send it either.
+
+**Mixed writers:** a client with the flag on and a client with the flag off send
+writes to the same keys through different code paths. TiKV serializes an atomic
+write and a `compareAndSwap()` on the same key with latches. TiKV applies a
+plain write without these latches. A plain write can land between the read and
+the write of a CAS, and the CAS then overwrites it. The client does not check
+this. Use the same mode for every writer of the same keys. If only a part of
+your workload needs CAS, give that part its own client instance, and let this
+client be the only writer of its keys.
+
 **Why it defaults to `false`:** the non-atomic path is the faster one for plain
 writes, which is what most calls are. The flag is per client and not per call,
 so a client that mixes a handful of CAS operations with bulk plain writes pays
@@ -791,7 +813,9 @@ Atomic compare-and-set operation:
 > **Prerequisite:** `compareAndSwap()` and `putIfAbsent()` require atomic mode.
 > Call `$client->setAtomicForCAS(true)` once after creating the client, otherwise
 > both methods throw `InvalidStateException`. Atomic mode makes the client send the
-> `for_cas` flag on `RawPut`/`RawDelete`, which selects TiKV's atomic code path.
+> `for_cas` flag on every `RawPut`/`RawDelete` (`put()`, `delete()`, `batchPut()`
+> and `batchDelete()` too), which selects TiKV's atomic code path. See
+> [Atomic Mode](#atomic-mode-setatomicforcas--isatomicforcas) for the scope.
 > It is disabled by default because the non-atomic path is faster for plain writes.
 
 ```php
