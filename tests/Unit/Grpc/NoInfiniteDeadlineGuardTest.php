@@ -86,10 +86,10 @@ class NoInfiniteDeadlineGuardTest extends TestCase
             . "configuration error (issue #276, GRPC-17).\n" . implode("\n", $violations),
         );
 
-        // Without this the test would also pass if the scan silently stopped
-        // finding anything. There is no allowlisted site left to be the
-        // witness, so the scan itself is checked: it still has to find the
-        // one `infFuture()` the *tests* use as the reference value.
+        // Without this the test would also pass if the scan stopped looking
+        // at the right directory. The scan itself is witnessed by
+        // testTheScanStillFindsAnInfiniteDeadlineSite(); this assertion
+        // pins the count the scan has to find.
         self::assertSame(0, $total, 'The scan found ' . $total . ' Timeval::infFuture() site(s) '
             . 'in src/Client; there must be none — a non-positive timeout is a configuration '
             . 'error (issue #276, GRPC-17).');
@@ -100,6 +100,18 @@ class NoInfiniteDeadlineGuardTest extends TestCase
      * guard above asserts a count of zero, so without a witness the test
      * would also pass if the scan silently stopped matching anything.
      */
+    public function testTheScanLooksAtTheClientSourceDirectory(): void
+    {
+        // The witness above proves that the scan *can* find a site; this
+        // proves that it looks at the right place. Without it a scan over an
+        // empty or wrong directory would pass.
+        self::assertDirectoryExists(self::CLIENT_SOURCE_DIR);
+        self::assertNotEmpty(
+            $this->phpFilesUnder(self::CLIENT_SOURCE_DIR),
+            'The scan must look at the client sources.',
+        );
+    }
+
     public function testTheScanStillFindsAnInfiniteDeadlineSite(): void
     {
         $code = <<<'PHP'

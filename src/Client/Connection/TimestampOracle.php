@@ -205,9 +205,12 @@ final class TimestampOracle
      *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
+     * @throws InvalidArgumentException when $timeoutMs is not positive
      */
     public function getTimestamp(?int $timeoutMs = null): int
     {
+        $this->assertPositiveTimeout($timeoutMs);
+
         if ($this->poolSize <= 1) {
             return $this->getTimestampBatch(1, $timeoutMs)[0];
         }
@@ -253,9 +256,12 @@ final class TimestampOracle
      * @throws InvalidArgumentException when $count is < 1 or
      *                                  > {@see self::MAX_TIMESTAMP_POOL_SIZE}
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
+     * @throws InvalidArgumentException when $timeoutMs is not positive
      */
     public function getTimestampBatch(int $count, ?int $timeoutMs = null): array
     {
+        $this->assertPositiveTimeout($timeoutMs);
+
         if ($count < 1) {
             throw new InvalidArgumentException('Timestamp batch count must be >= 1');
         }
@@ -269,6 +275,20 @@ final class TimestampOracle
         $this->resetPool();
 
         return $this->requestTimestampRange($count, $timeoutMs);
+    }
+
+    /**
+     * Reject a non-positive timeout at the call site (issue #276, GRPC-17),
+     * where the mistake was made — not deep inside the transport.
+     */
+    private function assertPositiveTimeout(?int $timeoutMs): void
+    {
+        if ($timeoutMs !== null && $timeoutMs <= 0) {
+            throw new InvalidArgumentException(sprintf(
+                'timeoutMs must be greater than 0, got %d',
+                $timeoutMs,
+            ));
+        }
     }
 
     /**
@@ -423,9 +443,12 @@ final class TimestampOracle
      *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
+     * @throws InvalidArgumentException when $timeoutMs is not positive
      */
     public function getLowResolutionTimestamp(?int $timeoutMs = null): int
     {
+        $this->assertPositiveTimeout($timeoutMs);
+
         if ($this->lowResMaxStalenessMs === null) {
             return $this->requestTimestampRange(1, $timeoutMs)[0];
         }

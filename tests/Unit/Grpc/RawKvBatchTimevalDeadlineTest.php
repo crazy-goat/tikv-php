@@ -87,6 +87,20 @@ class RawKvBatchTimevalDeadlineTest extends TestCase
     }
 
     /**
+     * A non-positive timeout is refused at the seam that derives the
+     * deadline — the batch fan-out does not go through
+     * `GrpcClient::deadline()`, so this is the only place that can.
+     */
+    public function testANonPositiveTimeoutIsRejectedByTheDeadlineSeam(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('timeoutMs must be greater than 0, got 0');
+
+        $method = new \ReflectionMethod(RawKvBatch::class, 'deadlineFor');
+        $method->invoke($this->batch(new TimeoutConfig()), 0);
+    }
+
+    /**
      * The deadline the batch fan-out produces for a valid configuration is
      * finite and honours the configured value.
      */

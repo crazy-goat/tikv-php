@@ -2498,6 +2498,7 @@ what the user has to do: configure the logger's level and handlers before
 the client is built, and build a new client after changing them. A
 limitation that is only described in the commit message is a limitation
 that the next integrator re-discovers the hard way.
+
 ## `0` means "disabled" in one knob and "invalid" in another — the knob decides
 
 `0` is overloaded across the configuration surface, and the two meanings

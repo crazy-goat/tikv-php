@@ -274,6 +274,21 @@ class ConnectionFactoryTest extends TestCase
         );
     }
 
+    /**
+     * A key the factory does not know is not a timeout: it is ignored, like
+     * every other unknown option key (issue #276, GRPC-17). The validation
+     * must not turn it into an error.
+     */
+    public function testAnUnknownTimeoutOptionIsIgnored(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['notATimeout' => 0]],
+        );
+
+        $this->assertSame(5000, $bundle->timeoutConfig->readTimeoutMs);
+    }
+
     public function testANegativeBatchDeadlineOptionIsRejected(): void
     {
         $this->expectException(InvalidArgumentException::class);

@@ -218,17 +218,17 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
+        // The timeout is validated before anything else happens: a
+        // non-positive value is a configuration error and must not be
+        // counted as an RPC, must not create (and cache) a channel and must
+        // not be reported as a failed call (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
         $operation = $service . '/' . $method;
         $this->metrics->rpcStarted($operation);
         $start = hrtime(true);
         $success = false;
         try {
-            // The timeout is validated before anything is opened: a
-            // non-positive value is a configuration error and must not
-            // create (and cache) a channel before it is raised
-            // (issue #276, GRPC-17).
-            $timeout = $this->resolveTimeoutMs($timeoutMs);
-
             $channel = $this->getChannel($address);
 
             $deadline = $this->deadline($timeout);
@@ -282,17 +282,17 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
+        // The timeout is validated before anything else happens: a
+        // non-positive value is a configuration error and must not be
+        // counted as an RPC, must not create (and cache) a channel and must
+        // not be reported as a failed call (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
         $operation = $service . '/' . $method;
         $this->metrics->rpcStarted($operation);
         $start = hrtime(true);
         $success = false;
         try {
-            // The timeout is validated before anything is opened: a
-            // non-positive value is a configuration error and must not
-            // create (and cache) a channel before it is raised
-            // (issue #276, GRPC-17).
-            $timeout = $this->resolveTimeoutMs($timeoutMs);
-
             $channel = $this->getChannel($address);
 
             $deadline = $this->deadline($timeout);
@@ -864,6 +864,16 @@ final class GrpcClient implements GrpcClientInterface
      */
     private function deadline(int $timeoutMs): Timeval
     {
+        // Defence in depth: the caller resolves the timeout (and rejects a
+        // non-positive one) before it gets here, but a raw value that
+        // reached this method would build a deadline already in the past —
+        // every call would fail with DEADLINE_EXCEEDED (issue #276).
+        if ($timeoutMs <= 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                sprintf('timeoutMs must be greater than 0, got %d', $timeoutMs),
+            );
+        }
+
         return Timeval::now()->add(new Timeval($timeoutMs * 1000));
     }
 

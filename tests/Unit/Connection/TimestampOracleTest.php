@@ -45,6 +45,30 @@ class TimestampOracleTest extends TestCase
         );
     }
 
+    /**
+     * A non-positive timeout passed to a call is rejected at the call site,
+     * not deep inside the transport (issue #276, GRPC-17).
+     */
+    public function testANonPositiveCallTimeoutIsRejected(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getClusterId')->willReturn(1);
+
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('timeoutMs must be greater than 0, got 0');
+
+        $oracle->getTimestamp(0);
+    }
+
     public function testGetTimestampReturnsComposedTimestamp(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);

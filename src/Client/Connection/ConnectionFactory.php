@@ -58,25 +58,6 @@ final class ConnectionFactory
         'clientKey',
     ];
 
-    /**
-     * The `options['timeout']` keys the factory understands. A key that is
-     * not in this list is not a timeout: it is ignored, exactly like every
-     * other unknown option key.
-     */
-    private const RECOGNISED_TIMEOUT_KEYS = [
-        'readTimeoutMs',
-        'writeTimeoutMs',
-        'batchReadTimeoutMs',
-        'batchWriteTimeoutMs',
-        'scanTimeoutMs',
-        'deleteRangeTimeoutMs',
-        'checksumTimeoutMs',
-        'ingestTimeoutMs',
-        'batchDeadlineMs',
-        'pdTimeoutMs',
-        'tsoTimeoutMs',
-        'lockResolveTimeoutMs',
-    ];
 
     /**
      * Options that configure the gRPC transport the factory builds. They
@@ -697,6 +678,29 @@ final class ConnectionFactory
     }
 
     /**
+     * The `options['timeout']` keys the factory understands.
+     *
+     * Derived from {@see TimeoutConfig}'s constructor parameters, so the
+     * list cannot drift from the class that carries the values: a new
+     * timeout field is validated as soon as it exists. A key that is not in
+     * the list is not a timeout — it is ignored, exactly like every other
+     * unknown option key.
+     *
+     * @return list<string>
+     */
+    private static function recognisedTimeoutKeys(): array
+    {
+        $parameters = (new \ReflectionMethod(TimeoutConfig::class, '__construct'))->getParameters();
+
+        $keys = [];
+        foreach ($parameters as $parameter) {
+            $keys[] = $parameter->getName();
+        }
+
+        return $keys;
+    }
+
+    /**
      * Reject non-positive timeout options before they reach
      * {@see TimeoutConfig} (issue #276, GRPC-17).
      *
@@ -710,7 +714,7 @@ final class ConnectionFactory
     private static function assertPositiveTimeoutOptions(array $timeouts): void
     {
         foreach ($timeouts as $key => $value) {
-            if (!is_string($key) || !in_array($key, self::RECOGNISED_TIMEOUT_KEYS, true)) {
+            if (!is_string($key) || !in_array($key, self::recognisedTimeoutKeys(), true)) {
                 continue;
             }
             if (!is_int($value)) {

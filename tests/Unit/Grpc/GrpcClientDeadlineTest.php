@@ -25,10 +25,10 @@ use PHPUnit\Framework\TestCase;
  * `0` was removed in issue #276 (GRPC-17): it is also what an unset
  * environment variable coerces to, so it turned a configuration mistake into
  * a call that never expires. A non-positive timeout is now rejected.
- * Asserted here through the private `resolveTimeoutMs()` and `deadline()`
- * seams, which are pure PHP: the `Timeval` they feed needs ext-grpc, so the
- * object-level assertions live in {@see GrpcClientTimevalDeadlineTest} (the
- * `Grpc` suite).
+ * Asserted here through the private `resolveTimeoutMs()` seam, which is
+ * pure PHP: the `Timeval` it feeds needs ext-grpc, so the object-level
+ * assertions live in {@see GrpcClientTimevalDeadlineTest} (the `Grpc`
+ * suite).
  */
 class GrpcClientDeadlineTest extends TestCase
 {

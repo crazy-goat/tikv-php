@@ -51,9 +51,14 @@ class BatchCommandsConnectionDeadlineTest extends TestCase
             'credentials' => ChannelCredentials::createInsecure(),
         ]);
 
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage(sprintf('deadlineMs must be greater than 0, got %d', $deadlineMs));
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage(sprintf('deadlineMs must be greater than 0, got %d', $deadlineMs));
 
-        BatchCommandsConnection::open($channel, $deadlineMs);
+            BatchCommandsConnection::open($channel, $deadlineMs);
+        } finally {
+            // The channel is never used, but it must not outlive the test.
+            $channel->close();
+        }
     }
 }
