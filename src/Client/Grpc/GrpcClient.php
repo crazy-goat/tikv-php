@@ -265,8 +265,7 @@ final class GrpcClient implements GrpcClientInterface
 
             return $response;
         } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            $this->metrics->rpcCompleted($operation, $durationMs, $success);
+            $this->completeRpc($operation, $start, $success);
         }
     }
 
@@ -342,8 +341,7 @@ final class GrpcClient implements GrpcClientInterface
 
             return $response;
         } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            $this->metrics->rpcCompleted($operation, $durationMs, $success);
+            $this->completeRpc($operation, $start, $success);
         }
     }
 
@@ -413,7 +411,7 @@ final class GrpcClient implements GrpcClientInterface
         } catch (\Throwable $e) {
             // The RPC never started: complete it here, because no future
             // exists to settle it.
-            $this->metrics->rpcCompleted($operation, (hrtime(true) - $start) / 1_000_000, false);
+            $this->completeRpc($operation, $start, false);
 
             throw $e;
         }
@@ -431,9 +429,26 @@ final class GrpcClient implements GrpcClientInterface
             $responseClass,
             onSettled: function (bool $success) use ($channel, $operation, $start): void {
                 $this->releaseInFlight($channel);
-                $this->metrics->rpcCompleted($operation, (hrtime(true) - $start) / 1_000_000, $success);
+                $this->completeRpc($operation, $start, $success);
             },
         );
+    }
+
+    /**
+     * Record the end of an RPC. A metrics backend that throws is logged and
+     * swallowed: this runs in `finally` blocks, where a throw would replace
+     * the transport exception that is propagating (issue #274, GRPC-15).
+     */
+    private function completeRpc(string $operation, int|float $startNs, bool $success): void
+    {
+        try {
+            $this->metrics->rpcCompleted($operation, (hrtime(true) - $startNs) / 1_000_000, $success);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Metrics backend threw from rpcCompleted()', [
+                'operation' => $operation,
+                'exception' => $e,
+            ]);
+        }
     }
 
     public function __destruct()
