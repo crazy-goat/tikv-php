@@ -1219,3 +1219,26 @@ Other decisions of #277:
    needs a way to hold a channel in flight for the lifetime of a stream, on
    the interface, and the transport is experimental and off by default.
 
+
+## The batch deadline is finite by default (#275)
+
+`TimeoutConfig::$batchDeadlineMs` defaults to 60000 instead of 0. A batch could run without any
+wall-clock bound, so a slow cluster stalled a PHP worker for a long time. The call sites already
+passed the deadline (RawKV V1, ApiV2, TxnKV through `BatchAsyncExecutor`), so the default was
+the missing part.
+
+1. The default equals the largest default per-call timeout (`ingestTimeoutMs`, 60000). The
+   default configuration passes its own validation.
+2. A deadline above 0 must be at least every per-call timeout used inside a fan-out (all eight:
+   read, write, batch read, batch write, scan, delete-range, checksum, ingest). A smaller
+   deadline has no effect on one call, and the constructor throws `InvalidArgumentException`.
+3. `0` stays the explicit opt-out. This is the same contract as in #276: the batch deadline is
+   a wall-clock budget, not a gRPC deadline.
+4. The default of the `$deadlineMs` parameters of `executeParallel()` and
+   `executeParallelCapped()` is `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, so a direct caller is
+   no longer unbounded without saying so.
+5. The deadline is checked at dispatch and wait boundaries only. We do not interrupt a blocking
+   wait, because the per-call timeout already bounds it. Worst case: `batchDeadlineMs` plus one
+   per-call timeout.
+6. `executeParallelCapped()` uses one shared budget for all windows.
+7. Not covered: the experimental BatchCommands multiplex path is bounded per call only.

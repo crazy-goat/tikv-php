@@ -2247,8 +2247,8 @@ an **unexpected throwable** escaping the wait phase (anything that is not a
 "the un-awaited futures are cancelled after a batch failure" must therefore
 drive one of those two paths — the deadline, or a non-`TiKvException` from a
 region's wait — and not a plain region error. Note that the batch deadline
-is off by default (`TimeoutConfig::$batchDeadlineMs = 0`), so the
-throwable-escape path is the only one a default client can reach.
+was off by default until #275 (`TimeoutConfig::$batchDeadlineMs` is now 60000), so on
+older code the throwable-escape path was the only one a default client could reach.
 
 ## An audit issue's premise can expire: the slow-log wrapper has kept the inner future since #183
 
@@ -2636,3 +2636,21 @@ default) gets its channel once and never marks it in flight or touches
 `lastUsed`. The idle sweep, like the LRU eviction, can drop that channel while
 its stream is open. The pool discards the broken stream and the caller falls
 back to the unary path, so the failure heals itself.
+
+## The batch deadline is finite by default, and checked only between waits (#275)
+
+`TimeoutConfig::$batchDeadlineMs` defaults to 60000. An explicit `0` still disables it.
+The constructor rejects a deadline below any per-call timeout of a batch fan-out, because a
+deadline below one call cannot cut that call short.
+
+`BatchAsyncExecutor` checks the deadline before each dispatch and before each wait. It never
+interrupts one blocking `GrpcFuture::wait()`. The worst case is `batchDeadlineMs` plus one
+per-call timeout.
+
+Before #275, `executeParallelCapped()` gave the full deadline to every window, so N windows
+could run N times longer than the deadline. All windows now share one budget. A test of this
+must make the pre-window check the only way to fail: a test that trips inside one window's
+wait does not prove the shared budget.
+
+The experimental BatchCommands multiplex path (`RawKvBatch::tryMultiplex`) is bounded per call
+only. It does not use the batch deadline.

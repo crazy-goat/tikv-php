@@ -709,16 +709,13 @@ cluster failures.
 BatchDeadlineExceededException: Batch operation exceeded its <deadlineMs> ms deadline (elapsed <elapsedMs> ms)
 ```
 
-**What it means:** `BatchAsyncExecutor` aborted a fanned-out batch because an
-explicit wall-clock deadline expired before all regions answered; some
+**What it means:** `BatchAsyncExecutor` aborted a fanned-out batch because the
+wall-clock batch deadline expired before all regions answered; some
 regions were never dispatched or their results were cancelled.
 
-**Likely cause:** The executor was invoked with an explicit deadline too small
-for the region count, or slow/unreachable TiKV nodes. Note: no shipped client
-option currently wires a batch deadline — every built-in operation runs the
-executor without one, so this exception is reachable only by calling
-`BatchAsyncExecutor` directly with `deadlineMs > 0`. For deadlines you can
-configure from the public API, see RetryBudgetExhaustedException below.
+**Likely cause:** The batch is too large for `batchDeadlineMs` (60000 ms by
+default), or TiKV nodes are slow or unreachable. Raise `batchDeadlineMs` in
+`options['timeout']`, or set it to `0` to disable the batch deadline.
 
 **Solution:** Do not retry blindly — the batch is **partially applied**.
 Inspect `getContext()['pendingRegions']` / `['dispatchedRegions']`, re-drive

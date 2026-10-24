@@ -291,11 +291,9 @@ which ones must not be repeated after an ambiguous failure — see
 [Idempotency and Retry Safety](error-handling.md#idempotency-and-retry-safety).
 
 **Deadline variant:** `BatchDeadlineExceededException` is thrown by
-`BatchAsyncExecutor` when an explicit wall-clock deadline (the
-`$deadlineMs` argument) expires; in-flight futures are cancelled, so the
-applied subset is likewise unknown. No shipped client option currently
-wires a batch deadline — built-in batch operations run without one — so you
-will only see this exception if you drive `BatchAsyncExecutor` directly.
+`BatchAsyncExecutor` when the wall-clock batch deadline expires (the
+`batchDeadlineMs` timeout option, 60000 ms by default; `0` disables it);
+in-flight futures are cancelled, so the applied subset is likewise unknown.
 
 ## Scanning Operations
 
@@ -1011,6 +1009,9 @@ The client enforces these limits. The constants are public on `RawKvClient`.
 | Maximum scan limit | 10240 rows per RPC | `MAX_SCAN_LIMIT` | Client. See [Scan](#scan) |
 | Keys per batch RPC | 512 | `MAX_BATCH_LIMIT` | Automatic split. No error |
 | Bytes per batch RPC | 16384 bytes (16 KiB) | `MAX_BATCH_GET_SIZE`, `MAX_BATCH_PUT_SIZE`, `MAX_BATCH_DELETE_SIZE` | Automatic split. No error |
+| Batch fan-out deadline | 60000 ms | `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS` | Client, `batchDeadlineMs`. Throws `BatchDeadlineExceededException`. `0` disables it |
+
+The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. The worst case is `batchDeadlineMs` plus one per-call timeout. The experimental BatchCommands transport does not use the batch deadline.
 
 `InvalidArgumentException` is `CrazyGoat\TiKV\Client\Exception\InvalidArgumentException`.
 Its message names the size and the method, for example `Value size (5242880) exceeds maximum allowed size (4194304) in put`.

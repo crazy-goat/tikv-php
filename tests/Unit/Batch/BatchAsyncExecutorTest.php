@@ -493,4 +493,43 @@ class BatchAsyncExecutorTest extends TestCase
         $this->expectException(BatchDeadlineExceededException::class);
         $executor->executeParallelCapped($calls, maxConcurrency: 1, deadlineMs: 10);
     }
+
+    /**
+     * The budget is shared by all windows (issue #275): every window alone
+     * stays below the deadline, but together they exceed it, so the batch
+     * must throw between windows instead of restarting the clock per window.
+     */
+    public function testDeadlineIsSharedByAllWindows(): void
+    {
+        $executor = new BatchAsyncExecutor(new NullLogger());
+
+        $calls = [];
+        foreach ([1, 2, 3, 4] as $regionId) {
+            $calls[$regionId] = static function () use ($regionId): int {
+                usleep(15_000); // 15 ms: one window alone is under the 40 ms deadline
+
+                return $regionId;
+            };
+        }
+
+        $this->expectException(BatchDeadlineExceededException::class);
+        $executor->executeParallelCapped($calls, maxConcurrency: 1, deadlineMs: 40);
+    }
+
+    public function testTheDeadlineParameterDefaultsToAFiniteValue(): void
+    {
+        foreach (['executeParallel', 'executeParallelCapped'] as $method) {
+            $parameters = (new \ReflectionMethod(BatchAsyncExecutor::class, $method))->getParameters();
+            $deadline = array_values(array_filter(
+                $parameters,
+                static fn(\ReflectionParameter $parameter): bool => $parameter->getName() === 'deadlineMs',
+            ))[0];
+
+            $this->assertSame(
+                \CrazyGoat\TiKV\Client\Grpc\TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS,
+                $deadline->getDefaultValue(),
+                $method . '() must not default to "no deadline"',
+            );
+        }
+    }
 }
