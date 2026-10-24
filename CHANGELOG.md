@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Added
+
+- `begin()`, `beginOptimistic()` and `beginPessimistic()` accept `optimisticLockTtlMs` (default 3000, the baseline of the per-mutation scaling) and `pessimisticLockTtlMs` (default 30000). A pessimistic transaction now extends its primary lock automatically: `get()`, `batchGet()`, `scan()`, `set()` and `delete()` send a `TxnHeartBeat` when less than half of the lock TTL remains. An optimistic transaction holds no lock before `commit()`, so it sends none. A transaction that waits without touching TiKV still needs an explicit `heartbeat()`. (#429)
+
 ### Fixed
 
 - `ScanIterator` now throws `TiKvException` when a page does not move the scan cursor forward — its last key does not advance the cursor, or its first key lies before it — instead of looping forever on a server that keeps answering a full page ending on the same key. Any forward scan was affected, bounded ones included (a constant last key keeps the cursor below `endKey`). Well-behaved servers return strictly increasing keys and are unaffected. (#312)

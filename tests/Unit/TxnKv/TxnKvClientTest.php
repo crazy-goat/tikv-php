@@ -574,6 +574,64 @@ class TxnKvClientTest extends TestCase
         $this->assertSame(250, $property->getValue($txn));
     }
 
+    // ========================================================================
+    // begin() — configurable lock TTLs (issue #429, GAP-15)
+    // ========================================================================
+
+    public function testBeginForwardsTheConfiguredLockTtls(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->begin(['optimisticLockTtlMs' => 5000, 'pessimisticLockTtlMs' => 20000]);
+
+        $this->assertSame(5000, (new \ReflectionProperty(Transaction::class, 'optimisticLockTtlMs'))->getValue($txn));
+        $this->assertSame(20000, (new \ReflectionProperty(Transaction::class, 'pessimisticLockTtlMs'))->getValue($txn));
+    }
+
+    public function testBeginUsesTheDefaultLockTtls(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->beginOptimistic();
+
+        $this->assertSame(3000, (new \ReflectionProperty(Transaction::class, 'optimisticLockTtlMs'))->getValue($txn));
+        $this->assertSame(30000, (new \ReflectionProperty(Transaction::class, 'pessimisticLockTtlMs'))->getValue($txn));
+    }
+
+    /**
+     * @return iterable<string, array{string, mixed, string}>
+     */
+    public static function invalidLockTtlProvider(): iterable
+    {
+        foreach (['optimisticLockTtlMs', 'pessimisticLockTtlMs'] as $key) {
+            yield $key . ' zero' => [$key, 0, "options['$key'] must be between 1 and 120000"];
+            yield $key . ' negative' => [$key, -1, "options['$key'] must be between 1 and 120000"];
+            yield $key . ' above cap' => [$key, 120001, "options['$key'] must be between 1 and 120000"];
+            yield $key . ' string' => [$key, '5000', "options['$key'] must be an int (milliseconds), string given"];
+        }
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('invalidLockTtlProvider')]
+    public function testBeginRejectsAnInvalidLockTtl(string $key, mixed $value, string $message): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $client = new TxnKvClient($pdClient, $grpc);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($message);
+        $client->begin([$key => $value]); // @phpstan-ignore argument.type
+    }
+
     public function testBeginWithoutLockWaitTimeUsesTheDefault(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);

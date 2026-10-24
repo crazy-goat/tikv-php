@@ -1197,6 +1197,56 @@ Details:
   never applies an unsafe fast commit, it just answers with a decline and the
   client proceeds with two-phase commit.
 
+## Lock TTLs and the Primary Lock Keepalive (TxnKV)
+
+A lock that a transaction holds expires after its TTL. After that, a
+concurrent transaction can resolve the lock and roll the owner back. The
+TTLs are set per transaction, on `begin()` (issue #429, GAP-15):
+
+```php
+$txn = $client->begin([
+    'optimisticLockTtlMs'  => 3000,  // default
+    'pessimisticLockTtlMs' => 30000, // default
+]);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `optimisticLockTtlMs` | `3000` | Baseline TTL of the optimistic prewrite locks, in milliseconds. The prewrite adds 10 ms for each mutation and caps the result at 120000 ms. |
+| `pessimisticLockTtlMs` | `30000` | TTL of the pessimistic locks and of the prewrite locks of a pessimistic transaction, in milliseconds. |
+
+Each value must be an `int` from `1` to `120000`. Any other value throws
+`InvalidArgumentException`.
+
+### Heartbeat interval and TTL
+
+TiKV counts a lock TTL from the start timestamp of the transaction. A
+heartbeat therefore asks for a total TTL: `uptime + TTL`. A value at or below
+the current TTL changes nothing. The client stops extending a lock when the
+total TTL reaches one hour (`TwoPhaseCommitter::MAX_TXN_TTL_MS`).
+
+The client sends a heartbeat in these cases:
+
+1. A pessimistic transaction sends a heartbeat inside `get()`, `batchGet()`,
+   `scan()`, `set()` and `delete()` when less than half of the lock TTL
+   remains. The first pessimistic lock starts the keepalive.
+2. The prewrite of `commit()` sends a heartbeat between region prewrites
+   (issue #218).
+3. Your code calls `Transaction::heartbeat()`.
+
+An optimistic transaction holds no lock before `commit()`, so it sends no
+opportunistic heartbeat. A heartbeat for a lock that does not exist fails.
+
+PHP has no background thread. A transaction that waits on an external call
+without touching TiKV does not send a heartbeat. If the wait can be longer than
+half of the TTL, call `Transaction::heartbeat($uptimeMs + $ttlMs)` before the
+wait. The same applies to a single RPC that takes longer than the TTL.
+
+If a heartbeat fails, the operation throws the typed exception of
+`Transaction::heartbeat()` (issue #492) and the next operation tries again.
+The usual cause is a lock that is already gone. In that case, roll the
+transaction back.
+
 ## Pessimistic Lock Wait Timeout (TxnKV)
 
 A pessimistic-lock request tells TiKV how long it may block on a contended

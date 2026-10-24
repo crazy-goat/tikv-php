@@ -149,7 +149,7 @@ final class LockTtlScalingTest extends TestCase
     public function testOptimisticLockTtlIsCappedAtMaximum(): void
     {
         $committer = $this->createCommitter();
-        $method = new \ReflectionMethod(TwoPhaseCommitter::class, 'optimisticLockTtlMs');
+        $method = new \ReflectionMethod(TwoPhaseCommitter::class, 'scaledOptimisticLockTtlMs');
 
         $mutations = array_fill(0, 15000, new Mutation());
 

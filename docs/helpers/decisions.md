@@ -1188,3 +1188,38 @@ image. Raise the pin only when `require.php` drops a PHP version.
 The CI `lint` job runs `composer audit --locked`, so a new advisory
 fails the build. Downstream users of the library are not affected:
 Composer ignores the lock file of a dependency.
+
+## Opportunistic primary-lock heartbeat: pessimistic only, absolute TTL, no timer (#429)
+
+PHP has no background thread, so the client cannot run client-go's
+`ttlManager` goroutine. Issue #429 adds a keepalive that runs inside
+`Transaction::get()`, `batchGet()`, `scan()`, `set()` and `delete()`
+(`TwoPhaseCommitter::heartbeatIfDue()`). Four choices that should not be
+"simplified" away:
+
+1. **Pessimistic transactions only.** The keepalive starts when the first
+   eager pessimistic lock is acknowledged
+   (`TransactionState::$primaryLockExpiresAtMs`). An optimistic transaction
+   writes no lock before the prewrite, and `TxnHeartBeat` for a missing lock
+   fails with `TxnNotFound`. This matches client-go, which starts its
+   keepalive after the primary prewrite or the first pessimistic lock. A
+   deferred pessimistic transaction (`eagerPessimisticLocks => false`) also
+   has no lock before `commit()`.
+2. **The advise is `uptime + TTL`, not `TTL`.** TiKV counts a lock TTL from the
+   start timestamp and `TxnHeartBeat` only raises the TTL. Advising a plain
+   `TTL` is a no-op after the first TTL has passed. The uptime is the client
+   clock since the start of the `Transaction`. The advise is capped at
+   `MAX_TXN_TTL_MS` (one hour, client-go's `MaxTxnTTL`); at the cap the client
+   sends no more heartbeats. `MAX_LOCK_TTL_MS` (120000) caps only the
+   per-mutation scaling of the configured TTL, and also the maximum of the
+   two TTL options.
+3. **Trigger: less than half of the TTL remains**, computed from the tracked
+   expiry (`startedAtMs + granted TTL`), not from the time of the last
+   heartbeat. The two differ when the first lock is taken late in the life of
+   the transaction.
+4. **A failed heartbeat throws and keeps the expiry.** It surfaces the typed
+   exception of #492, and the next operation tries again. Swallowing it would
+   hide a lock that is already gone until `commit()`.
+
+The clock is an injectable `?\Closure` on `Transaction` (shared with
+`TwoPhaseCommitter`), the same seam as the prewrite heartbeat of #218.

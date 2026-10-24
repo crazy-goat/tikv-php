@@ -131,6 +131,16 @@ final class Transaction
          * configure it through.
          */
         private readonly int $maxScanLimit = self::MAX_SCAN_LIMIT,
+        /** Optimistic lock TTL baseline in milliseconds (issue #429). */
+        private readonly int $optimisticLockTtlMs = TwoPhaseCommitter::DEFAULT_OPTIMISTIC_LOCK_TTL_MS,
+        /** Pessimistic lock TTL in milliseconds (issue #429). */
+        private readonly int $pessimisticLockTtlMs = TwoPhaseCommitter::DEFAULT_PESSIMISTIC_LOCK_TTL_MS,
+        /**
+         * Optional clock (milliseconds) for the lock TTL bookkeeping.
+         * Injectable for deterministic tests (issue #429); defaults to the
+         * wall clock. Shared with the committer.
+         */
+        private readonly ?\Closure $clock = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -144,7 +154,20 @@ final class Transaction
             // it would silently change the meaning of the option (issue #443).
             throw new InvalidArgumentException('lockWaitTimeMs must be >= 0');
         }
-        $this->state = new TransactionState();
+        $lockTtlsMs = [
+            'optimisticLockTtlMs' => $optimisticLockTtlMs,
+            'pessimisticLockTtlMs' => $pessimisticLockTtlMs,
+        ];
+        foreach ($lockTtlsMs as $name => $ttlMs) {
+            if ($ttlMs < 1 || $ttlMs > TwoPhaseCommitter::MAX_LOCK_TTL_MS) {
+                throw new InvalidArgumentException(sprintf(
+                    '%s must be between 1 and %d',
+                    $name,
+                    TwoPhaseCommitter::MAX_LOCK_TTL_MS,
+                ));
+            }
+        }
+        $this->state = new TransactionState($this->nowMs());
 
         $this->reader = new TxnReader(
             startTs: $this->startTs,
@@ -179,7 +202,10 @@ final class Transaction
             enable1Pc: $this->enable1Pc,
             enableAsyncCommit: $this->enableAsyncCommit,
             logger: $this->logger,
+            clock: $this->clock,
             lockWaitTimeMs: $this->lockWaitTimeMs,
+            optimisticLockTtlMs: $this->optimisticLockTtlMs,
+            pessimisticLockTtlMs: $this->pessimisticLockTtlMs,
         );
     }
 
@@ -259,6 +285,7 @@ final class Transaction
     public function get(string $key): ?string
     {
         $this->state->ensureWritable();
+        $this->keepPrimaryLockAlive();
 
         if ($this->pessimistic && !$this->state->hasWriteSetKey($key)) {
             $this->readTsByKey[$key] = $this->pdClient->getTimestamp();
@@ -296,6 +323,7 @@ final class Transaction
     public function batchGet(array $keys): array
     {
         $this->state->ensureWritable();
+        $this->keepPrimaryLockAlive();
 
         if ($this->pessimistic && $keys !== []) {
             $timestamp = $this->pdClient->getTimestamp();
@@ -346,6 +374,7 @@ final class Transaction
     public function scan(string $startKey, string $endKey, int $limit = 0): array
     {
         $this->state->ensureWritable();
+        $this->keepPrimaryLockAlive();
 
         if ($this->pessimistic) {
             $timestamp = $this->pdClient->getTimestamp();
@@ -414,6 +443,11 @@ final class Transaction
 
                 throw $failure;
             }
+            if ($this->state->getPrimaryLockExpiresAtMs() === null) {
+                $this->state->setPrimaryLockExpiresAtMs(
+                    $this->state->getStartedAtMs() + $this->pessimisticLockTtlMs,
+                );
+            }
         } else {
             $this->state->addPendingLockKey($key);
             $this->state->updateMaxForUpdateTs($forUpdateTs);
@@ -430,6 +464,7 @@ final class Transaction
     public function set(string $key, string $value): void
     {
         $this->state->ensureWritable();
+        $this->keepPrimaryLockAlive();
         $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, $value);
     }
@@ -442,6 +477,7 @@ final class Transaction
     public function delete(string $key): void
     {
         $this->state->ensureWritable();
+        $this->keepPrimaryLockAlive();
         $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, null);
     }
@@ -533,8 +569,15 @@ final class Transaction
      * a safe default `$adviseLockTtlMs`.
      *
      * The committer additionally heartbeats automatically during the prewrite
-     * loop (issue #218, TXN-13), so callers only need to heartbeat for the
-     * gaps between their own operations.
+     * loop (issue #218, TXN-13), and a pessimistic transaction heartbeats
+     * opportunistically inside get(), batchGet(), scan(), set() and delete()
+     * once half of the lock TTL has elapsed (issue #429). Callers therefore
+     * only need to heartbeat when the transaction waits (for example on an
+     * external call) without touching TiKV for longer than half the TTL.
+     *
+     * TiKV counts the lock TTL from the transaction's start timestamp, so
+     * `$adviseLockTtlMs` is a total TTL, not an extension: a value at or
+     * below the current TTL changes nothing.
      *
      * @param int $adviseLockTtlMs Requested lock TTL in milliseconds
      * @return int The actual lock TTL granted by TiKV
@@ -548,15 +591,46 @@ final class Transaction
     {
         $this->state->ensureWritable();
 
-        $primary = $this->state->getPrimaryKey();
+        $primary = $this->state->getPessimisticPrimaryKey() ?? $this->state->getPrimaryKey();
 
-        return $this->committer->heartbeat(
+        $grantedMs = $this->committer->heartbeat(
             $primary,
             $this->state,
             $this->retryExecutor(),
             $this->classifyError(...),
             $adviseLockTtlMs,
         );
+        if ($this->state->getPrimaryLockExpiresAtMs() !== null && $grantedMs > 0) {
+            $this->state->setPrimaryLockExpiresAtMs($this->state->getStartedAtMs() + $grantedMs);
+        }
+
+        return $grantedMs;
+    }
+
+    /**
+     * Opportunistic keepalive (issue #429): called by every operation that
+     * talks to TiKV. It sends a heartbeat for the primary pessimistic lock
+     * when fewer than half of its TTL remain, and does nothing for a
+     * transaction without a primary lock (optimistic, or no lock taken yet).
+     * See {@see TwoPhaseCommitter::heartbeatIfDue()}.
+     */
+    private function keepPrimaryLockAlive(): void
+    {
+        $this->committer->heartbeatIfDue(
+            $this->state,
+            $this->retryExecutor(),
+            $this->classifyError(...),
+            $this->nowMs(),
+        );
+    }
+
+    private function nowMs(): int
+    {
+        if ($this->clock instanceof \Closure) {
+            return ($this->clock)();
+        }
+
+        return (int) (microtime(true) * 1000);
     }
 
     // ---------------------------------------------------------------
