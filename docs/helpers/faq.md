@@ -2498,6 +2498,15 @@ what the user has to do: configure the logger's level and handlers before
 the client is built, and build a new client after changing them. A
 limitation that is only described in the commit message is a limitation
 that the next integrator re-discovers the hard way.
-## A test double for `PdClient::getRegion()` must return a region that contains the key (issue #253)
 
-`RegionResolver::getRegionInfo()` rejects a PD answer whose range does not contain the requested key (a retryable `RegionException` with `ErrorKind::RegionNotFound`) and does not cache it. A test that mocks `getRegion()` with an arbitrary region now fails with `RetryBudgetExhaustedException` after 30 attempts. To simulate a split in a committer test (for example "region no longer covers the whole key group"), return a region that contains the first key but not the others, and use a group of at least two keys.
+## A test double for `PdClient::getRegion()` must contain the key (#253)
+
+`RegionResolver::getRegionInfo()` rejects a PD answer whose range does
+not contain the requested key. It throws a retryable `RegionException`
+with `ErrorKind::RegionNotFound` and does not cache the region. A test
+that mocks `getRegion()` with an arbitrary region now fails with
+`RetryBudgetExhaustedException` after 30 attempts.
+
+To simulate a split in a committer test (for example "region no longer
+covers the whole key group"), return a region that contains the first
+key but not the others. Use a group of at least two keys.
