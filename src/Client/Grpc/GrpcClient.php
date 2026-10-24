@@ -439,6 +439,11 @@ final class GrpcClient implements GrpcClientInterface
      * and swallowed: the emission sits *before* the call, so a throw from it
      * would abort a call that never happened and replace the transport
      * exception the caller has to see (issue #759, GRPC-15).
+     *
+     * The `rpcStarted == rpcSucceeded + rpcFailed` invariant holds for every
+     * backend that records what it is told. A backend that throws from
+     * `rpcStarted()` alone breaks it — its own counters are not trustworthy
+     * in that case.
      */
     private function startRpc(string $operation): void
     {

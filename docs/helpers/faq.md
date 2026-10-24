@@ -2580,9 +2580,12 @@ must call `rpcCompleted()` exactly once on every path (issue #274). The
 `GrpcClient::startRpc()` and the end through `GrpcClient::completeRpc()`:
 both swallow (and log) a throwing metrics backend, because a throw from
 the emission would replace the transport exception — from `finally` for the
-completion, and before the call for the start (issue #759).
-A protobuf message cannot be mocked in a test (the descriptor lookup
-fails), so to fail a call early use
+completion, and before the call for the start (issue #759). A backend that
+throws from `rpcStarted()` alone breaks the
+`rpcStarted == rpcSucceeded + rpcFailed` invariant: its own counters are not
+trustworthy in that case.
+A protobuf message cannot be mocked or subclassed in a test (the
+descriptor lookup fails), so to fail a call early use
 `new GrpcClient(allowInsecure: false)`: `getChannel()` throws right after
 `rpcStarted()`.
 
