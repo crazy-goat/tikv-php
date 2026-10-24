@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -178,7 +179,7 @@ final class TxnReaderEmptyScanReattemptTest extends TestCase
 
     public function testReattemptBudgetIsResetWhenTheReaskLandsOnASplitRegion(): void
     {
-        $split = false;
+        $layout = new \ArrayObject(['split' => false]);
         $regions = [
             'left' => new RegionInfo(2, 2, 1, 1, 2, '', 'm'),
             'right' => new RegionInfo(3, 3, 1, 1, 2, 'm', ''),
@@ -186,7 +187,13 @@ final class TxnReaderEmptyScanReattemptTest extends TestCase
         ];
         $regionCache = $this->createMock(RegionCacheInterface::class);
         $regionCache->method('getByKey')->willReturnCallback(
-            fn(string $key): RegionInfo => $regions['whole'],
+            static function (string $key) use ($layout, $regions): RegionInfo {
+                if (!$layout['split']) {
+                    return $regions['whole'];
+                }
+
+                return KeyOrder::gte($key, 'm') ? $regions['right'] : $regions['left'];
+            },
         );
         $this->regionCache = $regionCache;
 
@@ -200,7 +207,7 @@ final class TxnReaderEmptyScanReattemptTest extends TestCase
                 mixed $request,
             ) use (
                 &$call,
-                &$split,
+                $layout,
                 &$captured
             ): ScanResponse {
                 $this->assertInstanceOf(ScanRequest::class, $request);
@@ -209,7 +216,7 @@ final class TxnReaderEmptyScanReattemptTest extends TestCase
                 // Call 1: whole region, empty. Re-ask lands on the split
                 // layout: call 2 empty on [,m), call 3 empty on [m,), call 4
                 // returns the row.
-                $split = true;
+                $layout['split'] = true;
                 $response = new ScanResponse();
                 if ($call === 4) {
                     $pair = new KvPair();
