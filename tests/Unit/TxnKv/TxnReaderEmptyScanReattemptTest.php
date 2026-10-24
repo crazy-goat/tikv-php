@@ -151,7 +151,7 @@ final class TxnReaderEmptyScanReattemptTest extends TestCase
         $this->assertCount(1, $captured);
     }
 
-    public function testWholeRangeScanReaskesAnEmptyAnswerAndReturnsTheRow(): void
+    public function testWholeRangeScanReasksAnEmptyAnswerAndReturnsTheRow(): void
     {
         /** @var list<ScanRequest> $captured */
         $captured = [];
