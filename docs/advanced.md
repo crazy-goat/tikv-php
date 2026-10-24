@@ -756,6 +756,8 @@ The interface has six methods (full reference with emitted tag examples:
 | `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
 | `regionInvalidated()`  | A region was dropped from the cache (e.g. `retry_region_error`, `fatal_region_error`) |
 
+For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
+
 Implementations must never throw; the default is a zero-cost no-op
 (`NoOpMetrics`). A ready-made in-memory recorder for tests and benchmarks
 ships as [`InMemoryMetrics`](../src/Client/Observability/InMemoryMetrics.php)

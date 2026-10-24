@@ -30,6 +30,7 @@ use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
+use CrazyGoat\TiKV\Tests\Unit\Support\DeadEndpointGrpcFuture;
 use Google\Protobuf\Internal\Message;
 use Grpc\Call;
 use Monolog\Handler\TestHandler;
@@ -103,15 +104,42 @@ class RawKvBatchTest extends TestCase
     public function testBatchPutEmptyReturnsEarly(): void
     {
         $retryExecutor = $this->createRetryExecutor();
-        $this->grpc->expects($this->never())->method('getChannel');
+        $this->grpc->expects($this->never())->method('callAsync');
         $this->batch->batchPut([], 0, $retryExecutor);
     }
 
     public function testBatchDeleteEmptyReturnsEarly(): void
     {
         $retryExecutor = $this->createRetryExecutor();
-        $this->grpc->expects($this->never())->method('getChannel');
+        $this->grpc->expects($this->never())->method('callAsync');
         $this->batch->batchDelete([], $retryExecutor);
+    }
+
+    /**
+     * Issue #273: the fan-out must dispatch through `callAsync()` — the one
+     * entry point that counts a call as in-flight — and never take the raw
+     * channel from `getChannel()`.
+     */
+    public function testBatchPutDispatchesThroughCallAsyncNotGetChannel(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->grpc->expects($this->never())->method('getChannel');
+        $this->grpc->expects($this->once())->method('callAsync')->with(
+            $this->anything(),
+            'tikvpb.Tikv',
+            'RawBatchPut',
+            $this->isInstanceOf(RawBatchPutRequest::class),
+            RawBatchPutResponse::class,
+            $this->greaterThan(0),
+        )->willReturn(GrpcFuture::fromWaiter(
+            static fn(): Message => new RawBatchPutResponse(),
+            static function (): void {
+            },
+        ));
+
+        $this->batch->batchPut(['k1' => 'v1'], 0, $this->createRetryExecutor(1));
     }
 
     public function testBatchPutWithIntTtl(): void
@@ -121,9 +149,7 @@ class RawKvBatchTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        $this->grpc->method('callAsync')->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         // No TiKV server in unit tests: the request reaches the transport layer
         // and fails at connection time (issue #322 pattern).
@@ -141,9 +167,7 @@ class RawKvBatchTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        $this->grpc->method('callAsync')->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         // No TiKV server in unit tests: the request reaches the transport layer
         // and fails at connection time (issue #322 pattern).
@@ -208,9 +232,7 @@ class RawKvBatchTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        $this->grpc->method('callAsync')->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         // No TiKV server in unit tests: the request reaches the transport layer
         // and fails at connection time (issue #322 pattern).
@@ -229,9 +251,7 @@ class RawKvBatchTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        $this->grpc->method('callAsync')->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         // Pre-fix: PHP coerces the "12345"/"0" array keys to int, so
         // KvPair::setKey(string) throws a TypeError while building the wire
@@ -344,19 +364,17 @@ class RawKvBatchTest extends TestCase
     {
         // 600 keys in one region → exactly 2 RawBatchGet RPCs
         // (MAX_BATCH_LIMIT = 512). The wait phase fails against the dead
-        // channel, which is what pins the *dispatch count*. maxAttempts=1
-        // disables the wait-phase retry introduced by #183 so getChannel()
+        // endpoint, which is what pins the *dispatch count*. maxAttempts=1
+        // disables the wait-phase retry introduced by #183 so callAsync()
         // is not called again for each retry.
         $keys = array_map(static fn(int $i): string => 'k' . $i, range(0, 599));
 
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-        $this->grpc->expects($this->exactly(2))->method('getChannel')->willReturnCallback(
-            fn(): \Grpc\Channel => new \Grpc\Channel('127.0.0.1:1', [
-                'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-            ]),
-        );
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         $this->expectException(BatchPartialFailureException::class);
         $this->batch->batchGet($keys, $this->createRetryExecutor(1));
@@ -375,11 +393,9 @@ class RawKvBatchTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-        $this->grpc->expects($this->exactly(2))->method('getChannel')->willReturnCallback(
-            fn(): \Grpc\Channel => new \Grpc\Channel('127.0.0.1:1', [
-                'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-            ]),
-        );
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         $this->expectException(BatchPartialFailureException::class);
         $this->batch->batchPut($pairs, 60, $this->createRetryExecutor(1));
@@ -394,11 +410,9 @@ class RawKvBatchTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-        $this->grpc->expects($this->exactly(1))->method('getChannel')->willReturnCallback(
-            fn(): \Grpc\Channel => new \Grpc\Channel('127.0.0.1:1', [
-                'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-            ]),
-        );
+        $this->grpc->expects($this->exactly(1))
+            ->method('callAsync')
+            ->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         $this->expectException(BatchPartialFailureException::class);
         $this->batch->batchGet(['a', 'a', 'b'], $this->createRetryExecutor(1));
@@ -414,7 +428,7 @@ class RawKvBatchTest extends TestCase
     // (ReflectionMethod) against a dead endpoint: each attempt fails with a
     // retryable gRPC UNAVAILABLE, and with maxAttempts = 2 exactly two
     // region resolutions (pdClient->getRegion) and two gRPC sends
-    // (grpc->getChannel) must happen. The region cache is forced to miss so
+    // (grpc->callAsync) must happen. The region cache is forced to miss so
     // the re-resolution count is observable without cache-hit masking.
     // ========================================================================
 
@@ -460,7 +474,7 @@ class RawKvBatchTest extends TestCase
     // leak exactly when the process is under stress.
     //
     // The composition is driven the way RawKvBatch builds it (see
-    // docs/helpers/faq.md, "RawKvBatch hardcodes `new Call(...)`"): the
+    // docs/helpers/faq.md, "RawKvBatch dispatches through `callAsync()`"): the
     // futures are handed to BatchAsyncExecutor::executeParallel(), which
     // is where the cancellation happens.
     // ========================================================================
@@ -713,8 +727,8 @@ class RawKvBatchTest extends TestCase
     }
 
     /**
-     * Set up a cluster mock whose region cache always misses and whose gRPC
-     * channel points at a dead endpoint, then invoke the requested private
+     * Set up a cluster mock whose region cache always misses and whose callAsync()
+     * returns a future against a dead endpoint, then invoke the requested private
      * wrapper. The caller must include the RetryExecutor sized with
      * maxAttempts = 2 so exactly two dispatch attempts occur.
      *
@@ -729,11 +743,9 @@ class RawKvBatchTest extends TestCase
             ->method('getRegion')
             ->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
-        $this->grpc->expects($this->exactly(2))->method('getChannel')->willReturnCallback(
-            fn(): \Grpc\Channel => new \Grpc\Channel('127.0.0.1:1', [
-                'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-            ]),
-        );
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         $reflection = new \ReflectionMethod(RawKvBatch::class, $method);
         /** @var CheckedGrpcFuture $future */

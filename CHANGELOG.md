@@ -25,10 +25,9 @@ policy now classifies as internal.
 
 ### Fixed
 
+- The V1 batch fan-out (`RawKvBatch` batchGet/batchPut/batchDelete) now dispatches every sub-request through `GrpcClient::callAsync()` instead of hand-rolling `\Grpc\Call` on a raw channel from `getChannel()`, so its calls are counted as in-flight and an LRU/idle channel eviction can no longer close the channel under them. Every RPC sent through `GrpcClient::callAsync()` — the V1 batch fan-out, the TxnKv prewrite/commit fan-out, scans, range operations and SST ingest — is now visible to `MetricsInterface`: `callAsync()` emits `rpcStarted()` and, when the future settles (once, also on cancellation), `rpcCompleted()`. Expect new operation tags (e.g. `tikvpb.Tikv/RawBatchGet`) and higher RPC counts. The batch deadline is now derived by `callAsync()`; `RawKvBatch::deadlineFor()` is gone. (#273)
+- `RegionResolver::getRegionInfo()` now rejects a PD-returned region whose range does not contain the requested key, instead of caching it. The lookup fails with a retryable `RegionException` (`RegionNotFound`, `RegionMiss` backoff), so one stale PD answer during a split no longer causes a persistent fatal `KeyNotInRegion`. (#253)
 - `RegionCache::put()` now ignores a region whose epoch is strictly older than the cached one for the same ID, preventing stale `scanRegions` results from downgrading a fresher entry. (#249)
-
-### Fixed
-
 - `TlsConfigBuilder::readFile()` no longer emits a PHP warning exposing the resolved certificate path when the file is unreadable. (#553)
 
 ### Changed
@@ -37,6 +36,10 @@ policy now classifies as internal.
 - An unmapped `RegionException` (no typed `ErrorKind`) is now classified as fatal instead of `BackoffType::RegionMiss`, so permanent misconfiguration errors such as "invalid cf" fail after a single attempt instead of being retried 30 times. A per-pair `KeyError` is now reported as `KeyErrorException` rather than `RegionException`, so it is no longer retried as a region miss. (#251)
 - **BREAKING**: a non-positive timeout is now a configuration error instead of "no deadline at all" (issue #276, GRPC-17). `TimeoutConfig` rejects a non-positive value for every timeout field, `ConnectionFactory` rejects a non-positive `options['timeout']` entry and names the offending key, and `GrpcClient::call()` / `callAsync()` / `callStreaming()` throw `InvalidArgumentException` for a non-positive `$timeoutMs`. `0` used to be the documented "no deadline" sentinel, but it is also what an unset environment variable coerces to (`(int) getenv('TIKV_READ_TIMEOUT_MS')` yields `0`), so a configuration mistake turned into a call that never expires — and a gRPC call that never expires cannot be interrupted by PHP. **Migration:** replace every `0` timeout with a large finite value; a gRPC call can no longer be unbounded.
 - `batchDeadlineMs` is unchanged: it is a wall-clock budget for the batch fan-out, not a gRPC deadline, so `0` still disables it. The slow-log thresholds keep `0` as their documented "disabled" value and now reject a negative threshold. (issue #276)
+
+### Tests
+
+- `MemComparableCodec` is pinned to TiDB `codec.EncodeBytes`: known-answer vectors for `abc` and a two-byte key, group-boundary and seeded random round-trip and sort-order tests, and a marker-range rejection test. No production behaviour changes — #415 already implemented the scheme and wired the TxnKV region-key encode/decode (`PdClient::getRegion()`/`scanRegions()`, `RegionInfoMapper::fromProto()`). The issue quotes `6162630000000000f9` for `abc`; the correct marker is `fa` (pad = 5). (#252)
 
 ## [v0.9.0] - 2026-10-21
 
