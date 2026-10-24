@@ -265,7 +265,8 @@ class TlsConfigBuilderTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Cannot read TLS file');
 
-        // We don't assert that path is absent because realpath() returns false for unreadable files
+        // The path must not leak: readFile() checks is_readable() before reading,
+        // so no PHP warning carrying the resolved path is emitted.
         try {
             (new TlsConfigBuilder())
                 ->withCaCertFile($path);

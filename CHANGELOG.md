@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `TlsConfigBuilder::readFile()` no longer emits a PHP warning exposing the resolved certificate path when the file is unreadable. (#553)
+
 ### Changed
 
 - An unmapped `RegionException` (no typed `ErrorKind`) is now classified as fatal instead of `BackoffType::RegionMiss`, so permanent misconfiguration errors such as "invalid cf" fail after a single attempt instead of being retried 30 times. A per-pair `KeyError` is now reported as `KeyErrorException` rather than `RegionException`, so it is no longer retried as a region miss. (#251)
