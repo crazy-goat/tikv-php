@@ -1132,6 +1132,27 @@ decisions inside it are worth keeping:
    deprecation cycle precedes it: no API ever returned the class, and
    `docs/release-workflow.md` allows breaking changes before `1.0.0`.
 
+## ScanIterator enforces cursor progress but has no page ceiling (issue #312)
+
+`ScanIterator` throws `TiKvException` when a page does not progress: the
+first key lies before the cursor, or a key is not strictly greater than
+the key before it. Together these keep every key at or after the cursor,
+so the next cursor (`lastKey . "\x00"`) always moves forward. All
+checks use `KeyOrder`, so the comparison is bytewise (`"99"` is greater
+than `"100"`; see the #232 and #180 entries). Any forward scan can hang
+without the checks, bounded ones too: a constant last key keeps the cursor
+below `endKey`. The cost is O(batchSize) compares per page.
+
+There is deliberately **no page or row ceiling**. The iterator promises
+constant-memory streaming of ranges of any size. A server that fabricates
+a growing key space is not distinguishable from a large real one, so a
+ceiling would break legitimate scans.
+
+One case stays open. A server that answers a one-row page equal to the
+cursor key (`batchSize = 1`) makes the cursor grow by one `"\x00"` per
+page. It passes the checks, as in the one-byte advance of the #288 entry.
+The caller bounds the iteration (a row count, a deadline, `break`).
+
 ## An empty KvScan batch is re-asked once, outside RetryExecutor (#512)
 
 `TxnReader::executeScanForRegion()` re-asks a sub-range once when it

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Iterator;
 
@@ -132,7 +133,22 @@ final class ScanIterator implements Iterator
         }
 
         $lastKey = $results[count($results) - 1]['key'];
-        $this->currentStartKey = KeyOrder::successor($lastKey);
+        $nextStartKey = KeyOrder::successor($lastKey);
+
+        // A well-behaved server returns strictly increasing keys, all >= the
+        // requested start key. Without these checks a server that keeps
+        // answering a full page ending on the same key never ends any
+        // forward scan, bounded or not: the cursor stays below endKey. Only
+        // a one-row page equal to the cursor passes (it advances by one
+        // byte). Keys are not put in the message.
+        if (!$this->pageProgresses($results)) {
+            $this->buffer = [];
+            $this->exhausted = true;
+
+            throw new TiKvException('Scan cursor did not advance; server returned non-monotonic keys');
+        }
+
+        $this->currentStartKey = $nextStartKey;
 
         if (count($results) < $this->batchSize) {
             $this->exhausted = true;
@@ -140,5 +156,26 @@ final class ScanIterator implements Iterator
 
         $this->buffer = $results;
         $this->bufferIndex = 0;
+    }
+
+    /**
+     * @param non-empty-array<array{key: string, value: ?string}> $results
+     */
+    private function pageProgresses(array $results): bool
+    {
+        $previous = null;
+        foreach ($results as $row) {
+            $key = $row['key'];
+            if (
+                $previous === null
+                    ? KeyOrder::lt($key, $this->currentStartKey)
+                    : KeyOrder::lte($key, $previous)
+            ) {
+                return false;
+            }
+            $previous = $key;
+        }
+
+        return true;
     }
 }
