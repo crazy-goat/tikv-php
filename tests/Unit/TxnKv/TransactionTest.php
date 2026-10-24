@@ -5580,8 +5580,10 @@ class TransactionTest extends TestCase
             endKey: '',
             peers: [],
         );
-        // Inconsistent answer: claims to cover ''.. 'a', which does not
-        // contain 'k1' — every re-resolve fails the coverage check.
+        // Inconsistent answer: claims to cover ''..'k2', which does not
+        // contain the whole key group ('k1' and 'k3') while still containing the
+        // first key 'k1' (issue #253 rejects a region that misses it) —
+        // every re-resolve fails the coverage check.
         $neverCovering = new RegionInfo(
             regionId: 1,
             leaderPeerId: 1,
@@ -5589,7 +5591,7 @@ class TransactionTest extends TestCase
             epochConfVer: 1,
             epochVersion: 5,
             startKey: '',
-            endKey: 'a',
+            endKey: 'k2',
             peers: [],
         );
 
@@ -5627,6 +5629,7 @@ class TransactionTest extends TestCase
 
         $txn = $this->createTransaction(['pessimistic' => true]);
         $txn->set('k1', 'v1');
+        $txn->set('k3', 'v3');
 
         try {
             $txn->commit();
@@ -5923,8 +5926,10 @@ class TransactionTest extends TestCase
             endKey: '',
             peers: [],
         );
-        // Inconsistent answer: claims to cover ''..'a', which does not
-        // contain 'k1' — every resolve fails the coverage check.
+        // Inconsistent answer: claims to cover ''..'k2', which does not
+        // contain the whole key group ('k1' and 'k3') while still containing the
+        // first key 'k1' (issue #253 rejects a region that misses it) —
+        // every resolve fails the coverage check.
         $neverCovering = new RegionInfo(
             regionId: 1,
             leaderPeerId: 1,
@@ -5932,7 +5937,7 @@ class TransactionTest extends TestCase
             epochConfVer: 1,
             epochVersion: 5,
             startKey: '',
-            endKey: 'a',
+            endKey: 'k2',
             peers: [],
         );
 
@@ -5949,6 +5954,7 @@ class TransactionTest extends TestCase
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'v1');
+        $txn->set('k3', 'v3');
 
         try {
             $txn->rollback();
@@ -6073,7 +6079,7 @@ class TransactionTest extends TestCase
             epochConfVer: 1,
             epochVersion: 5,
             startKey: '',
-            endKey: 'a',
+            endKey: 'k2',
             peers: [],
         );
 
@@ -6094,6 +6100,7 @@ class TransactionTest extends TestCase
 
         $txn = $this->createTransaction(['pessimistic' => true]);
         $txn->set('k1', 'v1');
+        $txn->set('k3', 'v3');
 
         try {
             $txn->rollback();
