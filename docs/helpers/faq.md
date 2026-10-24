@@ -1073,6 +1073,12 @@ flake, not a code regression. If it recurs, suspect the scan loop in
 `TxnReader::executeScanForRegion()` — an empty batch with `$pending > 0` and no
 split exits silently (see `while (true)` loop, `break` conditions); a one-off
 empty answer for non-empty data is never retried.
+Fixed in #512: such an empty batch is now re-asked once (see
+`MAX_EMPTY_SCAN_REATTEMPTS`, and decisions.md for the trade-off). Tests: a
+mocked `KvScan` that answers empty is now called twice, and any `getByKey()`
+consecutive-return stub needs one more value. The truncation probe is
+re-asked too: a transient empty probe would otherwise make `scan(limit: 0)`
+return a truncated range silently.
 
 E2E note: `docker-compose run --rm php-test …` recreates the tikv
 containers it depends on; if the cluster was just (re)started the run
