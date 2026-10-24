@@ -139,7 +139,7 @@ final class RawKvClient
 - MVCC reads at transaction start timestamp
 - Pessimistic and optimistic transaction modes
 - Lock resolution for concurrent conflicts
-- Heartbeat to extend lock TTL for long-running transactions
+- Heartbeat to extend lock TTL for long-running transactions (opportunistic for pessimistic transactions, explicit `heartbeat()` otherwise; see [Configuration](configuration.md#lock-ttls-and-the-primary-lock-keepalive-txnkv))
 
 **Key Design Patterns**:
 - **Unit of Work**: Transaction tracks write set and read set
@@ -154,7 +154,7 @@ final class TxnKvClient
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self;
     
     // Transaction lifecycle
-    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int)
+    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int), optimisticLockTtlMs (int), pessimisticLockTtlMs (int)
     public function beginOptimistic(array $options = []): Transaction;   // begin() with pessimistic = false
     public function beginPessimistic(array $options = []): Transaction;  // begin() with pessimistic = true
     public function close(): void;
@@ -174,7 +174,7 @@ final class Transaction
     // Transaction control
     public function commit(): void;           // 2PC: prewrite + commit
     public function rollback(): void;
-    public function heartbeat(int $adviseLockTtlMs = 10000): int;
+    public function heartbeat(?int $adviseLockTtlMs = null): int;
     
     // Inspection
     public function getTxnId(): string;
