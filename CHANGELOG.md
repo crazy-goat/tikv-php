@@ -25,6 +25,10 @@ policy now classifies as internal.
 
 ### Fixed
 
+- The V1 batch fan-out (`RawKvBatch` batchGet/batchPut/batchDelete) now dispatches every sub-request through `GrpcClient::callAsync()` instead of hand-rolling `\Grpc\Call` on a raw channel from `getChannel()`, so its calls are counted as in-flight and an LRU/idle channel eviction can no longer close the channel under them. The batch deadline is now derived by `callAsync()`; `RawKvBatch::deadlineFor()` is gone. (#273)
+
+### Fixed
+
 - `RegionCache::put()` now ignores a region whose epoch is strictly older than the cached one for the same ID, preventing stale `scanRegions` results from downgrading a fresher entry. (#249)
 
 ### Fixed
