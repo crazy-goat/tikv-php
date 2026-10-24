@@ -301,7 +301,7 @@ The classes in the namespace:
 
 | Class | Behavior |
 |---|---|
-| `CodecV1` | API V1. User keys pass through unchanged. It reports API version 0, keyspace ID 0 and an empty keyspace name. |
+| `CodecV1` | API V1. User keys pass through unchanged. It reports `APIVersion::V1` (protocol value 0), keyspace ID 0 and an empty keyspace name. |
 | `CodecV2` | API V2. It adds a 4-byte prefix to each user key: the mode byte and a 3-byte keyspace ID in network byte order. |
 | `MemComparableCodec` | Memory-comparable encoding (TiDB `EncodeBytes`) for region keys. It keeps the byte order of the keys. |
 | `Mode` | Enum `Raw` (prefix byte `0x72`) and `Txn` (prefix byte `0x78`). `CodecV2` uses the prefix byte. `CodecV1` uses the mode only to choose the region-key encoding. |
