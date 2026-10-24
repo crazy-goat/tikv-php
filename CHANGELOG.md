@@ -25,7 +25,6 @@ policy now classifies as internal.
 
 ### Fixed
 
-- `MemComparableCodec` already matches TiDB `codec.EncodeBytes` (since #415). Added known-answer vectors for `abc` and a two-byte key, a seeded random round-trip and sort-order test, and a marker-range rejection test, so a regression to a non-TiDB scheme is caught. (#252)
 - `RegionCache::put()` now ignores a region whose epoch is strictly older than the cached one for the same ID, preventing stale `scanRegions` results from downgrading a fresher entry. (#249)
 
 ### Fixed
@@ -37,6 +36,10 @@ policy now classifies as internal.
 - An unmapped `RegionException` (no typed `ErrorKind`) is now classified as fatal instead of `BackoffType::RegionMiss`, so permanent misconfiguration errors such as "invalid cf" fail after a single attempt instead of being retried 30 times. A per-pair `KeyError` is now reported as `KeyErrorException` rather than `RegionException`, so it is no longer retried as a region miss. (#251)
 - **BREAKING**: a non-positive timeout is now a configuration error instead of "no deadline at all" (issue #276, GRPC-17). `TimeoutConfig` rejects a non-positive value for every timeout field, `ConnectionFactory` rejects a non-positive `options['timeout']` entry and names the offending key, and `GrpcClient::call()` / `callAsync()` / `callStreaming()` throw `InvalidArgumentException` for a non-positive `$timeoutMs`. `0` used to be the documented "no deadline" sentinel, but it is also what an unset environment variable coerces to (`(int) getenv('TIKV_READ_TIMEOUT_MS')` yields `0`), so a configuration mistake turned into a call that never expires — and a gRPC call that never expires cannot be interrupted by PHP. **Migration:** replace every `0` timeout with a large finite value; a gRPC call can no longer be unbounded.
 - `batchDeadlineMs` is unchanged: it is a wall-clock budget for the batch fan-out, not a gRPC deadline, so `0` still disables it. The slow-log thresholds keep `0` as their documented "disabled" value and now reject a negative threshold. (issue #276)
+
+### Tests
+
+- `MemComparableCodec` is pinned to TiDB `codec.EncodeBytes`: known-answer vectors for `abc` and a two-byte key, group-boundary and seeded random round-trip and sort-order tests, and a marker-range rejection test. No production behaviour changes — #415 already implemented the scheme and wired the TxnKV region-key encode/decode (`PdClient::getRegion()`/`scanRegions()`, `RegionInfoMapper::fromProto()`). The issue quotes `6162630000000000f9` for `abc`; the correct marker is `fa` (pad = 5). (#252)
 
 ## [v0.9.0] - 2026-10-21
 

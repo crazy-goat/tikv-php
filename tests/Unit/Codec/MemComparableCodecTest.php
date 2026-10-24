@@ -126,16 +126,42 @@ class MemComparableCodecTest extends TestCase
         $this->assertSame($expected, $decoded, 'MCE encoding must preserve sort order');
     }
 
+    public function testEncodedKeysSortCorrectlyAcrossGroupBoundary(): void
+    {
+        $keys = [
+            str_repeat("\x00", 7),
+            str_repeat("\x00", 8),
+            str_repeat("\x00", 9),
+            str_repeat("\x00", 7) . "\xff",
+            str_repeat("\xff", 8),
+            str_repeat("\xff", 8) . "\x00",
+            str_repeat('k', 16),
+            str_repeat('k', 16) . 'k',
+            '10',
+            '9',
+        ];
+
+        foreach ($keys as $a) {
+            foreach ($keys as $b) {
+                $this->assertSame(
+                    strcmp($a, $b) <=> 0,
+                    strcmp($this->codec->encode($a), $this->codec->encode($b)) <=> 0,
+                    bin2hex($a) . ' vs ' . bin2hex($b),
+                );
+            }
+        }
+    }
+
     public function testRandomBinaryKeysRoundTripAndKeepSortOrder(): void
     {
-        mt_srand(252);
+        $rng = new \Random\Randomizer(new \Random\Engine\Mt19937(252));
         $keys = [];
         for ($i = 0; $i < 400; ++$i) {
-            $len = mt_rand(0, 20);
+            $len = $rng->getInt(0, 20);
             $key = '';
             for ($j = 0; $j < $len; ++$j) {
                 // Bias toward the bytes that matter for padding and markers.
-                $key .= \chr(mt_rand(0, 3) === 0 ? [0x00, 0xFF][mt_rand(0, 1)] : mt_rand(0, 255));
+                $key .= \chr($rng->getInt(0, 3) === 0 ? [0x00, 0xFF][$rng->getInt(0, 1)] : $rng->getInt(0, 255));
             }
             $keys[] = $key;
         }
