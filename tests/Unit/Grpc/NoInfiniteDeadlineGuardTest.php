@@ -17,8 +17,9 @@ use PHPUnit\Framework\TestCase;
  * never answered pinned a PHP-FPM worker inside the gRPC C core, where
  * `max_execution_time` cannot reach. #260 fixed the call sites and added a
  * 30 s backstop for `null`, and the remaining `?:`-over-a-nullable shape
- * survived in `RawKvBatch`, which hand-rolls `new \Grpc\Call(...)` and
- * therefore never reaches that backstop. One `match` arm away from arming an
+ * survived in `RawKvBatch`, which hand-rolled `new \Grpc\Call(...)` and
+ * therefore never reached that backstop (until #273 routed it through
+ * `callAsync()`). One `match` arm away from arming an
  * unbounded deadline, with nothing in the type system objecting.
  *
  * A guard is the right answer because the whole point of the class of bug is

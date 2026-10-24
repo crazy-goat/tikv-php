@@ -110,8 +110,8 @@ final class GrpcClientChannelIsolationTest extends TestCase
             $this->assertSame(1, $first->getChannelCount());
             $this->assertSame(1, $second->getChannelCount());
 
-            // The batch fan-out (RawKvBatch) sends through getChannel() and
-            // an un-awaited GrpcFuture — exactly the seam callAsync() uses.
+            // The batch fan-out (RawKvBatch) sends through callAsync() and
+            // an un-awaited GrpcFuture.
             $future = $second->callAsync(
                 self::DEAD_ADDRESS,
                 'tikvpb.Tikv',

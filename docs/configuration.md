@@ -1682,6 +1682,8 @@ The library emits the following counter tags:
 | `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
 | `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader region error (`RegionErrorHandler`), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on other retryable errors, a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. Invalidating an ID that is not cached emits nothing. |
 
+For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
+
 Reasons are mutually exclusive per drop; the current source emits
 `'region_error'`, `'not_leader'`, `'retry_region_error'`,
 `'fatal_region_error'`, and `'lock_resolve'`
