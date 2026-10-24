@@ -13,6 +13,7 @@ use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -275,18 +276,31 @@ class ConnectionFactoryTest extends TestCase
     }
 
     /**
-     * A key the factory does not know is not a timeout: it is ignored, like
-     * every other unknown option key (issue #276, GRPC-17). The validation
-     * must not turn it into an error.
+     * A key the factory does not know is a misconfiguration, not a no-op:
+     * a silently dropped option has no effect and the default applies, with
+     * no warning anywhere (issue #272, GRPC-13). The TLS options already
+     * fail this way.
      */
-    public function testAnUnknownTimeoutOptionIsIgnored(): void
+    public function testAnUnknownTimeoutOptionIsRejected(): void
     {
-        $bundle = ConnectionFactory::create(
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Unrecognised option(s) in options['timeout']: notATimeout");
+
+        ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['timeout' => ['notATimeout' => 0]],
         );
+    }
 
-        $this->assertSame(5000, $bundle->timeoutConfig->readTimeoutMs);
+    public function testAnUnknownSlowLogOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Unrecognised option(s) in options['slowLog']: notAThreshold");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => ['notAThreshold' => 0]],
+        );
     }
 
     /**
@@ -318,6 +332,39 @@ class ConnectionFactoryTest extends TestCase
                 $configured,
                 $bundle->timeoutConfig->{$field},
                 "options['timeout']['{$field}'] must reach TimeoutConfig::\${$field}",
+            );
+        }
+    }
+
+    /**
+     * The same for the slow-log thresholds: every
+     * {@see SlowLogConfig} field is configurable through `options['slowLog']`
+     * under its own name (issue #272, GRPC-13).
+     */
+    public function testEverySlowLogConfigFieldIsConfigurableByItsOwnName(): void
+    {
+        $parameters = (new \ReflectionMethod(SlowLogConfig::class, '__construct'))->getParameters();
+
+        $fields = [];
+        foreach ($parameters as $parameter) {
+            $fields[] = $parameter->getName();
+        }
+
+        self::assertNotEmpty($fields, 'SlowLogConfig must have threshold fields');
+
+        foreach ($fields as $field) {
+            $configured = 4321;
+
+            $bundle = ConnectionFactory::create(
+                ['127.0.0.1:2379'],
+                options: ['slowLog' => [$field => $configured]],
+            );
+
+            self::assertNotNull($bundle->slowLogConfig, 'options[slowLog] must build a SlowLogConfig');
+            self::assertSame(
+                $configured,
+                $bundle->slowLogConfig->{$field},
+                "options['slowLog']['{$field}'] must reach SlowLogConfig::\${$field}",
             );
         }
     }

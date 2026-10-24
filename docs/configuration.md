@@ -1503,6 +1503,14 @@ When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught
 
 By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
 
+Every key of the table above is configurable under its own name — the mapping is
+derived from `TimeoutConfig`'s constructor, so a field that is added to the
+class is configurable the moment it exists. A key the client does not know is
+reported instead of silently dropped: `options['timeout'] => ['ingestTimeout' => 300000]`
+(a missing `Ms`) throws `InvalidArgumentException` naming the unknown key
+rather than quietly applying the 60-second default. The same holds for
+`options['slowLog']`.
+
 ### Deadlines are never infinite
 
 A gRPC call created with an infinite deadline does not expire, and PHP cannot
