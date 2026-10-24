@@ -1511,7 +1511,8 @@ reported instead of silently dropped: `options['timeout'] => ['ingestTimeout' =>
 (a missing `Ms`) throws `InvalidArgumentException` naming the unknown key
 rather than quietly applying the 60-second default. A value of the wrong type
 (`'readTimeoutMs' => '60000'`) is rejected the same way, and the group itself
-must be an array. The same holds for `options['slowLog']`.
+must be an array — unless it is absent or explicitly `null`, which both mean
+"not configured". The same holds for `options['slowLog']`.
 
 ### Deadlines are never infinite
 

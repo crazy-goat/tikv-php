@@ -1029,7 +1029,9 @@ fixed:
    TLS options already failed closed on a mistyped value; the timeouts and
    the slow-log thresholds now do too. Rejecting what was never read is a
    behaviour change, but it converts a silent misconfiguration into a startup
-   error, which is the correct trade.
+   error, which is the correct trade. An option group that is absent — or
+   explicitly `null` — is not a misconfiguration: it means "not configured"
+   and keeps the default.
 3. **The regression test is derived from the class as well.** The test that
    every field round-trips enumerates the constructor parameters, so a field
    that is added without a mapping fails the suite instead of the cluster.

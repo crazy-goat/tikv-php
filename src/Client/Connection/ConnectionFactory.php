@@ -749,25 +749,26 @@ final class ConnectionFactory
      */
     private static function assertPositiveTimeoutOptions(array $timeouts, array $recognised): void
     {
+        $optionPath = "options['timeout']";
         foreach ($timeouts as $key => $value) {
             if (!is_string($key) || !in_array($key, $recognised, true)) {
                 continue;
             }
             if (!is_int($value)) {
-                // The type is checked by assertIntTimeoutOptions() first.
+                // The type is checked by assertIntOptions() first.
                 continue;
             }
             if ($key === 'batchDeadlineMs') {
                 if ($value < 0) {
                     throw new InvalidArgumentException(
-                        sprintf("options['timeout'][%s] must be greater than or equal to 0, got %d", $key, $value),
+                        sprintf('%s[%s] must be greater than or equal to 0, got %d', $optionPath, $key, $value),
                     );
                 }
                 continue;
             }
             if ($value <= 0) {
                 throw new InvalidArgumentException(
-                    sprintf("options['timeout'][%s] must be greater than 0, got %d", $key, $value),
+                    sprintf('%s[%s] must be greater than 0, got %d', $optionPath, $key, $value),
                 );
             }
         }

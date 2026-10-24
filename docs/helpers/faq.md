@@ -2522,7 +2522,7 @@ names the offending field or option key. When you read a `0` in a
 configuration file, ask which knob it belongs to before assuming what it
 does — and prefer a large finite value for anything that bounds a call.
 
-## An unknown `options['timeout']` / `options['slowLog']` key is a startup error, not a no-op
+## An `options['timeout']` / `options['slowLog']` entry the client cannot apply is a startup error, not a no-op
 
 A configuration key the client does not know used to be **silently
 dropped**: the option had no effect, the built-in default applied, and
@@ -2538,5 +2538,7 @@ name as soon as it exists, and an unknown key — or a value of the wrong type
 being ignored. The same fail-closed rule the TLS options have always had.
 
 The general rule: **an option that cannot be applied must not be silently
-ignored.** Either it is applied, or the client refuses to start. The
-exception is an option group that is simply absent, which keeps the default.
+ignored.** Either it is applied, or the client refuses to start. Two things
+count as "absent" and keep the default: the option group is not there at all,
+or it is explicitly `null`. Everything else — an unknown key, a value of the
+wrong type, a group that is a string instead of a map — is an error.
