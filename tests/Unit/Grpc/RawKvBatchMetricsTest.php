@@ -108,7 +108,9 @@ final class RawKvBatchMetricsTest extends TestCase
             // The fan-out reports the per-region failure; the cause is the
             // closed client, and no RPC was started or metered.
             $this->assertStringContainsString('gRPC client is closed', $e->getMessage());
+            $this->assertInstanceOf(InvalidStateException::class, $e->getFirstRegionError());
             $this->assertSame(0, $metrics->getRpcStarted(self::OPERATION));
+            $this->assertSame(0, $metrics->getRpcFailed(self::OPERATION));
         }
     }
 
@@ -125,6 +127,31 @@ final class RawKvBatchMetricsTest extends TestCase
             new RawBatchGetRequest(),
             RawBatchGetResponse::class,
         );
+    }
+
+    public function testSendFailureCompletesTheRpcAsFailedExactlyOnce(): void
+    {
+        // Plaintext is refused, so createChannel() throws after the closed
+        // check and rpcStarted(): no future exists to settle the RPC.
+        $metrics = new InMemoryMetrics();
+        $grpc = new GrpcClient(allowInsecure: false, metrics: $metrics);
+
+        try {
+            $grpc->callAsync(
+                self::DEAD_ADDRESS,
+                'tikvpb.Tikv',
+                'RawBatchGet',
+                new RawBatchGetRequest(),
+                RawBatchGetResponse::class,
+            );
+            $this->fail('Expected InvalidStateException from the refused plaintext channel');
+        } catch (InvalidStateException) {
+            $this->assertSame(1, $metrics->getRpcStarted(self::OPERATION));
+            $this->assertSame(1, $metrics->getRpcFailed(self::OPERATION));
+            $this->assertSame(0, $metrics->getRpcSucceeded(self::OPERATION));
+        } finally {
+            $grpc->close();
+        }
     }
 
     private function createBatch(GrpcClient $grpc): RawKvBatch

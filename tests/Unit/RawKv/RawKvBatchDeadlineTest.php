@@ -22,8 +22,7 @@ use Psr\Log\NullLogger;
  *
  * The fan-out does NOT go through `GrpcClient::call()`: it forwards the
  * resolved value to `callAsync()`, where `0` means "no deadline" (#273 routed it
- * there). The helper must therefore never return a non-positive value, and the
- * 30 s backstop #260 added for a `null` timeout does not protect the fan-out.
+ * there). The helper must therefore never return a non-positive value.
  * It used to derive the deadline inline as
  * `$timeout !== null ? now + $timeout : Timeval::infFuture()` over a
  * `timeoutMs(): ?int` helper — a `?:` whose *condition* was a nullability the
