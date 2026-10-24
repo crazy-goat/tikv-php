@@ -2363,12 +2363,12 @@ operation's anchor key: the key itself for a single-key read or write, the
 otherwise (the scan cursor, the exclusive upper bound of a reverse scan, the
 per-region sub-range start of a range operation).
 
-A threshold of `0` disables that operation type — the guard is
-`if ($threshold <= 0)`, so a *negative* threshold silently disables the
-warning as well. `ConnectionFactory::buildSlowLogConfig()` never throws: a
-non-array `slowLog` value, or a non-int threshold, is silently ignored (the
-default wins), unlike `options['tls']` and `options['grpc']`, which fail
-closed.
+A threshold of `0` disables that operation type. A *negative* threshold is a
+configuration error (`InvalidArgumentException`), and so is an unknown key or
+a non-int value inside `options['slowLog']` (issue #272) — a non-array
+`slowLog` value fails closed too, like `options['tls']`. The guard itself is
+`if ($threshold <= 0)`, so the negative case would have disabled the warning
+silently; the constructor now rejects it first.
 
 ## Infection forces `stopOnDefect="true"` — one PHP warning truncates the whole mutation score
 
@@ -2529,6 +2529,27 @@ config class states and enforces its own contract, and the error message
 names the offending field or option key. When you read a `0` in a
 configuration file, ask which knob it belongs to before assuming what it
 does — and prefer a large finite value for anything that bounds a call.
+
+## An `options['timeout']` / `options['slowLog']` entry the client cannot apply is a startup error, not a no-op
+
+A configuration key the client does not know used to be **silently
+dropped**: the option had no effect, the built-in default applied, and
+nothing said so. The worst case is a key that is nearly right —
+`options['timeout'] => ['ingestTimeout' => 300000]` instead of
+`ingestTimeoutMs` — where the operator believes a five-minute SST ingest
+deadline was configured and the client runs with the 60-second default.
+
+Both groups are now mapped from the config class's own constructor
+(`TimeoutConfig`, `SlowLogConfig`), so a field is configurable under its own
+name as soon as it exists, and an unknown key — or a value of the wrong type
+— is reported with an `InvalidArgumentException` naming the key instead of
+being ignored. The same fail-closed rule the TLS options have always had.
+
+The general rule: **an option that cannot be applied must not be silently
+ignored.** Either it is applied, or the client refuses to start. Two things
+count as "absent" and keep the default: the option group is not there at all,
+or it is explicitly `null`. Everything else — an unknown key, a value of the
+wrong type, a group that is a string instead of a map — is an error.
 
 ## MCE marker for a key is 0xFF - pad, not a fixed value (issue #252)
 

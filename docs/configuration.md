@@ -991,7 +991,8 @@ $client = RawKvClient::create(
 Every key is optional and keeps its default when it is omitted. A threshold of
 `0` disables the warning for that operation type, so `'readThresholdMs' => 0`
 silences the read warning while the other six stay active. A negative value is
-a configuration error and throws `InvalidArgumentException`. Omitting the whole
+a configuration error and throws `InvalidArgumentException`, and so is a key
+the client does not know or a value that is not an integer. Omitting the whole
 `slowLog` key disables slow logging entirely.
 
 | Option key               | Default | Operations covered                                                                    |
@@ -1503,6 +1504,16 @@ When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught
 ### Default Timeouts
 
 By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
+
+Every key of the table above is configurable under its own name — the mapping is
+derived from `TimeoutConfig`'s constructor, so a field that is added to the
+class is configurable the moment it exists. A key the client does not know is
+reported instead of silently dropped: `options['timeout'] => ['ingestTimeout' => 300000]`
+(a missing `Ms`) throws `InvalidArgumentException` naming the unknown key
+rather than quietly applying the 60-second default. A value of the wrong type
+(`'readTimeoutMs' => '60000'`) is rejected the same way, and the group itself
+must be an array — unless it is absent or explicitly `null`, which both mean
+"not configured". The same holds for `options['slowLog']`.
 
 ### Deadlines are never infinite
 
