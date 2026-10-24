@@ -1011,7 +1011,7 @@ The client enforces these limits. The constants are public on `RawKvClient`.
 | Bytes per batch RPC | 16384 bytes (16 KiB) | `MAX_BATCH_GET_SIZE`, `MAX_BATCH_PUT_SIZE`, `MAX_BATCH_DELETE_SIZE` | Automatic split. No error |
 | Batch fan-out deadline | 60000 ms | `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS` | Client, `batchDeadlineMs`. Throws `BatchDeadlineExceededException`. `0` disables it |
 
-The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. The worst case is `batchDeadlineMs` plus one per-call timeout. The experimental BatchCommands transport does not use the batch deadline.
+The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs the whole retry loop of one region (up to 30000 ms, plus one per-call timeout). The worst case is `batchDeadlineMs` plus one region's full retry loop. The experimental BatchCommands transport does not use the batch deadline.
 
 `InvalidArgumentException` is `CrazyGoat\TiKV\Client\Exception\InvalidArgumentException`.
 Its message names the size and the method, for example `Value size (5242880) exceeds maximum allowed size (4194304) in put`.

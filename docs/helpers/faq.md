@@ -2644,8 +2644,11 @@ The constructor rejects a deadline below any per-call timeout of a batch fan-out
 deadline below one call cannot cut that call short.
 
 `BatchAsyncExecutor` checks the deadline before each dispatch and before each wait. It never
-interrupts one blocking `GrpcFuture::wait()`. The worst case is `batchDeadlineMs` plus one
-per-call timeout.
+interrupts one blocking wait. Most fan-out callables use
+`CheckedGrpcFuture::fromRetryableDispatch()`, and its wait runs the whole `RetryExecutor` loop of
+one region (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms). The worst case is
+therefore `batchDeadlineMs` plus one region's full retry loop, not plus one per-call timeout.
+The constructor check does not use `readTimeoutMs`: only synchronous point reads use it.
 
 Before #275, `executeParallelCapped()` gave the full deadline to every window, so N windows
 could run N times longer than the deadline. All windows now share one budget. A test of this

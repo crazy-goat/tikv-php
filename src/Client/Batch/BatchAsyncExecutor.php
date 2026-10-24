@@ -48,12 +48,14 @@ final readonly class BatchAsyncExecutor
      *     exits still cancel unfinished futures.
      *
      * The deadline is checked at dispatch and wait **boundaries** (before each
-     * dispatch and before each wait), never during one blocking
-     * `GrpcFuture::wait()`, which only the per-call gRPC deadline can end. The
-     * worst case is therefore `$deadlineMs` plus one per-call timeout (plus the
-     * time of a callable that blocks while it dispatches, e.g. a PD lookup on a
-     * cold region cache). `TimeoutConfig` rejects a batch deadline that is
-     * shorter than a per-call timeout (issue #275).
+     * dispatch and before each wait), never during one blocking wait. One wait
+     * on a `CheckedGrpcFuture::fromRetryableDispatch()` future runs the
+     * whole retry loop of one region (up to
+     * `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, plus one per-call timeout),
+     * so the worst case is `$deadlineMs` plus one region's full retry loop
+     * (plus the time of a callable that blocks while it dispatches, e.g. a PD
+     * lookup on a cold region cache). `TimeoutConfig` rejects a batch deadline
+     * that is shorter than a per-call timeout (issue #275).
      *
      * Errors raised during dispatch and wait phases are accumulated and
      * reported via {@see BatchPartialFailureException} after all calls have
@@ -77,6 +79,9 @@ final readonly class BatchAsyncExecutor
      * @return array<int, mixed>
      * @throws BatchPartialFailureException   If any region fails
      * @throws BatchDeadlineExceededException If $deadlineMs > 0 and dispatch+wait exceeds it
+     * @throws \RuntimeException              If a callable throws a non-TiKvException
+     *                                        (e.g. a regroup signal); in-flight futures
+     *                                        are cancelled first
      */
     public function executeParallel(
         array $regionCalls,
@@ -244,19 +249,63 @@ final readonly class BatchAsyncExecutor
                         'elapsedMs' => $elapsedMs,
                         'deadlineMs' => $deadlineMs,
                     ]);
-                    throw new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
-                        'pendingRegions' => array_keys(array_diff_key($regionCalls, $results)),
-                    ]);
+                    throw $this->capDeadlineException(
+                        $regionCalls,
+                        $results,
+                        $deadlineMs,
+                        $elapsedMs,
+                        array_keys($results),
+                    );
                 }
                 $windowDeadlineMs = $deadlineMs - $elapsedMs;
             }
 
-            foreach ($this->executeParallel($window, $windowDeadlineMs) as $regionId => $result) {
+            try {
+                $windowResults = $this->executeParallel($window, $windowDeadlineMs);
+            } catch (BatchDeadlineExceededException $e) {
+                // The inner exception speaks for one window and for the
+                // remaining budget. Report the configured deadline, the total
+                // elapsed time and every region that has no result, including
+                // the windows that never started.
+                /** @var array<int, int> $dispatched */
+                $dispatched = $e->getContext()['dispatchedRegions'] ?? array_keys($window);
+                throw $this->capDeadlineException(
+                    $regionCalls,
+                    $results,
+                    $deadlineMs,
+                    (int) (microtime(true) * 1000) - $startTimeMs,
+                    array_merge(array_keys($results), $dispatched),
+                );
+            }
+
+            foreach ($windowResults as $regionId => $result) {
                 $results[$regionId] = $result;
             }
         }
 
         return $results;
+    }
+
+    /**
+     * Build the exception for a deadline that ran out inside
+     * executeParallelCapped(): the configured deadline, the total elapsed
+     * time, and every region without a result as pending.
+     *
+     * @param array<int, callable(): mixed> $regionCalls
+     * @param array<int, mixed>             $results
+     * @param array<int, int>               $dispatched
+     */
+    private function capDeadlineException(
+        array $regionCalls,
+        array $results,
+        int $deadlineMs,
+        int $elapsedMs,
+        array $dispatched,
+    ): BatchDeadlineExceededException {
+        return new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
+            'dispatchedRegions' => array_values(array_unique($dispatched)),
+            'pendingRegions' => array_keys(array_diff_key($regionCalls, $results)),
+        ]);
     }
 
     /**

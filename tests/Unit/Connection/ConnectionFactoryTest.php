@@ -235,7 +235,7 @@ class ConnectionFactoryTest extends TestCase
     public function testTimeoutBatchDeadlineMsBelowAPerCallTimeoutIsRejectedByName(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('batchDeadlineMs (2500) must not be less than readTimeoutMs (5000)');
+        $this->expectExceptionMessage('batchDeadlineMs (2500) must not be less than writeTimeoutMs (5000)');
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],

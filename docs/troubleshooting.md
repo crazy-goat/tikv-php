@@ -716,6 +716,8 @@ regions were never dispatched or their results were cancelled.
 **Likely cause:** The batch is too large for `batchDeadlineMs` (60000 ms by
 default), or TiKV nodes are slow or unreachable. Raise `batchDeadlineMs` in
 `options['timeout']`, or set it to `0` to disable the batch deadline.
+`getContext()['pendingRegions']` lists every region without a result, including
+the regions of windows that never started.
 
 **Solution:** Do not retry blindly — the batch is **partially applied**.
 Inspect `getContext()['pendingRegions']` / `['dispatchedRegions']`, re-drive

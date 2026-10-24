@@ -150,9 +150,11 @@ Verdict legend:
 | `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff |
 | `StoreNotFoundException` | **Do not retry blindly** — transient only after the stale cache entry expires (TTL/LRU sweep) or PD restores the store; the retry executor does *not* invalidate the region cache for it (it is not classified as a region error). A short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
-| `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()` for pending regions |
+| `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()['pendingRegions']` for the regions without a result. The deadline is finite by default (`batchDeadlineMs`, 60000 ms). `Transaction::commit()` never throws it after the commit point (see below) |
 
 ### Transaction::commit() and double-apply
+
+`BatchDeadlineExceededException` cannot cause a double apply. The secondary-commit fan-out runs after the commit point, so `commit()` logs a batch deadline there and returns normally. The leftover secondary locks are resolved by readers. The prewrite fan-out still throws it, because the transaction is not committed yet. A rollback fan-out logs it (best effort).
 
 `commit()` deserves special care because a network failure at exactly the
 wrong moment leaves the outcome *unknown*: the commit may have taken effect

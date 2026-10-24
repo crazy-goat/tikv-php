@@ -58,10 +58,10 @@ final readonly class TimeoutConfig
     /**
      * The per-call timeouts used by calls that run inside a batch fan-out
      * (RawKV batch, scan, range operations, SST ingest and the TxnKV
-     * prewrite/commit/read fan-out).
+     * prewrite/commit/read fan-out). `readTimeoutMs` is not listed: only
+     * synchronous point reads use it, never a fan-out.
      */
     private const BATCH_FAN_OUT_TIMEOUTS = [
-        'readTimeoutMs',
         'writeTimeoutMs',
         'batchReadTimeoutMs',
         'batchWriteTimeoutMs',
@@ -117,8 +117,9 @@ final readonly class TimeoutConfig
         }
 
         // The deadline is checked at dispatch and wait boundaries, never
-        // during one blocking wait: a budget shorter than a per-call
-        // timeout of the fan-out cannot be honoured (issue #275).
+        // during one blocking wait (which can run a region's whole retry
+        // loop): a budget shorter than a per-call timeout of the fan-out
+        // cannot be honoured, so it is a configuration error (issue #275).
         if ($this->batchDeadlineMs > 0) {
             foreach (self::BATCH_FAN_OUT_TIMEOUTS as $name) {
                 if ($this->batchDeadlineMs < $this->{$name}) {

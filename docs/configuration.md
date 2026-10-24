@@ -1493,6 +1493,7 @@ $options = [
                                          // cancelling in-flight futures.
                                          // 0 disables it. Must be >= every per-call
                                          // timeout used inside a batch fan-out
+                                         // (not readTimeoutMs)
         'pdTimeoutMs' => 3000,           // default: 3000 (PD metadata RPCs)
         'tsoTimeoutMs' => 3000,          // default: 3000 (PD TSO)
         'lockResolveTimeoutMs' => 5000,  // default: 5000 (lock resolution)
@@ -1526,9 +1527,9 @@ When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught
 
 By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
 
-`batchDeadlineMs` is finite by default (`TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, 60000 ms). When it is above `0`, it must not be less than any per-call timeout that a batch fan-out uses: `readTimeoutMs`, `writeTimeoutMs`, `batchReadTimeoutMs`, `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs`, `checksumTimeoutMs` and `ingestTimeoutMs`. If it is less, the `TimeoutConfig` constructor throws an `InvalidArgumentException` that names both fields. A deadline that is less than one call cannot cut that call short, so such a setting has no meaning.
+`batchDeadlineMs` is finite by default (`TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, 60000 ms). When it is above `0`, it must not be less than any per-call timeout that a batch fan-out uses: `writeTimeoutMs`, `batchReadTimeoutMs`, `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs`, `checksumTimeoutMs` and `ingestTimeoutMs` (`readTimeoutMs` is not in the list: only point reads use it). If it is less, the `TimeoutConfig` constructor throws an `InvalidArgumentException` that names both fields. One wait is not interrupted by the deadline, so a deadline that is less than one call cannot be honoured. Such a setting has no meaning.
 
-The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. The worst case is therefore `batchDeadlineMs` plus one per-call timeout. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
+The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs the whole retry loop of one region (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus one region's full retry loop. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
 
 Every key of the table above is configurable under its own name — the mapping is
 derived from `TimeoutConfig`'s constructor, so a field that is added to the
@@ -1585,7 +1586,7 @@ try {
 }
 ```
 
-Batch methods already send their sub-batches in parallel (default concurrency 16, `RawKvClient::DEFAULT_MAX_CONCURRENCY`). When you set the `batchDeadlineMs` timeout option to a value above 0, it bounds the whole fan-out. The default is `60000` ms, and `0` disables it. The deadline is checked between waits, so one slow call can run up to its own per-call timeout past it (see [Timeouts](#timeouts)).
+Batch methods already send their sub-batches in parallel (default concurrency 16, `RawKvClient::DEFAULT_MAX_CONCURRENCY`). When you set the `batchDeadlineMs` timeout option to a value above 0, it bounds the whole fan-out. The default is `60000` ms, and `0` disables it. The deadline is checked between waits, so one slow region can run up to its whole retry loop past it (see [Timeouts](#timeouts)).
 
 ## Production Configuration
 

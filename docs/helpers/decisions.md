@@ -1229,8 +1229,9 @@ the missing part.
 
 1. The default equals the largest default per-call timeout (`ingestTimeoutMs`, 60000). The
    default configuration passes its own validation.
-2. A deadline above 0 must be at least every per-call timeout used inside a fan-out (all eight:
-   read, write, batch read, batch write, scan, delete-range, checksum, ingest). A smaller
+2. A deadline above 0 must be at least every per-call timeout used inside a fan-out (all seven:
+   write, batch read, batch write, scan, delete-range, checksum, ingest; `readTimeoutMs` is
+   used only by synchronous point reads, never inside a fan-out). A smaller
    deadline has no effect on one call, and the constructor throws `InvalidArgumentException`.
 3. `0` stays the explicit opt-out. This is the same contract as in #276: the batch deadline is
    a wall-clock budget, not a gRPC deadline.
@@ -1238,7 +1239,14 @@ the missing part.
    `executeParallelCapped()` is `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, so a direct caller is
    no longer unbounded without saying so.
 5. The deadline is checked at dispatch and wait boundaries only. We do not interrupt a blocking
-   wait, because the per-call timeout already bounds it. Worst case: `batchDeadlineMs` plus one
-   per-call timeout.
-6. `executeParallelCapped()` uses one shared budget for all windows.
-7. Not covered: the experimental BatchCommands multiplex path is bounded per call only.
+   wait. One wait on a retryable call runs the whole retry loop of one region, so the worst
+   case is `batchDeadlineMs` plus one region's full retry loop (the retry deadline, 30000 ms,
+   plus one per-call timeout).
+6. `executeParallelCapped()` and the parallel scan (`RawKvScanner::scanSegmentsInParallel()`)
+   use one shared budget for all windows. A deadline is never a reason for the scan to fall
+   back to the sequential path, which has no deadline. The exception reports the configured
+   deadline, the total elapsed time and every region without a result.
+7. TxnKV: a deadline in the secondary-commit fan-out happens after the commit point, so it is
+   logged and `commit()` does not throw (a retrying caller could apply the transaction
+   twice). A deadline in a rollback fan-out is logged: rollback is best effort.
+8. Not covered: the experimental BatchCommands multiplex path is bounded per call only.

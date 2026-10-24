@@ -175,7 +175,7 @@ class TimeoutConfigTest extends TestCase
         $fields = [];
         foreach (
             [
-            'readTimeoutMs', 'writeTimeoutMs', 'batchReadTimeoutMs', 'batchWriteTimeoutMs',
+            'writeTimeoutMs', 'batchReadTimeoutMs', 'batchWriteTimeoutMs',
             'scanTimeoutMs', 'deleteRangeTimeoutMs', 'checksumTimeoutMs', 'ingestTimeoutMs',
             ] as $field
         ) {
