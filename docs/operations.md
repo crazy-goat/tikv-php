@@ -999,6 +999,40 @@ Note that `InvalidArgumentException` is *not* caught by the arm above — it
 does not extend `TiKvException`. See
 [Troubleshooting](troubleshooting.md) for common errors and solutions.
 
+## Limits
+
+The client enforces these limits. The constants are public on `RawKvClient`.
+
+| Limit | Value | Constant | Enforced |
+|---|---|---|---|
+| Maximum key size | 8 MiB (8388608 bytes) | `MAX_KEY_SIZE` | Client, before any RPC. Throws `InvalidArgumentException` |
+| Maximum value size | 4 MiB (4194304 bytes) | `MAX_VALUE_SIZE` | Client, before any RPC. Throws `InvalidArgumentException` |
+| Minimum key size | 1 byte | `MIN_KEY_SIZE` | An empty key throws `InvalidArgumentException` |
+| Maximum scan limit | 10240 rows per RPC | `MAX_SCAN_LIMIT` | Client. See [Scan](#scan) |
+| Keys per batch RPC | 512 | `MAX_BATCH_LIMIT` | Automatic split. No error |
+| Bytes per batch RPC | 16384 bytes (16 KiB) | `MAX_BATCH_GET_SIZE`, `MAX_BATCH_PUT_SIZE`, `MAX_BATCH_DELETE_SIZE` | Automatic split. No error |
+
+`InvalidArgumentException` is `CrazyGoat\TiKV\Client\Exception\InvalidArgumentException`.
+Its message names the size and the method, for example `Value size (5242880) exceeds maximum allowed size (4194304) in put`.
+The key and value checks apply to `get`, `put`, `delete`, `getKeyTTL`, `compareAndSwap`, `putIfAbsent`, `batchGet`, `batchPut`, `batchDelete` and `ingest`.
+`putIfAbsent` calls `compareAndSwap`, so its error message names `compareAndSwap`.
+A batch method checks every key and value before it sends the first RPC.
+`scan` and `reverseScan` check the size of the start key and of the end key. They accept an empty start key.
+
+### Batch auto-split
+
+You do not need to split a batch yourself. `batchGet`, `batchPut` and `batchDelete` group the keys by region.
+Then they split the keys of each region into sub-batches of at most 512 keys and 16384 bytes.
+For `batchGet` and `batchDelete`, the byte count is the total size of the keys.
+For `batchPut`, the byte count is the total size of the keys and the values.
+A single pair that is larger than 16384 bytes is not rejected. It goes alone in its own sub-batch.
+The client sends the sub-batches in parallel. A batch is not atomic. See [Batch Operations](#batch-operations).
+
+### TxnKV
+
+The TxnKV client has no key or value size check of its own. The `MAX_KEY_SIZE` and `MAX_VALUE_SIZE` constants apply to RawKV only.
+A transactional scan has its own cap of 10240 rows. See [Scan](#scan).
+
 ## Best Practices
 
 ### Key Design
@@ -1023,8 +1057,8 @@ $client->put('user_' . uniqid(), $data);  // Random, hard to scan
 // Good: Small to medium values
 $client->put('user:123', json_encode(['name' => 'Alice', 'email' => 'alice@example.com']));
 
-// Avoid: Very large values (TiKV has limits)
-// If you need to store large data, consider chunking:
+// Avoid: Values larger than MAX_VALUE_SIZE (4 MiB). put() throws InvalidArgumentException.
+// See "Limits". If you need to store large data, split it into chunks:
 $largeData = str_repeat('x', 10 * 1024 * 1024);  // 10MB
 $chunks = str_split($largeData, 1024 * 1024);     // 1MB chunks
 foreach ($chunks as $i => $chunk) {
@@ -1035,13 +1069,13 @@ foreach ($chunks as $i => $chunk) {
 ### Batch Size
 
 ```php
-// Good: Reasonable batch sizes (100-1000 keys)
-$batch = array_slice($allKeys, 0, 100);
-$client->batchPut($batch);
+// Good: Pass the whole list. The client groups the keys by region and
+// splits them into sub-batches of 512 keys and 16 KiB (see "Limits").
+$client->batchDelete($allKeys);
 
-// Avoid: Extremely large batches
-// If you have many keys, process in chunks:
-$chunks = array_chunk($allKeys, 500);
+// Chunk only to bound memory use or to limit the part of the work
+// that a BatchPartialFailureException can leave unknown.
+$chunks = array_chunk($allKeys, 10000);
 foreach ($chunks as $chunk) {
     $client->batchDelete($chunk);
 }

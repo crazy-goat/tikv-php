@@ -255,11 +255,10 @@ GrpcException: Deadline exceeded
 
 3. **Large requests:**
    ```php
-   // Split large batches
-   $chunks = array_chunk($keys, 100);
-   foreach ($chunks as $chunk) {
-       $client->batchGet($chunk);
-   }
+   // The client splits a batch by region (512 keys, 16 KiB per RPC).
+   // Do not chunk the keys to make the RPC smaller.
+   // See operations.md#limits.
+   $client->batchGet($keys);
    ```
 
 ## Runtime Errors
@@ -844,8 +843,10 @@ echo "Took: {$elapsed}s\n";
 
 3. **Batch size too large:**
    ```php
-   // Reduce batch size
-   $chunks = array_chunk($keys, 100);
+   // The client already splits a batch into sub-batches of at most
+   // 512 keys and 16 KiB (see operations.md#limits).
+   // A smaller chunk does not make an RPC smaller.
+   // Chunk only to bound memory or the scope of a partial failure.
    ```
 
 4. **Hot spot (all keys in one region):**
@@ -890,10 +891,10 @@ echo "Took: {$elapsed}s\n";
 
 2. **Large values:**
    ```php
-   // Check value sizes
-   $value = $client->get('large-key');
-   if (strlen($value) > 10 * 1024 * 1024) {
-       // Value > 10MB, consider chunking
+   // Check the size before put()
+   if (strlen($data) > RawKvClient::MAX_VALUE_SIZE) {
+       // put() rejects a value above 4 MiB with InvalidArgumentException.
+       // Split $data into chunks. See operations.md#limits.
    }
    ```
 

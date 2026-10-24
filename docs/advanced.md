@@ -332,48 +332,11 @@ echo "Page views: $newCount\n";
 
 ### Batch Optimization
 
-#### Optimal Batch Sizes
+#### Batch Sizes
 
-```php
-class BatchOptimizer
-{
-    private const MAX_BATCH_SIZE = 1000;
-    private const TARGET_REGION_SIZE = 100;  // Keys per region
-    
-    public static function optimizeBatches(array $keys): array
-    {
-        // Split large batches into optimal chunks
-        if (count($keys) <= self::MAX_BATCH_SIZE) {
-            return [$keys];
-        }
-        
-        return array_chunk($keys, self::MAX_BATCH_SIZE);
-    }
-    
-    public static function parallelBatchGet(
-        RawKvClient $client,
-        array $keys,
-        int $concurrency = 5
-    ): array {
-        $batches = self::optimizeBatches($keys);
-        $results = [];
-        
-        // Process batches with limited concurrency
-        $queue = new SplQueue();
-        foreach ($batches as $batch) {
-            $queue->enqueue($batch);
-        }
-        
-        while (!$queue->isEmpty()) {
-            $batch = $queue->dequeue();
-            $batchResults = $client->batchGet($batch);
-            $results = array_merge($results, $batchResults);
-        }
-        
-        return $results;
-    }
-}
-```
+Do not write your own batch splitter. `batchGet`, `batchPut` and `batchDelete` already group keys by region.
+They split each group into sub-batches of at most 512 keys and 16 KiB, and send the sub-batches in parallel.
+See [Limits](operations.md#limits) for all constants.
 
 #### Write Batching
 
