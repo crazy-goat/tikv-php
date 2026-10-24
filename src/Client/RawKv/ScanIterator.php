@@ -132,17 +132,16 @@ final class ScanIterator implements Iterator
             return;
         }
 
-        $firstKey = $results[0]['key'];
         $lastKey = $results[count($results) - 1]['key'];
         $nextStartKey = KeyOrder::successor($lastKey);
 
-        // A well-behaved server returns keys >= the requested start key, so
-        // the cursor strictly advances. Without this check a server that
-        // keeps answering a full page ending on the same key never ends any
-        // forward scan, bounded or not: the cursor stays below endKey. The
-        // first-key check also blocks a page that repeats an earlier key.
-        // Keys are not put in the message.
-        if (KeyOrder::lt($firstKey, $this->currentStartKey) || KeyOrder::lte($nextStartKey, $this->currentStartKey)) {
+        // A well-behaved server returns strictly increasing keys, all >= the
+        // requested start key. Without these checks a server that keeps
+        // answering a full page ending on the same key never ends any
+        // forward scan, bounded or not: the cursor stays below endKey. Only
+        // a one-row page equal to the cursor passes (it advances by one
+        // byte). Keys are not put in the message.
+        if (!$this->pageProgresses($results, $nextStartKey)) {
             $this->buffer = [];
             $this->exhausted = true;
 
@@ -157,5 +156,30 @@ final class ScanIterator implements Iterator
 
         $this->buffer = $results;
         $this->bufferIndex = 0;
+    }
+
+    /**
+     * @param non-empty-array<array{key: string, value: ?string}> $results
+     */
+    private function pageProgresses(array $results, string $nextStartKey): bool
+    {
+        if (KeyOrder::lte($nextStartKey, $this->currentStartKey)) {
+            return false;
+        }
+
+        $previous = null;
+        foreach ($results as $row) {
+            $key = $row['key'];
+            if (
+                $previous === null
+                    ? KeyOrder::lt($key, $this->currentStartKey)
+                    : KeyOrder::lte($key, $previous)
+            ) {
+                return false;
+            }
+            $previous = $key;
+        }
+
+        return true;
     }
 }

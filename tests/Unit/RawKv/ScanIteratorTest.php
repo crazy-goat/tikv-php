@@ -325,7 +325,7 @@ class ScanIteratorTest extends TestCase
         iterator_to_array($iterator);
     }
 
-    public function testPageRepeatingAnEarlierKeyThrows(): void
+    public function testPageStartingBeforeTheCursorThrows(): void
     {
         $calls = 0;
         $scanFn = function () use (&$calls): array {
@@ -337,10 +337,44 @@ class ScanIteratorTest extends TestCase
         };
 
         $iterator = new ScanIterator($scanFn, 'a', '', 2);
+        $seen = [];
+
+        try {
+            foreach ($iterator as $key => $value) {
+                $seen[$key] = $value;
+            }
+            $this->fail('Expected TiKvException');
+        } catch (TiKvException) {
+            $this->assertSame(['k1' => '1', 'k5' => '5'], $seen);
+            $this->assertSame(2, $calls);
+        }
+    }
+
+    public function testPageWithDuplicateKeyAtTheCursorThrows(): void
+    {
+        $scanFn = fn(): array => [['key' => 'c', 'value' => '1'], ['key' => 'c', 'value' => '2']];
+
+        $iterator = new ScanIterator($scanFn, 'c', '', 2);
 
         $this->expectException(TiKvException::class);
 
-        iterator_to_array($iterator, false);
+        $iterator->valid();
+    }
+
+    public function testPageWithMiddleDuplicateKeyThrows(): void
+    {
+        $scanFn = fn(): array => [
+            ['key' => 'k3', 'value' => '1'],
+            ['key' => 'k4', 'value' => '2'],
+            ['key' => 'k4', 'value' => '3'],
+            ['key' => 'k6', 'value' => '4'],
+        ];
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 4);
+
+        $this->expectException(TiKvException::class);
+
+        $iterator->valid();
     }
 
     public function testNumericCursorBelowPageEndIsByteOrdered(): void
