@@ -95,9 +95,15 @@ class GrpcClientTimevalDeadlineTest extends TestCase
 
     private function deadlineOf(?int $timeoutMs): Timeval
     {
+        // The timeout is resolved first (that is where a non-positive value
+        // is rejected, issue #276, GRPC-17), then the `Timeval` is built.
+        $resolve = new \ReflectionMethod(GrpcClient::class, 'resolveTimeoutMs');
+        $resolved = $resolve->invoke(new GrpcClient(), $timeoutMs);
+        self::assertIsInt($resolved);
+
         $method = new \ReflectionMethod(GrpcClient::class, 'deadline');
 
-        $value = $method->invoke(new GrpcClient(), $timeoutMs);
+        $value = $method->invoke(new GrpcClient(), $resolved);
         self::assertInstanceOf(Timeval::class, $value);
 
         return $value;

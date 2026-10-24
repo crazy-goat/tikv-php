@@ -722,13 +722,11 @@ Two decisions from #260 that should not be "simplified" away:
    deadline the gRPC C core never expires — and `Grpc\Call::startBatch()` is
    a blocking call *inside* the C extension, so neither `max_execution_time`
    nor `set_time_limit()` can rescue a worker pinned on a half-open
-   connection. `null` now resolves to `GrpcClient::DEFAULT_TIMEOUT_MS` (30 s),
-   and the only way to ask for an unbounded call is the explicit non-positive
-   sentinel `0` — deliberately the same spelling `TimeoutConfig`'s
-   `batchDeadlineMs = 0` already uses for "disabled", so there is one
-   convention rather than two. The 30 s backstop is defence in depth, not the
-   fix: the real deadlines are named per call site, so a 30 s default never
-   has to be the one that fires.
+   connection. `null` now resolves to `GrpcClient::DEFAULT_TIMEOUT_MS` (30 s).
+   The 30 s backstop is defence in depth, not the fix: the real deadlines are
+   named per call site, so a 30 s default never has to be the one that fires.
+   The "no deadline" sentinel `0` that used to sit next to it is gone — see
+   the decision on a non-positive timeout below.
 2. **PD, TSO and lock resolution have their own `TimeoutConfig` fields**
    (`pdTimeoutMs` / `tsoTimeoutMs` / `lockResolveTimeoutMs`, all finite
    defaults) rather than borrowing a store field. They are separate because
@@ -775,16 +773,12 @@ rule that class is now held to:
    PHP-FPM pool. The class of bug is not a bad value but a **`null` that
    silently means "forever"**, and nothing in PHP's type system objects to a
    `?:` over a `?int` that produces it. So the nullable deadline helper is
-   gone: `RawKvBatch::timeoutMs()` returns `int` with a `default => throw`, and
-   a non-positive configured value resolves to
-   `GrpcClient::DEFAULT_TIMEOUT_MS` — because `TimeoutConfig`'s `0` is a
-   *transport-level* opt-out, and a hand-rolled `new Call(...)` is not the
-   transport.
-2. **Two sites may legitimately produce one, and they are enumerated, counted
-   and justified**: `GrpcClient::deadline()`'s explicit `0` sentinel (the
-   library's single "disabled" spelling, from #260) and
+   gone: `RawKvBatch::timeoutMs()` returns `int` with a `default => throw`.
+2. **No site may produce one.** The two that used to be enumerated — the
+   unary transport's explicit `0` sentinel and
    `BatchCommandsConnection::open()`'s `$deadlineMs` stream-lifetime parameter
-   (a bidirectional stream, not a unary call; production never passes `0`).
+   — are both gone since #276 (GRPC-17): a non-positive value is a
+   configuration error, so there is no way to ask for an unbounded call.
 3. **`NoInfiniteDeadlineGuardTest` keeps it that way.** A guard is the right
    instrument precisely because the bug is an *absent* value: a behavioural
    test can only assert the paths it drives, and a value assertion says nothing
@@ -793,9 +787,9 @@ rule that class is now held to:
    every shape that can produce an unbounded deadline must mention it somewhere,
    so `match`, `??`, `if` and a hardcoded one are all caught, and a count-based
    allowlist (the `NoSilentRegionDropGuardTest` precedent) forces a conscious
-   review whenever a site is added or removed. It carries an
-   `assertSame(2, …)` witness so a scan that silently stops finding anything
-   fails too.
+   review whenever a site is added or removed. The allowlist is empty now, so
+   the guard's witness is a **scan of a snippet** that contains an
+   `infFuture()`: a scan that silently stops finding anything fails too.
 
 The same reasoning is why the *retry* half is a test and not a refactor: a
 shared `RetryExecutor` is the documented collaborator `Transaction` memoizes
@@ -807,6 +801,35 @@ the wall-clock deadline, the #233 fatal-path interaction, and the attempt cap.
 Do not collapse the three bounds into one value: the 30 s wall clock is the
 binding one for a `ServerBusy` storm (1–2 s sleeps), the sleep budgets are what
 bound a millisecond-scale retry storm that no wall clock would catch.
+
+## A non-positive timeout is a configuration error, not a "disabled" spelling (issue #276)
+
+Issue #276 removed the last way to ask for an unbounded gRPC call. The
+decision worth recording is *where* the rule is enforced, because the
+alternative — validating only at the transport — was tried first and is worse:
+
+1. **The rule is enforced where the value is configured, not only where it is
+   used.** `TimeoutConfig`'s constructor rejects a non-positive value for
+   every timeout field, and `ConnectionFactory` rejects a non-positive
+   `options['timeout']` entry *before* the `TimeoutConfig` is built, so the
+   error names the option key the user wrote. Validating only in
+   `GrpcClient::deadline()` would have produced the same failure, but late: the
+   error would surface on the first RPC instead of at construction, and the
+   message would name an internal field rather than the configuration entry
+   that carries the mistake.
+2. **`0` is not a safe spelling for "disabled" in a timeout.** It was the
+   library's documented "no deadline" sentinel, and it is also exactly what
+   `(int) getenv('TIKV_READ_TIMEOUT_MS')` yields when the variable is unset —
+   so the sentinel turned a configuration mistake into a call that never
+   expires. The two knobs that still spell "disabled" as `0` are not timeouts
+   in that sense: `batchDeadlineMs` is a wall-clock budget for the batch
+   executor (it never reaches a gRPC deadline) and the slow-log thresholds
+   disable a log line. Each config class states and enforces its own contract
+   rather than leaving the meaning of `0` to be discovered at the transport.
+3. **The change is a breaking one and says so.** A deployment that runs with a
+   zero timeout now fails at construction — which is the desired outcome,
+   because the previous behaviour was a latent outage. `CHANGELOG.md` carries
+   the **BREAKING** marker and a migration note.
 
 ## The ext-grpc channel semantics are verified, not assumed (issue #283)
 

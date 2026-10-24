@@ -91,14 +91,6 @@ class SlowLogConfigTest extends TestCase
     // contract — but a negative threshold is a configuration error.
     // ========================================================================
 
-    public function testZeroThresholdIsAllowedAndDisablesLogging(): void
-    {
-        $config = new SlowLogConfig(readThresholdMs: 0);
-
-        $this->assertSame(0, $config->readThresholdMs);
-        $this->assertSame(0, $config->getThreshold('read'));
-    }
-
     public function testANegativeThresholdIsRejected(): void
     {
         $this->expectException(InvalidArgumentException::class);

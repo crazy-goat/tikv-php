@@ -38,10 +38,11 @@ use Psr\Log\NullLogger;
  *    is a non-nullable `int`, so the `?:` has nothing to switch on;
  *  - {@see testAnUnknownOperationTypeCannotSilentlyMeanNoDeadline()} — the
  *    `default => null` arm is gone, so a new operation type must be decided;
- *  - {@see testEveryConfiguredTimeoutResolvesToAPositiveDeadline()} — including
- *    the `0` that `TimeoutConfig` documents as "no deadline", which used to
- *    reach `new Timeval(0)` (a deadline already in the past) on the hand-rolled
- *    path and `Timeval::infFuture()` on the API V2 `callAsync()` path.
+ *  - {@see testANonPositiveConfiguredTimeoutIsRejected()} — a non-positive
+ *    configured timeout is a configuration error (issue #276, GRPC-17); it used
+ *    to reach `new Timeval(0)` (a deadline already in the past) on the
+ *    hand-rolled path and `Timeval::infFuture()` on the API V2 `callAsync()`
+ *    path.
  *
  * The resulting `Timeval` object needs ext-grpc and is asserted in
  * {@see \CrazyGoat\TiKV\Tests\Unit\Grpc\RawKvBatchTimevalDeadlineTest} (the

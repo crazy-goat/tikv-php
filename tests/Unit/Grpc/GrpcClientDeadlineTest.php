@@ -51,34 +51,20 @@ class GrpcClientDeadlineTest extends TestCase
         self::assertSame(1, $this->resolveTimeoutMs(1));
     }
 
-    public function testZeroIsNotResolvedToADeadline(): void
-    {
-        // `0` used to survive resolution untouched — it was the documented
-        // "no deadline" opt-out. It is now a configuration error
-        // (issue #276, GRPC-17): `0` is what an unset environment variable
-        // coerces to, so the opt-out turned a configuration mistake into a
-        // call that never expires. The resolution still passes the value
-        // through; `deadline()` is the place that rejects it.
-        self::assertSame(0, $this->resolveTimeoutMs(0));
-    }
-
     /**
      * A non-positive timeout never reaches `Timeval::infFuture()`: the
-     * deadline helper rejects it (issue #276, GRPC-17).
+     * resolution rejects it (issue #276, GRPC-17). `0` used to be the
+     * documented "no deadline" opt-out, but it is also what an unset
+     * environment variable coerces to, so the opt-out turned a configuration
+     * mistake into a call that never expires.
      */
     #[DataProvider('provideNonPositiveTimeouts')]
     public function testANonPositiveTimeoutIsRejected(int $timeoutMs): void
     {
-        $client = new GrpcClient();
-
-        // PHP 8.1+ makes reflection methods accessible by default;
-        // setAccessible() is a no-op and deprecated since PHP 8.5.
-        $method = new \ReflectionMethod(GrpcClient::class, 'deadline');
-
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage(sprintf('timeoutMs must be greater than 0, got %d', $timeoutMs));
 
-        $method->invoke($client, $timeoutMs);
+        $this->resolveTimeoutMs($timeoutMs);
     }
 
     /**

@@ -59,6 +59,26 @@ final class ConnectionFactory
     ];
 
     /**
+     * The `options['timeout']` keys the factory understands. A key that is
+     * not in this list is not a timeout: it is ignored, exactly like every
+     * other unknown option key.
+     */
+    private const RECOGNISED_TIMEOUT_KEYS = [
+        'readTimeoutMs',
+        'writeTimeoutMs',
+        'batchReadTimeoutMs',
+        'batchWriteTimeoutMs',
+        'scanTimeoutMs',
+        'deleteRangeTimeoutMs',
+        'checksumTimeoutMs',
+        'ingestTimeoutMs',
+        'batchDeadlineMs',
+        'pdTimeoutMs',
+        'tsoTimeoutMs',
+        'lockResolveTimeoutMs',
+    ];
+
+    /**
      * Options that configure the gRPC transport the factory builds. They
      * cannot be combined with a caller-supplied transport
      * (options['grpcClient']) — that transport was configured by the
@@ -690,7 +710,7 @@ final class ConnectionFactory
     private static function assertPositiveTimeoutOptions(array $timeouts): void
     {
         foreach ($timeouts as $key => $value) {
-            if (!is_string($key)) {
+            if (!is_string($key) || !in_array($key, self::RECOGNISED_TIMEOUT_KEYS, true)) {
                 continue;
             }
             if (!is_int($value)) {
@@ -698,14 +718,14 @@ final class ConnectionFactory
             }
             if ($key === 'batchDeadlineMs') {
                 if ($value < 0) {
-                    throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                    throw new InvalidArgumentException(
                         sprintf('timeout option "%s" must be greater than or equal to 0, got %d', $key, $value),
                     );
                 }
                 continue;
             }
             if ($value <= 0) {
-                throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                throw new InvalidArgumentException(
                     sprintf('timeout option "%s" must be greater than 0, got %d', $key, $value),
                 );
             }

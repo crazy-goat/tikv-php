@@ -223,9 +223,15 @@ final class GrpcClient implements GrpcClientInterface
         $start = hrtime(true);
         $success = false;
         try {
+            // The timeout is validated before anything is opened: a
+            // non-positive value is a configuration error and must not
+            // create (and cache) a channel before it is raised
+            // (issue #276, GRPC-17).
+            $timeout = $this->resolveTimeoutMs($timeoutMs);
+
             $channel = $this->getChannel($address);
 
-            $deadline = $this->deadline($timeoutMs);
+            $deadline = $this->deadline($timeout);
 
             $call = new Call(
                 $channel,
@@ -281,9 +287,15 @@ final class GrpcClient implements GrpcClientInterface
         $start = hrtime(true);
         $success = false;
         try {
+            // The timeout is validated before anything is opened: a
+            // non-positive value is a configuration error and must not
+            // create (and cache) a channel before it is raised
+            // (issue #276, GRPC-17).
+            $timeout = $this->resolveTimeoutMs($timeoutMs);
+
             $channel = $this->getChannel($address);
 
-            $deadline = $this->deadline($timeoutMs);
+            $deadline = $this->deadline($timeout);
 
             $call = new Call(
                 $channel,
@@ -358,6 +370,7 @@ final class GrpcClient implements GrpcClientInterface
      *                            non-positive value throws
      * @return GrpcFuture Un-waited future resolving to T
      * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callAsync(
         string $address,
@@ -371,9 +384,14 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
+        // The timeout is validated before anything is opened: a
+        // non-positive value is a configuration error and must not create
+        // (and cache) a channel before it is raised (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
         $channel = $this->getChannel($address);
 
-        $deadline = $this->deadline($timeoutMs);
+        $deadline = $this->deadline($timeout);
 
         $call = new Call(
             $channel,
@@ -815,26 +833,15 @@ final class GrpcClient implements GrpcClientInterface
      *
      * `null` — a call site with no opinion — becomes the conservative
      * library default {@see self::DEFAULT_TIMEOUT_MS} rather than an
-     * unbounded deadline. A non-positive value is rejected by
-     * {@see self::deadline()} (issue #276, GRPC-17): it used to be the
-     * "no deadline" sentinel, but a user-supplied `0` is far more likely to
-     * be an accident than an intent.
+     * unbounded deadline. A non-positive value is rejected here
+     * (issue #276, GRPC-17): it used to be the "no deadline" sentinel, but a
+     * user-supplied `0` is far more likely to be an accident than an intent.
+     *
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When the resolved timeout is not positive
      */
     private function resolveTimeoutMs(?int $timeoutMs): int
     {
-        return $timeoutMs ?? self::DEFAULT_TIMEOUT_MS;
-    }
-
-    /**
-     * Build the gRPC deadline for a call (issue #260).
-     *
-     * The single place where a deadline is derived from a `$timeoutMs`
-     * argument, so {@see self::resolveTimeoutMs()} cannot be honoured in
-     * one entry point and forgotten in another.
-     */
-    private function deadline(?int $timeoutMs): Timeval
-    {
-        $timeout = $this->resolveTimeoutMs($timeoutMs);
+        $timeout = $timeoutMs ?? self::DEFAULT_TIMEOUT_MS;
 
         if ($timeout <= 0) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -842,7 +849,22 @@ final class GrpcClient implements GrpcClientInterface
             );
         }
 
-        return Timeval::now()->add(new Timeval($timeout * 1000));
+        return $timeout;
+    }
+
+    /**
+     * Build the gRPC deadline for a call (issue #260).
+     *
+     * The single place where a deadline is derived from a timeout, so
+     * {@see self::resolveTimeoutMs()} cannot be honoured in one entry point
+     * and forgotten in another. It takes the **resolved** timeout (a
+     * strictly positive number of milliseconds), so the rejection of a
+     * non-positive value happens in {@see self::resolveTimeoutMs()} — before
+     * a channel is opened (issue #276, GRPC-17).
+     */
+    private function deadline(int $timeoutMs): Timeval
+    {
+        return Timeval::now()->add(new Timeval($timeoutMs * 1000));
     }
 
     private function createTlsCredentials(): ChannelCredentials

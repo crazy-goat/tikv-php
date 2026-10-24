@@ -36,40 +36,19 @@ use PHPUnit\Framework\TestCase;
  * construction — `token_get_all()` reports their contents as
  * `T_COMMENT`/`T_DOC_COMMENT`, never as the `T_STRING` this looks for.
  *
- * ## Scope: two reviewed exceptions, allowlisted by count
+ * ## Scope: no exceptions at all
  *
- * The count form is the same as `NoSilentRegionDropGuardTest`'s and for the
- * same reason: it is invariant under reformatting, and adding or removing one
- * of these sites fails the test until this allowlist and its reason are
- * updated — a conscious review, not a silently widened exception.
+ * Two sites used to be allowlisted by count — the unary transport's "no
+ * deadline" sentinel `0` and the `BatchCommands` stream's `0`. Both are
+ * gone since issue #276 (GRPC-17): a non-positive timeout is a
+ * configuration error, so there is no way to ask for an unbounded call and
+ * nothing left to allowlist. The scan itself is still witnessed by a
+ * separate test that feeds it a snippet containing an `infFuture()`, so a
+ * scan that silently stops matching anything fails too.
  */
 class NoInfiniteDeadlineGuardTest extends TestCase
 {
     private const CLIENT_SOURCE_DIR = __DIR__ . '/../../../src/Client';
-
-    /**
-     * Reviewed exceptions, as `file (relative to src/Client) => how many
-     * `Timeval::infFuture()` sites that file may contain`.
-     *
-     *  - `Grpc/BatchCommandsConnection.php` (1): a **stream** lifetime, not
-     *    a unary call. The class opens one bidirectional `BatchCommands` stream
-     *    per store and reuses it, so its `open()` takes a real `$deadlineMs`
-     *    parameter defaulting to 60 s; `0` is the same explicit opt-out.
-     *    Production never passes it (`GrpcBatchCommandsTransport::forClient()`
-     *    calls `open()` with one argument), so no configured value can reach
-     *    this site today.
-     *
-     * `Grpc/GrpcClient.php` used to be allowlisted with one site: the
-     * transport's own "no deadline" sentinel `0`. It is gone since
-     * issue #276 (GRPC-17) — a non-positive `$timeoutMs` is now a
-     * configuration error, so the unary transport has no infinite deadline
-     * left to derive.
-     *
-     * @var array<string, int>
-     */
-    private const ALLOWED = [
-        'Grpc/BatchCommandsConnection.php' => 1,
-    ];
 
     public function testNoCodeInTheClientDerivesAnInfiniteDeadline(): void
     {
@@ -86,16 +65,12 @@ class NoInfiniteDeadlineGuardTest extends TestCase
             }
 
             $total += count($found);
-            $expected = self::ALLOWED[$relative] ?? 0;
-            if (count($found) !== $expected) {
-                $violations[] = sprintf(
-                    "%s: %d infinite-deadline site(s), %d reviewed (issue #184)\n    %s",
-                    $relative,
-                    count($found),
-                    $expected,
-                    implode("\n    ", $found),
-                );
-            }
+            $violations[] = sprintf(
+                "%s: %d infinite-deadline site(s) (issue #184)\n    %s",
+                $relative,
+                count($found),
+                implode("\n    ", $found),
+            );
         }
 
         self::assertSame(
@@ -107,15 +82,37 @@ class NoInfiniteDeadlineGuardTest extends TestCase
             . "cannot interrupt it, so a single slow TiKV/PD can exhaust a whole PHP-FPM worker "
             . "pool. A `null` that silently means 'forever' is what caused issue #184: resolve it "
             . "to a positive deadline instead, exactly as GrpcClient::resolveTimeoutMs() does. "
-            . "If a site here is a legitimate opt-out, review it and update the ALLOWED map with "
-            . "its reason.\n" . implode("\n", $violations),
+            . "There is no legitimate opt-out left: a non-positive timeout is a "
+            . "configuration error (issue #276, GRPC-17).\n" . implode("\n", $violations),
         );
 
         // Without this the test would also pass if the scan silently stopped
-        // finding anything — the one allowlisted site below is its witness.
-        self::assertSame(1, $total, 'The scan found a different number of '
-            . 'Timeval::infFuture() sites than the one documented opt-out; the scan is '
-            . 'broken, not the source.');
+        // finding anything. There is no allowlisted site left to be the
+        // witness, so the scan itself is checked: it still has to find the
+        // one `infFuture()` the *tests* use as the reference value.
+        self::assertSame(0, $total, 'The scan found ' . $total . ' Timeval::infFuture() site(s) '
+            . 'in src/Client; there must be none — a non-positive timeout is a configuration '
+            . 'error (issue #276, GRPC-17).');
+    }
+
+    /**
+     * The scan must still find an `infFuture()` when there is one — the
+     * guard above asserts a count of zero, so without a witness the test
+     * would also pass if the scan silently stopped matching anything.
+     */
+    public function testTheScanStillFindsAnInfiniteDeadlineSite(): void
+    {
+        $code = <<<'PHP'
+        <?php
+        $deadline = $timeoutMs > 0
+            ? Timeval::now()->add(new Timeval($timeoutMs * 1000))
+            : Timeval::infFuture();
+        PHP;
+
+        $sites = $this->infiniteDeadlineSites($code);
+
+        self::assertCount(1, $sites, 'The scan must find an executable infFuture() site');
+        self::assertStringContainsString('Timeval::infFuture()', $sites[0]);
     }
 
     /**
@@ -124,8 +121,8 @@ class NoInfiniteDeadlineGuardTest extends TestCase
      *
      * Tokenised rather than regexed so a call that is built dynamically (or
      * spread over lines) is still found, and so the same text inside a
-     * comment or a docblock — which is where the rationale for these two
-     * sites is written — is not mistaken for code.
+     * comment or a docblock — which is where the rationale for a site is
+     * written — is not mistaken for code.
      *
      * @return list<string>
      */

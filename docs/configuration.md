@@ -988,9 +988,10 @@ $client = RawKvClient::create(
 ```
 
 Every key is optional and keeps its default when it is omitted. A threshold of
-`0` — or any negative value — disables the warning for that operation type,
-so `'readThresholdMs' => 0` silences the read warning while the other six stay
-active. Omitting the whole `slowLog` key disables slow logging entirely.
+`0` disables the warning for that operation type, so `'readThresholdMs' => 0`
+silences the read warning while the other six stay active. A negative value is
+a configuration error and throws `InvalidArgumentException`. Omitting the whole
+`slowLog` key disables slow logging entirely.
 
 | Option key               | Default | Operations covered                                                                    |
 |--------------------------|---------|---------------------------------------------------------------------------------------|

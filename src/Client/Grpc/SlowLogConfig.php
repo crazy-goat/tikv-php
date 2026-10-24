@@ -8,7 +8,10 @@ namespace CrazyGoat\TiKV\Client\Grpc;
  * Configuration for slow operation logging.
  *
  * Thresholds are in milliseconds. A threshold of 0 disables slow logging
- * for that operation type.
+ * for that operation type — a documented contract of this class, unlike the
+ * gRPC deadlines, where a non-positive value is a configuration error
+ * (issue #276, GRPC-17). A negative threshold is rejected here, at
+ * construction, and throws `InvalidArgumentException`.
  *
  * @see https://github.com/crazy-goat/tikv-php/issues/31
  */

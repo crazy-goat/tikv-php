@@ -47,6 +47,7 @@ interface GrpcClientInterface
      *                            `InvalidArgumentException`
      * @return T Response message
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException On gRPC error
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function call(
         string $address,
@@ -78,6 +79,7 @@ interface GrpcClientInterface
      *                            `InvalidArgumentException`
      * @return GrpcFuture Un-waited future resolving to T
      * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callAsync(
         string $address,
@@ -106,6 +108,7 @@ interface GrpcClientInterface
      *                            `InvalidArgumentException`
      * @return T Response message
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException On gRPC error
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callStreaming(
         string $address,

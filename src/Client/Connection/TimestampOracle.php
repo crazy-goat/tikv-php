@@ -152,6 +152,16 @@ final class TimestampOracle
             : static fn (): string => $pdAddress;
         $this->clock = $clock ?? static fn (): int => (int) (microtime(true) * 1000);
 
+        if ($tsoTimeoutMs <= 0) {
+            // A non-positive TSO deadline is a configuration error
+            // (issue #276, GRPC-17); rejecting it here reports it where the
+            // mistake was made instead of deep inside the transport.
+            throw new InvalidArgumentException(sprintf(
+                'tsoTimeoutMs must be greater than 0, got %d',
+                $tsoTimeoutMs,
+            ));
+        }
+
         $resolvedPoolSize = $poolSize ?? self::DEFAULT_TIMESTAMP_POOL_SIZE;
         if ($resolvedPoolSize < 1) {
             throw new InvalidArgumentException('Timestamp pool size must be >= 1');
