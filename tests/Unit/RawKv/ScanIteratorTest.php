@@ -331,6 +331,10 @@ class ScanIteratorTest extends TestCase
         $scanFn = function () use (&$calls): array {
             $calls++;
 
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
             return $calls === 1
                 ? [['key' => 'k1', 'value' => '1'], ['key' => 'k5', 'value' => '5']]
                 : [['key' => 'k2', 'value' => '2'], ['key' => 'k9', 'value' => '9']];
@@ -402,7 +406,15 @@ class ScanIteratorTest extends TestCase
     public function testConstantFullPageOnAllFfCursorThrows(): void
     {
         $key = "\xFF\xFF";
-        $scanFn = fn(): array => [['key' => $key, 'value' => 'v']];
+        $calls = 0;
+        $scanFn = function () use (&$calls, $key): array {
+            $calls++;
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
+            return [['key' => $key, 'value' => 'v']];
+        };
 
         $iterator = new ScanIterator($scanFn, "\xFF", '', 1);
 
@@ -427,6 +439,10 @@ class ScanIteratorTest extends TestCase
         $calls = 0;
         $scanFn = function () use (&$calls): array {
             $calls++;
+
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
 
             return [['key' => 'k1', 'value' => 'v1']];
         };
