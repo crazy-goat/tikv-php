@@ -252,6 +252,11 @@ final class TxnKvClient
          * other clients.
          */
         private readonly bool $ownsGrpcClient = true,
+        /**
+         * Optional clock (milliseconds) for the lock TTL bookkeeping, handed
+         * to every transaction. Test seam (issue #429); defaults to the wall clock.
+         */
+        private readonly ?Closure $clock = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -417,6 +422,14 @@ final class TxnKvClient
             TwoPhaseCommitter::DEFAULT_PESSIMISTIC_LOCK_TTL_MS,
         );
 
+        // Read the local clock BEFORE the start timestamp and the GC check
+        // (a PD fetch on a cache miss): TiKV counts a lock TTL from the start
+        // timestamp, so an earlier reading keeps the tracked primary-lock
+        // expiry no later than the real one (issue #429).
+        $startedAtMs = $this->clock instanceof Closure
+            ? ($this->clock)()
+            : (int) (microtime(true) * 1000);
+
         $startTs = $this->pdClient->getTimestamp();
 
         $this->validateStartTsAgainstGcSafePoint($startTs);
@@ -462,6 +475,8 @@ final class TxnKvClient
             lockWaitTimeMs: $lockWaitTimeMs,
             optimisticLockTtlMs: $optimisticLockTtlMs,
             pessimisticLockTtlMs: $pessimisticLockTtlMs,
+            clock: $this->clock,
+            startedAtMs: $startedAtMs,
         );
     }
 

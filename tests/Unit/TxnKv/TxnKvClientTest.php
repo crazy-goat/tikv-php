@@ -19,6 +19,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use PHPUnit\Framework\TestCase;
@@ -668,5 +669,32 @@ class TxnKvClientTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage("options['lockWaitTimeMs'] must be >= 0");
         $client->begin(['lockWaitTimeMs' => -1]);
+    }
+
+    public function testBeginTracksTheClockReadingTakenBeforeTheStartTimestamp(): void
+    {
+        $nowMs = 1_000_000;
+        $pdClient = $this->createMock(PdClientInterface::class);
+        // The start timestamp fetch takes 250 ms, as a slow PD round trip would.
+        $pdClient->method('getTimestamp')->willReturnCallback(static function () use (&$nowMs): int {
+            $nowMs += 250;
+
+            return 2000;
+        });
+        $client = new TxnKvClient(
+            $pdClient,
+            $this->createMock(GrpcClientInterface::class),
+            clock: static function () use (&$nowMs): int {
+                return $nowMs;
+            },
+        );
+
+        $transaction = $client->begin();
+
+        $stateProperty = new \ReflectionProperty(Transaction::class, 'state');
+        $state = $stateProperty->getValue($transaction);
+        $this->assertInstanceOf(TransactionState::class, $state);
+        $this->assertSame(1_000_000, $state->getStartedAtMs());
+        $this->assertSame(1_000_250, $nowMs);
     }
 }

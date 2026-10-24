@@ -141,6 +141,12 @@ final class Transaction
          * wall clock. Shared with the committer.
          */
         private readonly ?\Closure $clock = null,
+        /**
+         * Local clock reading (ms) taken before the start timestamp was
+         * fetched; null reads the clock now. Internal: begin() passes it so
+         * the tracked lock expiry is never later than the real one (issue #429).
+         */
+        ?int $startedAtMs = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -167,7 +173,7 @@ final class Transaction
                 ));
             }
         }
-        $this->state = new TransactionState($this->nowMs());
+        $this->state = new TransactionState($startedAtMs ?? $this->nowMs());
 
         $this->reader = new TxnReader(
             startTs: $this->startTs,
@@ -416,8 +422,9 @@ final class Transaction
 
         $forUpdateTs = $this->readTsByKey[$key] ?? $this->pdClient->getTimestamp();
         if ($this->eagerPessimisticLocks) {
-            // The TTL the lock request carries, measured before the RPC: the
-            // request is built at or after this instant, so the tracked
+            // The TTL the lock request carries, measured before the RPC. The
+            // start time was read before the start timestamp was fetched, and
+            // TiKV counts the TTL from the start timestamp, so the tracked
             // expiry below is never later than the real one.
             $lockTtlMs = $this->committer->ttlWithUptimeMs($this->state, $this->pessimisticLockTtlMs);
             $this->state->setPessimisticPrimaryKey($key);

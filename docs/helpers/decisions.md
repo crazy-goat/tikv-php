@@ -1219,7 +1219,9 @@ PHP has no background thread, so the client cannot run client-go's
    in the life of the transaction. TiKV keeps `max(lock_ttl, lock.ttl)` on
    prewrite (`prewrite.rs:527`), so the larger prewrite TTL cannot shrink a
    pessimistic lock. The uptime is the client clock since the start of the
-   `Transaction`. `MAX_TXN_TTL_MS` is one hour (client-go's `MaxTxnTTL`); at
+   `Transaction`. `begin()` reads that clock before it fetches the start
+   timestamp and runs the GC safe-point check, so the tracked start is never
+   later than the real one. `MAX_TXN_TTL_MS` is one hour (client-go's `MaxTxnTTL`); at
    the cap the client sends no more heartbeats. `MAX_LOCK_TTL_MS` (120000)
    caps only the per-mutation scaling of the optimistic TTL and the value of
    the two TTL options. The prewrite heartbeat trigger (half of the base TTL
