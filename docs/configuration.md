@@ -1564,7 +1564,7 @@ try {
 }
 ```
 
-Batch methods already send their sub-batches in parallel (default concurrency 16, `RawKvClient::DEFAULT_MAX_CONCURRENCY`). The `batchDeadlineMs` timeout option bounds the whole fan-out (see [Timeouts](#timeouts)).
+Batch methods already send their sub-batches in parallel (default concurrency 16, `RawKvClient::DEFAULT_MAX_CONCURRENCY`). When you set the `batchDeadlineMs` timeout option to a value above 0, it bounds the whole fan-out. The default `0` disables it (see [Timeouts](#timeouts)).
 
 ## Production Configuration
 
