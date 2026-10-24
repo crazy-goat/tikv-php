@@ -764,7 +764,7 @@ $client = RawKvClient::create(['127.0.0.1:2379'], logger: $logger);
 // The client will log:
 // - Connection attempts and failures
 // - Retry attempts with backoff information
-// - Region cache hits/misses
+// - Region cache hits/misses (DEBUG level only)
 // - Error conditions
 ```
 
