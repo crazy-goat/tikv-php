@@ -196,14 +196,17 @@ class ConnectionFactoryTest extends TestCase
         $this->assertSame(45000, $bundle->timeoutConfig->ingestTimeoutMs);
     }
 
-    public function testTimeoutIngestTimeoutMsNonIntFallsBackToDefault(): void
+    public function testTimeoutIngestTimeoutMsNonIntIsRejected(): void
     {
-        $bundle = ConnectionFactory::create(
+        // A mistyped value was silently dropped before (issue #272): the
+        // option had no effect and the default applied, with no warning.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('timeout option "ingestTimeoutMs" must be an int (milliseconds), string given');
+
+        ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['timeout' => ['ingestTimeoutMs' => '45000']],
         );
-
-        $this->assertSame(60000, $bundle->timeoutConfig->ingestTimeoutMs);
     }
 
     // ========================================================================
@@ -227,14 +230,15 @@ class ConnectionFactoryTest extends TestCase
         $this->assertSame(2500, $bundle->timeoutConfig->batchDeadlineMs);
     }
 
-    public function testTimeoutBatchDeadlineMsNonIntFallsBackToDefault(): void
+    public function testTimeoutBatchDeadlineMsNonIntIsRejected(): void
     {
-        $bundle = ConnectionFactory::create(
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('timeout option "batchDeadlineMs" must be an int (milliseconds), string given');
+
+        ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['timeout' => ['batchDeadlineMs' => '2500']],
         );
-
-        $this->assertSame(0, $bundle->timeoutConfig->batchDeadlineMs);
     }
 
     // ========================================================================
@@ -289,6 +293,63 @@ class ConnectionFactoryTest extends TestCase
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['timeout' => ['notATimeout' => 0]],
+        );
+    }
+
+    /**
+     * A group that is not a map at all is a misconfiguration of the same
+     * class as an unknown key — `options['tls']` already fails closed on it
+     * (issue #272, GRPC-13).
+     */
+    public function testANonArrayTimeoutOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['timeout'] must be an array, got string");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => 'readTimeoutMs=1000'],
+        );
+    }
+
+    public function testANonArraySlowLogOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['slowLog'] must be an array, got string");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => 'readThresholdMs=100'],
+        );
+    }
+
+    /**
+     * A slow-log threshold of the wrong type was silently dropped before
+     * (issue #272): the option had no effect and the default applied.
+     */
+    public function testANonIntSlowLogThresholdIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('slow-log option "readThresholdMs" must be an int (milliseconds), string given');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => ['readThresholdMs' => '250']],
+        );
+    }
+
+    /**
+     * The slow-log error names the option the user wrote, not the internal
+     * field — like the timeout group does.
+     */
+    public function testANegativeSlowLogThresholdNamesTheOption(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('slow-log option "readThresholdMs" must be greater than or equal to 0, got -1');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => ['readThresholdMs' => -1]],
         );
     }
 
@@ -429,16 +490,19 @@ class ConnectionFactoryTest extends TestCase
     }
 
     #[DataProvider('metadataDeadlineProvider')]
-    public function testTimeoutMetadataDeadlineNonIntFallsBackToDefault(
+    public function testTimeoutMetadataDeadlineNonIntIsRejected(
         string $field,
-        int $default,
     ): void {
-        $bundle = ConnectionFactory::create(
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf(
+            'timeout option "%s" must be an int (milliseconds), string given',
+            $field,
+        ));
+
+        ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['timeout' => [$field => '3000']],
         );
-
-        $this->assertSame($default, $bundle->timeoutConfig->{$field});
     }
 
     /**

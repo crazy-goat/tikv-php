@@ -990,7 +990,8 @@ $client = RawKvClient::create(
 Every key is optional and keeps its default when it is omitted. A threshold of
 `0` disables the warning for that operation type, so `'readThresholdMs' => 0`
 silences the read warning while the other six stay active. A negative value is
-a configuration error and throws `InvalidArgumentException`. Omitting the whole
+a configuration error and throws `InvalidArgumentException`, and so is a key
+the client does not know or a value that is not an integer. Omitting the whole
 `slowLog` key disables slow logging entirely.
 
 | Option key               | Default | Operations covered                                                                    |
@@ -1508,8 +1509,9 @@ derived from `TimeoutConfig`'s constructor, so a field that is added to the
 class is configurable the moment it exists. A key the client does not know is
 reported instead of silently dropped: `options['timeout'] => ['ingestTimeout' => 300000]`
 (a missing `Ms`) throws `InvalidArgumentException` naming the unknown key
-rather than quietly applying the 60-second default. The same holds for
-`options['slowLog']`.
+rather than quietly applying the 60-second default. A value of the wrong type
+(`'readTimeoutMs' => '60000'`) is rejected the same way, and the group itself
+must be an array. The same holds for `options['slowLog']`.
 
 ### Deadlines are never infinite
 

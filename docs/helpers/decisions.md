@@ -1006,10 +1006,11 @@ the thrown type. Pinned by `tests/Unit/TxnKv/TxnKvFanoutTest.php`
 
 ## An option key the client does not know is an error, not a no-op (issue #272)
 
-Issue #272 fixed the concrete symptom — `options['timeout']['ingestTimeoutMs']`
-was dropped on the floor, so an operator who configured a five-minute SST
-ingest deadline got the 60-second default and no warning — and recorded the
-decision that keeps it fixed:
+The concrete symptom — `options['timeout']['ingestTimeoutMs']` was dropped on
+the floor, so an operator who configured a five-minute SST ingest deadline got
+the 60-second default and no warning — was fixed by #580, which re-added the
+key to the hand-written list. Issue #272 records the decision that keeps it
+fixed:
 
 1. **The mapping is derived from the config class, not written out.** The
    factory reads `TimeoutConfig`'s and `SlowLogConfig`'s constructor

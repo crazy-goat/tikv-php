@@ -744,16 +744,17 @@ final class ConnectionFactory
      * "no overall batch deadline" value.
      *
      * @param array<array-key, mixed> $timeouts
+     * @param list<string> $recognised the keys the config class knows; every
+     *                                 key has already been checked against it
      */
-    private static function assertPositiveTimeoutOptions(array $timeouts): void
+    private static function assertPositiveTimeoutOptions(array $timeouts, array $recognised): void
     {
-        $recognised = self::recognisedOptionKeys(TimeoutConfig::class);
-
         foreach ($timeouts as $key => $value) {
             if (!is_string($key) || !in_array($key, $recognised, true)) {
                 continue;
             }
             if (!is_int($value)) {
+                // The type is checked by assertIntTimeoutOptions() first.
                 continue;
             }
             if ($key === 'batchDeadlineMs') {
@@ -773,15 +774,74 @@ final class ConnectionFactory
     }
 
     /**
+     * Reject a timeout option whose value is not a number.
+     *
+     * A value of the wrong type was silently dropped before (issue #272,
+     * GRPC-13): the option had no effect and the default applied, with no
+     * warning anywhere — the same failure mode an unknown key has. Every
+     * other option group in the factory already fails closed on a mistyped
+     * value.
+     *
+     * @param array<array-key, mixed> $timeouts
+     * @param list<string> $recognised
+     */
+    private static function assertIntTimeoutOptions(array $timeouts, array $recognised): void
+    {
+        foreach ($timeouts as $key => $value) {
+            if (!is_string($key) || !in_array($key, $recognised, true)) {
+                continue;
+            }
+            if (!is_int($value)) {
+                throw new InvalidArgumentException(sprintf(
+                    'timeout option "%s" must be an int (milliseconds), %s given',
+                    $key,
+                    get_debug_type($value),
+                ));
+            }
+        }
+    }
+
+    /**
+     * Reject a slow-log threshold whose value is not a number, and name the
+     * option path the user wrote (issue #272, GRPC-13).
+     *
+     * @param array<array-key, mixed> $thresholds
+     * @param list<string> $recognised
+     */
+    private static function assertIntSlowLogOptions(array $thresholds, array $recognised): void
+    {
+        foreach ($thresholds as $key => $value) {
+            if (!is_string($key) || !in_array($key, $recognised, true)) {
+                continue;
+            }
+            if (!is_int($value)) {
+                throw new InvalidArgumentException(sprintf(
+                    'slow-log option "%s" must be an int (milliseconds), %s given',
+                    $key,
+                    get_debug_type($value),
+                ));
+            }
+            if ($value < 0) {
+                throw new InvalidArgumentException(sprintf(
+                    'slow-log option "%s" must be greater than or equal to 0, got %d',
+                    $key,
+                    $value,
+                ));
+            }
+        }
+    }
+
+    /**
      * Build TimeoutConfig from the options array.
      *
      * The mapping is driven by {@see TimeoutConfig}'s constructor signature
      * (issue #272, GRPC-13): every field is configurable under its own name,
      * and a field that is added to the class is configurable the moment it
-     * exists. The hand-written list this replaces had already dropped one
-     * field — `ingestTimeoutMs` — silently, so an operator who configured a
-     * five-minute ingest deadline got the 60-second default and no warning
-     * at all.
+     * exists. The hand-written list this replaces had already dropped the
+     * `ingestTimeoutMs` field once — it was re-added by #580, but nothing
+     * kept the two in step, so the next field would have gone the same way.
+     * A dropped field is invisible: the operator configured a five-minute
+     * ingest deadline and got the 60-second default, with no warning.
      *
      * @param array<string, mixed> $options
      */
@@ -789,18 +849,27 @@ final class ConnectionFactory
     {
         $defaults = new TimeoutConfig();
 
-        if (!isset($options['timeout']) || !is_array($options['timeout'])) {
+        if (!array_key_exists('timeout', $options) || $options['timeout'] === null) {
             return $defaults;
+        }
+
+        if (!is_array($options['timeout'])) {
+            throw new InvalidArgumentException(
+                "options['timeout'] must be an array, got " . get_debug_type($options['timeout'])
+            );
         }
 
         $t = $options['timeout'];
 
-        self::assertKnownOptionKeys($t, self::recognisedOptionKeys(TimeoutConfig::class), "options['timeout']");
-        self::assertPositiveTimeoutOptions($t);
+        $recognised = self::recognisedOptionKeys(TimeoutConfig::class);
+
+        self::assertKnownOptionKeys($t, $recognised, "options['timeout']");
+        self::assertIntTimeoutOptions($t, $recognised);
+        self::assertPositiveTimeoutOptions($t, $recognised);
 
         /** @var array<string, int> $values */
         $values = [];
-        foreach (self::recognisedOptionKeys(TimeoutConfig::class) as $key) {
+        foreach ($recognised as $key) {
             $value = $t[$key] ?? null;
             if (is_int($value)) {
                 $values[$key] = $value;
@@ -822,17 +891,26 @@ final class ConnectionFactory
      */
     private static function buildSlowLogConfig(array $options): ?SlowLogConfig
     {
-        if (!isset($options['slowLog']) || !is_array($options['slowLog'])) {
+        if (!array_key_exists('slowLog', $options) || $options['slowLog'] === null) {
             return null;
+        }
+
+        if (!is_array($options['slowLog'])) {
+            throw new InvalidArgumentException(
+                "options['slowLog'] must be an array, got " . get_debug_type($options['slowLog'])
+            );
         }
 
         $s = $options['slowLog'];
 
-        self::assertKnownOptionKeys($s, self::recognisedOptionKeys(SlowLogConfig::class), "options['slowLog']");
+        $recognised = self::recognisedOptionKeys(SlowLogConfig::class);
+
+        self::assertKnownOptionKeys($s, $recognised, "options['slowLog']");
+        self::assertIntSlowLogOptions($s, $recognised);
 
         /** @var array<string, int> $values */
         $values = [];
-        foreach (self::recognisedOptionKeys(SlowLogConfig::class) as $key) {
+        foreach ($recognised as $key) {
             $value = $s[$key] ?? null;
             if (is_int($value)) {
                 $values[$key] = $value;
