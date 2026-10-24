@@ -861,6 +861,9 @@ final class GrpcClient implements GrpcClientInterface
      * strictly positive number of milliseconds), so the rejection of a
      * non-positive value happens in {@see self::resolveTimeoutMs()} — before
      * a channel is opened (issue #276, GRPC-17).
+     *
+     * The guard below is defence in depth: ext-grpc does not reject a
+     * negative `Timeval`, it builds a deadline already in the past.
      */
     private function deadline(int $timeoutMs): Timeval
     {

@@ -59,6 +59,12 @@ final readonly class ApiV2GrpcClient implements GrpcClientInterface
      * @param class-string<T> $responseClass
      * @return T
      */
+    /**
+     * @template T of Message
+     * @param class-string<T> $responseClass
+     * @return T
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
+     */
     public function call(
         string $address,
         string $service,
@@ -116,6 +122,7 @@ final readonly class ApiV2GrpcClient implements GrpcClientInterface
      * @template T of Message
      * @param class-string<T> $responseClass
      * @return T
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callStreaming(
         string $address,

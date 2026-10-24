@@ -713,8 +713,10 @@ final class ConnectionFactory
      */
     private static function assertPositiveTimeoutOptions(array $timeouts): void
     {
+        $recognised = self::recognisedTimeoutKeys();
+
         foreach ($timeouts as $key => $value) {
-            if (!is_string($key) || !in_array($key, self::recognisedTimeoutKeys(), true)) {
+            if (!is_string($key) || !in_array($key, $recognised, true)) {
                 continue;
             }
             if (!is_int($value)) {

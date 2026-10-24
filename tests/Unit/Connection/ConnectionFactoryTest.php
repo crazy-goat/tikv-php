@@ -289,6 +289,39 @@ class ConnectionFactoryTest extends TestCase
         $this->assertSame(5000, $bundle->timeoutConfig->readTimeoutMs);
     }
 
+    /**
+     * Every {@see TimeoutConfig} field is configurable through
+     * `options['timeout']` under its own name — the factory derives the
+     * list of keys it validates from that class, so a new field is
+     * validated as soon as it exists and no key can drift.
+     */
+    public function testEveryTimeoutConfigFieldIsConfigurableByItsOwnName(): void
+    {
+        $parameters = (new \ReflectionMethod(TimeoutConfig::class, '__construct'))->getParameters();
+
+        $fields = [];
+        foreach ($parameters as $parameter) {
+            $fields[] = $parameter->getName();
+        }
+
+        self::assertNotEmpty($fields, 'TimeoutConfig must have timeout fields');
+
+        foreach ($fields as $field) {
+            $configured = 4321;
+
+            $bundle = ConnectionFactory::create(
+                ['127.0.0.1:2379'],
+                options: ['timeout' => [$field => $configured]],
+            );
+
+            self::assertSame(
+                $configured,
+                $bundle->timeoutConfig->{$field},
+                "options['timeout']['{$field}'] must reach TimeoutConfig::\${$field}",
+            );
+        }
+    }
+
     public function testANegativeBatchDeadlineOptionIsRejected(): void
     {
         $this->expectException(InvalidArgumentException::class);

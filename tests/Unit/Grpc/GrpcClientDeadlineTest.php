@@ -68,6 +68,23 @@ class GrpcClientDeadlineTest extends TestCase
     }
 
     /**
+     * The deadline seam refuses a non-positive timeout on its own, even when
+     * it is called with a raw value (issue #276, GRPC-17): a negative value
+     * would build a deadline already in the past, and ext-grpc does not
+     * reject it.
+     */
+    #[DataProvider('provideNonPositiveTimeouts')]
+    public function testTheDeadlineSeamRefusesANonPositiveTimeout(int $timeoutMs): void
+    {
+        $method = new \ReflectionMethod(GrpcClient::class, 'deadline');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('timeoutMs must be greater than 0, got %d', $timeoutMs));
+
+        $method->invoke(new GrpcClient(), $timeoutMs);
+    }
+
+    /**
      * @return array<string, array{int}>
      */
     public static function provideNonPositiveTimeouts(): array

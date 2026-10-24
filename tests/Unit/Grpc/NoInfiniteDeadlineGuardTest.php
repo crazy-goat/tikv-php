@@ -96,15 +96,12 @@ class NoInfiniteDeadlineGuardTest extends TestCase
     }
 
     /**
-     * The scan must still find an `infFuture()` when there is one — the
-     * guard above asserts a count of zero, so without a witness the test
-     * would also pass if the scan silently stopped matching anything.
+     * The scan must look at the client sources — the guard above asserts a
+     * count of zero, so without this a scan over an empty or wrong
+     * directory would pass.
      */
     public function testTheScanLooksAtTheClientSourceDirectory(): void
     {
-        // The witness above proves that the scan *can* find a site; this
-        // proves that it looks at the right place. Without it a scan over an
-        // empty or wrong directory would pass.
         self::assertDirectoryExists(self::CLIENT_SOURCE_DIR);
         self::assertNotEmpty(
             $this->phpFilesUnder(self::CLIENT_SOURCE_DIR),
@@ -112,6 +109,11 @@ class NoInfiniteDeadlineGuardTest extends TestCase
         );
     }
 
+    /**
+     * The scan must still find an `infFuture()` when there is one — the
+     * guard above asserts a count of zero, so without a witness the test
+     * would also pass if the scan silently stopped matching anything.
+     */
     public function testTheScanStillFindsAnInfiniteDeadlineSite(): void
     {
         $code = <<<'PHP'
