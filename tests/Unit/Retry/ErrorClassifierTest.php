@@ -6,8 +6,8 @@ namespace CrazyGoat\TiKV\Tests\Unit\Retry;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
-use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;

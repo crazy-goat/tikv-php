@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Retry;
 
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
-use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
@@ -131,22 +131,11 @@ final class ErrorClassifier
             return BackoffType::MaxTimestampNotSynced;
         }
 
-        // Fatal flashback errors
-        if (str_contains($message, 'FlashbackInProgress')) {
-            return null;
-        }
-        if (str_contains($message, 'FlashbackNotPrepared')) {
-            return null;
-        }
-
         // Generic exception type checks. An unmapped RegionException (no typed
         // ErrorKind) is fatal by default: unknown errors must not be retried
         // (issue #251, REG-20). Retryable cases are enumerated explicitly
-        // above and via the typed ErrorKind path.
-        if ($e instanceof RegionException) {
-            return null;
-        }
-
+        // above and via the typed ErrorKind path. A kind-less RegionException
+        // therefore falls through to the final fatal return below.
         return null;
     }
 
