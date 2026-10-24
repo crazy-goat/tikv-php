@@ -839,8 +839,8 @@ The client writes these levels:
 
 - **DEBUG**: Region cache hits and misses, store cache hits and misses, channel opening and eviction, request detail. This level is verbose. Do not use it in production.
 - **INFO**: Region and store invalidation, region leader switch, PD failover, transaction start, fallback from one-phase or async commit to two-phase commit.
-- **WARNING**: Retry attempts (`Retrying operation`), failed regions in a batch, channel reconnects, and slow operations (only when the `slowLog` option is enabled — see [Slow Operation Logging](#slow-operation-logging)).
-- **ERROR**: Failures after the retries end (`Retry budget exhausted`, `Retry deadline exhausted`), fatal errors, and failed `close()` steps.
+- **WARNING**: Retry attempts (`Retrying operation`), failed regions in a batch, channel reconnects, partial prewrite failure, `Pessimistic lock retry budget exhausted`, a skipped GC safe-point check, and slow operations (only when the `slowLog` option is enabled — see [Slow Operation Logging](#slow-operation-logging)).
+- **ERROR**: The general retry loop (`RetryExecutor`) writes `Retry attempt cap exhausted`, `Retry budget exhausted`, `ServerBusy budget exhausted`, `Retry deadline exhausted` and `Fatal error, not retrying`. The client also writes ERROR records for an exhausted batch deadline, a failed TSO request, an undetermined primary commit, and failed `close()` steps.
 
 Region cache hits and misses are **not** INFO records. A logger at the `INFO` level does not show them.
 
