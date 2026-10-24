@@ -25,6 +25,7 @@ policy now classifies as internal.
 
 ### Fixed
 
+- `docs/operations.md` now has a Limits section with the real key, value, scan and batch constants and the exception that the client throws. It states that batches split automatically per region. `docs/advanced.md` no longer shows the redundant `BatchOptimizer` class, and the Best Practices examples no longer advise manual chunking (#398)
 - `docs/configuration.md` now states the real log levels and shows sample log lines that exist in `src/` (issue #380, DOC-14). Region cache hits and misses are DEBUG records, not INFO. The invalidation record is `Region invalidated` with a `regionId` field and no `reason`. The sample keys use the `KeyRedactor` format. (#380)
 - `ScanIterator` now throws `TiKvException` when a page does not move the scan cursor forward — its last key does not advance the cursor, or its first key lies before it — instead of looping forever on a server that keeps answering a full page ending on the same key. Any forward scan was affected, bounded ones included (a constant last key keeps the cursor below `endKey`). Well-behaved servers return strictly increasing keys and are unaffected. (#312)
 - The repository now commits `composer.lock` (resolved with `config.platform.php` set to `8.2.0`, so it installs on PHP 8.2 to 8.4), the Dockerfile copies it before `composer install`, `make clean` keeps it, and the CI `lint` job runs `composer audit --locked`. `squizlabs/php_codesniffer` is raised to `^3.13.6 || ^4.0.2` (CVE-2026-67434). (#311)
