@@ -25,6 +25,7 @@ policy now classifies as internal.
 
 ### Fixed
 
+- `README.md` and `docs/operations.md` now state the scope of `setAtomicForCAS(true)`. The flag is per client instance and makes `put()`, `delete()`, `batchPut()` and `batchDelete()` send `for_cas` too. The docs also tell you to use one mode for all writers of the same keys. (#399)
 - `docs/operations.md` now has a Limits section with the real key, value, scan and batch constants and the exception that the client throws. It states that batches split automatically per region. `docs/advanced.md` no longer shows the redundant `BatchOptimizer` class, and the Best Practices examples no longer advise manual chunking. (#398)
 - `docs/configuration.md` now states the real log levels and shows sample log lines that exist in `src/` (issue #380, DOC-14). Region cache hits and misses are DEBUG records, not INFO. The invalidation record is `Region invalidated` with a `regionId` field and no `reason`. The sample keys use the `KeyRedactor` format. (#380)
 - `ScanIterator` now throws `TiKvException` when a page does not move the scan cursor forward — its last key does not advance the cursor, or its first key lies before it — instead of looping forever on a server that keeps answering a full page ending on the same key. Any forward scan was affected, bounded ones included (a constant last key keeps the cursor below `endKey`). Well-behaved servers return strictly increasing keys and are unaffected. (#312)
