@@ -113,6 +113,11 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         );
     }
 
+    private function scanAll(): void
+    {
+        $this->reader()->scan('k0', 'k9', 10, new TransactionState(), $this->executor(), static fn (): null => null);
+    }
+
     private function lockedPair(string $key, int $ts = 2000): KvPair
     {
         $lock = new LockInfo();
@@ -164,7 +169,7 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         $this->readResponse = $response;
 
         try {
-            $this->reader()->scan('k0', 'k9', 10, new TransactionState(), $this->executor(), static fn (): null => null);
+            $this->scanAll();
             $this->fail('Expected a retry request');
         } catch (TxnRetryableException $e) {
             $this->assertSame(BackoffType::TxnLock, $e->backoffType);
@@ -197,7 +202,7 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
 
         $this->expectException(TxnRetryableException::class);
         try {
-            $this->reader()->scan('k0', 'k9', 10, new TransactionState(), $this->executor(), static fn (): null => null);
+            $this->scanAll();
         } finally {
             $this->assertSame(['k1', 'k2'], $this->resolvedKeys());
         }
