@@ -988,9 +988,10 @@ $client = RawKvClient::create(
 ```
 
 Every key is optional and keeps its default when it is omitted. A threshold of
-`0` — or any negative value — disables the warning for that operation type,
-so `'readThresholdMs' => 0` silences the read warning while the other six stay
-active. Omitting the whole `slowLog` key disables slow logging entirely.
+`0` disables the warning for that operation type, so `'readThresholdMs' => 0`
+silences the read warning while the other six stay active. A negative value is
+a configuration error and throws `InvalidArgumentException`. Omitting the whole
+`slowLog` key disables slow logging entirely.
 
 | Option key               | Default | Operations covered                                                                    |
 |--------------------------|---------|---------------------------------------------------------------------------------------|
@@ -1492,15 +1493,15 @@ per-region problem the retry executor already handles. `pdTimeoutMs` covers
 `KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`.
 
 Every gRPC call carries a deadline. `GrpcClientInterface::call()`'s `$timeoutMs`
-argument of `null` means the library default (30 s) and a value of `0` is the
-explicit opt-out meaning "no deadline at all" — see [Deadlines are never
-infinite](#deadlines-are-never-infinite).
+argument of `null` means the library default (30 s); a non-positive value is a
+configuration error and throws `InvalidArgumentException` — see [Deadlines are
+never infinite](#deadlines-are-never-infinite).
 
 When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught and retried by the retry executor unless the budget is exhausted.
 
 ### Default Timeouts
 
-By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Set any value to `0` to disable it (not recommended in production).
+By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
 
 ### Deadlines are never infinite
 
@@ -1520,12 +1521,15 @@ argument of `call()`, `callAsync()` and `callStreaming()` reads as:
 |--------------|--------------------------------------------------------------|
 | positive int | that many milliseconds from now                              |
 | `null`       | the library default — `GrpcClient::DEFAULT_TIMEOUT_MS` (30 s)  |
-| `0`          | explicit opt-out: no deadline at all                          |
+| `0` or less  | a configuration error — `InvalidArgumentException` is thrown   |
 
-A caller that omits the argument therefore gets a bounded call; only a caller that
-passes `0` (or a `TimeoutConfig` field set to `0`) gets an unbounded one. Prefer a
-large finite value: an unbounded call is a resource that a hung peer can pin
-indefinitely, in a process that has no way to give the slot back.
+A caller that omits the argument therefore gets a bounded call, and there is no
+way to ask for an unbounded one. `0` used to be the explicit opt-out, but it is
+also what an unset environment variable coerces to — `(int) getenv('TIKV_READ_TIMEOUT_MS')`
+yields `0` when the variable is missing — so the opt-out turned a configuration
+mistake into a call that never expires. Prefer a large finite value: an
+unbounded call is a resource that a hung peer can pin indefinitely, in a process
+that has no way to give the slot back.
 
 ### Handling Slow Operations
 

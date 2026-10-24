@@ -126,8 +126,10 @@ final class GrpcClient implements GrpcClientInterface
      * C extension is not interrupted by `max_execution_time`, so a
      * half-open connection pinned a PHP-FPM worker for minutes or forever
      * and exhausted the whole pool. `null` now means "library default" and a
-     * caller who genuinely wants an unbounded call must say so with the
-     * explicit sentinel `0`.
+     * non-positive value is a configuration error (issue #276, GRPC-17):
+     * `0` used to be the "no deadline" sentinel, but a value of `0` is
+     * exactly what an unset environment variable coerces to, so it turned a
+     * configuration mistake into an unbounded call.
      */
     public const DEFAULT_TIMEOUT_MS = 30000;
 
@@ -216,6 +218,12 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
+        // The timeout is validated before anything else happens: a
+        // non-positive value is a configuration error and must not be
+        // counted as an RPC, must not create (and cache) a channel and must
+        // not be reported as a failed call (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
         $operation = $service . '/' . $method;
         $this->metrics->rpcStarted($operation);
         $start = hrtime(true);
@@ -223,7 +231,7 @@ final class GrpcClient implements GrpcClientInterface
         try {
             $channel = $this->getChannel($address);
 
-            $deadline = $this->deadline($timeoutMs);
+            $deadline = $this->deadline($timeout);
 
             $call = new Call(
                 $channel,
@@ -274,6 +282,12 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
+        // The timeout is validated before anything else happens: a
+        // non-positive value is a configuration error and must not be
+        // counted as an RPC, must not create (and cache) a channel and must
+        // not be reported as a failed call (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
         $operation = $service . '/' . $method;
         $this->metrics->rpcStarted($operation);
         $start = hrtime(true);
@@ -281,7 +295,7 @@ final class GrpcClient implements GrpcClientInterface
         try {
             $channel = $this->getChannel($address);
 
-            $deadline = $this->deadline($timeoutMs);
+            $deadline = $this->deadline($timeout);
 
             $call = new Call(
                 $channel,
@@ -352,9 +366,11 @@ final class GrpcClient implements GrpcClientInterface
      * @param class-string<T> $responseClass Response message class name
      * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds;
      *                            null = the library default
-     *                            ({@see self::DEFAULT_TIMEOUT_MS}), 0 = no deadline
+     *                            ({@see self::DEFAULT_TIMEOUT_MS}); a
+     *                            non-positive value throws
      * @return GrpcFuture Un-waited future resolving to T
      * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callAsync(
         string $address,
@@ -368,9 +384,14 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
+        // The timeout is validated before anything is opened: a
+        // non-positive value is a configuration error and must not create
+        // (and cache) a channel before it is raised (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
         $channel = $this->getChannel($address);
 
-        $deadline = $this->deadline($timeoutMs);
+        $deadline = $this->deadline($timeout);
 
         $call = new Call(
             $channel,
@@ -812,30 +833,51 @@ final class GrpcClient implements GrpcClientInterface
      *
      * `null` — a call site with no opinion — becomes the conservative
      * library default {@see self::DEFAULT_TIMEOUT_MS} rather than an
-     * unbounded deadline. A caller that genuinely wants no deadline has to
-     * pass the explicit non-positive sentinel `0`, which is the same way
-     * the rest of the library spells "disabled" (`TimeoutConfig`'s
-     * `batchDeadlineMs = 0`).
+     * unbounded deadline. A non-positive value is rejected here
+     * (issue #276, GRPC-17): it used to be the "no deadline" sentinel, but a
+     * user-supplied `0` is far more likely to be an accident than an intent.
+     *
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When the resolved timeout is not positive
      */
     private function resolveTimeoutMs(?int $timeoutMs): int
     {
-        return $timeoutMs ?? self::DEFAULT_TIMEOUT_MS;
+        $timeout = $timeoutMs ?? self::DEFAULT_TIMEOUT_MS;
+
+        if ($timeout <= 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                sprintf('timeoutMs must be greater than 0, got %d', $timeout),
+            );
+        }
+
+        return $timeout;
     }
 
     /**
      * Build the gRPC deadline for a call (issue #260).
      *
-     * The single place where a deadline is derived from a `$timeoutMs`
-     * argument, so {@see self::resolveTimeoutMs()} cannot be honoured in
-     * one entry point and forgotten in another.
+     * The single place where a deadline is derived from a timeout, so
+     * {@see self::resolveTimeoutMs()} cannot be honoured in one entry point
+     * and forgotten in another. It takes the **resolved** timeout (a
+     * strictly positive number of milliseconds), so the rejection of a
+     * non-positive value happens in {@see self::resolveTimeoutMs()} — before
+     * a channel is opened (issue #276, GRPC-17).
+     *
+     * The guard below is defence in depth: ext-grpc does not reject a
+     * negative `Timeval`, it builds a deadline already in the past.
      */
-    private function deadline(?int $timeoutMs): Timeval
+    private function deadline(int $timeoutMs): Timeval
     {
-        $timeout = $this->resolveTimeoutMs($timeoutMs);
+        // Defence in depth: the caller resolves the timeout (and rejects a
+        // non-positive one) before it gets here, but a raw value that
+        // reached this method would build a deadline already in the past —
+        // every call would fail with DEADLINE_EXCEEDED (issue #276).
+        if ($timeoutMs <= 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                sprintf('timeoutMs must be greater than 0, got %d', $timeoutMs),
+            );
+        }
 
-        return $timeout > 0
-            ? Timeval::now()->add(new Timeval($timeout * 1000))
-            : Timeval::infFuture();
+        return Timeval::now()->add(new Timeval($timeoutMs * 1000));
     }
 
     private function createTlsCredentials(): ChannelCredentials

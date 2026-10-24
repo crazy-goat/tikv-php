@@ -15,9 +15,10 @@ namespace CrazyGoat\TiKV\Client\Grpc;
  * while a slow store is a per-region problem the retry executor already
  * handles. They are therefore configured separately (issue #260).
  *
- * Every field is an explicit number of milliseconds. `0` keeps the
- * historical "no deadline" meaning (documented, not recommended) — see
- * {@see GrpcClient::resolveTimeoutMs()}.
+ * Every field except `batchDeadlineMs` is an explicit number of
+ * milliseconds and must be strictly positive; `0` or a negative value is a
+ * configuration error (issue #276, GRPC-17). `batchDeadlineMs` uses `0`
+ * to disable the overall batch deadline.
  */
 final readonly class TimeoutConfig
 {
@@ -57,5 +58,35 @@ final readonly class TimeoutConfig
         public int $tsoTimeoutMs = self::DEFAULT_TSO_TIMEOUT_MS,
         public int $lockResolveTimeoutMs = self::DEFAULT_LOCK_RESOLVE_TIMEOUT_MS,
     ) {
+        $timeouts = [
+            'readTimeoutMs' => $this->readTimeoutMs,
+            'writeTimeoutMs' => $this->writeTimeoutMs,
+            'batchReadTimeoutMs' => $this->batchReadTimeoutMs,
+            'batchWriteTimeoutMs' => $this->batchWriteTimeoutMs,
+            'scanTimeoutMs' => $this->scanTimeoutMs,
+            'deleteRangeTimeoutMs' => $this->deleteRangeTimeoutMs,
+            'checksumTimeoutMs' => $this->checksumTimeoutMs,
+            'ingestTimeoutMs' => $this->ingestTimeoutMs,
+            'pdTimeoutMs' => $this->pdTimeoutMs,
+            'tsoTimeoutMs' => $this->tsoTimeoutMs,
+            'lockResolveTimeoutMs' => $this->lockResolveTimeoutMs,
+        ];
+
+        foreach ($timeouts as $name => $value) {
+            if ($value <= 0) {
+                throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                    sprintf('%s must be greater than 0, got %d', $name, $value),
+                );
+            }
+        }
+
+        // `batchDeadlineMs` sizes the overall batch deadline and keeps `0`
+        // as the documented "disabled" value — only a negative value is a
+        // configuration error there.
+        if ($this->batchDeadlineMs < 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                sprintf('batchDeadlineMs must be greater than or equal to 0, got %d', $this->batchDeadlineMs),
+            );
+        }
     }
 }

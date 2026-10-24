@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use Grpc\Timeval;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -66,20 +68,42 @@ class GrpcClientTimevalDeadlineTest extends TestCase
         );
     }
 
-    public function testZeroIsTheOnlyValueThatOptsOutOfADeadline(): void
+    /**
+     * A non-positive timeout is a configuration error (issue #276, GRPC-17):
+     * `0` used to be the explicit no-deadline sentinel, which is also what
+     * an unset environment variable coerces to.
+     */
+    #[DataProvider('provideNonPositiveTimeouts')]
+    public function testANonPositiveTimeoutIsRejected(int $timeoutMs): void
     {
-        self::assertSame(
-            0,
-            Timeval::compare($this->deadlineOf(0), Timeval::infFuture()),
-            '0 must remain the explicit, documented no-deadline sentinel.',
-        );
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('timeoutMs must be greater than 0, got %d', $timeoutMs));
+
+        $this->deadlineOf($timeoutMs);
+    }
+
+    /**
+     * @return array<string, array{int}>
+     */
+    public static function provideNonPositiveTimeouts(): array
+    {
+        return [
+            'zero' => [0],
+            'negative' => [-1],
+        ];
     }
 
     private function deadlineOf(?int $timeoutMs): Timeval
     {
+        // The timeout is resolved first (that is where a non-positive value
+        // is rejected, issue #276, GRPC-17), then the `Timeval` is built.
+        $resolve = new \ReflectionMethod(GrpcClient::class, 'resolveTimeoutMs');
+        $resolved = $resolve->invoke(new GrpcClient(), $timeoutMs);
+        self::assertIsInt($resolved);
+
         $method = new \ReflectionMethod(GrpcClient::class, 'deadline');
 
-        $value = $method->invoke(new GrpcClient(), $timeoutMs);
+        $value = $method->invoke(new GrpcClient(), $resolved);
         self::assertInstanceOf(Timeval::class, $value);
 
         return $value;

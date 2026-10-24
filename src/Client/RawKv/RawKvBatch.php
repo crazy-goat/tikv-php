@@ -19,7 +19,6 @@ use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient;
-use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -475,17 +474,13 @@ final readonly class RawKvBatch
     /**
      * The batch deadline in milliseconds, always strictly positive.
      *
-     * `TimeoutConfig` documents `0` as "no deadline" for the store fields, and
-     * `GrpcClient` honours that sentinel — which is exactly why this method
-     * must not hand its value on unchanged: the batch fan-out does NOT go
-     * through `GrpcClient::call()`, it hand-rolls `new Call(...)` (the three
-     * `execute*ForRegionAsync()` methods) and forwards the value to
-     * `callAsync()` on the API V2 path, so a configured `0` reached
-     * `Timeval::infFuture()` on one path and an already-expired
-     * `new Timeval(0)` on the other. A non-positive configuration therefore
-     * resolves to the same conservative library default `GrpcClient` applies
-     * to a call site with no opinion (`null`), so no batch sub-request can
-     * arm a deadline that never expires (issue #184).
+     * `TimeoutConfig` rejects a non-positive value outright (issue #276,
+     * GRPC-17), so this method can only ever see a positive one — the
+     * configuration is the single source of truth. The batch fan-out does
+     * NOT go through `GrpcClient::call()` — it hand-rolls `new Call(...)`
+     * (the three `execute*ForRegionAsync()` methods) and therefore never
+     * reaches `GrpcClient::deadline()` and its 30 s backstop (issue #260),
+     * so {@see self::deadlineFor()} carries the guard instead.
      *
      * The return type is `int`, not `?int`: the previous `?:` over a nullable
      * helper was one `match` arm away from arming an unbounded deadline in
@@ -499,7 +494,7 @@ final readonly class RawKvBatch
      */
     private function timeoutMs(string $operationType): int
     {
-        $configured = match ($operationType) {
+        return match ($operationType) {
             'batch_read' => $this->timeoutConfig->batchReadTimeoutMs,
             'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
             default => throw new InvalidArgumentException(sprintf(
@@ -507,24 +502,35 @@ final readonly class RawKvBatch
                 $operationType,
             )),
         };
-
-        return $configured > 0 ? $configured : GrpcClient::DEFAULT_TIMEOUT_MS;
     }
 
     /**
      * The one place in this class where a gRPC deadline is derived.
      *
      * Always finite by construction: it takes the strictly positive value
-     * {@see self::timeoutMs()} returns, so the three hand-rolled
-     * `new Call(...)` sites of the batch fan-out — which bypass
-     * `GrpcClient::deadline()` and therefore its 30 s backstop (issue #260) —
-     * cannot arm an unbounded deadline (issue #184).
+     * {@see self::timeoutMs()} returns and refuses anything else, so the
+     * three hand-rolled `new Call(...)` sites of the batch fan-out — which
+     * bypass `GrpcClient::deadline()` and therefore its 30 s backstop
+     * (issue #260) — can arm neither an unbounded nor an already expired
+     * deadline (issue #184, #276).
      * `tests/Unit/Grpc/RawKvBatchTimevalDeadlineTest` pins the produced
      * `Timeval` object with ext-grpc loaded; `NoInfiniteDeadlineGuardTest`
      * keeps `Timeval::infFuture()` out of every other site in `src/Client`.
      */
     private function deadlineFor(int $timeoutMs): Timeval
     {
+        // Defence in depth: the batch fan-out does not go through
+        // `GrpcClient::deadline()`, so this seam is the only place that can
+        // refuse a non-positive timeout. A negative value would produce a
+        // deadline already in the past — every sub-batch would fail with
+        // DEADLINE_EXCEEDED (issue #184, #276).
+        if ($timeoutMs <= 0) {
+            throw new InvalidArgumentException(sprintf(
+                'timeoutMs must be greater than 0, got %d',
+                $timeoutMs,
+            ));
+        }
+
         return Timeval::now()->add(new Timeval($timeoutMs * 1000));
     }
 

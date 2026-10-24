@@ -6,7 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
-use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
@@ -29,11 +29,12 @@ use Psr\Log\NullLogger;
  * The regression is a *comparison*, not a value. Before the fix the three
  * `execute*ForRegionAsync()` methods built the deadline inline as
  * `$timeout !== null ? now + $timeout : Timeval::infFuture()`; the `0` that
- * `TimeoutConfig` documents as "no deadline" then took the *finite* arm and
+ * `TimeoutConfig` documented as "no deadline" then took the *finite* arm and
  * produced a deadline already in the past, while the API V2 `callAsync()`
- * branch forwarded the same `0` to `GrpcClient::deadline()`, which reads it as
+ * branch forwarded the same `0` to `GrpcClient::deadline()`, which read it as
  * the explicit opt-out and produced `infFuture()`. One seam now derives it,
- * from a value that cannot be zero.
+ * from a value that cannot be zero: a non-positive configured timeout is a
+ * configuration error (issue #276, GRPC-17).
  */
 class RawKvBatchTimevalDeadlineTest extends TestCase
 {
@@ -70,20 +71,46 @@ class RawKvBatchTimevalDeadlineTest extends TestCase
     }
 
     /**
-     * `TimeoutConfig::batchReadTimeoutMs = 0` is documented as "no deadline",
-     * and `GrpcClient` honours that sentinel — which is why `RawKvBatch`
-     * resolves a non-positive value instead of forwarding it. Before the fix
-     * the value reached `new Timeval(0)` on the hand-rolled path (a deadline
-     * already in the past, so every sub-batch failed with
-     * DEADLINE_EXCEEDED) and `Timeval::infFuture()` on the API V2 path.
+     * A non-positive configured timeout is a configuration error
+     * (issue #276, GRPC-17): `TimeoutConfig` rejects it at construction, so
+     * the batch fan-out can never be handed one. Before the fix the value
+     * reached `new Timeval(0)` on the hand-rolled path (a deadline already in
+     * the past, so every sub-batch failed with DEADLINE_EXCEEDED) and
+     * `Timeval::infFuture()` on the API V2 path.
      */
-    public function testAZeroConfiguredTimeoutBecomesTheLibraryDefault(): void
+    public function testANonPositiveConfiguredTimeoutIsRejected(): void
     {
-        $config = new TimeoutConfig(batchReadTimeoutMs: 0, batchWriteTimeoutMs: 0);
-        $resolvedMs = $this->timeoutMsOf('batch_read', $config);
-        $expected = Timeval::now()->add(new Timeval(GrpcClient::DEFAULT_TIMEOUT_MS * 1000));
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchReadTimeoutMs must be greater than 0, got 0');
 
-        self::assertSame(GrpcClient::DEFAULT_TIMEOUT_MS, $resolvedMs);
+        new TimeoutConfig(batchReadTimeoutMs: 0, batchWriteTimeoutMs: 0);
+    }
+
+    /**
+     * A non-positive timeout is refused at the seam that derives the
+     * deadline — the batch fan-out does not go through
+     * `GrpcClient::deadline()`, so this is the only place that can.
+     */
+    public function testANonPositiveTimeoutIsRejectedByTheDeadlineSeam(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('timeoutMs must be greater than 0, got 0');
+
+        $method = new \ReflectionMethod(RawKvBatch::class, 'deadlineFor');
+        $method->invoke($this->batch(new TimeoutConfig()), 0);
+    }
+
+    /**
+     * The deadline the batch fan-out produces for a valid configuration is
+     * finite and honours the configured value.
+     */
+    public function testAConfiguredTimeoutProducesAFiniteDeadline(): void
+    {
+        $config = new TimeoutConfig(batchReadTimeoutMs: 2000, batchWriteTimeoutMs: 2000);
+        $resolvedMs = $this->timeoutMsOf('batch_read', $config);
+        $expected = Timeval::now()->add(new Timeval(2000 * 1000));
+
+        self::assertSame(2000, $resolvedMs);
         self::assertSame(
             -1,
             Timeval::compare($this->deadlineFor($resolvedMs), Timeval::infFuture()),

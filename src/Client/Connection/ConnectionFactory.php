@@ -58,6 +58,7 @@ final class ConnectionFactory
         'clientKey',
     ];
 
+
     /**
      * Options that configure the gRPC transport the factory builds. They
      * cannot be combined with a caller-supplied transport
@@ -677,6 +678,67 @@ final class ConnectionFactory
     }
 
     /**
+     * The `options['timeout']` keys the factory understands.
+     *
+     * Derived from {@see TimeoutConfig}'s constructor parameters, so the
+     * list cannot drift from the class that carries the values: a new
+     * timeout field is validated as soon as it exists. A key that is not in
+     * the list is not a timeout — it is ignored, exactly like every other
+     * unknown option key.
+     *
+     * @return list<string>
+     */
+    private static function recognisedTimeoutKeys(): array
+    {
+        $parameters = (new \ReflectionMethod(TimeoutConfig::class, '__construct'))->getParameters();
+
+        $keys = [];
+        foreach ($parameters as $parameter) {
+            $keys[] = $parameter->getName();
+        }
+
+        return $keys;
+    }
+
+    /**
+     * Reject non-positive timeout options before they reach
+     * {@see TimeoutConfig} (issue #276, GRPC-17).
+     *
+     * The check names the option key the user wrote, so the error points at
+     * the offending entry of the configuration array instead of at an
+     * internal field name. `batchDeadlineMs` keeps `0` as the documented
+     * "no overall batch deadline" value.
+     *
+     * @param array<array-key, mixed> $timeouts
+     */
+    private static function assertPositiveTimeoutOptions(array $timeouts): void
+    {
+        $recognised = self::recognisedTimeoutKeys();
+
+        foreach ($timeouts as $key => $value) {
+            if (!is_string($key) || !in_array($key, $recognised, true)) {
+                continue;
+            }
+            if (!is_int($value)) {
+                continue;
+            }
+            if ($key === 'batchDeadlineMs') {
+                if ($value < 0) {
+                    throw new InvalidArgumentException(
+                        sprintf('timeout option "%s" must be greater than or equal to 0, got %d', $key, $value),
+                    );
+                }
+                continue;
+            }
+            if ($value <= 0) {
+                throw new InvalidArgumentException(
+                    sprintf('timeout option "%s" must be greater than 0, got %d', $key, $value),
+                );
+            }
+        }
+    }
+
+    /**
      * Build TimeoutConfig from the options array.
      *
      * @param array<string, mixed> $options
@@ -687,6 +749,7 @@ final class ConnectionFactory
 
         if (isset($options['timeout']) && is_array($options['timeout'])) {
             $t = $options['timeout'];
+            self::assertPositiveTimeoutOptions($t);
             $timeoutConfig = new TimeoutConfig(
                 readTimeoutMs: isset($t['readTimeoutMs']) && is_int($t['readTimeoutMs'])
                     ? $t['readTimeoutMs'] : $timeoutConfig->readTimeoutMs,

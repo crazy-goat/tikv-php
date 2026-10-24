@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class TimeoutConfigTest extends TestCase
@@ -97,5 +99,57 @@ class TimeoutConfigTest extends TestCase
         $this->assertSame(1000, $config->readTimeoutMs);
         $this->assertSame(5000, $config->writeTimeoutMs);
         $this->assertSame(50000, $config->scanTimeoutMs);
+    }
+
+    // ========================================================================
+    // Issue #276 (GRPC-17): a non-positive timeout is a configuration error.
+    // ========================================================================
+
+    /**
+     * @return array<string, array{string, int}>
+     */
+    public static function provideNonPositiveTimeouts(): array
+    {
+        return [
+            'readTimeoutMs' => ['readTimeoutMs', 0],
+            'writeTimeoutMs' => ['writeTimeoutMs', -1],
+            'batchReadTimeoutMs' => ['batchReadTimeoutMs', 0],
+            'batchWriteTimeoutMs' => ['batchWriteTimeoutMs', 0],
+            'scanTimeoutMs' => ['scanTimeoutMs', 0],
+            'deleteRangeTimeoutMs' => ['deleteRangeTimeoutMs', 0],
+            'checksumTimeoutMs' => ['checksumTimeoutMs', 0],
+            'ingestTimeoutMs' => ['ingestTimeoutMs', 0],
+            'pdTimeoutMs' => ['pdTimeoutMs', 0],
+            'tsoTimeoutMs' => ['tsoTimeoutMs', 0],
+            'lockResolveTimeoutMs' => ['lockResolveTimeoutMs', 0],
+        ];
+    }
+
+    #[DataProvider('provideNonPositiveTimeouts')]
+    public function testANonPositiveTimeoutIsRejected(string $field, int $value): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('%s must be greater than 0, got %d', $field, $value));
+
+        new TimeoutConfig(...[$field => $value]);
+    }
+
+    /**
+     * `batchDeadlineMs` is the one field that keeps `0` as "disabled": it
+     * sizes the overall batch deadline, not a gRPC call.
+     */
+    public function testZeroBatchDeadlineIsStillAllowed(): void
+    {
+        $config = new TimeoutConfig(batchDeadlineMs: 0);
+
+        $this->assertSame(0, $config->batchDeadlineMs);
+    }
+
+    public function testANegativeBatchDeadlineIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchDeadlineMs must be greater than or equal to 0, got -1');
+
+        new TimeoutConfig(batchDeadlineMs: -1);
     }
 }

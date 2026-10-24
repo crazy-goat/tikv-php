@@ -2499,6 +2499,37 @@ the client is built, and build a new client after changing them. A
 limitation that is only described in the commit message is a limitation
 that the next integrator re-discovers the hard way.
 
+## `0` means "disabled" in one knob and "invalid" in another — the knob decides
+
+`0` is overloaded across the configuration surface, and the two meanings
+contradict each other:
+
+- **A gRPC timeout** (`TimeoutConfig`, `options['timeout']`) — `0` is a
+  configuration error and throws `InvalidArgumentException`. It used to mean
+  "no deadline at all", but that is exactly what an unset environment
+  variable coerces to: `(int) getenv('TIKV_READ_TIMEOUT_MS')` yields `0` when
+  the variable is missing, so the "opt-out" turned a typo into a call that
+  never expires (issue #276, GRPC-17).
+- **`batchDeadlineMs`** — `0` disables the overall wall-clock budget of the
+  batch fan-out. It is not a gRPC deadline: it bounds the dispatch and the
+  wait, and it never reaches `Timeval`.
+- **The slow-log thresholds** — `0` disables the warning for that operation
+  type. A *negative* value is a configuration error.
+
+So the rule is not "0 is never allowed" and not "0 always disables": each
+config class states and enforces its own contract, and the error message
+names the offending field or option key. When you read a `0` in a
+configuration file, ask which knob it belongs to before assuming what it
+does — and prefer a large finite value for anything that bounds a call.
+
+## MCE marker for a key is 0xFF - pad, not a fixed value (issue #252)
+
+The issue text quotes `6162630000000000f9` for `abc`. That is wrong: `abc`
+has 3 bytes, pad = 5, so the marker is `fa`. `f9` is the marker of a
+2-byte key. `MemComparableCodec` already follows TiDB `EncodeBytes`
+(since #415). Compute a vector from `0xFF - pad`, do not copy it from an
+issue.
+
 ## A test double for `PdClient::getRegion()` must contain the key (#253)
 
 `RegionResolver::getRegionInfo()` rejects a PD answer whose range does

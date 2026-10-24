@@ -152,6 +152,16 @@ final class TimestampOracle
             : static fn (): string => $pdAddress;
         $this->clock = $clock ?? static fn (): int => (int) (microtime(true) * 1000);
 
+        if ($tsoTimeoutMs <= 0) {
+            // A non-positive TSO deadline is a configuration error
+            // (issue #276, GRPC-17); rejecting it here reports it where the
+            // mistake was made instead of deep inside the transport.
+            throw new InvalidArgumentException(sprintf(
+                'tsoTimeoutMs must be greater than 0, got %d',
+                $tsoTimeoutMs,
+            ));
+        }
+
         $resolvedPoolSize = $poolSize ?? self::DEFAULT_TIMESTAMP_POOL_SIZE;
         if ($resolvedPoolSize < 1) {
             throw new InvalidArgumentException('Timestamp pool size must be >= 1');
@@ -195,9 +205,12 @@ final class TimestampOracle
      *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
+     * @throws InvalidArgumentException when $timeoutMs is not positive
      */
     public function getTimestamp(?int $timeoutMs = null): int
     {
+        $this->assertPositiveTimeout($timeoutMs);
+
         if ($this->poolSize <= 1) {
             return $this->getTimestampBatch(1, $timeoutMs)[0];
         }
@@ -243,9 +256,12 @@ final class TimestampOracle
      * @throws InvalidArgumentException when $count is < 1 or
      *                                  > {@see self::MAX_TIMESTAMP_POOL_SIZE}
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
+     * @throws InvalidArgumentException when $timeoutMs is not positive
      */
     public function getTimestampBatch(int $count, ?int $timeoutMs = null): array
     {
+        $this->assertPositiveTimeout($timeoutMs);
+
         if ($count < 1) {
             throw new InvalidArgumentException('Timestamp batch count must be >= 1');
         }
@@ -259,6 +275,20 @@ final class TimestampOracle
         $this->resetPool();
 
         return $this->requestTimestampRange($count, $timeoutMs);
+    }
+
+    /**
+     * Reject a non-positive timeout at the call site (issue #276, GRPC-17),
+     * where the mistake was made — not deep inside the transport.
+     */
+    private function assertPositiveTimeout(?int $timeoutMs): void
+    {
+        if ($timeoutMs !== null && $timeoutMs <= 0) {
+            throw new InvalidArgumentException(sprintf(
+                'timeoutMs must be greater than 0, got %d',
+                $timeoutMs,
+            ));
+        }
     }
 
     /**
@@ -413,9 +443,12 @@ final class TimestampOracle
      *                            means the configured TimeoutConfig::$tsoTimeoutMs (#260)
      *
      * @throws TiKvException when the TSO RPC fails or returns an invalid response
+     * @throws InvalidArgumentException when $timeoutMs is not positive
      */
     public function getLowResolutionTimestamp(?int $timeoutMs = null): int
     {
+        $this->assertPositiveTimeout($timeoutMs);
+
         if ($this->lowResMaxStalenessMs === null) {
             return $this->requestTimestampRange(1, $timeoutMs)[0];
         }
