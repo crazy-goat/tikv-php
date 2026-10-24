@@ -2527,3 +2527,15 @@ has 3 bytes, pad = 5, so the marker is `fa`. `f9` is the marker of a
 2-byte key. `MemComparableCodec` already follows TiDB `EncodeBytes`
 (since #415). Compute a vector from `0xFF - pad`, do not copy it from an
 issue.
+
+## A test double for `PdClient::getRegion()` must contain the key (#253)
+
+`RegionResolver::getRegionInfo()` rejects a PD answer whose range does
+not contain the requested key. It throws a retryable `RegionException`
+with `ErrorKind::RegionNotFound` and does not cache the region. A test
+that mocks `getRegion()` with an arbitrary region now fails with
+`RetryBudgetExhaustedException` after 30 attempts.
+
+To simulate a split in a committer test (for example "region no longer
+covers the whole key group"), return a region that contains the first
+key but not the others. Use a group of at least two keys.
