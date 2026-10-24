@@ -1118,3 +1118,20 @@ Trade-offs:
   retry metric.
 - A persistent empty answer is accepted after the re-ask and logged at
   debug level with a redacted key.
+
+## `composer.lock` is committed and pinned to the lowest PHP (#311)
+
+The lock file is tracked and CI and the Docker image install from it.
+Before this, every run resolved the newest dev tools. A new Rector,
+PHPStan or `php-code-coverage` release could turn `master` red, and a
+vulnerable `squizlabs/php_codesniffer` went unnoticed.
+
+`composer.json` sets `config.platform.php` to `8.2.0`, the lowest
+supported PHP. Without it, a resolve on a newer host PHP (8.5) picks
+packages such as `symfony/string` 8.x that need PHP 8.4.1 or later. The
+lock then breaks the PHP 8.2 and 8.3 CI jobs and the PHP 8.3 Docker
+image. Raise the pin only when `require.php` drops a PHP version.
+
+The CI `lint` job runs `composer audit --locked`, so a new advisory
+fails the build. Downstream users of the library are not affected:
+Composer ignores the lock file of a dependency.
