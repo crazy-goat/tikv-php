@@ -467,7 +467,7 @@ addresses on the RPC path just the same.
 | `delete(string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Same eager pessimistic-lock behavior and failure cleanup as `set()`; the tombstone remains buffered until commit |
 | `commit()` | `InvalidStateException`, `TiKvException` (incl. [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php)), `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | See [double-apply section](#transactioncommit-and-double-apply); since issue #213 prewrite runs inside the shared retry executor, so region errors and resolved `locked` conflicts are auto-retried while deadlocks/conflicts still escape |
 | `rollback()` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Only an `Active` transaction may be rolled back; a failed RPC leaves it active but non-writable so rollback can be retried |
-| `heartbeat(int $adviseLockTtlMs = 10000): int` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Extends the primary lock TTL |
+| `heartbeat(?int $adviseLockTtlMs = null): int` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Extends the primary lock TTL |
 
 (`TxnRetryableException` is a subclass of `TiKvException`, so rows listing
 `TiKvException` cover it implicitly; it is listed explicitly wherever the
