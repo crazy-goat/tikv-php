@@ -104,7 +104,7 @@ Your requirements could not be resolved to an installable set of packages.
 2. Clear Composer cache:
    ```bash
    composer clear-cache
-   rm -rf vendor/ composer.lock
+   rm -rf vendor/
    composer install
    ```
 

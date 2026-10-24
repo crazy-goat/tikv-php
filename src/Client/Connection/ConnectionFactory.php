@@ -678,19 +678,19 @@ final class ConnectionFactory
     }
 
     /**
-     * The `options['timeout']` keys the factory understands.
+     * The option keys a config class understands.
      *
-     * Derived from {@see TimeoutConfig}'s constructor parameters, so the
-     * list cannot drift from the class that carries the values: a new
-     * timeout field is validated as soon as it exists. A key that is not in
-     * the list is not a timeout — it is ignored, exactly like every other
-     * unknown option key.
+     * Derived from the class's constructor parameters, so the list cannot
+     * drift from the class that carries the values: a new timeout field is
+     * configurable — and validated — as soon as it exists (issue #272,
+     * GRPC-13).
      *
+     * @param class-string $class
      * @return list<string>
      */
-    private static function recognisedTimeoutKeys(): array
+    private static function recognisedOptionKeys(string $class): array
     {
-        $parameters = (new \ReflectionMethod(TimeoutConfig::class, '__construct'))->getParameters();
+        $parameters = (new \ReflectionMethod($class, '__construct'))->getParameters();
 
         $keys = [];
         foreach ($parameters as $parameter) {
@@ -698,6 +698,40 @@ final class ConnectionFactory
         }
 
         return $keys;
+    }
+
+    /**
+     * Reject an option key the config class does not know.
+     *
+     * A silently dropped key is a misconfiguration nobody sees: the option
+     * has no effect and the default applies, with no warning anywhere. The
+     * TLS options already fail that way (see
+     * {@see self::RECOGNISED_TLS_KEYS}); the timeouts and the slow-log
+     * thresholds now do too (issue #272, GRPC-13).
+     *
+     * @param array<array-key, mixed> $options
+     * @param list<string> $recognised
+     * @param string $optionPath the option path as the user wrote it, e.g.
+     *                           "options['timeout']"
+     */
+    private static function assertKnownOptionKeys(array $options, array $recognised, string $optionPath): void
+    {
+        $unknown = array_diff(
+            array_map(strval(...), array_keys($options)),
+            $recognised,
+        );
+
+        if ($unknown === []) {
+            return;
+        }
+
+        sort($unknown);
+
+        throw new InvalidArgumentException(sprintf(
+            'Unrecognised option(s) in %s: %s',
+            $optionPath,
+            implode(', ', $unknown),
+        ));
     }
 
     /**
@@ -710,30 +744,90 @@ final class ConnectionFactory
      * "no overall batch deadline" value.
      *
      * @param array<array-key, mixed> $timeouts
+     * @param list<string> $recognised the keys the config class knows; every
+     *                                 key has already been checked against it
      */
-    private static function assertPositiveTimeoutOptions(array $timeouts): void
+    private static function assertPositiveTimeoutOptions(array $timeouts, array $recognised): void
     {
-        $recognised = self::recognisedTimeoutKeys();
-
+        $optionPath = "options['timeout']";
         foreach ($timeouts as $key => $value) {
             if (!is_string($key) || !in_array($key, $recognised, true)) {
                 continue;
             }
             if (!is_int($value)) {
+                // The type is checked by assertIntOptions() first.
                 continue;
             }
             if ($key === 'batchDeadlineMs') {
                 if ($value < 0) {
                     throw new InvalidArgumentException(
-                        sprintf('timeout option "%s" must be greater than or equal to 0, got %d', $key, $value),
+                        sprintf('%s[%s] must be greater than or equal to 0, got %d', $optionPath, $key, $value),
                     );
                 }
                 continue;
             }
             if ($value <= 0) {
                 throw new InvalidArgumentException(
-                    sprintf('timeout option "%s" must be greater than 0, got %d', $key, $value),
+                    sprintf('%s[%s] must be greater than 0, got %d', $optionPath, $key, $value),
                 );
+            }
+        }
+    }
+
+    /**
+     * Reject an option whose value is not a number.
+     *
+     * A value of the wrong type was silently dropped before (issue #272,
+     * GRPC-13): the option had no effect and the default applied, with no
+     * warning anywhere — the same failure mode an unknown key has. Every
+     * other option group in the factory already fails closed on a mistyped
+     * value.
+     *
+     * @param array<array-key, mixed> $options
+     * @param list<string> $recognised
+     * @param string $optionPath the option path as the user wrote it, e.g.
+     *                           "options['timeout']"
+     */
+    private static function assertIntOptions(array $options, array $recognised, string $optionPath): void
+    {
+        foreach ($options as $key => $value) {
+            if (!is_string($key) || !in_array($key, $recognised, true)) {
+                continue;
+            }
+            if (!is_int($value)) {
+                throw new InvalidArgumentException(sprintf(
+                    '%s[%s] must be an int (milliseconds), %s given',
+                    $optionPath,
+                    $key,
+                    get_debug_type($value),
+                ));
+            }
+        }
+    }
+
+    /**
+     * Reject a slow-log threshold that is negative, naming the option path
+     * the user wrote (issue #272, GRPC-13).
+     *
+     * @param array<array-key, mixed> $thresholds
+     * @param list<string> $recognised
+     */
+    private static function assertNonNegativeSlowLogOptions(array $thresholds, array $recognised): void
+    {
+        foreach ($thresholds as $key => $value) {
+            if (!is_string($key) || !in_array($key, $recognised, true)) {
+                continue;
+            }
+            if (!is_int($value)) {
+                // The type is checked by assertIntOptions() first.
+                continue;
+            }
+            if ($value < 0) {
+                throw new InvalidArgumentException(sprintf(
+                    "options['slowLog'][%s] must be greater than or equal to 0, got %d",
+                    $key,
+                    $value,
+                ));
             }
         }
     }
@@ -741,79 +835,90 @@ final class ConnectionFactory
     /**
      * Build TimeoutConfig from the options array.
      *
+     * The mapping is driven by {@see TimeoutConfig}'s constructor signature
+     * (issue #272, GRPC-13): every field is configurable under its own name,
+     * and a field that is added to the class is configurable the moment it
+     * exists. The hand-written list this replaces had already dropped the
+     * `ingestTimeoutMs` field once — it was re-added by #580, but nothing
+     * kept the two in step, so the next field would have gone the same way.
+     * A dropped field is invisible: the operator configured a five-minute
+     * ingest deadline and got the 60-second default, with no warning.
+     *
      * @param array<string, mixed> $options
      */
     private static function buildTimeoutConfig(array $options): TimeoutConfig
     {
-        $timeoutConfig = new TimeoutConfig();
+        $defaults = new TimeoutConfig();
 
-        if (isset($options['timeout']) && is_array($options['timeout'])) {
-            $t = $options['timeout'];
-            self::assertPositiveTimeoutOptions($t);
-            $timeoutConfig = new TimeoutConfig(
-                readTimeoutMs: isset($t['readTimeoutMs']) && is_int($t['readTimeoutMs'])
-                    ? $t['readTimeoutMs'] : $timeoutConfig->readTimeoutMs,
-                writeTimeoutMs: isset($t['writeTimeoutMs']) && is_int($t['writeTimeoutMs'])
-                    ? $t['writeTimeoutMs'] : $timeoutConfig->writeTimeoutMs,
-                batchReadTimeoutMs: isset($t['batchReadTimeoutMs']) && is_int($t['batchReadTimeoutMs'])
-                    ? $t['batchReadTimeoutMs'] : $timeoutConfig->batchReadTimeoutMs,
-                batchWriteTimeoutMs: isset($t['batchWriteTimeoutMs']) && is_int($t['batchWriteTimeoutMs'])
-                    ? $t['batchWriteTimeoutMs'] : $timeoutConfig->batchWriteTimeoutMs,
-                scanTimeoutMs: isset($t['scanTimeoutMs']) && is_int($t['scanTimeoutMs'])
-                    ? $t['scanTimeoutMs'] : $timeoutConfig->scanTimeoutMs,
-                deleteRangeTimeoutMs: isset($t['deleteRangeTimeoutMs']) && is_int($t['deleteRangeTimeoutMs'])
-                    ? $t['deleteRangeTimeoutMs'] : $timeoutConfig->deleteRangeTimeoutMs,
-                checksumTimeoutMs: isset($t['checksumTimeoutMs']) && is_int($t['checksumTimeoutMs'])
-                    ? $t['checksumTimeoutMs'] : $timeoutConfig->checksumTimeoutMs,
-                ingestTimeoutMs: isset($t['ingestTimeoutMs']) && is_int($t['ingestTimeoutMs'])
-                    ? $t['ingestTimeoutMs'] : $timeoutConfig->ingestTimeoutMs,
-                batchDeadlineMs: isset($t['batchDeadlineMs']) && is_int($t['batchDeadlineMs'])
-                    ? $t['batchDeadlineMs'] : $timeoutConfig->batchDeadlineMs,
-                // PD / TSO / lock-resolution deadlines (issue #260). Separate
-                // from the store RPC fields above: a hung PD fails every lookup
-                // and every transaction begin, which is a different failure
-                // mode from a slow store.
-                pdTimeoutMs: isset($t['pdTimeoutMs']) && is_int($t['pdTimeoutMs'])
-                    ? $t['pdTimeoutMs'] : $timeoutConfig->pdTimeoutMs,
-                tsoTimeoutMs: isset($t['tsoTimeoutMs']) && is_int($t['tsoTimeoutMs'])
-                    ? $t['tsoTimeoutMs'] : $timeoutConfig->tsoTimeoutMs,
-                lockResolveTimeoutMs: isset($t['lockResolveTimeoutMs']) && is_int($t['lockResolveTimeoutMs'])
-                    ? $t['lockResolveTimeoutMs'] : $timeoutConfig->lockResolveTimeoutMs,
+        if (!array_key_exists('timeout', $options) || $options['timeout'] === null) {
+            return $defaults;
+        }
+
+        if (!is_array($options['timeout'])) {
+            throw new InvalidArgumentException(
+                "options['timeout'] must be an array, got " . get_debug_type($options['timeout'])
             );
         }
 
-        return $timeoutConfig;
+        $t = $options['timeout'];
+
+        $recognised = self::recognisedOptionKeys(TimeoutConfig::class);
+
+        self::assertKnownOptionKeys($t, $recognised, "options['timeout']");
+        self::assertIntOptions($t, $recognised, "options['timeout']");
+        self::assertPositiveTimeoutOptions($t, $recognised);
+
+        /** @var array<string, int> $values */
+        $values = [];
+        foreach ($recognised as $key) {
+            $value = $t[$key] ?? null;
+            if (is_int($value)) {
+                $values[$key] = $value;
+            }
+        }
+
+        return new TimeoutConfig(...$values);
     }
 
     /**
      * Build SlowLogConfig from the options array.
      *
+     * Driven by {@see SlowLogConfig}'s constructor signature, like
+     * {@see self::buildTimeoutConfig()} (issue #272, GRPC-13): a threshold
+     * that is added to the class is configurable the moment it exists, and
+     * an unknown key is reported instead of silently dropped.
+     *
      * @param array<string, mixed> $options
      */
     private static function buildSlowLogConfig(array $options): ?SlowLogConfig
     {
-        if (!isset($options['slowLog']) || !is_array($options['slowLog'])) {
+        if (!array_key_exists('slowLog', $options) || $options['slowLog'] === null) {
             return null;
         }
 
-        $s = $options['slowLog'];
-        $defaults = new SlowLogConfig();
+        if (!is_array($options['slowLog'])) {
+            throw new InvalidArgumentException(
+                "options['slowLog'] must be an array, got " . get_debug_type($options['slowLog'])
+            );
+        }
 
-        return new SlowLogConfig(
-            readThresholdMs: isset($s['readThresholdMs']) && is_int($s['readThresholdMs'])
-                ? $s['readThresholdMs'] : $defaults->readThresholdMs,
-            writeThresholdMs: isset($s['writeThresholdMs']) && is_int($s['writeThresholdMs'])
-                ? $s['writeThresholdMs'] : $defaults->writeThresholdMs,
-            batchReadThresholdMs: isset($s['batchReadThresholdMs']) && is_int($s['batchReadThresholdMs'])
-                ? $s['batchReadThresholdMs'] : $defaults->batchReadThresholdMs,
-            batchWriteThresholdMs: isset($s['batchWriteThresholdMs']) && is_int($s['batchWriteThresholdMs'])
-                ? $s['batchWriteThresholdMs'] : $defaults->batchWriteThresholdMs,
-            scanThresholdMs: isset($s['scanThresholdMs']) && is_int($s['scanThresholdMs'])
-                ? $s['scanThresholdMs'] : $defaults->scanThresholdMs,
-            deleteRangeThresholdMs: isset($s['deleteRangeThresholdMs']) && is_int($s['deleteRangeThresholdMs'])
-                ? $s['deleteRangeThresholdMs'] : $defaults->deleteRangeThresholdMs,
-            checksumThresholdMs: isset($s['checksumThresholdMs']) && is_int($s['checksumThresholdMs'])
-                ? $s['checksumThresholdMs'] : $defaults->checksumThresholdMs,
-        );
+        $s = $options['slowLog'];
+
+        $recognised = self::recognisedOptionKeys(SlowLogConfig::class);
+
+        self::assertKnownOptionKeys($s, $recognised, "options['slowLog']");
+        self::assertIntOptions($s, $recognised, "options['slowLog']");
+        self::assertNonNegativeSlowLogOptions($s, $recognised);
+
+        /** @var array<string, int> $values */
+        $values = [];
+        foreach ($recognised as $key) {
+            $value = $s[$key] ?? null;
+            if (is_int($value)) {
+                $values[$key] = $value;
+            }
+        }
+
+        return new SlowLogConfig(...$values);
     }
 }

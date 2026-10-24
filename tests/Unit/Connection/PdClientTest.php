@@ -135,6 +135,50 @@ class PdClientTest extends TestCase
         $client->close();
     }
 
+    public function testGetStoreUsesDefaultCacheWithThreeArguments(): void
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('tikv1:20160');
+
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+
+        $response = new GetStoreResponse();
+        $response->setHeader($header);
+        $response->setStore($store);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', new NullLogger());
+        for ($i = 0; $i < 100; $i++) {
+            $this->assertSame('tikv1:20160', $client->getStore(1)?->getAddress());
+        }
+    }
+
+    public function testCloseClearsDefaultStoreCache(): void
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('tikv1:20160');
+
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+
+        $response = new GetStoreResponse();
+        $response->setHeader($header);
+        $response->setStore($store);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $client->getStore(1);
+        $client->close();
+        $client->getStore(1);
+    }
+
     public function testCloseResetsClusterId(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);

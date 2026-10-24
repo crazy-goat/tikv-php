@@ -864,7 +864,11 @@ Facts verified empirically (PHPUnit 11.5.57, issue #361):
 
 ## Rector version drift: local rector ≠ CI rector (no committed composer.lock)
 
-The repo has **no committed `composer.lock`**, so CI's `composer install`
+Historical note: since #311 `composer.lock` is committed and CI installs
+from it, so this drift only appears after a `composer update`. Entry below
+describes the state before that.
+
+The repo had **no committed `composer.lock`**, so CI's `composer install`
 resolves the latest rector within `^2.3` every run, while local devs use
 whatever `vendor/` happens to hold (this repo historically pinned 2.4.3).
 When rector 2.6.x shipped (2026-08), CI's Lint job started flagging 8 files
@@ -1073,6 +1077,12 @@ flake, not a code regression. If it recurs, suspect the scan loop in
 `TxnReader::executeScanForRegion()` — an empty batch with `$pending > 0` and no
 split exits silently (see `while (true)` loop, `break` conditions); a one-off
 empty answer for non-empty data is never retried.
+Fixed in #512: such an empty batch is now re-asked once (see
+`MAX_EMPTY_SCAN_REATTEMPTS`, and decisions.md for the trade-off). Tests: a
+mocked `KvScan` that answers empty is now called twice, and any `getByKey()`
+consecutive-return stub needs one more value. The truncation probe is
+re-asked too: a transient empty probe would otherwise make `scan(limit: 0)`
+return a truncated range silently.
 
 E2E note: `docker-compose run --rm php-test …` recreates the tikv
 containers it depends on; if the cluster was just (re)started the run
@@ -2353,12 +2363,12 @@ operation's anchor key: the key itself for a single-key read or write, the
 otherwise (the scan cursor, the exclusive upper bound of a reverse scan, the
 per-region sub-range start of a range operation).
 
-A threshold of `0` disables that operation type — the guard is
-`if ($threshold <= 0)`, so a *negative* threshold silently disables the
-warning as well. `ConnectionFactory::buildSlowLogConfig()` never throws: a
-non-array `slowLog` value, or a non-int threshold, is silently ignored (the
-default wins), unlike `options['tls']` and `options['grpc']`, which fail
-closed.
+A threshold of `0` disables that operation type. A *negative* threshold is a
+configuration error (`InvalidArgumentException`), and so is an unknown key or
+a non-int value inside `options['slowLog']` (issue #272) — a non-array
+`slowLog` value fails closed too, like `options['tls']`. The guard itself is
+`if ($threshold <= 0)`, so the negative case would have disabled the warning
+silently; the constructor now rejects it first.
 
 ## Infection forces `stopOnDefect="true"` — one PHP warning truncates the whole mutation score
 
@@ -2520,6 +2530,27 @@ names the offending field or option key. When you read a `0` in a
 configuration file, ask which knob it belongs to before assuming what it
 does — and prefer a large finite value for anything that bounds a call.
 
+## An `options['timeout']` / `options['slowLog']` entry the client cannot apply is a startup error, not a no-op
+
+A configuration key the client does not know used to be **silently
+dropped**: the option had no effect, the built-in default applied, and
+nothing said so. The worst case is a key that is nearly right —
+`options['timeout'] => ['ingestTimeout' => 300000]` instead of
+`ingestTimeoutMs` — where the operator believes a five-minute SST ingest
+deadline was configured and the client runs with the 60-second default.
+
+Both groups are now mapped from the config class's own constructor
+(`TimeoutConfig`, `SlowLogConfig`), so a field is configurable under its own
+name as soon as it exists, and an unknown key — or a value of the wrong type
+— is reported with an `InvalidArgumentException` naming the key instead of
+being ignored. The same fail-closed rule the TLS options have always had.
+
+The general rule: **an option that cannot be applied must not be silently
+ignored.** Either it is applied, or the client refuses to start. Two things
+count as "absent" and keep the default: the option group is not there at all,
+or it is explicitly `null`. Everything else — an unknown key, a value of the
+wrong type, a group that is a string instead of a map — is an error.
+
 ## MCE marker for a key is 0xFF - pad, not a fixed value (issue #252)
 
 The issue text quotes `6162630000000000f9` for `abc`. That is wrong: `abc`
@@ -2539,3 +2570,20 @@ that mocks `getRegion()` with an arbitrary region now fails with
 To simulate a split in a committer test (for example "region no longer
 covers the whole key group"), return a region that contains the first
 key but not the others. Use a group of at least two keys.
+
+## Why does `composer update` not install the newest packages? (#311)
+
+`composer.json` pins `config.platform.php` to `8.2.0`, so Composer
+resolves for the lowest supported PHP, whatever PHP the host runs.
+Commit the changed `composer.lock` with the change that needs it. Use
+`composer update <package>` to move one package. Run `composer audit`
+after each update.
+
+## Why is the `PdClient` store cache not nullable? (#298)
+
+`PdClient` used to accept `?StoreCacheInterface $storeCache = null`. A
+`PdClient` built with three arguments then sent one `GetStore` RPC to PD
+for every store lookup. The parameter is now `StoreCacheInterface` with
+the default `new StoreCache()` (PHP 8.2 allows `new` in an initializer).
+`PdClient::close()` always clears the cache. A test that needs "no cache"
+must pass a mock of `StoreCacheInterface` whose `get()` returns `null`.
