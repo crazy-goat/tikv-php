@@ -180,7 +180,7 @@ of the contract.
   `RawKv\RawKvAtomic`, `RawKv\RawKvBatch`, `RawKv\RawKvScanner`,
   `RawKv\RawKvRangeOps`, `RawKv\SstIngestor`, `TxnKv\TxnReader`,
   `TxnKv\TwoPhaseCommitter`, `TxnKv\LockResolver`, `TxnKv\TransactionState`,
-  `TxnKv\RollbackRegroupSignal`;
+  `TxnKv\RollbackRegroupSignal`, `TxnKv\ResolvedTxnStatusCache`;
 - `Retry\` — except `Retry\RetryBudgetExhaustedException` and
   `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
   `Retry\BackoffType`, `Retry\ErrorClassifier` and `Retry\RetryExecutor`;

@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
@@ -796,6 +797,55 @@ PHP;
         unset($txnA);
     }
 
+    /**
+     * A reader that runs into many locks of one abandoned transaction asks
+     * for the transaction status once (the outcome is cached) and resolves
+     * the locks in a batch, instead of one status check and one resolve per
+     * lock (issue #428).
+     */
+    public function testScanPastManyAbandonedLocksResolvesInFewRpcs(): void
+    {
+        $lockCount = 20;
+        $prefix = 'txn-batch-resolve-' . uniqid();
+        $keys = [];
+        for ($i = 0; $i < $lockCount; ++$i) {
+            $keys[] = sprintf('%s-%03d', $prefix, $i);
+        }
+
+        // The abandoned transaction: prewrite only, 1 s TTL, never committed.
+        $abandoned = $this->testClient->begin(['pessimistic' => false]);
+        $this->prewriteOnly($keys, $abandoned->getStartTs(), 'abandoned-value');
+
+        // Wait until the lock TTL (1 s) has certainly elapsed.
+        sleep(3);
+
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+        $metrics = new InMemoryMetrics();
+        $reader = TxnKvClient::create($pdEndpoints, null, [TxnKvClient::OPT_METRICS => $metrics]);
+
+        try {
+            $txn = $reader->begin(['pessimistic' => false]);
+            $rows = $txn->scan($prefix, $prefix . '~');
+            $txn->rollback();
+
+            $this->assertSame([], $rows, 'the rolled-back puts are invisible');
+            $this->assertSame(
+                1,
+                $metrics->getRpcStarted('tikvpb.Tikv/KvCheckTxnStatus'),
+                'one status check for the whole transaction, not one per lock',
+            );
+            $this->assertLessThanOrEqual(
+                2,
+                $metrics->getRpcStarted('tikvpb.Tikv/KvResolveLock'),
+                'one resolve per region (two at most if the region split during the test), not one per lock',
+            );
+        } finally {
+            $reader->close();
+        }
+
+        unset($abandoned);
+    }
+
     // ========================================================================
     //  Multi-region TxnKV workload (GAP-01 fix validation)
     // ========================================================================
@@ -968,47 +1018,60 @@ PHP;
     }
 
     /**
-     * Send a bare KvPrewrite for the given key, simulating a transaction
-     * abandoned right after its prewrite phase.
+     * Send bare KvPrewrite requests for the given keys (one per region, the
+     * first key is the primary), simulating a transaction abandoned right
+     * after its prewrite phase.
+     *
+     * @param string|list<string> $keys
      */
-    private function prewriteOnly(string $key, int $startTs, string $value): void
+    private function prewriteOnly(string|array $keys, int $startTs, string $value): void
     {
+        $keys = is_array($keys) ? $keys : [$keys];
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
         // This is a transactional prewrite: region lookups must run in the
         // MCE-encoded key space like TxnKvClient::create() (issue #415).
         $bundle = ConnectionFactory::create($pdEndpoints, null, [], new CodecV1(Mode::Txn));
 
         try {
-            $region = $bundle->pdClient->getRegion($key);
-            $store = $bundle->pdClient->getStore($region->leaderStoreId);
-            $this->assertNotNull($store, 'Leader store must be resolvable for prewrite');
+            $mutationsByRegion = [];
+            $regions = [];
+            foreach ($keys as $key) {
+                $region = $bundle->pdClient->getRegion($key);
+                $mutation = new Mutation();
+                $mutation->setOp(Op::Put);
+                $mutation->setKey($key);
+                $mutation->setValue($value);
+                $regions[$region->regionId] = $region;
+                $mutationsByRegion[$region->regionId][] = $mutation;
+            }
 
-            $mutation = new Mutation();
-            $mutation->setOp(Op::Put);
-            $mutation->setKey($key);
-            $mutation->setValue($value);
+            foreach ($mutationsByRegion as $regionId => $mutations) {
+                $region = $regions[$regionId];
+                $store = $bundle->pdClient->getStore($region->leaderStoreId);
+                $this->assertNotNull($store, 'Leader store must be resolvable for prewrite');
 
-            $request = new PrewriteRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setMutations([$mutation]);
-            $request->setPrimaryLock($key);
-            $request->setStartVersion($startTs);
-            $request->setLockTtl(1000);
+                $request = new PrewriteRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                $request->setMutations($mutations);
+                $request->setPrimaryLock($keys[0]);
+                $request->setStartVersion($startTs);
+                $request->setLockTtl(1000);
 
-            /** @var PrewriteResponse $response */
-            $response = $bundle->grpc->call(
-                (string) $store->getAddress(),
-                'tikvpb.Tikv',
-                'KvPrewrite',
-                $request,
-                PrewriteResponse::class,
-                5000,
-            );
+                /** @var PrewriteResponse $response */
+                $response = $bundle->grpc->call(
+                    (string) $store->getAddress(),
+                    'tikvpb.Tikv',
+                    'KvPrewrite',
+                    $request,
+                    PrewriteResponse::class,
+                    5000,
+                );
 
-            RegionErrorHandler::check($response);
+                RegionErrorHandler::check($response);
 
-            $errors = $response->getErrors();
-            $this->assertCount(0, $errors, 'Prewrite for abandoned lock must succeed');
+                $errors = $response->getErrors();
+                $this->assertCount(0, $errors, 'Prewrite for abandoned lock must succeed');
+            }
         } finally {
             $bundle->grpc->close();
             $bundle->pdClient->close();

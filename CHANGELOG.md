@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Added
+
+- `LockResolver` now caches final transaction outcomes (committed with a commit ts, or rolled back) by lock start ts in a bounded FIFO `ResolvedTxnStatusCache` (2048 entries, as in client-go), so the next lock of a known transaction skips `KvCheckTxnStatus`. A live, pessimistic or undetermined status is never cached. New `LockResolver::resolveLocks()` groups locks by transaction and region and sends one `KvResolveLock` per (region, transaction) with all its keys; `TxnReader` uses it for `batchGet()` and `scan()` responses that carry several locks. (#428)
+
 ### Fixed
 
 - The repository now commits `composer.lock` (resolved with `config.platform.php` set to `8.2.0`, so it installs on PHP 8.2 to 8.4), the Dockerfile copies it before `composer install`, `make clean` keeps it, and the CI `lint` job runs `composer audit --locked`. `squizlabs/php_codesniffer` is raised to `^3.13.6 || ^4.0.2` (CVE-2026-67434). (#311)

@@ -568,16 +568,57 @@ final readonly class TxnReader
                 $this->handleReadKeyError($error, $regionKeys[0] ?? '', 'BatchGet');
             }
 
+            $pairErrors = [];
             foreach ($response->getPairs() as $index => $pair) {
                 $pairError = $pair->getError();
                 if ($pairError instanceof KeyError) {
                     $fallbackKey = is_int($index) ? ($regionKeys[$index] ?? $pair->getKey()) : $pair->getKey();
-                    $this->handleReadKeyError($pairError, $fallbackKey, 'BatchGet');
+                    $pairErrors[] = [$pairError, $fallbackKey];
                 }
             }
+            $this->handleReadKeyErrors($pairErrors, 'BatchGet');
 
             return $response;
         }, $future);
+    }
+
+    private function lockRetryMessage(string $operation): string
+    {
+        return $operation === 'Get'
+            ? 'Lock encountered, resolved - retry'
+            : sprintf('Lock encountered during %s, resolved - retry', $operation);
+    }
+
+    /**
+     * Handle the per-pair KeyErrors of one batchGet or scan response. Every
+     * lock is resolved in one batch (one status check per transaction, one
+     * KvResolveLock per region and transaction, issue #428) before a single
+     * retry is requested. Without locks the first error raises as in
+     * {@see handleReadKeyError()}.
+     *
+     * @param list<array{KeyError, string}> $pairErrors each error with its fallback key
+     */
+    private function handleReadKeyErrors(array $pairErrors, string $operation): void
+    {
+        $locks = [];
+        foreach ($pairErrors as [$error, $fallbackKey]) {
+            $locked = $error->getLocked();
+            if ($locked !== null) {
+                if ($locked->getKey() === '') {
+                    $locked->setKey($fallbackKey);
+                }
+                $locks[] = $locked;
+            }
+        }
+
+        if ($locks !== []) {
+            $this->lockResolver->resolveLocks($locks);
+            throw new TxnRetryableException($this->lockRetryMessage($operation), BackoffType::TxnLock);
+        }
+
+        foreach ($pairErrors as [$error, $fallbackKey]) {
+            $this->handleReadKeyError($error, $fallbackKey, $operation);
+        }
     }
 
     /**
@@ -597,10 +638,7 @@ final readonly class TxnReader
                 ? $rawPrimary
                 : ($locked->getKey() !== '' ? $locked->getKey() : $fallbackKey);
             $this->lockResolver->resolveLock($primary, $locked);
-            $lockMessage = $operation === 'Get'
-                ? 'Lock encountered, resolved - retry'
-                : sprintf('Lock encountered during %s, resolved - retry', $operation);
-            throw new TxnRetryableException($lockMessage, BackoffType::TxnLock);
+            throw new TxnRetryableException($this->lockRetryMessage($operation), BackoffType::TxnLock);
         }
 
         $retryable = $error->getRetryable();
@@ -715,16 +753,18 @@ final readonly class TxnReader
                 }
 
                 $subResults = [];
+                $pairErrors = [];
                 foreach ($response->getPairs() as $pair) {
                     $pairError = $pair->getError();
                     if ($pairError instanceof KeyError) {
-                        $this->handleReadKeyError($pairError, $pair->getKey(), 'Scan');
+                        $pairErrors[] = [$pairError, $pair->getKey()];
                     }
                     $subResults[] = [
                         'key' => $pair->getKey(),
                         'value' => $pair->getValue(),
                     ];
                 }
+                $this->handleReadKeyErrors($pairErrors, 'Scan');
 
                 return $subResults;
             }, $classifier);

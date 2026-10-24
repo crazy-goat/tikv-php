@@ -307,8 +307,8 @@ class RpcDeadlineTest extends TestCase
         self::assertSame([], $offenders, implode("\n", $offenders));
 
         // Without this the test would also pass if the scan silently stopped
-        // finding anything: the three classes carry 10 call sites today.
-        self::assertSame(10, $total, 'The call-site scan found a different number '
+        // finding anything: the three classes carry 11 call sites today.
+        self::assertSame(11, $total, 'The call-site scan found a different number '
             . 'of sites than the three classes have; the scan is broken, not the '
             . 'source.');
     }

@@ -1167,3 +1167,26 @@ image. Raise the pin only when `require.php` drops a PHP version.
 The CI `lint` job runs `composer audit --locked`, so a new advisory
 fails the build. Downstream users of the library are not affected:
 Composer ignores the lock file of a dependency.
+
+## Resolved transaction statuses are cached, FIFO, 2048, final outcomes only (#428)
+
+`LockResolver` keeps a `ResolvedTxnStatusCache` per resolver: start ts to
+commit ts (0 means rolled back), FIFO eviction, 2048 entries as in client-go.
+The size is a constant (`DEFAULT_CAPACITY`) and is not an option, because no
+user-facing option group fits it.
+
+Only a final outcome enters the cache: a commit ts above 0, or an explicit
+`TTLExpireRollback` or `LockNotExistRollback` action. `NoAction` and
+`MinCommitTSPushed` (the lock is alive), `TTLExpirePessimisticRollback` and
+`LockNotExistDoNothing` can still change, so they are never cached. A status
+of `commit_ts = 0` without a rollback action is not a rollback proof.
+
+A cache hit skips the async-commit secondary check, because a final rollback
+of the primary is final for every secondary too.
+
+`resolveLocks()` sends `ResolveLockRequest.keys`, so it resolves only the
+locks it saw. The single-lock `resolveLock()` still sends no keys, so TiKV
+resolves every lock of that transaction in the region. Locks of a live
+transaction do not block the others: they are resolved first, and one
+`TxnRetryableException` follows. Pinned by `LockResolverBatchTest` and
+`ResolvedTxnStatusCacheTest`.

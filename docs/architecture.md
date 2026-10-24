@@ -422,6 +422,13 @@ Transaction encounters lock on key
     └─────────┘
 ```
 
+`LockResolver` keeps the final outcomes (committed or rolled back) in a
+bounded FIFO cache keyed by lock start ts (`ResolvedTxnStatusCache`, 2048
+entries). A lock of a known transaction skips `CheckTxnStatus`. A live or
+undetermined status is never cached. `resolveLocks()` takes several locks,
+checks each transaction once, and sends one `ResolveLock` per region and
+transaction with all keys of that transaction in the region.
+
 ### 8. Retry System
 
 **Location**: `src/Client/Retry/` — `RetryExecutor` runs the loop; `RawKvClient::createRetryExecutor()` builds one per operation
