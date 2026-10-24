@@ -2521,3 +2521,11 @@ config class states and enforces its own contract, and the error message
 names the offending field or option key. When you read a `0` in a
 configuration file, ask which knob it belongs to before assuming what it
 does — and prefer a large finite value for anything that bounds a call.
+
+## MCE marker for a key is 0xFF - pad, not a fixed value (issue #252)
+
+The issue text quotes `6162630000000000f9` for `abc`. That is wrong: `abc`
+has 3 bytes, pad = 5, so the marker is `fa`. `f9` is the marker of a
+2-byte key. `MemComparableCodec` already follows TiDB `EncodeBytes`
+(since #415). Compute a vector from `0xFF - pad`, do not copy it from an
+issue.

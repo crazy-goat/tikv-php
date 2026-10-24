@@ -25,6 +25,7 @@ policy now classifies as internal.
 
 ### Fixed
 
+- `MemComparableCodec` already matches TiDB `codec.EncodeBytes` (since #415). Added known-answer vectors for `abc` and a two-byte key, a seeded random round-trip and sort-order test, and a marker-range rejection test, so a regression to a non-TiDB scheme is caught. (#252)
 - `RegionCache::put()` now ignores a region whose epoch is strictly older than the cached one for the same ID, preventing stale `scanRegions` results from downgrading a fresher entry. (#249)
 
 ### Fixed
