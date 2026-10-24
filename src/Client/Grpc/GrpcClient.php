@@ -102,7 +102,7 @@ final class GrpcClient implements GrpcClientInterface
      * Time (seconds) of the last idle sweep, or null before the first one.
      *
      * The sweep runs on every cache miss and, at most once per
-     * `sweepIntervalSeconds()`, on the cache-hit path (issue #277).
+     * `sweepDue()`, on the cache-hit path (issue #277).
      */
     private ?float $lastSweepAt = null;
 
@@ -688,7 +688,8 @@ final class GrpcClient implements GrpcClientInterface
     }
 
     /**
-     * If the channel cache is at capacity, evict the least recently used channel.
+     * If the channel cache is at capacity, evict the least recently used idle
+     * channels (the ones with no in-flight calls) until it is below the cap.
      *
      * `maxChannels` is a soft cap: a channel with in-flight calls is never
      * evicted, so when every cached channel is busy the cache is allowed to

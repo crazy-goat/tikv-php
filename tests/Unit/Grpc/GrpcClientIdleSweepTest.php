@@ -157,12 +157,18 @@ final class GrpcClientIdleSweepTest extends TestCase
 
     public function testReapIdleChannelsIsANoOpAfterClose(): void
     {
-        $client = $this->client();
+        $reads = 0;
+        $client = new GrpcClient(clock: static function () use (&$reads): float {
+            ++$reads;
+
+            return 1000.0;
+        });
         $client->close();
 
         $client->reapIdleChannels();
 
-        $this->assertSame(0, $client->getChannelCount());
+        // The closed guard returns before the clock is read.
+        $this->assertSame(0, $reads);
     }
 
     public function testApiV2DecoratorForwardsReapIdleChannels(): void

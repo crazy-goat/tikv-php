@@ -389,6 +389,32 @@ class TxnKvClientTest extends TestCase
         $client->close();
     }
 
+    public function testReapIdleChannelsForwardsToTheTransport(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('reapIdleChannels');
+
+        (new TxnKvClient($pdClient, $grpc))->reapIdleChannels();
+    }
+
+    public function testReapIdleChannelsIsANoOpAfterClose(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(1000);
+        $pdClient->method('getClusterId')->willReturn(null);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->never())->method('reapIdleChannels');
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $client->close();
+        $client->reapIdleChannels();
+    }
+
     public function testCloseIdempotent(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);
