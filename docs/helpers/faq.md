@@ -864,7 +864,11 @@ Facts verified empirically (PHPUnit 11.5.57, issue #361):
 
 ## Rector version drift: local rector ≠ CI rector (no committed composer.lock)
 
-The repo has **no committed `composer.lock`**, so CI's `composer install`
+Historical note: since #311 `composer.lock` is committed and CI installs
+from it, so this drift only appears after a `composer update`. Entry below
+describes the state before that.
+
+The repo had **no committed `composer.lock`**, so CI's `composer install`
 resolves the latest rector within `^2.3` every run, while local devs use
 whatever `vendor/` happens to hold (this repo historically pinned 2.4.3).
 When rector 2.6.x shipped (2026-08), CI's Lint job started flagging 8 files
