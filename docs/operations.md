@@ -1014,7 +1014,8 @@ The client enforces these limits. The constants are public on `RawKvClient`.
 
 `InvalidArgumentException` is `CrazyGoat\TiKV\Client\Exception\InvalidArgumentException`.
 Its message names the size and the method, for example `Value size (5242880) exceeds maximum allowed size (4194304) in put`.
-The key and value checks apply to `get`, `put`, `delete`, `getKeyTTL`, `compareAndSwap`, `batchGet`, `batchPut`, `batchDelete` and `ingest`.
+The key and value checks apply to `get`, `put`, `delete`, `getKeyTTL`, `compareAndSwap`, `putIfAbsent`, `batchGet`, `batchPut`, `batchDelete` and `ingest`.
+`putIfAbsent` calls `compareAndSwap`, so its error message names `compareAndSwap`.
 A batch method checks every key and value before it sends the first RPC.
 `scan` and `reverseScan` check the size of the start key and of the end key. They accept an empty start key.
 

@@ -1567,12 +1567,9 @@ try {
 Or use async patterns:
 
 ```php
-// For batch operations, process in chunks
-$chunks = array_chunk($keys, 100);
-foreach ($chunks as $chunk) {
-    $results = $client->batchGet($chunk);
-    // Process results
-}
+// Batch operations split by region and size on their own.
+// You do not need to chunk $keys. See docs/operations.md#limits.
+$results = $client->batchGet($keys);
 ```
 
 ## Production Configuration
