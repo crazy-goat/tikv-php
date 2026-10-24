@@ -1416,14 +1416,6 @@ final readonly class TwoPhaseCommitter
             try {
                 $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
                 continue;
-            } catch (BatchDeadlineExceededException $e) {
-                // Best effort (issue #275): the rollback budget is spent. The
-                // unrolled locks expire by TTL or are resolved by readers.
-                $this->logger->warning('Rollback fan-out hit the batch deadline; locks will expire or be resolved', [
-                    'exception' => $e,
-                ]);
-
-                return;
             } catch (BatchPartialFailureException $e) {
                 // Preserve the sequential first-abort exception semantics
                 // (issue #291): rethrow the first failing group's original
@@ -2225,14 +2217,6 @@ final readonly class TwoPhaseCommitter
             try {
                 $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
                 continue;
-            } catch (BatchDeadlineExceededException $e) {
-                // Best effort (issue #275): the rollback budget is spent. The
-                // unrolled locks expire by TTL or are resolved by readers.
-                $this->logger->warning('Rollback fan-out hit the batch deadline; locks will expire or be resolved', [
-                    'exception' => $e,
-                ]);
-
-                return;
             } catch (BatchPartialFailureException $e) {
                 // Preserve the sequential first-abort exception semantics.
                 throw $e->getFirstRegionError();

@@ -15,6 +15,7 @@ use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -22,6 +23,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -695,10 +697,11 @@ final class TxnKvFanoutTest extends TestCase
     }
 
     /**
-     * Issue #275: rollback is best effort, so a batch deadline in the
-     * rollback fan-out is logged and does not fail rollback().
+     * Issue #275: a batch deadline in the rollback fan-out propagates like a
+     * partial failure. A silent return would report a failed cleanup as a
+     * success and leave the transaction closed, so nobody retries it.
      */
-    public function testBatchDeadlineInTheRollbackFanOutIsLoggedNotThrown(): void
+    public function testBatchDeadlineInTheRollbackFanOutPropagatesAndKeepsTheTransactionRollbackable(): void
     {
         $regions = $this->makeRegions(3);
         $this->stubPdClient($regions);
@@ -710,19 +713,17 @@ final class TxnKvFanoutTest extends TestCase
                 return new BatchRollbackResponse();
             },
         );
-        $logger = $this->recordingLogger();
-        $txn = $this->createTransaction($regions, $grpc, [], $logger, $this->shortDeadlineConfig());
+        $txn = $this->createTransaction($regions, $grpc, [], new NullLogger(), $this->shortDeadlineConfig());
         for ($i = 0; $i < 3; $i++) {
             $txn->set("k{$i}", "v{$i}");
         }
 
-        $txn->rollback();
-
-        $messages = array_column($logger->records, 'message');
-        self::assertContains(
-            'Rollback fan-out hit the batch deadline; locks will expire or be resolved',
-            $messages,
-        );
+        try {
+            $txn->rollback();
+            self::fail('a batch deadline in the rollback fan-out must propagate');
+        } catch (BatchDeadlineExceededException) {
+            self::assertNotSame(TransactionStatus::RolledBack, $txn->getStatus());
+        }
     }
 
     /**

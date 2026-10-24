@@ -719,10 +719,13 @@ default), or TiKV nodes are slow or unreachable. Raise `batchDeadlineMs` in
 `getContext()['pendingRegions']` lists every region without a result, including
 the regions of windows that never started.
 
-**Solution:** Do not retry blindly — the batch is **partially applied**.
-Inspect `getContext()['pendingRegions']` / `['dispatchedRegions']`, re-drive
-only the affected keys/ranges, or raise the explicit deadline passed to
-`executeParallel()`. See
+**Solution:** A read (`batchGet`, scan, checksum) applies nothing, so retry the
+whole operation. Raise `batchDeadlineMs` in `options['timeout']` if the batch is
+too large. For writes, do not retry blindly: the batch is **partially applied**.
+`getContext()['pendingRegions']` and `['dispatchedRegions']` hold internal
+sub-batch or segment indices, not region IDs and not user keys. Treat the batch
+as partially applied and re-check per key. For scans the deadline applies per
+region batch, not per `scan()` call. See
 [BatchDeadlineExceededException](error-handling.md#exception-hierarchy).
 
 #### Batch Partial Failure

@@ -1244,9 +1244,12 @@ the missing part.
    plus one per-call timeout).
 6. `executeParallelCapped()` and the parallel scan (`RawKvScanner::scanSegmentsInParallel()`)
    use one shared budget for all windows. A deadline is never a reason for the scan to fall
-   back to the sequential path, which has no deadline. The exception reports the configured
+   back to the sequential path, which has no deadline. For scans the deadline applies per region
+   batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. The exception reports the configured
    deadline, the total elapsed time and every region without a result.
 7. TxnKV: a deadline in the secondary-commit fan-out happens after the commit point, so it is
    logged and `commit()` does not throw (a retrying caller could apply the transaction
-   twice). A deadline in a rollback fan-out is logged: rollback is best effort.
+   twice). A deadline in a rollback fan-out throws, like a
+   partial failure: an early return would report a failed cleanup as a success, `rollback()`
+   would mark the state `RolledBack` and close it, and nobody would retry.
 8. Not covered: the experimental BatchCommands multiplex path is bounded per call only.

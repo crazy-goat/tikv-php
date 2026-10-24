@@ -154,7 +154,7 @@ Verdict legend:
 
 ### Transaction::commit() and double-apply
 
-`BatchDeadlineExceededException` cannot cause a double apply. The secondary-commit fan-out runs after the commit point, so `commit()` logs a batch deadline there and returns normally. The leftover secondary locks are resolved by readers. The prewrite fan-out still throws it, because the transaction is not committed yet. A rollback fan-out logs it (best effort).
+`BatchDeadlineExceededException` cannot cause a double apply. The secondary-commit fan-out runs after the commit point, so `commit()` logs a batch deadline there and returns normally. The leftover secondary locks are resolved by readers. The prewrite fan-out still throws it, because the transaction is not committed yet. A rollback fan-out throws it like a partial failure, and the transaction stays rollback-able: call `rollback()` again.
 
 `commit()` deserves special care because a network failure at exactly the
 wrong moment leaves the outcome *unknown*: the commit may have taken effect
