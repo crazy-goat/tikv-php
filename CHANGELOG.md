@@ -25,6 +25,10 @@ policy now classifies as internal.
 
 ### Changed
 
+- `RawKvBatch` now routes batch RPCs through `GrpcClient::callAsync()`, so batch traffic is metered and closed-checked like single-key RPCs. `GrpcClient::callAsync()` emits `rpcStarted`/`rpcCompleted`. (#273)
+
+### Changed
+
 - An unmapped `RegionException` (no typed `ErrorKind`) is now classified as fatal instead of `BackoffType::RegionMiss`, so permanent misconfiguration errors such as "invalid cf" fail after a single attempt instead of being retried 30 times. A per-pair `KeyError` is now reported as `KeyErrorException` rather than `RegionException`, so it is no longer retried as a region miss. (#251)
 
 ## [v0.9.0] - 2026-10-21

@@ -18,7 +18,6 @@ use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
-use CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
@@ -32,8 +31,6 @@ use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
-use Grpc\Call;
-use Grpc\Timeval;
 use Psr\Log\LoggerInterface;
 
 final readonly class RawKvBatch
@@ -337,32 +334,15 @@ final readonly class RawKvBatch
         }
 
         $batchReadTimeout = $this->timeoutMs('batch_read');
-        $deadline = $this->deadlineFor($batchReadTimeout);
 
-        if ($this->grpc instanceof ApiV2GrpcClient && $this->grpc->isApiV2Enabled()) {
-            return $this->grpc->callAsync(
-                $address,
-                'tikvpb.Tikv',
-                'RawBatchGet',
-                $request,
-                RawBatchGetResponse::class,
-                $batchReadTimeout,
-            );
-        }
-
-        $call = new Call(
-            $this->grpc->getChannel($address),
-            '/tikvpb.Tikv/RawBatchGet',
-            $deadline,
+        return $this->grpc->callAsync(
+            $address,
+            'tikvpb.Tikv',
+            'RawBatchGet',
+            $request,
+            RawBatchGetResponse::class,
+            $batchReadTimeout,
         );
-
-        $call->startBatch([
-            \Grpc\OP_SEND_INITIAL_METADATA => [],
-            \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
-            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
-        ]);
-
-        return new GrpcFuture($call, RawBatchGetResponse::class);
     }
 
     /**
@@ -394,32 +374,15 @@ final readonly class RawKvBatch
         }
 
         $batchWriteTimeout = $this->timeoutMs('batch_write');
-        $deadline = $this->deadlineFor($batchWriteTimeout);
 
-        if ($this->grpc instanceof ApiV2GrpcClient && $this->grpc->isApiV2Enabled()) {
-            return $this->grpc->callAsync(
-                $address,
-                'tikvpb.Tikv',
-                'RawBatchPut',
-                $request,
-                RawBatchPutResponse::class,
-                $batchWriteTimeout,
-            );
-        }
-
-        $call = new Call(
-            $this->grpc->getChannel($address),
-            '/tikvpb.Tikv/RawBatchPut',
-            $deadline,
+        return $this->grpc->callAsync(
+            $address,
+            'tikvpb.Tikv',
+            'RawBatchPut',
+            $request,
+            RawBatchPutResponse::class,
+            $batchWriteTimeout,
         );
-
-        $call->startBatch([
-            \Grpc\OP_SEND_INITIAL_METADATA => [],
-            \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
-            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
-        ]);
-
-        return new GrpcFuture($call, RawBatchPutResponse::class);
     }
 
     /**
@@ -444,32 +407,15 @@ final readonly class RawKvBatch
         }
 
         $batchWriteTimeout = $this->timeoutMs('batch_write');
-        $deadline = $this->deadlineFor($batchWriteTimeout);
 
-        if ($this->grpc instanceof ApiV2GrpcClient && $this->grpc->isApiV2Enabled()) {
-            return $this->grpc->callAsync(
-                $address,
-                'tikvpb.Tikv',
-                'RawBatchDelete',
-                $request,
-                RawBatchDeleteResponse::class,
-                $batchWriteTimeout,
-            );
-        }
-
-        $call = new Call(
-            $this->grpc->getChannel($address),
-            '/tikvpb.Tikv/RawBatchDelete',
-            $deadline,
+        return $this->grpc->callAsync(
+            $address,
+            'tikvpb.Tikv',
+            'RawBatchDelete',
+            $request,
+            RawBatchDeleteResponse::class,
+            $batchWriteTimeout,
         );
-
-        $call->startBatch([
-            \Grpc\OP_SEND_INITIAL_METADATA => [],
-            \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
-            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
-        ]);
-
-        return new GrpcFuture($call, RawBatchDeleteResponse::class);
     }
 
     /**
@@ -523,11 +469,6 @@ final readonly class RawKvBatch
      * `Timeval` object with ext-grpc loaded; `NoInfiniteDeadlineGuardTest`
      * keeps `Timeval::infFuture()` out of every other site in `src/Client`.
      */
-    private function deadlineFor(int $timeoutMs): Timeval
-    {
-        return Timeval::now()->add(new Timeval($timeoutMs * 1000));
-    }
-
     // ========================================================================
     // BatchCommands multiplexing (issue #418, experimental, behind
     // options['batchCommands']). The helpers below build the per-sub-batch

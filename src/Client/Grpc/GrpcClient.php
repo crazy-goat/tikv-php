@@ -372,6 +372,11 @@ final class GrpcClient implements GrpcClientInterface
 
         $deadline = $this->deadline($timeoutMs);
 
+        $operation = $service . '/' . $method;
+
+        $this->metrics->rpcStarted($operation);
+        $startNs = hrtime(true);
+
         $call = new Call(
             $channel,
             "/{$service}/{$method}",
@@ -393,8 +398,9 @@ final class GrpcClient implements GrpcClientInterface
         return new GrpcFuture(
             $call,
             $responseClass,
-            onSettled: function (bool $success) use ($channel): void {
+            onSettled: function (bool $success) use ($channel, $operation, $startNs): void {
                 $this->releaseInFlight($channel);
+                $this->metrics->rpcCompleted($operation, (hrtime(true) - $startNs) / 1e6, $success);
             },
         );
     }

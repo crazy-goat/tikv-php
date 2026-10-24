@@ -127,27 +127,6 @@ class RawKvBatchDeadlineTest extends TestCase
         self::assertSame($config->batchWriteTimeoutMs, $this->timeoutMs('batch_write', $config));
     }
 
-    /**
-     * The single derivation seam, asserted structurally: it takes a plain
-     * `int` and returns the `Timeval` type, so the three hand-rolled
-     * `new Call(...)` sites have no other way to build one and no way to pass
-     * it something that means "no deadline".
-     */
-    public function testDeadlinesAreDerivedThroughOneNonNullableSeam(): void
-    {
-        $method = new \ReflectionMethod(RawKvBatch::class, 'deadlineFor');
-        $parameter = $method->getParameters()[0] ?? null;
-        $parameterType = $parameter?->getType();
-        $returnType = $method->getReturnType();
-
-        self::assertNotNull($parameter, 'deadlineFor() must take the timeout it converts');
-        self::assertNotNull($parameterType);
-        self::assertSame('int', (string) $parameterType);
-        self::assertFalse($parameterType->allowsNull());
-        self::assertNotNull($returnType);
-        self::assertSame(\Grpc\Timeval::class, (string) $returnType);
-    }
-
     private function timeoutMs(string $operationType, TimeoutConfig $timeoutConfig): mixed
     {
         $batch = new RawKvBatch(
