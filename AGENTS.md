@@ -113,7 +113,7 @@ combinations (and the `test` profile); `bin/worktree-done.sh` calls it.
 `changes` job detects documentation-only changes and the `docs` job checks them fast. `lint`,
 the unit matrix, `grpc-unit-tests`, `integration-tests`, `e2e-tests` and `e2e-tests-apiv2` run only
 for code changes. `ci-ok` aggregates the results and is the check to require. The `lint` job does
-the setup (PHP, Composer, hadolint) and runs only `bin/lint.sh`. Workflow runs of external
+the setup (PHP, Composer, hadolint), runs `composer audit --locked` and then `bin/lint.sh`. Workflow runs of external
 contributors need maintainer approval (repository setting); there is no custom actor gate.
 
 The `grpc-unit-tests` job runs the `Unit` and `Grpc` suites together under PCOV, uploads the Clover
@@ -131,4 +131,6 @@ locally (it needs `ext-grpc` and a coverage driver: PCOV, or Xdebug in `coverage
 - New code gets tests: unit tests in `tests/Unit/` mirroring `src/Client/`. Tests that need
   `ext-grpc` are listed in the `Grpc` suite in `phpunit.xml`, not in `Unit`.
 - Update `CHANGELOG.md` under `## [Unreleased]` in every user-visible change.
-- `composer.lock` is not committed; CI resolves the newest dev dependencies on every run.
+- `composer.lock` is committed and CI installs from it. `config.platform.php` pins resolution to
+  PHP 8.2.0, the lowest supported version. Update with `composer update <package>`. Do not run a
+  bare `composer update` without reviewing the lock diff. See `docs/helpers/decisions.md`.

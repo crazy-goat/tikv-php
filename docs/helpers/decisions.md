@@ -1004,6 +1004,38 @@ the thrown type. Pinned by `tests/Unit/TxnKv/TxnKvFanoutTest.php`
 `::testFailingRegionIsRetriedOnItsOwnWhilePeersAreNotResent`,
 `::testAggregatedPrewriteFailureNamesEveryFailingRegion`).
 
+## An option the client cannot apply is an error, not a no-op (issue #272)
+
+The concrete symptom — `options['timeout']['ingestTimeoutMs']` was dropped on
+the floor, so an operator who configured a five-minute SST ingest deadline got
+the 60-second default and no warning — was fixed by #580, which re-added the
+key to the hand-written list. Issue #272 records the decision that keeps it
+fixed:
+
+1. **The mapping is derived from the config class, not written out.** The
+   factory reads `TimeoutConfig`'s and `SlowLogConfig`'s constructor
+   parameters and maps `options['timeout']` / `options['slowLog']` onto them
+   by name. A hand-written list is a list that drifts: the list had already
+   lost one field, silently, and nothing noticed because the value it lost
+   was only wrong on a slow store. A field that is added to the class is
+   configurable the moment it exists.
+2. **Three things are rejected: an unknown key, a value of the wrong type,
+   and a group that is not a map.** A silently dropped option has no effect
+   and the default applies — the user believes a deadline was raised and it
+   was not. The same is true of a value that is not applied because it has
+   the wrong type (`'readTimeoutMs' => '60000'` from an environment
+   variable), and of a group that is not a map at all
+   (`options['slowLog'] => 'x'` silently turned the slow logging *off*). The
+   TLS options already failed closed on a mistyped value; the timeouts and
+   the slow-log thresholds now do too. Rejecting what was never read is a
+   behaviour change, but it converts a silent misconfiguration into a startup
+   error, which is the correct trade. An option group that is absent — or
+   explicitly `null` — is not a misconfiguration: it means "not configured"
+   and keeps the default.
+3. **The regression test is derived from the class as well.** The test that
+   every field round-trips enumerates the constructor parameters, so a field
+   that is added without a mapping fails the suite instead of the cluster.
+
 ## The transport belongs to whoever created it (issue #407)
 
 The gRPC transport is **long-lived and shared** — one instance keeps the channel
@@ -1099,3 +1131,39 @@ decisions inside it are worth keeping:
    and that its removal breaks a consumer that instantiated it directly. No
    deprecation cycle precedes it: no API ever returned the class, and
    `docs/release-workflow.md` allows breaking changes before `1.0.0`.
+
+## An empty KvScan batch is re-asked once, outside RetryExecutor (#512)
+
+`TxnReader::executeScanForRegion()` re-asks a sub-range once when it
+answers an empty batch while the limit is unsatisfied and the scan would
+end there. The probe of `assertRangeNotTruncated()` is covered too: a
+transient empty probe would hide a truncated whole-range scan (#440).
+Trade-offs:
+
+- `MAX_EMPTY_SCAN_REATTEMPTS = 1`, counted per sub-range: the counter
+  resets when a batch is non-empty and when the scan moves to the next
+  region after a split.
+- Limit 0 normalizes to 10240, so every empty sub-range now costs two
+  KvScan RPCs plus a `BackoffType::RegionMiss` sleep of about 2 ms.
+- The sleep is a plain `usleep()` outside `RetryExecutor`: it does not
+  count against `maxBackoffMs` or the retry deadline and emits no
+  retry metric.
+- A persistent empty answer is accepted after the re-ask and logged at
+  debug level with a redacted key.
+
+## `composer.lock` is committed and pinned to the lowest PHP (#311)
+
+The lock file is tracked and CI and the Docker image install from it.
+Before this, every run resolved the newest dev tools. A new Rector,
+PHPStan or `php-code-coverage` release could turn `master` red, and a
+vulnerable `squizlabs/php_codesniffer` went unnoticed.
+
+`composer.json` sets `config.platform.php` to `8.2.0`, the lowest
+supported PHP. Without it, a resolve on a newer host PHP (8.5) picks
+packages such as `symfony/string` 8.x that need PHP 8.4.1 or later. The
+lock then breaks the PHP 8.2 and 8.3 CI jobs and the PHP 8.3 Docker
+image. Raise the pin only when `require.php` drops a PHP version.
+
+The CI `lint` job runs `composer audit --locked`, so a new advisory
+fails the build. Downstream users of the library are not affected:
+Composer ignores the lock file of a dependency.
