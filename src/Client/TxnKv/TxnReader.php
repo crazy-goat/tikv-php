@@ -57,6 +57,12 @@ use Psr\Log\NullLogger;
 final readonly class TxnReader
 {
     /**
+     * Re-asks allowed for a KvScan sub-range that answered empty while the
+     * limit was still unsatisfied (issue #512).
+     */
+    private const MAX_EMPTY_SCAN_REATTEMPTS = 1;
+
+    /**
      * @param int $startTs Transaction start timestamp (constant for the lifetime of the reader)
      */
     public function __construct(
@@ -393,7 +399,18 @@ final readonly class TxnReader
             return;
         }
 
-        $probe = $this->executeScanForRegion($cursor, $endKey, 1, $retryExecutor, $classifier, $maxScanLimit);
+        // An empty probe is the normal "range complete" answer, so it is
+        // not re-asked (issue #512): that would double the RPCs of every
+        // whole-range scan.
+        $probe = $this->executeScanForRegion(
+            $cursor,
+            $endKey,
+            1,
+            $retryExecutor,
+            $classifier,
+            $maxScanLimit,
+            reattemptEmpty: false,
+        );
 
         if ($probe !== []) {
             throw ScanLimitExceededException::forTransactionScan($maxScanLimit, count($results));
@@ -624,10 +641,12 @@ final readonly class TxnReader
         RetryExecutor $retryExecutor,
         callable $classifier,
         int $maxScanLimit = 10240,
+        bool $reattemptEmpty = true,
     ): array {
         $results = [];
         $pending = $limit;
         $cursorStart = $startKey;
+        $emptyReattempts = 0;
 
         while (true) {
             // Resolve on the current start key: the sub-range starts inside
@@ -725,6 +744,11 @@ final readonly class TxnReader
                 $results[] = $row;
             }
 
+            $emptyBatch = $batch === [];
+            if (!$emptyBatch) {
+                $emptyReattempts = 0;
+            }
+
             if ($pending > 0) {
                 $pending -= count($batch);
                 if ($pending <= 0) {
@@ -745,6 +769,23 @@ final readonly class TxnReader
                 || KeyOrder::lte($freshEndKey, $cursorStart)
                 || ($endKey !== '' && KeyOrder::gte($freshEndKey, $endKey))
             ) {
+                // An empty answer for a still-unsatisfied limit that would end
+                // the scan is the one shape a transient empty KvScan batch
+                // takes (issue #512). Re-ask the same range a bounded number
+                // of times before accepting it as the end of the data.
+                if ($reattemptEmpty && $emptyBatch && $pending > 0) {
+                    if ($emptyReattempts < self::MAX_EMPTY_SCAN_REATTEMPTS) {
+                        usleep(BackoffType::RegionMiss->sleepMs($emptyReattempts) * 1000);
+                        $emptyReattempts++;
+                        continue;
+                    }
+
+                    $this->logger->debug('TxnKV scan accepted an empty batch after re-attempts', [
+                        'startKey' => bin2hex($cursorStart),
+                        'pending' => $pending,
+                        'reattempts' => $emptyReattempts,
+                    ]);
+                }
                 break;
             }
             $cursorStart = $freshEndKey;

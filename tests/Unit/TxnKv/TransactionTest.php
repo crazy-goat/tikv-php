@@ -1373,7 +1373,8 @@ class TransactionTest extends TestCase
         $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
-        $this->grpc->expects($this->once())->method('call')->willReturn($this->makeScanResponse([]));
+        // The empty answer is re-asked once before it is accepted (issue #512).
+        $this->grpc->expects($this->exactly(2))->method('call')->willReturn($this->makeScanResponse([]));
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->scan('', '');
@@ -4227,7 +4228,7 @@ class TransactionTest extends TestCase
         // The cache serves the stale region for the first resolution and the
         // retry executor's invalidation lookup, then misses so the retry
         // falls back to PD for the post-split region.
-        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
+        $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null, null);
         $this->regionCache->method('put');
         $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
 
@@ -4283,7 +4284,8 @@ class TransactionTest extends TestCase
 
         $this->assertCount(1, $result);
         $this->assertSame('k1', $result[0]['key']);
-        $this->assertCount(3, $capturedRequests);
+        // The empty [k,z) continuation is re-asked once (issue #512).
+        $this->assertCount(4, $capturedRequests);
 
         // The retry must use the post-split region and re-clip the range.
         $context = $capturedRequests[1]->getContext();
