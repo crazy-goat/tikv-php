@@ -404,6 +404,21 @@ the *connection* alive, not the *entry* in the cache). Lowering the cap
 limits the memory the channel cache can use; a channel is evicted only when
 another one is needed, so the cap never breaks a request.
 
+The transport drops an idle channel (one that was unused for `idleTtlMs`)
+when it opens a new channel. It also drops idle channels when a request
+reuses a cached channel, so the handle of a store that left the cluster does
+not stay in the cache. This sweep runs at most once per interval. The
+interval is one tenth of `idleTtlMs`, at least 1 second and at most
+`idleTtlMs`. The sweep drops the cached handle and frees the slot. It does
+not always close the connection: the ext-grpc persistent channel can outlive
+the handle (see the FAQ entry "ext-grpc's persistent channels are shared and
+reference-counted (#283)" in `docs/helpers/faq.md`). A channel with an
+in-flight call and the channel that the request uses are never dropped.
+
+A long-running worker that is quiet for a long time calls
+`$client->reapIdleChannels()` from its own tick to run the sweep without a
+request. `RawKvClient` and `TxnKvClient` have this method.
+
 ### Sharing One Transport Between Clients
 
 The gRPC transport is **long-lived and shared**: it caches one channel per

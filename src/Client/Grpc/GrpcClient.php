@@ -99,6 +99,17 @@ final class GrpcClient implements GrpcClientInterface
     private bool $closed = false;
 
     /**
+     * Time (seconds) of the last idle sweep, or null before the first one.
+     *
+     * The sweep runs on every cache miss and, at most once per
+     * `sweepDue()`, on the cache-hit path (issue #277).
+     */
+    private ?float $lastSweepAt = null;
+
+    /** Whether the soft-cap overshoot of the current episode was logged. */
+    private bool $softCapWarned = false;
+
+    /**
      * Maximum number of channels kept open at the same time.
      *
      * The client is meant to be long-lived and shared: the channel cache is
@@ -139,7 +150,9 @@ final class GrpcClient implements GrpcClientInterface
      *                        is evicted when the cap is reached. Must be >= 1.
      * @param int $idleTtlMs Idle time (ms) after which an unused channel is
      *                       evicted (default 10 minutes). A channel that is
-     *                       evicted is reopened on the next request.
+     *                       evicted is reopened on the next request. Idle
+     *                       channels are swept on every cache miss and, rate
+     *                       limited, on cache hits (issue #277).
      * @param bool $allowInsecure When true (default), an insecure (plaintext) gRPC channel
      *                            is created when no TLS configuration is provided or when
      *                            the TLS configuration has no credentials set. When false,
@@ -166,6 +179,9 @@ final class GrpcClient implements GrpcClientInterface
      *                             how often to ping an idle connection so NAT/firewall-dropped
      *                             flows are detected instead of silently dead.
      * @param int $keepaliveTimeoutMs grpc.keepalive_timeout_ms channel argument (default 3 s).
+     * @param (\Closure(): float)|null $clock Source of the current time in seconds
+     *                                         (default `microtime(true)`). Tests inject
+     *                                         a fake clock to age channels without sleeping.
      */
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
@@ -178,6 +194,7 @@ final class GrpcClient implements GrpcClientInterface
         private readonly int $maxSendMessageBytes = self::DEFAULT_MAX_SEND_MESSAGE_BYTES,
         private readonly int $keepaliveTimeMs = self::DEFAULT_KEEPALIVE_TIME_MS,
         private readonly int $keepaliveTimeoutMs = self::DEFAULT_KEEPALIVE_TIMEOUT_MS,
+        private readonly ?\Closure $clock = null,
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -577,7 +594,16 @@ final class GrpcClient implements GrpcClientInterface
             } else {
                 // Update last-used timestamp
                 $this->channels[$address]['lastUsed'] = $now;
-                return $this->channels[$address]['channel'];
+                $channel = $this->channels[$address]['channel'];
+
+                // A client that only ever hits the cache would keep the
+                // channels of departed stores for ever (issue #277). The
+                // returned channel was just touched, so it is never reaped.
+                if ($this->sweepDue($now)) {
+                    $this->evictIdleChannels($now);
+                }
+
+                return $channel;
             }
         }
 
@@ -588,6 +614,23 @@ final class GrpcClient implements GrpcClientInterface
         $this->enforceMaxChannels();
 
         return $this->createChannel($address, $now);
+    }
+
+    /**
+     * Drop the cached channels that were idle longer than `idleTtlMs`.
+     *
+     * The idle sweep also runs inside `getChannel()`, but only when a request
+     * arrives. A long-running worker that can be quiet for a long time calls
+     * this from its own tick. A channel with in-flight calls is skipped.
+     * No-op if the client has already been closed.
+     */
+    public function reapIdleChannels(): void
+    {
+        if ($this->closed) {
+            return;
+        }
+
+        $this->evictIdleChannels($this->now());
     }
 
     /**
@@ -607,6 +650,7 @@ final class GrpcClient implements GrpcClientInterface
      */
     private function evictIdleChannels(float $now): void
     {
+        $this->lastSweepAt = $now;
         $idleThreshold = $now - ($this->idleTtlMs / 1000);
 
         foreach ($this->channels as $address => $entry) {
@@ -625,7 +669,27 @@ final class GrpcClient implements GrpcClientInterface
     }
 
     /**
-     * If the channel cache is at capacity, evict the least recently used channel.
+     * Whether the cache-hit path may run an idle sweep now.
+     *
+     * The sweep walks every cached channel, so the hot path runs it at most
+     * once per interval: a tenth of the idle TTL, but at least one second and
+     * never more than the TTL itself (issue #277).
+     */
+    private function sweepDue(float $now): bool
+    {
+        if ($this->lastSweepAt === null) {
+            return true;
+        }
+
+        $ttlSeconds = $this->idleTtlMs / 1000;
+        $interval = min($ttlSeconds, max(1.0, $ttlSeconds / 10));
+
+        return $now - $this->lastSweepAt >= $interval;
+    }
+
+    /**
+     * If the channel cache is at capacity, evict the least recently used idle
+     * channels (the ones with no in-flight calls) until it is below the cap.
      *
      * `maxChannels` is a soft cap: a channel with in-flight calls is never
      * evicted, so when every cached channel is busy the cache is allowed to
@@ -636,38 +700,65 @@ final class GrpcClient implements GrpcClientInterface
     private function enforceMaxChannels(): void
     {
         if (count($this->channels) < $this->maxChannels) {
+            // Back under the cap: the next overshoot is a new episode and
+            // is logged again.
+            $this->softCapWarned = false;
+
             return;
         }
 
-        // Find the least recently used channel that has no live calls.
-        $lruAddress = null;
-        $lruTime = PHP_FLOAT_MAX;
-        foreach ($this->channels as $address => $entry) {
-            if ($entry['inFlight'] > 0) {
-                continue;
+        // Evict down to the cap, not one channel per call: an over-cap cache
+        // would otherwise shrink by one address per new address and stay
+        // above the cap for a long time. Every pass removes one channel from
+        // the cache, so the loop ends.
+        while (count($this->channels) >= $this->maxChannels) {
+            // Find the least recently used channel that has no live calls.
+            $lruAddress = null;
+            $lruTime = PHP_FLOAT_MAX;
+            foreach ($this->channels as $address => $entry) {
+                if ($entry['inFlight'] > 0) {
+                    continue;
+                }
+                if ($entry['lastUsed'] < $lruTime) {
+                    $lruTime = $entry['lastUsed'];
+                    $lruAddress = $address;
+                }
             }
-            if ($entry['lastUsed'] < $lruTime) {
-                $lruTime = $entry['lastUsed'];
-                $lruAddress = $address;
-            }
-        }
 
-        if ($lruAddress === null) {
-            $this->logger->warning('Channel cache at capacity but all channels are busy; exceeding soft cap', [
+            if ($lruAddress === null) {
+                $this->warnSoftCapExceeded();
+
+                return;
+            }
+
+            $this->logger->debug('Evicting LRU channel to enforce max channels', [
+                'address' => $lruAddress,
                 'maxChannels' => $this->maxChannels,
-                // The size of the cache, not the number of busy channels:
-                // every cached channel is busy in this branch.
-                'cachedChannels' => count($this->channels),
             ]);
+            $this->evictChannel($lruAddress);
+        }
 
+        $this->softCapWarned = false;
+    }
+
+    /**
+     * Log the soft-cap overshoot once per episode, not once per new address:
+     * a fan-out over a thousand stores would otherwise log ~1000 lines. The
+     * flag is cleared when the cache is back under the cap.
+     */
+    private function warnSoftCapExceeded(): void
+    {
+        if ($this->softCapWarned) {
             return;
         }
 
-        $this->logger->debug('Evicting LRU channel to enforce max channels', [
-            'address' => $lruAddress,
+        $this->softCapWarned = true;
+        $this->logger->warning('Channel cache at capacity but all channels are busy; exceeding soft cap', [
             'maxChannels' => $this->maxChannels,
+            // The size of the cache, not the number of busy channels:
+            // every cached channel is busy in this branch.
+            'cachedChannels' => count($this->channels),
         ]);
-        $this->evictChannel($lruAddress);
     }
 
     /**
@@ -855,7 +946,7 @@ final class GrpcClient implements GrpcClientInterface
 
     private function now(): float
     {
-        return microtime(true);
+        return $this->clock instanceof \Closure ? ($this->clock)() : microtime(true);
     }
 
     /**

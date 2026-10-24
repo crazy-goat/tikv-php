@@ -1239,3 +1239,34 @@ PHP has no background thread, so the client cannot run client-go's
 
 The clock is an injectable `?\Closure` on `Transaction` (shared with
 `TwoPhaseCommitter`), the same seam as the prewrite heartbeat of #218.
+
+## The idle sweep touches the returned channel before it sweeps, and `reapIdleChannels()` is public on the clients (#277)
+
+Issue #277 asks that the sweep run **before** the cache lookup, so a channel
+that is idle past the TTL is reclaimed and not refreshed by the call that
+finds it. The code does the opposite: on a cache hit it sets `lastUsed` of the
+returned channel first and then sweeps. Reason: a recreate does not give a new
+connection. ext-grpc keeps the channel in its persistent table, so the new
+handle resolves to the same `grpc_channel` (see the #283 entries). Reclaiming
+the requested channel and building it again would add work and no benefit, and
+it would risk closing the handle that the caller is about to use. The sweep
+still reclaims every **other** idle channel, which is what the issue needs.
+
+Other decisions of #277:
+
+1. The sweep interval is `min(idleTtl, max(1 s, idleTtl / 10))`, so it scales
+   with the TTL. A fixed 30 s would exceed a small TTL.
+2. The clock is a `?\Closure` constructor argument (default `microtime(true)`).
+3. `reapIdleChannels()` is on `GrpcClientInterface` (workers may hold the
+   interface) and on `RawKvClient` and `TxnKvClient`, because a worker holds
+   those and cannot reach the `GrpcClient` that the factory builds. It is a
+   no-op after `close()`, like `closeChannel()`.
+4. `maxChannels` eviction runs down to the cap in one call. The soft-cap
+   warning is logged once per overshoot episode (re-armed when the cache is
+   back under the cap), not on every growth of the maximum: a fan-out over
+   1 000 stores raises the maximum on every new address and would still log
+   once per address.
+5. #658 (BatchCommands stream on an unprotected channel) is not fixed here: it
+   needs a way to hold a channel in flight for the lifetime of a stream, on
+   the interface, and the transport is experimental and off by default.
+

@@ -161,6 +161,11 @@ final readonly class ApiV2GrpcClient implements GrpcClientInterface
         $this->inner->closeChannel($address);
     }
 
+    public function reapIdleChannels(): void
+    {
+        $this->inner->reapIdleChannels();
+    }
+
     public function getChannel(string $address): Channel
     {
         return $this->inner->getChannel($address);
