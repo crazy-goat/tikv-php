@@ -835,12 +835,14 @@ new client after you change them.
 
 ### What Gets Logged
 
-The client logs:
+The client writes these levels:
 
-- **DEBUG**: Connection attempts, cache operations, request details
-- **INFO**: Successful operations, region cache hits/misses
-- **WARNING**: Retry attempts, region invalidations, slow operations (only when the `slowLog` option is enabled — see [Slow Operation Logging](#slow-operation-logging))
-- **ERROR**: Failed operations, exhausted retries, fatal errors
+- **DEBUG**: Region cache hits and misses, store cache hits and misses, channel opening and eviction, request detail. This level is verbose. Do not use it in production.
+- **INFO**: Region and store invalidation, region leader switch, PD failover, transaction start, fallback from one-phase or async commit to two-phase commit.
+- **WARNING**: Retry attempts (`Retrying operation`), failed regions in a batch, channel reconnects, partial prewrite failure, `Pessimistic lock retry budget exhausted`, a skipped GC safe-point check, and slow operations (only when the `slowLog` option is enabled — see [Slow Operation Logging](#slow-operation-logging)).
+- **ERROR**: The general retry loop (`RetryExecutor`) writes `Retry attempt cap exhausted`, `Retry budget exhausted`, `ServerBusy budget exhausted`, `Retry deadline exhausted` and `Fatal error, not retrying`. The client also writes ERROR records for an exhausted batch deadline, a failed TSO request, an undetermined primary commit, and failed `close()` steps.
+
+Region cache hits and misses are **not** INFO records. A logger at the `INFO` level does not show them.
 
 Keys in the log details are redacted — see
 [Log Redaction](#log-redaction) for the exact format.
@@ -1442,13 +1444,15 @@ Store addresses are also cached:
 
 ### Cache Statistics
 
-Monitor cache performance via logs:
+Monitor cache performance via logs. The region cache writes these records (PSR-3 message and context):
 
 ```
-[INFO] Region cache hit: region_id=123
-[INFO] Region cache miss: key="user:123"
-[INFO] Invalidated region: region_id=123, reason=EpochNotMatch
+DEBUG  Region cache hit    {"key":"\"7573657231\" (5 bytes)","regionId":123}
+DEBUG  Region cache miss   {"key":"\"7573657231\" (5 bytes)"}
+INFO   Region invalidated  {"regionId":123}
 ```
+
+The hit and miss records need a logger that handles `DEBUG`. The `key` field is always redacted — see [Log Redaction](#log-redaction). The invalidation record has no `reason` field.
 
 ## Timeouts
 
