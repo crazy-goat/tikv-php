@@ -25,6 +25,10 @@ policy now classifies as internal.
 
 ### Fixed
 
+- `RegionCache::put()` now ignores a region whose epoch is strictly older than the cached one for the same ID, preventing stale `scanRegions` results from downgrading a fresher entry. (#249)
+
+### Fixed
+
 - `TlsConfigBuilder::readFile()` no longer emits a PHP warning exposing the resolved certificate path when the file is unreadable. (#553)
 
 ### Changed
