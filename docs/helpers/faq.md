@@ -864,7 +864,11 @@ Facts verified empirically (PHPUnit 11.5.57, issue #361):
 
 ## Rector version drift: local rector ≠ CI rector (no committed composer.lock)
 
-The repo has **no committed `composer.lock`**, so CI's `composer install`
+Historical note: since #311 `composer.lock` is committed and CI installs
+from it, so this drift only appears after a `composer update`. Entry below
+describes the state before that.
+
+The repo had **no committed `composer.lock`**, so CI's `composer install`
 resolves the latest rector within `^2.3` every run, while local devs use
 whatever `vendor/` happens to hold (this repo historically pinned 2.4.3).
 When rector 2.6.x shipped (2026-08), CI's Lint job started flagging 8 files
@@ -2566,3 +2570,11 @@ that mocks `getRegion()` with an arbitrary region now fails with
 To simulate a split in a committer test (for example "region no longer
 covers the whole key group"), return a region that contains the first
 key but not the others. Use a group of at least two keys.
+
+## Why does `composer update` not install the newest packages? (#311)
+
+`composer.json` pins `config.platform.php` to `8.2.0`, so Composer
+resolves for the lowest supported PHP, whatever PHP the host runs.
+Commit the changed `composer.lock` with the change that needs it. Use
+`composer update <package>` to move one package. Run `composer audit`
+after each update.
