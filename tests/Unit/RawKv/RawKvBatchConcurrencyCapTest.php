@@ -28,10 +28,10 @@ use Psr\Log\NullLogger;
  * calls (memory + server-side overload).
  *
  * The send (dispatch) phase is observable at GrpcClientInterface::callAsync()
- * — every sub-batch callable asks for its channel exactly once when the RPC
- * is sent. The executor's windowing guarantees that no more than
+ * — every sub-batch callable calls it exactly once when the RPC is
+ * sent. The executor's windowing guarantees that no more than
  * maxConcurrency futures exist before a wait happens, so the number of
- * channels handed out before the first wait completes equals the window
+ * callAsync() dispatches before the first wait completes equals the window
  * size: the peak in-flight request count is bounded by the cap.
  */
 final class RawKvBatchConcurrencyCapTest extends TestCase

@@ -1571,9 +1571,9 @@ stray call site to the existing knob is the whole fix. When an audit issue also 
 "reject batches above a documented key-count maximum", that is a separate, breaking API
 decision (needs a chosen cap + semver note) — do not silently fold it into a concurrency fix.
 
-Testing the cap through `RawKvBatch` (Grpc suite only — the wire path constructs real
-`\Grpc\Call` objects from `GrpcClientInterface::getChannel()`, so no ext-grpc = no test):
-mock `getChannel()` to count concurrent dispatches and return a real channel to a dead
+Testing the cap through `RawKvBatch` (Grpc suite only — the wire path needs a real
+`GrpcFuture`, which is `final`, so no ext-grpc = no test): mock `callAsync()` with
+`DeadEndpointGrpcFuture::callback()` to count dispatches against a dead
 endpoint (`127.0.0.1:1`); the sends succeed, the waits fail, and the test asserts the
 peak in-flight count equals the window size while expecting
 `BatchPartialFailureException` (which also proves partial-failure semantics survive
@@ -1912,7 +1912,7 @@ To observe *region re-resolution per attempt* specifically, do not count
 `regionCache->getByKey()`: the executor also calls it once per retryable
 failure for its own invalidation lookup, so the count is attempts + retries.
 Force a cache miss (`getByKey` → null), stub `pdClient->getRegion`, and count
-that (and/or `grpc->getChannel`, exactly one per dispatch): with
+that (and/or `grpc->callAsync`, exactly one per dispatch): with
 `maxAttempts: 2` both are exactly 2, while the old dispatch-only-retry code
 resolved once. Reference:
 `RawKvBatchTest::testBatchGetWithRetryReResolvesRegionOnEveryAttempt`.
@@ -2157,11 +2157,9 @@ Two implementation traps:
   `spl_object_id()`: an object id is reused once the channel it belonged to is
   gone, and a late settle must not release a slot of a different channel.
 
-Caveat: the protection only covers calls issued through
-`GrpcClient::callAsync()`. `RawKvBatch`'s V1 path still builds
-`\Grpc\Call` itself on a raw `getChannel()` handle, so its calls are not
-counted — that path is routed through `callAsync()` by GRPC-14 (#273), which
-is still open.
+Since #273 the V1 batch fan-out also goes through `callAsync()`, so every
+unary call is counted. `callAsync()` also emits `rpcStarted()` and, when the
+future settles (exactly once, also on cancellation), `rpcCompleted()`.
 
 ## A PD mock that ignores the `ScanRegions` limit breaks the batched region loader (issue #282)
 

@@ -778,8 +778,9 @@ rule that class is now held to:
    gone: `RawKvBatch::timeoutMs()` returns `int` with a `default => throw`, and
    a non-positive configured value resolves to
    `GrpcClient::DEFAULT_TIMEOUT_MS` — because `TimeoutConfig`'s `0` is a
-   *transport-level* opt-out, and a hand-rolled `new Call(...)` is not the
-   transport.
+   *transport-level* opt-out. The fan-out forwards the value to `callAsync()`,
+   which reads `0` as the explicit no-deadline opt-out, so a batch config of `0`
+   must not silently become an unbounded deadline.
 2. **Two sites may legitimately produce one, and they are enumerated, counted
    and justified**: `GrpcClient::deadline()`'s explicit `0` sentinel (the
    library's single "disabled" spelling, from #260) and

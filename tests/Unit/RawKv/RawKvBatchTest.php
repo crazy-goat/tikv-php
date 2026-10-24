@@ -364,7 +364,7 @@ class RawKvBatchTest extends TestCase
     {
         // 600 keys in one region → exactly 2 RawBatchGet RPCs
         // (MAX_BATCH_LIMIT = 512). The wait phase fails against the dead
-        // channel, which is what pins the *dispatch count*. maxAttempts=1
+        // endpoint, which is what pins the *dispatch count*. maxAttempts=1
         // disables the wait-phase retry introduced by #183 so callAsync()
         // is not called again for each retry.
         $keys = array_map(static fn(int $i): string => 'k' . $i, range(0, 599));
@@ -727,8 +727,8 @@ class RawKvBatchTest extends TestCase
     }
 
     /**
-     * Set up a cluster mock whose region cache always misses and whose gRPC
-     * channel points at a dead endpoint, then invoke the requested private
+     * Set up a cluster mock whose region cache always misses and whose callAsync()
+     * returns a future against a dead endpoint, then invoke the requested private
      * wrapper. The caller must include the RetryExecutor sized with
      * maxAttempts = 2 so exactly two dispatch attempts occur.
      *
