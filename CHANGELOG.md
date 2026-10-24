@@ -25,7 +25,7 @@ policy now classifies as internal.
 
 ### Fixed
 
-- `TxnReader::executeScanForRegion()` now re-asks a `KvScan` sub-range once when it answers an empty batch while the scan limit is still unsatisfied, instead of silently returning zero rows on a one-off empty answer (the mechanism behind the `testScanWithLimitOneReturnsSingleKey` CI flake). The unbounded-scan truncation probe is not re-asked. (#512)
+- `TxnReader::executeScanForRegion()` now re-asks a `KvScan` sub-range once when it answers an empty batch while the scan limit is still unsatisfied, instead of silently returning zero rows (or a truncated range, for the truncation probe) on a one-off empty answer. A scan of an empty range now sends one extra RPC. (#512)
 - `RegionCache::put()` now ignores a region whose epoch is strictly older than the cached one for the same ID, preventing stale `scanRegions` results from downgrading a fresher entry. (#249)
 
 ### Fixed

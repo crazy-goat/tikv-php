@@ -41,6 +41,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -399,18 +400,7 @@ final readonly class TxnReader
             return;
         }
 
-        // An empty probe is the normal "range complete" answer, so it is
-        // not re-asked (issue #512): that would double the RPCs of every
-        // whole-range scan.
-        $probe = $this->executeScanForRegion(
-            $cursor,
-            $endKey,
-            1,
-            $retryExecutor,
-            $classifier,
-            $maxScanLimit,
-            reattemptEmpty: false,
-        );
+        $probe = $this->executeScanForRegion($cursor, $endKey, 1, $retryExecutor, $classifier, $maxScanLimit);
 
         if ($probe !== []) {
             throw ScanLimitExceededException::forTransactionScan($maxScanLimit, count($results));
@@ -641,7 +631,6 @@ final readonly class TxnReader
         RetryExecutor $retryExecutor,
         callable $classifier,
         int $maxScanLimit = 10240,
-        bool $reattemptEmpty = true,
     ): array {
         $results = [];
         $pending = $limit;
@@ -773,7 +762,7 @@ final readonly class TxnReader
                 // the scan is the one shape a transient empty KvScan batch
                 // takes (issue #512). Re-ask the same range a bounded number
                 // of times before accepting it as the end of the data.
-                if ($reattemptEmpty && $emptyBatch && $pending > 0) {
+                if ($emptyBatch && $pending > 0) {
                     if ($emptyReattempts < self::MAX_EMPTY_SCAN_REATTEMPTS) {
                         usleep(BackoffType::RegionMiss->sleepMs($emptyReattempts) * 1000);
                         $emptyReattempts++;
@@ -781,7 +770,7 @@ final readonly class TxnReader
                     }
 
                     $this->logger->debug('TxnKV scan accepted an empty batch after re-attempts', [
-                        'startKey' => bin2hex($cursorStart),
+                        'startKey' => KeyRedactor::redact($cursorStart),
                         'pending' => $pending,
                         'reattempts' => $emptyReattempts,
                     ]);
@@ -789,6 +778,7 @@ final readonly class TxnReader
                 break;
             }
             $cursorStart = $freshEndKey;
+            $emptyReattempts = 0;
         }
 
         return $results;

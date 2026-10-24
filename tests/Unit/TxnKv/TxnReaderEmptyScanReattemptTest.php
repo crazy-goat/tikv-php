@@ -10,6 +10,7 @@ use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
@@ -56,7 +57,7 @@ final class TxnReaderEmptyScanReattemptTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($region);
     }
 
-    private function createTransaction(): Transaction
+    private function createTransaction(int $maxScanLimit = 10240): Transaction
     {
         $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
@@ -70,6 +71,7 @@ final class TxnReaderEmptyScanReattemptTest extends TestCase
             regionCache: $this->regionCache,
             lockResolver: new LockResolver($this->grpc, $regionResolver, $this->regionCache, $this->pdClient, 1000),
             regionResolver: $regionResolver,
+            maxScanLimit: $maxScanLimit,
         );
     }
 
@@ -146,5 +148,85 @@ final class TxnReaderEmptyScanReattemptTest extends TestCase
 
         $this->assertSame(['k1'], array_column($result, 'key'));
         $this->assertCount(1, $captured);
+    }
+
+    public function testWholeRangeScanReaskesAnEmptyAnswerAndReturnsTheRow(): void
+    {
+        /** @var list<ScanRequest> $captured */
+        $captured = [];
+        $this->stubScanAnswers([[], ['k1']], $captured);
+
+        $result = $this->createTransaction()->scan('', '', 0);
+
+        $this->assertSame(['k1'], array_column($result, 'key'));
+        $this->assertCount(2, $captured);
+    }
+
+    public function testTransientEmptyProbeStillReportsTruncation(): void
+    {
+        // Cap 2 is filled, the first probe answer is a transient empty one,
+        // the re-ask sees the extra row: the scan must refuse, not return a
+        // silently truncated range.
+        /** @var list<ScanRequest> $captured */
+        $captured = [];
+        $this->stubScanAnswers([['k1', 'k2'], [], ['k3']], $captured);
+
+        $this->expectException(ScanLimitExceededException::class);
+
+        $this->createTransaction(2)->scan('', '', 0);
+    }
+
+    public function testReattemptBudgetIsResetWhenTheReaskLandsOnASplitRegion(): void
+    {
+        $split = false;
+        $regions = [
+            'left' => new RegionInfo(2, 2, 1, 1, 2, '', 'm'),
+            'right' => new RegionInfo(3, 3, 1, 1, 2, 'm', ''),
+            'whole' => new RegionInfo(1, 1, 1, 1, 1, '', ''),
+        ];
+        $regionCache = $this->createMock(RegionCacheInterface::class);
+        $regionCache->method('getByKey')->willReturnCallback(
+            fn(string $key): RegionInfo => $regions['whole'],
+        );
+        $this->regionCache = $regionCache;
+
+        $call = 0;
+        $captured = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$call,
+                &$split,
+                &$captured
+            ): ScanResponse {
+                $this->assertInstanceOf(ScanRequest::class, $request);
+                $captured[] = $request;
+                $call++;
+                // Call 1: whole region, empty. Re-ask lands on the split
+                // layout: call 2 empty on [,m), call 3 empty on [m,), call 4
+                // returns the row.
+                $split = true;
+                $response = new ScanResponse();
+                if ($call === 4) {
+                    $pair = new KvPair();
+                    $pair->setKey('p1');
+                    $pair->setValue('v');
+                    $response->setPairs([$pair]);
+                }
+
+                return $response;
+            },
+        );
+
+        $result = $this->createTransaction()->scan('', '', 5);
+
+        $this->assertSame(['p1'], array_column($result, 'key'));
+        $this->assertCount(4, $captured);
+        $this->assertSame('m', $captured[2]->getStartKey());
+        $this->assertSame('m', $captured[3]->getStartKey());
     }
 }

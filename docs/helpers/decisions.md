@@ -1099,3 +1099,22 @@ decisions inside it are worth keeping:
    and that its removal breaks a consumer that instantiated it directly. No
    deprecation cycle precedes it: no API ever returned the class, and
    `docs/release-workflow.md` allows breaking changes before `1.0.0`.
+
+## An empty KvScan batch is re-asked once, outside RetryExecutor (#512)
+
+`TxnReader::executeScanForRegion()` re-asks a sub-range once when it
+answers an empty batch while the limit is unsatisfied and the scan would
+end there. The probe of `assertRangeNotTruncated()` is covered too: a
+transient empty probe would hide a truncated whole-range scan (#440).
+Trade-offs:
+
+- `MAX_EMPTY_SCAN_REATTEMPTS = 1`, counted per sub-range: the counter
+  resets when a batch is non-empty and when the scan moves to the next
+  region after a split.
+- Limit 0 normalizes to 10240, so every empty sub-range now costs two
+  KvScan RPCs plus a `BackoffType::RegionMiss` sleep of about 2 ms.
+- The sleep is a plain `usleep()` outside `RetryExecutor`: it does not
+  count against `maxBackoffMs` or the retry deadline and emits no
+  retry metric.
+- A persistent empty answer is accepted after the re-ask and logged at
+  debug level with a redacted key.
