@@ -116,6 +116,35 @@ final class GrpcClientChannelCapTest extends TestCase
         $client->close();
     }
 
+    public function testSoftCapWarningIsLoggedAgainWhenTheCacheEmptiesBeforeTheNextOvershoot(): void
+    {
+        $logger = new TestLogger();
+        $client = new GrpcClient($logger, maxChannels: 1);
+
+        $first = $this->dispatch($client, '41140');
+        $second = $this->dispatch($client, '41141');
+        $this->assertSame(1, $this->softCapWarnings($logger));
+
+        foreach ([$first, $second] as $future) {
+            try {
+                $future->wait();
+            } catch (\Throwable) {
+            }
+        }
+        $client->closeChannel('127.0.0.1:41140');
+        $client->closeChannel('127.0.0.1:41141');
+        $this->assertSame(0, $client->getChannelCount());
+
+        // The cache is under the cap, so the next call takes the early
+        // return that ends the episode.
+        $third = $this->dispatch($client, '41142');
+        $fourth = $this->dispatch($client, '41143');
+        $this->assertSame(2, $this->softCapWarnings($logger));
+
+        unset($third, $fourth);
+        $client->close();
+    }
+
     private function dispatch(GrpcClient $client, string $port): \CrazyGoat\TiKV\Client\Batch\GrpcFuture
     {
         return $client->callAsync(
