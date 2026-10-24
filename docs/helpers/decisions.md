@@ -1191,7 +1191,7 @@ Composer ignores the lock file of a dependency.
 
 ## Resolved transaction statuses are cached, FIFO, 2048, final outcomes only (#428)
 
-`LockResolver` keeps a `ResolvedTxnStatusCache` per resolver: start ts to
+`TxnKvClient` owns one `ResolvedTxnStatusCache` and passes it to the `LockResolver` of every transaction (a final outcome per start ts is global, as in client-go's store-level `resolved`). It maps start ts to
 commit ts (0 means rolled back), FIFO eviction, 2048 entries as in client-go.
 The size is a constant (`DEFAULT_CAPACITY`) and is not an option, because no
 user-facing option group fits it.
@@ -1211,3 +1211,11 @@ resolves every lock of that transaction in the region. Locks of a live
 transaction do not block the others: they are resolved first, and one
 `TxnRetryableException` follows. Pinned by `LockResolverBatchTest` and
 `ResolvedTxnStatusCacheTest`.
+
+Known follow-up: `NoAction` with `lock_ttl = 0` and `commit_ts = 0` is resolved as
+rolled back but is not cached, unlike client-go.
+
+Cache lifetime tests: `TxnKvClientTest::testTransactionsShareOneResolvedStatusCache`
+(second transaction meets the same lock, one `KvCheckTxnStatus`);
+`LockResolverBatchTest::testCachedRollbackSkipsSecondaryCheckForAsyncCommitLock` pins the
+cache-hit path for async-commit locks.

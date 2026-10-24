@@ -318,6 +318,23 @@ class LockResolverBatchTest extends TestCase
         $this->assertSame(['1001'], $this->keysOf($this->resolves[0]));
     }
 
+    public function testCachedRollbackSkipsSecondaryCheckForAsyncCommitLock(): void
+    {
+        $cache = new ResolvedTxnStatusCache();
+        $cache->put(100, 0);
+
+        $lock = $this->lock('1001', 100);
+        $lock->setUseAsyncCommit(true);
+        $lock->setSecondaries(['1002', '6001']);
+
+        $resolver = $this->resolver($cache);
+        $resolver->resolveLock('1000', $lock);
+
+        $this->assertSame([], $this->checks, 'a cached outcome needs no CheckTxnStatus');
+        $this->assertCount(1, $this->resolves, 'no KvCheckSecondaryLocks, one KvResolveLock');
+        $this->assertSame(0, (int) $this->resolves[0]->getCommitVersion());
+    }
+
     public function testEmptyBatchMakesNoCall(): void
     {
         $this->resolver()->resolveLocks([]);

@@ -140,6 +140,12 @@ final class TxnKvClient
 
     private bool $closed = false;
     private readonly RegionResolver $regionResolver;
+
+    /**
+     * Final transaction outcomes shared by the LockResolver of every
+     * transaction of this client (issue #428). Bounded, FIFO.
+     */
+    private readonly ResolvedTxnStatusCache $resolvedStatusCache;
     /** Wall-clock deadline (ms) handed to every Transaction this client begins. */
     private readonly int $retryDeadlineMs;
     /** Per-instance default service ID for service safe-point registrations. */
@@ -241,6 +247,7 @@ final class TxnKvClient
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
+        $this->resolvedStatusCache = new ResolvedTxnStatusCache();
         $this->serviceId = self::SERVICE_ID_PREFIX . '-' . substr(md5(uniqid('svc', true)), 0, 8);
         if ($this->regionCache instanceof RegionCache) {
             // Issue #474: regionInvalidated() is emitted from inside
@@ -406,6 +413,7 @@ final class TxnKvClient
             $startTs,
             timeoutConfig: $this->timeoutConfig,
             logger: $this->logger,
+            statusCache: $this->resolvedStatusCache,
         );
 
         return new Transaction(

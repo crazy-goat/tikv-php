@@ -80,6 +80,68 @@ class TxnKvClientTest extends TestCase
         $client->begin(['eagerPessimisticLocks' => 'yes']); // @phpstan-ignore argument.type
     }
 
+    public function testTransactionsShareOneResolvedStatusCache(): void
+    {
+        $region = new RegionInfo(1, 1, 1, 1, 1, '', '');
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(5000);
+        $pdClient->method('getLowResolutionTimestamp')->willReturn(5000);
+        $pdClient->method('getStore')->willReturn($store);
+        $pdClient->method('getRegion')->willReturn($region);
+        $pdClient->method('scanRegions')->willReturn([$region]);
+
+        $lock = new \CrazyGoat\Proto\Kvrpcpb\LockInfo();
+        $lock->setKey('k1');
+        $lock->setPrimaryLock('k1');
+        $lock->setLockVersion(2000);
+        $keyError = new \CrazyGoat\Proto\Kvrpcpb\KeyError();
+        $keyError->setLocked($lock);
+        $lockedResponse = new GetResponse();
+        $lockedResponse->setError($keyError);
+        $valueResponse = new GetResponse();
+        $valueResponse->setValue('v');
+        $status = new \CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse();
+        $status->setCommitVersion(3000);
+
+        $statusChecks = 0;
+        $locksServed = 0;
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($grpc);
+        $grpc->method('call')->willReturnCallback(
+            function (
+                string $a,
+                string $s,
+                string $method
+            ) use (
+                &$statusChecks,
+                &$locksServed,
+                $lockedResponse,
+                $valueResponse,
+                $status,
+            ): object {
+                return match ($method) {
+                    'KvGet' => $locksServed++ % 2 === 0 ? $lockedResponse : $valueResponse,
+                    'KvCheckTxnStatus' => $this->countAndReturn($statusChecks, $status),
+                    'KvResolveLock' => new \CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse(),
+                    default => throw new \RuntimeException('Unexpected ' . $method),
+                };
+            },
+        );
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        foreach ([1, 2] as $_) {
+            $txn = $client->begin(['pessimistic' => false]);
+            $this->assertSame('v', $txn->get('k1'));
+            $txn->rollback();
+        }
+
+        $this->assertSame(2, intdiv($locksServed, 2), 'both transactions met the lock');
+        $this->assertSame(1, $statusChecks, 'the second transaction reuses the cached outcome');
+    }
+
     public function testBeginDefaultsToPessimistic(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);
@@ -610,5 +672,12 @@ class TxnKvClientTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage("options['lockWaitTimeMs'] must be >= 0");
         $client->begin(['lockWaitTimeMs' => -1]);
+    }
+
+    private function countAndReturn(int &$counter, object $response): object
+    {
+        $counter++;
+
+        return $response;
     }
 }

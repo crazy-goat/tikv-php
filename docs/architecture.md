@@ -422,7 +422,7 @@ Transaction encounters lock on key
     └─────────┘
 ```
 
-`LockResolver` keeps the final outcomes (committed or rolled back) in a
+`TxnKvClient` keeps one cache, shared by every transaction, with the final outcomes (committed or rolled back) in a
 bounded FIFO cache keyed by lock start ts (`ResolvedTxnStatusCache`, 2048
 entries). A lock of a known transaction skips `CheckTxnStatus`. A live or
 undetermined status is never cached. `resolveLocks()` takes several locks,
