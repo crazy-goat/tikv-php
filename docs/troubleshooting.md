@@ -891,11 +891,10 @@ echo "Took: {$elapsed}s\n";
 
 2. **Large values:**
    ```php
-   // Check value sizes
-   $value = $client->get('large-key');
-   if (strlen($value) > RawKvClient::MAX_VALUE_SIZE) {
-       // Value > 4 MiB. put() rejects it with InvalidArgumentException.
-       // See operations.md#limits. Consider chunking.
+   // Check the size before put()
+   if (strlen($data) > RawKvClient::MAX_VALUE_SIZE) {
+       // put() rejects a value above 4 MiB with InvalidArgumentException.
+       // Split $data into chunks. See operations.md#limits.
    }
    ```
 

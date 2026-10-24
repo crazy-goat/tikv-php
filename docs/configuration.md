@@ -1564,13 +1564,7 @@ try {
 }
 ```
 
-Or use async patterns:
-
-```php
-// Batch operations split by region and size on their own.
-// You do not need to chunk $keys. See docs/operations.md#limits.
-$results = $client->batchGet($keys);
-```
+Batch methods already send their sub-batches in parallel (default concurrency 16, `RawKvClient::DEFAULT_MAX_CONCURRENCY`). The `batchDeadlineMs` timeout option bounds the whole fan-out (see [Timeouts](#timeouts)).
 
 ## Production Configuration
 
