@@ -269,6 +269,7 @@ only the timing it produces differs.
 | `RawKvClient::create()`, `RawKvClient::close()` | Yes | Yes | `create()` validates the options (`InvalidArgumentException` on a bad option) and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent — a second call does nothing |
 | `RawKvClient::getClusterId()`, `RawKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
 | `RawKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `RawKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 
 ### TxnKV operations
 
@@ -282,6 +283,7 @@ only the timing it produces differs.
 | `TxnKvClient::create()`, `TxnKvClient::close()` | Yes | Yes | `create()` validates the options and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent |
 | `TxnKvClient::getClusterId()`, `TxnKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
 | `TxnKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `TxnKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 | `Transaction::get()`, `Transaction::batchGet()`, `Transaction::scan()` | Yes | Yes | Read-only inside the transaction's snapshot at `startTs`, so a repeated read sees the same version of the data |
 | `Transaction::set()`, `Transaction::delete()` | Yes (same value) | **With care** | The value is buffered locally, so the same call twice writes the same thing. But in the default eager pessimistic mode the physical lock is acquired *before* the call returns: a failed `set()`/`delete()` may have left a lock behind and leaves the transaction unwritable (`InvalidStateException` on the next write). Repeating therefore converges only while the transaction is still writable. The transaction cannot be continued — discard it and begin a new one |
 | `Transaction::commit()` | **No** | **No** | See [Transaction commit and the new-transaction rule](#transaction-commit-and-the-new-transaction-rule) |

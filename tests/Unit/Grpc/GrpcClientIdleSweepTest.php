@@ -120,6 +120,63 @@ final class GrpcClientIdleSweepTest extends TestCase
         $client->close();
     }
 
+    public function testReapIdleChannelsDropsIdleChannelsWithoutARequest(): void
+    {
+        $client = $this->client();
+        $client->getChannel('127.0.0.1:41050');
+        $client->getChannel('127.0.0.1:41051');
+
+        $this->now += 50.0;
+        $client->reapIdleChannels();
+        $this->assertSame(2, $client->getChannelCount());
+
+        $this->now += 100.0;
+        $client->reapIdleChannels();
+        $this->assertSame(0, $client->getChannelCount());
+        $client->close();
+    }
+
+    public function testReapIdleChannelsSkipsAChannelWithAnInFlightCall(): void
+    {
+        $client = $this->client();
+        $future = $client->callAsync(
+            '127.0.0.1:41060',
+            'tikvpb.Tikv',
+            'RawGet',
+            $this->rawGetRequest(),
+            RawGetResponse::class,
+        );
+
+        $this->now += 200.0;
+        $client->reapIdleChannels();
+
+        $this->assertSame(1, $client->getChannelCount());
+        unset($future);
+        $client->close();
+    }
+
+    public function testReapIdleChannelsIsANoOpAfterClose(): void
+    {
+        $client = $this->client();
+        $client->close();
+
+        $client->reapIdleChannels();
+
+        $this->assertSame(0, $client->getChannelCount());
+    }
+
+    public function testApiV2DecoratorForwardsReapIdleChannels(): void
+    {
+        $inner = $this->createMock(\CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface::class);
+        $inner->expects($this->once())->method('reapIdleChannels');
+
+        (new \CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient(
+            $inner,
+            $this->createMock(\CrazyGoat\TiKV\Client\Codec\CodecInterface::class),
+            \CrazyGoat\TiKV\Client\Codec\Mode::Raw,
+        ))->reapIdleChannels();
+    }
+
     private function client(): GrpcClient
     {
         return new GrpcClient(

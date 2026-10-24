@@ -106,6 +106,9 @@ final class GrpcClient implements GrpcClientInterface
      */
     private ?float $lastSweepAt = null;
 
+    /** Whether the soft-cap overshoot of the current episode was logged. */
+    private bool $softCapWarned = false;
+
     /**
      * Maximum number of channels kept open at the same time.
      *
@@ -614,6 +617,23 @@ final class GrpcClient implements GrpcClientInterface
     }
 
     /**
+     * Drop the cached channels that were idle longer than `idleTtlMs`.
+     *
+     * The idle sweep also runs inside `getChannel()`, but only when a request
+     * arrives. A long-running worker that can be quiet for a long time calls
+     * this from its own tick. A channel with in-flight calls is skipped.
+     * No-op if the client has already been closed.
+     */
+    public function reapIdleChannels(): void
+    {
+        if ($this->closed) {
+            return;
+        }
+
+        $this->evictIdleChannels($this->now());
+    }
+
+    /**
      * Get the current number of cached channels.
      */
     public function getChannelCount(): int
@@ -679,38 +699,65 @@ final class GrpcClient implements GrpcClientInterface
     private function enforceMaxChannels(): void
     {
         if (count($this->channels) < $this->maxChannels) {
+            // Back under the cap: the next overshoot is a new episode and
+            // is logged again.
+            $this->softCapWarned = false;
+
             return;
         }
 
-        // Find the least recently used channel that has no live calls.
-        $lruAddress = null;
-        $lruTime = PHP_FLOAT_MAX;
-        foreach ($this->channels as $address => $entry) {
-            if ($entry['inFlight'] > 0) {
-                continue;
+        // Evict down to the cap, not one channel per call: an over-cap cache
+        // would otherwise shrink by one address per new address and stay
+        // above the cap for a long time. Every pass removes one channel from
+        // the cache, so the loop ends.
+        while (count($this->channels) >= $this->maxChannels) {
+            // Find the least recently used channel that has no live calls.
+            $lruAddress = null;
+            $lruTime = PHP_FLOAT_MAX;
+            foreach ($this->channels as $address => $entry) {
+                if ($entry['inFlight'] > 0) {
+                    continue;
+                }
+                if ($entry['lastUsed'] < $lruTime) {
+                    $lruTime = $entry['lastUsed'];
+                    $lruAddress = $address;
+                }
             }
-            if ($entry['lastUsed'] < $lruTime) {
-                $lruTime = $entry['lastUsed'];
-                $lruAddress = $address;
-            }
-        }
 
-        if ($lruAddress === null) {
-            $this->logger->warning('Channel cache at capacity but all channels are busy; exceeding soft cap', [
+            if ($lruAddress === null) {
+                $this->warnSoftCapExceeded();
+
+                return;
+            }
+
+            $this->logger->debug('Evicting LRU channel to enforce max channels', [
+                'address' => $lruAddress,
                 'maxChannels' => $this->maxChannels,
-                // The size of the cache, not the number of busy channels:
-                // every cached channel is busy in this branch.
-                'cachedChannels' => count($this->channels),
             ]);
+            $this->evictChannel($lruAddress);
+        }
 
+        $this->softCapWarned = false;
+    }
+
+    /**
+     * Log the soft-cap overshoot once per episode, not once per new address:
+     * a fan-out over a thousand stores would otherwise log ~1000 lines. The
+     * flag is cleared when the cache is back under the cap.
+     */
+    private function warnSoftCapExceeded(): void
+    {
+        if ($this->softCapWarned) {
             return;
         }
 
-        $this->logger->debug('Evicting LRU channel to enforce max channels', [
-            'address' => $lruAddress,
+        $this->softCapWarned = true;
+        $this->logger->warning('Channel cache at capacity but all channels are busy; exceeding soft cap', [
             'maxChannels' => $this->maxChannels,
+            // The size of the cache, not the number of busy channels:
+            // every cached channel is busy in this branch.
+            'cachedChannels' => count($this->channels),
         ]);
-        $this->evictChannel($lruAddress);
     }
 
     /**
