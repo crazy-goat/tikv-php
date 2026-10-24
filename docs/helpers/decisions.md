@@ -1188,3 +1188,19 @@ image. Raise the pin only when `require.php` drops a PHP version.
 The CI `lint` job runs `composer audit --locked`, so a new advisory
 fails the build. Downstream users of the library are not affected:
 Composer ignores the lock file of a dependency.
+
+## Atomic mode and plain writes use different TiKV paths (#399)
+
+`setAtomicForCAS(true)` makes `put()`, `delete()`, `batchPut()` and
+`batchDelete()` send `for_cas`. `RawCASRequest` has no `for_cas` field.
+
+TiKV routes a `for_cas` put or delete to `raw_batch_put_atomic` or
+`raw_batch_delete_atomic` (`RawAtomicStore`). `RawCompareAndSwap` takes
+the same path. Both commands run through the transaction scheduler and
+take latches on their keys (`gen_lock!`). A plain `raw_put` writes to the
+engine directly and takes no latch. Source: `src/storage/mod.rs`,
+`src/server/service/kv.rs` and `src/storage/txn/commands/` in `tikv/tikv`.
+
+So a CAS is atomic only against writers that also use the atomic path.
+The client cannot enforce this across processes. The docs tell the user to
+use one mode for all writers of the same keys.

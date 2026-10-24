@@ -756,9 +756,10 @@ public function isAtomicForCAS(): bool;                 // current state of the 
 flag on every `RawPut`/`RawDelete` request it sends (single-key and batch),
 which is what selects TiKV's atomic code path on the store.
 
-**Scope:** the flag is a switch of the client instance. It affects **all** writes
-of that instance, not only `compareAndSwap()` and `putIfAbsent()`. These methods
-send `for_cas` while the flag is on:
+**Scope:** the flag is a switch of the client instance. It affects all put and
+delete writes of that instance, not only the CAS calls. `compareAndSwap()` and
+`putIfAbsent()` require the flag. These methods send `for_cas` while the flag
+is on:
 
 - `put()`
 - `delete()`
@@ -769,7 +770,10 @@ send `for_cas` while the flag is on:
 not send it either.
 
 **Mixed writers:** a client with the flag on and a client with the flag off send
-writes to the same keys through different code paths. The client does not check
+writes to the same keys through different code paths. TiKV serializes an atomic
+write and a `compareAndSwap()` on the same key with latches. TiKV applies a
+plain write without these latches. A plain write can land between the read and
+the write of a CAS, and the CAS then overwrites it. The client does not check
 this. Use the same mode for every writer of the same keys. If only a part of
 your workload needs CAS, give that part its own client instance, and let this
 client be the only writer of its keys.
