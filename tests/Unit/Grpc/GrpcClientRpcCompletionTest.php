@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 
 /**
  * Issue #274 (GRPC-15): every rpcStarted() of call() / callStreaming() is
@@ -105,14 +106,26 @@ final class GrpcClientRpcCompletionTest extends TestCase
 
     public function testThrowingMetricsBackendDoesNotMaskTheTransportException(): void
     {
+        $backendError = new \LogicException('metrics backend down');
         $metrics = $this->createMock(MetricsInterface::class);
         $metrics->expects($this->once())->method('rpcStarted');
         $metrics->expects($this->once())
             ->method('rpcCompleted')
             ->with(self::OPERATION, $this->isType('float'), false)
-            ->willThrowException(new \LogicException('metrics backend down'));
+            ->willThrowException($backendError);
 
-        $grpc = new GrpcClient(allowInsecure: false, metrics: $metrics);
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects($this->once())
+            ->method('warning')
+            ->with(
+                $this->anything(),
+                $this->callback(
+                    static fn(array $context): bool => ($context['operation'] ?? null) === self::OPERATION
+                        && ($context['exception'] ?? null) === $backendError,
+                ),
+            );
+
+        $grpc = new GrpcClient(logger: $logger, allowInsecure: false, metrics: $metrics);
 
         try {
             $grpc->call(self::ADDRESS, 'tikvpb.Tikv', 'RawGet', new RawGetRequest(), RawGetResponse::class);
