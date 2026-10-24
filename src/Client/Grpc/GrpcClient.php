@@ -242,7 +242,7 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->metrics->rpcStarted($operation);
+        $this->startRpc($operation);
         $start = hrtime(true);
         $success = false;
         try {
@@ -305,7 +305,7 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->metrics->rpcStarted($operation);
+        $this->startRpc($operation);
         $start = hrtime(true);
         $success = false;
         try {
@@ -406,7 +406,7 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->metrics->rpcStarted($operation);
+        $this->startRpc($operation);
         $start = hrtime(true);
 
         try {
@@ -449,6 +449,29 @@ final class GrpcClient implements GrpcClientInterface
                 $this->completeRpc($operation, $start, $success);
             },
         );
+    }
+
+    /**
+     * Record the start of an RPC. A metrics backend that throws is logged
+     * and swallowed: the emission sits *before* the call, so a throw from it
+     * would abort a call that never happened and replace the transport
+     * exception the caller has to see (issue #759, GRPC-15).
+     *
+     * The `rpcStarted == rpcSucceeded + rpcFailed` invariant holds for every
+     * backend that records what it is told. A backend that throws from
+     * `rpcStarted()` alone breaks it — its own counters are not trustworthy
+     * in that case.
+     */
+    private function startRpc(string $operation): void
+    {
+        try {
+            $this->metrics->rpcStarted($operation);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Metrics backend threw from rpcStarted()', [
+                'operation' => $operation,
+                'exception' => $e,
+            ]);
+        }
     }
 
     /**

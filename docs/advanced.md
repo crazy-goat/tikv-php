@@ -721,7 +721,7 @@ The interface has six methods (full reference with emitted tag examples:
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
 
-Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from `rpcCompleted()`, so the transport exception of the call is never replaced. The default is a zero-cost no-op
+Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from both `rpcStarted()` and `rpcCompleted()`, so the transport exception of a gRPC call is never replaced. The retry and region-cache counters are emitted directly and are not protected yet. The default is a zero-cost no-op
 (`NoOpMetrics`). A ready-made in-memory recorder for tests and benchmarks
 ships as [`InMemoryMetrics`](../src/Client/Observability/InMemoryMetrics.php)
 with `getRpcStarted(string $operation)`, `getRpcSucceeded(string $operation)`,

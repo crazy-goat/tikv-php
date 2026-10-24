@@ -300,6 +300,15 @@ $remaining = $client->getKeyTTL('session');          // seconds remaining, or nu
 > RPC sends the `for_cas` flag, which tells TiKV to use the atomic code path.
 > Atomic mode is disabled by default for performance — the non-atomic code path
 > is faster for regular writes. Enable it only when you need CAS semantics.
+>
+> **Scope:** `setAtomicForCAS(true)` is a switch of the client instance. It
+> affects all put and delete writes of that instance: `put()`, `delete()`,
+> `batchPut()` and `batchDelete()` send `for_cas`. `compareAndSwap()` and
+> `putIfAbsent()` require the flag. `deleteRange()`, `deletePrefix()` and
+> `ingest()` do not send it. The atomic path (and its cost) applies to all
+> put and delete writes of that client. If only a part of your workload needs
+> CAS, use a separate client instance for it. Use the same mode for every
+> writer of the same keys. See [Atomic Mode](docs/operations.md#atomic-mode-setatomicforcas--isatomicforcas).
 
 ```php
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
