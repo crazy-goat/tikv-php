@@ -132,5 +132,5 @@ locally (it needs `ext-grpc` and a coverage driver: PCOV, or Xdebug in `coverage
   `ext-grpc` are listed in the `Grpc` suite in `phpunit.xml`, not in `Unit`.
 - Update `CHANGELOG.md` under `## [Unreleased]` in every user-visible change.
 - `composer.lock` is committed and CI installs from it. `config.platform.php` pins resolution to
-  PHP 8.2.0, the lowest supported version. Update with `composer update <package>`, never with a
-  bare PHP 8.5 resolve of new majors. See `docs/helpers/decisions.md`.
+  PHP 8.2.0, the lowest supported version. Update with `composer update <package>`. Do not run a
+  bare `composer update` without reviewing the lock diff. See `docs/helpers/decisions.md`.

@@ -21,7 +21,8 @@
     },
     "config": {
         "audit": {
-            "block-insecure": true
+            "block-insecure": true,
+            "abandoned": "report"
         },
         "platform": {
             "php": "8.2.0"
