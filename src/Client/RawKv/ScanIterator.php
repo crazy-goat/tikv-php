@@ -132,14 +132,17 @@ final class ScanIterator implements Iterator
             return;
         }
 
+        $firstKey = $results[0]['key'];
         $lastKey = $results[count($results) - 1]['key'];
         $nextStartKey = KeyOrder::successor($lastKey);
 
         // A well-behaved server returns keys >= the requested start key, so
         // the cursor strictly advances. Without this check a server that
-        // keeps answering a full page ending on the same key never ends the
-        // scan when endKey is empty. Keys are not put in the message.
-        if (KeyOrder::lte($nextStartKey, $this->currentStartKey)) {
+        // keeps answering a full page ending on the same key never ends any
+        // forward scan, bounded or not: the cursor stays below endKey. The
+        // first-key check also blocks a page that repeats an earlier key.
+        // Keys are not put in the message.
+        if (KeyOrder::lt($firstKey, $this->currentStartKey) || KeyOrder::lte($nextStartKey, $this->currentStartKey)) {
             $this->buffer = [];
             $this->exhausted = true;
 

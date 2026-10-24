@@ -384,38 +384,54 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
-        // The timeout is validated before anything is opened: a
+        // The timeout is validated before anything is opened or metered: a
         // non-positive value is a configuration error and must not create
-        // (and cache) a channel before it is raised (issue #276, GRPC-17).
+        // (and cache) a channel, or emit rpcStarted(), before it is raised
+        // (issue #276, GRPC-17).
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
-        $channel = $this->getChannel($address);
+        $operation = $service . '/' . $method;
+        $this->metrics->rpcStarted($operation);
+        $start = hrtime(true);
 
-        $deadline = $this->deadline($timeout);
+        try {
+            $channel = $this->getChannel($address);
 
-        $call = new Call(
-            $channel,
-            "/{$service}/{$method}",
-            $deadline,
-        );
+            $deadline = $this->deadline($timeout);
 
-        $call->startBatch([
-            \Grpc\OP_SEND_INITIAL_METADATA => [],
-            \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
-            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
-        ]);
+            $call = new Call(
+                $channel,
+                "/{$service}/{$method}",
+                $deadline,
+            );
+
+            $call->startBatch([
+                \Grpc\OP_SEND_INITIAL_METADATA => [],
+                \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
+                \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
+            ]);
+        } catch (\Throwable $e) {
+            // The RPC never started: complete it here, because no future
+            // exists to settle it.
+            $this->metrics->rpcCompleted($operation, (hrtime(true) - $start) / 1_000_000, false);
+
+            throw $e;
+        }
 
         // The call is live on the channel from here on. Count it as
         // in-flight so that no eviction can close the channel under it
         // (issue #278); the counter is released when the future settles
-        // — successfully, with an error, or on cancellation.
+        // — successfully, with an error, or on cancellation. The same
+        // settlement records the RPC metric, so it is emitted exactly once
+        // per call (issue #273).
         $this->markInFlight($address, $channel);
 
         return new GrpcFuture(
             $call,
             $responseClass,
-            onSettled: function (bool $success) use ($channel): void {
+            onSettled: function (bool $success) use ($channel, $operation, $start): void {
                 $this->releaseInFlight($channel);
+                $this->metrics->rpcCompleted($operation, (hrtime(true) - $start) / 1_000_000, $success);
             },
         );
     }

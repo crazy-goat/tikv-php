@@ -45,6 +45,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
+use CrazyGoat\TiKV\Tests\Unit\Support\DeadEndpointGrpcFuture;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -597,16 +598,16 @@ class RawKvClientTest extends TestCase
         // guards against a regression that would silently drop keys before
         // any RPC (issue #244). A *successful* batchGet response (ordered
         // results, null for missing keys) cannot be driven end-to-end in
-        // unit tests because RawKvBatch hardcodes `new Call(...)` (see
+        // unit tests because RawKvBatch builds real gRPC calls (see
         // docs/helpers/faq.md) — that mapping is pinned by the E2E suite
         // (RawKvE2ETest::testBatchPutAndBatchGet / testBatchGetReturnsKeysInOrder).
         //
         // maxBackoffMs=1 makes the wait-phase retry (#183) abort on the first
         // backoff (TiKvRpc base 100 ms > 1 ms) before re-dispatching, so
-        // getChannel() is called exactly once for the one sub-batch.
-        $this->grpc->expects($this->exactly(1))->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        // callAsync() is called exactly once for the one sub-batch.
+        $this->grpc->expects($this->exactly(1))
+            ->method('callAsync')
+            ->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         // No TiKV server in unit tests: the request reaches the transport
         // layer and fails at connection time (issue #322 pattern).
@@ -625,9 +626,7 @@ class RawKvClientTest extends TestCase
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        $this->grpc->method('callAsync')->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         // Pre-fix: int keys from array_keys() hit validateKeyNotEmpty(string)
         // and throw a TypeError. Post-fix the keys are normalized and the
@@ -664,9 +663,7 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        $this->grpc->method('callAsync')->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         // Pre-fix: PHP coerces the "12345"/"0" array keys to int, so
         // validateKeyNotEmpty(string) throws a TypeError here. Post-fix the
@@ -716,9 +713,7 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        $this->grpc->method('callAsync')->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         // Pre-fix: int keys from array_keys() hit validateKeyNotEmpty(string)
         // and throw a TypeError. Post-fix the keys are normalized and the

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
@@ -15,6 +16,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
+use CrazyGoat\TiKV\Tests\Unit\Support\DeadEndpointGrpcFuture;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -25,11 +27,11 @@ use Psr\Log\NullLogger;
  * huge batch cannot open an unbounded thundering herd of in-flight gRPC
  * calls (memory + server-side overload).
  *
- * The send (dispatch) phase is observable at GrpcClientInterface::getChannel()
- * — every sub-batch callable asks for its channel exactly once when the RPC
- * is sent. The executor's windowing guarantees that no more than
+ * The send (dispatch) phase is observable at GrpcClientInterface::callAsync()
+ * — every sub-batch callable calls it exactly once when the RPC is
+ * sent. The executor's windowing guarantees that no more than
  * maxConcurrency futures exist before a wait happens, so the number of
- * channels handed out before the first wait completes equals the window
+ * callAsync() dispatches before the first wait completes equals the window
  * size: the peak in-flight request count is bounded by the cap.
  */
 final class RawKvBatchConcurrencyCapTest extends TestCase
@@ -96,14 +98,13 @@ final class RawKvBatchConcurrencyCapTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($store);
 
         $self = $this;
-        $this->grpc->method('getChannel')->willReturnCallback(
-            function (string $address) use ($self): \Grpc\Channel {
+        $deadEndpoint = DeadEndpointGrpcFuture::callback();
+        $this->grpc->method('callAsync')->willReturnCallback(
+            function (...$args) use ($self, $deadEndpoint): GrpcFuture {
                 $self->inFlight++;
                 $self->maxInFlight = max($self->maxInFlight, $self->inFlight);
 
-                return new \Grpc\Channel('127.0.0.1:1', [
-                    'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-                ]);
+                return $deadEndpoint(...$args);
             },
         );
     }
@@ -190,7 +191,7 @@ final class RawKvBatchConcurrencyCapTest extends TestCase
             new RegionResolver($this->pdClient, $this->regionCache),
             new NullLogger(),
             // maxAttempts=1 disables the wait-phase re-dispatch introduced by
-            // #183 so the getChannel() counter below measures only the
+            // #183 so the callAsync() counter below measures only the
             // windowed dispatch, not sequential retries.
             maxAttempts: 1,
         );

@@ -1401,25 +1401,25 @@ temporarily replacing the warning-early-return with `self::fail()`) and activate
 automatically when the fix merges — no env var to clean up later, and no
 duplicate tests alongside the fix PR's own coverage.
 
-## RawKvBatch hardcodes `new Call(...)` — retries are tested via the wait boundary or a dead channel
+## RawKvBatch dispatches through `callAsync()` — tests use a dead endpoint, not a dead channel (issue #273)
 
-`RawKvBatch::execute*ForRegionAsync()` constructs `\Grpc\Call` directly, so
-the transport cannot be injected with a mocked Call (which `GrpcFutureTest`
-does for the future itself). A response-borne region error therefore cannot
-be delivered end-to-end through `batchGet()` in unit tests. Before #183 the
-contract was pinned at the wait-boundary composition
-(`CheckedGrpcFuture::fromGrpcFuture(...)` through
-`BatchAsyncExecutor::executeParallel()`, issue #330); those tests were
-replaced when #183 moved the retry into
-`CheckedGrpcFuture::fromRetryableDispatch()`. The current coverage:
+`RawKvBatch::execute*ForRegionAsync()` used to build `\Grpc\Call` on
+`getChannel()` itself, so its calls were never counted as in-flight and an LRU
+eviction could close the channel under them (#278). They now call
+`GrpcClientInterface::callAsync()` only; `getChannel()` is not used by the
+batch fan-out any more. `GrpcFuture` is `final`, so a mocked `callAsync()`
+cannot return a double: tests that need a real future against a dead
+endpoint use `Tests\Unit\Support\DeadEndpointGrpcFuture::callback()` as the
+`willReturnCallback()` of `callAsync` (needs ext-grpc, so they stay in the
+`Grpc` suite). A response-borne region error still cannot be delivered
+end-to-end through `batchGet()` in unit tests. The current coverage:
 `CheckedGrpcFutureRetryableDispatchTest` pins the retry/invalidate/
 switchLeader/terminal behaviour with synthetic `fromCallable()` futures, and
 `RawKvBatchTest::testBatch*WithRetryReResolvesRegionOnEveryAttempt` reaches
 the real `RawKvBatch` dispatch path by invoking the private `*WithRetry`
-methods via reflection against a dead `127.0.0.1:1` channel, asserting
-`pdClient->getRegion` and `grpc->getChannel` are each called exactly twice
-with `maxAttempts: 2` — one resolution/send per attempt, which the old
-dispatch-only-retry code could not produce.
+methods via reflection against a dead `127.0.0.1:1` endpoint, asserting
+`pdClient->getRegion` and `grpc->callAsync` are each called exactly twice
+with `maxAttempts: 2`.
 
 ## Several legacy RawKvBatchTest TTL tests dispatch nothing (silently before #187)
 
@@ -1437,7 +1437,7 @@ declines. If you instead want the PD path exercised, stub
 as well, and note that a dispatch also needs
 `$this->pdClient->method('getStore')->willReturn($this->defaultStore())`
 (missing getStore makes dispatch fail early with "Store 1 not found in PD"
-before `getChannel()` is reached).
+before `callAsync()` is reached).
 
 ## Unit tests can silently pass because batch grouping dropped every key — check for a missing scanRegions mock
 
@@ -1571,9 +1571,9 @@ stray call site to the existing knob is the whole fix. When an audit issue also 
 "reject batches above a documented key-count maximum", that is a separate, breaking API
 decision (needs a chosen cap + semver note) — do not silently fold it into a concurrency fix.
 
-Testing the cap through `RawKvBatch` (Grpc suite only — the wire path constructs real
-`\Grpc\Call` objects from `GrpcClientInterface::getChannel()`, so no ext-grpc = no test):
-mock `getChannel()` to count concurrent dispatches and return a real channel to a dead
+Testing the cap through `RawKvBatch` (Grpc suite only — the wire path needs a real
+`GrpcFuture`, which is `final`, so no ext-grpc = no test): mock `callAsync()` with
+`DeadEndpointGrpcFuture::callback()` to count dispatches against a dead
 endpoint (`127.0.0.1:1`); the sends succeed, the waits fail, and the test asserts the
 peak in-flight count equals the window size while expecting
 `BatchPartialFailureException` (which also proves partial-failure semantics survive
@@ -1912,7 +1912,7 @@ To observe *region re-resolution per attempt* specifically, do not count
 `regionCache->getByKey()`: the executor also calls it once per retryable
 failure for its own invalidation lookup, so the count is attempts + retries.
 Force a cache miss (`getByKey` → null), stub `pdClient->getRegion`, and count
-that (and/or `grpc->getChannel`, exactly one per dispatch): with
+that (and/or `grpc->callAsync`, exactly one per dispatch): with
 `maxAttempts: 2` both are exactly 2, while the old dispatch-only-retry code
 resolved once. Reference:
 `RawKvBatchTest::testBatchGetWithRetryReResolvesRegionOnEveryAttempt`.
@@ -2157,11 +2157,9 @@ Two implementation traps:
   `spl_object_id()`: an object id is reused once the channel it belonged to is
   gone, and a late settle must not release a slot of a different channel.
 
-Caveat: the protection only covers calls issued through
-`GrpcClient::callAsync()`. `RawKvBatch`'s V1 path still builds
-`\Grpc\Call` itself on a raw `getChannel()` handle, so its calls are not
-counted — that path is routed through `callAsync()` by GRPC-14 (#273), which
-is still open.
+Since #273 the V1 batch fan-out also goes through `callAsync()`, so every
+unary call is counted. `callAsync()` also emits `rpcStarted()` and, when the
+future settles (exactly once, also on cancellation), `rpcCompleted()`.
 
 ## A PD mock that ignores the `ScanRegions` limit breaks the batched region loader (issue #282)
 

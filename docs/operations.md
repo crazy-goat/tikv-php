@@ -455,7 +455,9 @@ follows:
 - **Continuation** — after consuming a page, the next fetch starts after the
   page's last key (`lastKey . "\x00"`), the same continuation rule as manual
   pagination. The scan is exhausted when a page returns fewer than `batchSize`
-  rows.
+  rows. A page whose last key does not move the cursor forward (or whose first
+  key lies before it) throws `TiKvException`: it is a protocol violation, not
+  a transient error (#312).
 - **keyOnly** — with `keyOnly: true` values are not transferred; `current()`
   returns `null` for every entry.
 - **Rewindable** — calling `rewind()` (e.g. running the same `foreach` twice)

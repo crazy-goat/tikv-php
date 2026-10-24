@@ -302,6 +302,81 @@ class ScanIteratorTest extends TestCase
         iterator_to_array($iterator);
     }
 
+    public function testConstantFullBatchWithBoundedEndKeyThrowsInsteadOfHanging(): void
+    {
+        $calls = 0;
+        $scanFn = function () use (&$calls): array {
+            $calls++;
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
+            return [
+                ['key' => 'k1', 'value' => 'v1'],
+                ['key' => 'k2', 'value' => 'v2'],
+            ];
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', 'z', 2);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Scan cursor did not advance');
+
+        iterator_to_array($iterator);
+    }
+
+    public function testPageRepeatingAnEarlierKeyThrows(): void
+    {
+        $calls = 0;
+        $scanFn = function () use (&$calls): array {
+            $calls++;
+
+            return $calls === 1
+                ? [['key' => 'k1', 'value' => '1'], ['key' => 'k5', 'value' => '5']]
+                : [['key' => 'k2', 'value' => '2'], ['key' => 'k9', 'value' => '9']];
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 2);
+
+        $this->expectException(TiKvException::class);
+
+        iterator_to_array($iterator, false);
+    }
+
+    public function testNumericCursorBelowPageEndIsByteOrdered(): void
+    {
+        // Bytewise "99" > "100", so a page ending on "99" advances a "100" cursor.
+        $scanFn = fn(): array => [['key' => '99', 'value' => 'v']];
+
+        $iterator = new ScanIterator($scanFn, '100', '', 5);
+
+        $this->assertSame(['99' => 'v'], iterator_to_array($iterator));
+    }
+
+    public function testNumericPageEndBelowCursorIsByteOrdered(): void
+    {
+        // Bytewise "100" < "99", so a page ending on "100" does not advance a "99" cursor.
+        $scanFn = fn(): array => [['key' => '100', 'value' => 'v']];
+
+        $iterator = new ScanIterator($scanFn, '99', '', 5);
+
+        $this->expectException(TiKvException::class);
+
+        $iterator->valid();
+    }
+
+    public function testConstantFullPageOnAllFfCursorThrows(): void
+    {
+        $key = "\xFF\xFF";
+        $scanFn = fn(): array => [['key' => $key, 'value' => 'v']];
+
+        $iterator = new ScanIterator($scanFn, "\xFF", '', 1);
+
+        $this->expectException(TiKvException::class);
+
+        iterator_to_array($iterator, false);
+    }
+
     public function testBatchEndingBelowTheCursorThrows(): void
     {
         $scanFn = fn(): array => [['key' => 'a', 'value' => 'v']];
