@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Iterator;
 
@@ -132,7 +133,20 @@ final class ScanIterator implements Iterator
         }
 
         $lastKey = $results[count($results) - 1]['key'];
-        $this->currentStartKey = KeyOrder::successor($lastKey);
+        $nextStartKey = KeyOrder::successor($lastKey);
+
+        // A well-behaved server returns keys >= the requested start key, so
+        // the cursor strictly advances. Without this check a server that
+        // keeps answering a full page ending on the same key never ends the
+        // scan when endKey is empty. Keys are not put in the message.
+        if (KeyOrder::lte($nextStartKey, $this->currentStartKey)) {
+            $this->buffer = [];
+            $this->exhausted = true;
+
+            throw new TiKvException('Scan cursor did not advance; server returned non-monotonic keys');
+        }
+
+        $this->currentStartKey = $nextStartKey;
 
         if (count($results) < $this->batchSize) {
             $this->exhausted = true;

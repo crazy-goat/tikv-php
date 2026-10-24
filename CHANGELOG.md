@@ -25,6 +25,7 @@ policy now classifies as internal.
 
 ### Fixed
 
+- `ScanIterator` now throws `TiKvException` when a page's last key does not advance the scan cursor, instead of looping forever on a server that keeps answering a full page ending on the same key (reachable with an empty `endKey`, e.g. `scanIterator($start, '')`). Well-behaved servers return strictly increasing keys and are unaffected. (#312)
 - `RegionResolver::getRegionInfo()` now rejects a PD-returned region whose range does not contain the requested key, instead of caching it. The lookup fails with a retryable `RegionException` (`RegionNotFound`, `RegionMiss` backoff), so one stale PD answer during a split no longer causes a persistent fatal `KeyNotInRegion`. (#253)
 - `RegionCache::put()` now ignores a region whose epoch is strictly older than the cached one for the same ID, preventing stale `scanRegions` results from downgrading a fresher entry. (#249)
 - `TlsConfigBuilder::readFile()` no longer emits a PHP warning exposing the resolved certificate path when the file is unreadable. (#553)

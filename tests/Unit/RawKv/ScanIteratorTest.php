@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\RawKv\ScanIterator;
 use PHPUnit\Framework\TestCase;
@@ -272,6 +273,83 @@ class ScanIteratorTest extends TestCase
             iterator_to_array($iterator),
         );
         $this->assertSame(2, $calls);
+    }
+
+    // ========================================================================
+    // Cursor progress (server-trust boundary)
+    // ========================================================================
+
+    public function testConstantFullBatchWithEmptyEndKeyThrowsInsteadOfHanging(): void
+    {
+        $calls = 0;
+        $scanFn = function () use (&$calls): array {
+            $calls++;
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
+            return [
+                ['key' => 'k1', 'value' => 'v1'],
+                ['key' => 'k2', 'value' => 'v2'],
+            ];
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 2);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Scan cursor did not advance');
+
+        iterator_to_array($iterator);
+    }
+
+    public function testBatchEndingBelowTheCursorThrows(): void
+    {
+        $scanFn = fn(): array => [['key' => 'a', 'value' => 'v']];
+
+        $iterator = new ScanIterator($scanFn, 'm', '', 1);
+
+        $this->expectException(TiKvException::class);
+
+        $iterator->valid();
+    }
+
+    public function testNonAdvancingCursorIsDetectedOnTheSecondPage(): void
+    {
+        $calls = 0;
+        $scanFn = function () use (&$calls): array {
+            $calls++;
+
+            return [['key' => 'k1', 'value' => 'v1']];
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 1);
+        $seen = [];
+
+        try {
+            foreach ($iterator as $key => $value) {
+                $seen[$key] = $value;
+            }
+            $this->fail('Expected TiKvException');
+        } catch (TiKvException) {
+            $this->assertSame(['k1' => 'v1'], $seen);
+            $this->assertSame(2, $calls);
+        }
+    }
+
+    public function testStrictlyAdvancingFullBatchesWithEmptyEndKeyStillComplete(): void
+    {
+        $scanFn = (fn(string $startKey): array => match ($startKey) {
+            'a' => [['key' => 'k1', 'value' => '1'], ['key' => 'k2', 'value' => '2']],
+            "k2\x00" => [['key' => 'k3', 'value' => '3'], ['key' => 'k4', 'value' => '4']],
+            default => [],
+        });
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 2);
+
+        $this->assertSame(
+            ['k1' => '1', 'k2' => '2', 'k3' => '3', 'k4' => '4'],
+            iterator_to_array($iterator),
+        );
     }
 
     // ========================================================================
