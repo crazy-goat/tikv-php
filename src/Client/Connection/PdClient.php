@@ -24,6 +24,7 @@ use CrazyGoat\Proto\Pdpb\ScanRegionsRequest;
 use CrazyGoat\Proto\Pdpb\ScanRegionsResponse;
 use CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointRequest;
 use CrazyGoat\Proto\Pdpb\UpdateServiceGCSafePointResponse;
+use CrazyGoat\TiKV\Client\Cache\StoreCache;
 use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
@@ -55,6 +56,9 @@ final class PdClient implements PdClientInterface
     /**
      * @param string|list<string> $pdAddresses one PD address or a list of
      *        PD cluster endpoints (issue #416, GAP-02)
+     * @param StoreCacheInterface $storeCache store address cache; mandatory,
+     *        so a store lookup never costs one PD RPC per operation (issue
+     *        #298). The default is a {@see StoreCache} with its default TTL
      * @param TimeoutConfig $timeoutConfig deadlines for the PD and TSO RPCs
      *        (issue #260). Added last so the #416 positional signature stays
      *        stable; the default is {@see TimeoutConfig}
@@ -63,7 +67,7 @@ final class PdClient implements PdClientInterface
         private readonly GrpcClientInterface $grpc,
         string|array $pdAddresses,
         private readonly LoggerInterface $logger = new NullLogger(),
-        private readonly ?StoreCacheInterface $storeCache = null,
+        private readonly StoreCacheInterface $storeCache = new StoreCache(),
         private readonly ?int $lowResMaxStalenessMs = null,
         private readonly ?int $tsoPoolSize = null,
         /**
@@ -184,11 +188,9 @@ final class PdClient implements PdClientInterface
 
     public function getStore(int $storeId): ?Store
     {
-        if ($this->storeCache instanceof StoreCacheInterface) {
-            $cached = $this->storeCache->get($storeId);
-            if ($cached instanceof Store) {
-                return $cached;
-            }
+        $cached = $this->storeCache->get($storeId);
+        if ($cached instanceof Store) {
+            return $cached;
         }
 
         $request = new GetStoreRequest();
@@ -203,7 +205,7 @@ final class PdClient implements PdClientInterface
         );
 
         $store = $response->getStore();
-        if ($store instanceof Store && $this->storeCache instanceof StoreCacheInterface) {
+        if ($store instanceof Store) {
             $this->storeCache->put($store);
         }
 
@@ -425,7 +427,7 @@ final class PdClient implements PdClientInterface
         // PdClient does NOT own the GrpcClient — it is shared and managed
         // by the high-level client (RawKvClient or TxnKvClient). Only
         // close PdClient-specific resources.
-        $this->storeCache?->clear();
+        $this->storeCache->clear();
         $this->tso = null;
         $this->clusterId = null;
         // Reset the failover state too so a closed-then-reused client

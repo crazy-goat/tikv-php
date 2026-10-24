@@ -2557,3 +2557,12 @@ resolves for the lowest supported PHP, whatever PHP the host runs.
 Commit the changed `composer.lock` with the change that needs it. Use
 `composer update <package>` to move one package. Run `composer audit`
 after each update.
+
+## Why is the `PdClient` store cache not nullable? (#298)
+
+`PdClient` used to accept `?StoreCacheInterface $storeCache = null`. A
+`PdClient` built with three arguments then sent one `GetStore` RPC to PD
+for every store lookup. The parameter is now `StoreCacheInterface` with
+the default `new StoreCache()` (PHP 8.2 allows `new` in an initializer).
+`PdClient::close()` always clears the cache. A test that needs "no cache"
+must pass a mock of `StoreCacheInterface` whose `get()` returns `null`.

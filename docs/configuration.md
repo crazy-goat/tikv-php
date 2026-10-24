@@ -645,8 +645,9 @@ $tlsConfig = $builder->build();
 
 // Use with custom client construction
 $grpc = new GrpcClient($logger, $tlsConfig);
-// The store cache is the fourth argument of PdClient: without it every
-// store address is looked up in PD again on every request.
+// The store cache is the fourth argument of PdClient. It is mandatory: when
+// you omit it, PdClient creates a default StoreCache. Pass your own to set
+// the TTL, the size or the logger.
 $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
 // The client closes the transport it was given in close() — pass
