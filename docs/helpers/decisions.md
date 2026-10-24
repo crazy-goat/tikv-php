@@ -1103,8 +1103,9 @@ decisions inside it are worth keeping:
 ## ScanIterator enforces cursor progress but has no page ceiling (issue #312)
 
 `ScanIterator` throws `TiKvException` when a page does not progress: the
-last key does not move the cursor forward, the first key lies before the
-cursor, or a key is not strictly greater than the key before it. All
+first key lies before the cursor, or a key is not strictly greater than
+the key before it. Together these keep every key at or after the cursor,
+so the next cursor (`lastKey . "\x00"`) always moves forward. All
 checks use `KeyOrder`, so the comparison is bytewise (`"99"` is greater
 than `"100"`; see the #232 and #180 entries). Any forward scan can hang
 without the checks, bounded ones too: a constant last key keeps the cursor

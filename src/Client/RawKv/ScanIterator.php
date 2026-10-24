@@ -141,7 +141,7 @@ final class ScanIterator implements Iterator
         // forward scan, bounded or not: the cursor stays below endKey. Only
         // a one-row page equal to the cursor passes (it advances by one
         // byte). Keys are not put in the message.
-        if (!$this->pageProgresses($results, $nextStartKey)) {
+        if (!$this->pageProgresses($results)) {
             $this->buffer = [];
             $this->exhausted = true;
 
@@ -161,12 +161,8 @@ final class ScanIterator implements Iterator
     /**
      * @param non-empty-array<array{key: string, value: ?string}> $results
      */
-    private function pageProgresses(array $results, string $nextStartKey): bool
+    private function pageProgresses(array $results): bool
     {
-        if (KeyOrder::lte($nextStartKey, $this->currentStartKey)) {
-            return false;
-        }
-
         $previous = null;
         foreach ($results as $row) {
             $key = $row['key'];
