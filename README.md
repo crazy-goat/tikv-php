@@ -142,7 +142,7 @@ that keeps existing, correct code working.
 | Surface | What it covers |
 |---|---|
 | `RawKv\RawKvClient` | every public method — the RawKV entry point |
-| `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `close()` — the TxnKV entry point |
+| `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `reapIdleChannels()`, `close()` — the TxnKV entry point |
 | `TxnKv\Transaction` | every public method — the transaction handle |
 | `RawKv\CasResult`, `RawKv\ChecksumResult` | the result DTOs of `compareAndSwap()` and `checksum()` |
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
@@ -300,6 +300,15 @@ $remaining = $client->getKeyTTL('session');          // seconds remaining, or nu
 > RPC sends the `for_cas` flag, which tells TiKV to use the atomic code path.
 > Atomic mode is disabled by default for performance — the non-atomic code path
 > is faster for regular writes. Enable it only when you need CAS semantics.
+>
+> **Scope:** `setAtomicForCAS(true)` is a switch of the client instance. It
+> affects all put and delete writes of that instance: `put()`, `delete()`,
+> `batchPut()` and `batchDelete()` send `for_cas`. `compareAndSwap()` and
+> `putIfAbsent()` require the flag. `deleteRange()`, `deletePrefix()` and
+> `ingest()` do not send it. The atomic path (and its cost) applies to all
+> put and delete writes of that client. If only a part of your workload needs
+> CAS, use a separate client instance for it. Use the same mode for every
+> writer of the same keys. See [Atomic Mode](docs/operations.md#atomic-mode-setatomicforcas--isatomicforcas).
 
 ```php
 use CrazyGoat\TiKV\Client\RawKv\CasResult;

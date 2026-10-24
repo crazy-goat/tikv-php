@@ -105,6 +105,22 @@ final class TxnKvClient
     public const OPT_LOCK_WAIT_TIME_MS = 'lockWaitTimeMs';
 
     /**
+     * begin() options[] key for the optimistic lock TTL baseline in
+     * milliseconds (issue #429). The prewrite adds 10 ms per mutation to it
+     * and caps the result at 120000 ms. Default: 3000. Must be between 1 and
+     * 120000.
+     */
+    public const OPT_OPTIMISTIC_LOCK_TTL_MS = 'optimisticLockTtlMs';
+
+    /**
+     * begin() options[] key for the pessimistic lock TTL in milliseconds
+     * (issue #429). A pessimistic transaction extends the primary lock
+     * automatically once half of this TTL has elapsed. Default: 30000. Must
+     * be between 1 and 120000.
+     */
+    public const OPT_PESSIMISTIC_LOCK_TTL_MS = 'pessimisticLockTtlMs';
+
+    /**
      * options[] key for the maximum staleness (ms) of the low-resolution
      * TSO timestamp cache (issue #420, GAP-06). Used only by
      * staleness-tolerant consumers (lock resolution `current_ts`);
@@ -242,6 +258,11 @@ final class TxnKvClient
          * other clients.
          */
         private readonly bool $ownsGrpcClient = true,
+        /**
+         * Optional clock (milliseconds) for the lock TTL bookkeeping, handed
+         * to every transaction. Test seam (issue #429); defaults to the wall clock.
+         */
+        private readonly ?Closure $clock = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -368,6 +389,8 @@ final class TxnKvClient
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
+     *     optimisticLockTtlMs?: int,
+     *     pessimisticLockTtlMs?: int,
      * } $options
      *     `pessimistic` selects the transaction mode: true (the default)
      *     takes the physical lock inside set()/delete(), false defers it to
@@ -380,6 +403,10 @@ final class TxnKvClient
      *     lock-resolution RPCs are always Normal: they resolve locks of
      *     other transactions.
      *     `lockWaitTimeMs` bounds how long TiKV waits for a contended
+     *     `optimisticLockTtlMs` (default 3000) and `pessimisticLockTtlMs`
+     *     (default 30000) set the lock TTLs in milliseconds, each between 1 and
+     *     120000 (issue #429). A pessimistic transaction extends its primary
+     *     lock automatically once half of the TTL has elapsed.
      */
     public function begin(array $options = []): Transaction
     {
@@ -391,6 +418,24 @@ final class TxnKvClient
         $enableAsyncCommit = $this->resolveEnableFlag($options, self::OPT_ENABLE_ASYNC_COMMIT);
         $eagerPessimisticLocks = $this->resolveEagerPessimisticLocks($options);
         $lockWaitTimeMs = $this->resolveLockWaitTimeMs($options);
+        $optimisticLockTtlMs = $this->resolveLockTtlMs(
+            $options,
+            self::OPT_OPTIMISTIC_LOCK_TTL_MS,
+            TwoPhaseCommitter::DEFAULT_OPTIMISTIC_LOCK_TTL_MS,
+        );
+        $pessimisticLockTtlMs = $this->resolveLockTtlMs(
+            $options,
+            self::OPT_PESSIMISTIC_LOCK_TTL_MS,
+            TwoPhaseCommitter::DEFAULT_PESSIMISTIC_LOCK_TTL_MS,
+        );
+
+        // Read the local clock BEFORE the start timestamp and the GC check
+        // (a PD fetch on a cache miss): TiKV counts a lock TTL from the start
+        // timestamp, so an earlier reading keeps the tracked primary-lock
+        // expiry no later than the real one (issue #429).
+        $startedAtMs = $this->clock instanceof Closure
+            ? ($this->clock)()
+            : (int) (microtime(true) * 1000);
 
         $startTs = $this->pdClient->getTimestamp();
 
@@ -436,6 +481,10 @@ final class TxnKvClient
             enableAsyncCommit: $enableAsyncCommit,
             eagerPessimisticLocks: $eagerPessimisticLocks,
             lockWaitTimeMs: $lockWaitTimeMs,
+            optimisticLockTtlMs: $optimisticLockTtlMs,
+            pessimisticLockTtlMs: $pessimisticLockTtlMs,
+            clock: $this->clock,
+            startedAtMs: $startedAtMs,
         );
     }
 
@@ -462,6 +511,8 @@ final class TxnKvClient
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
+     *     optimisticLockTtlMs?: int,
+     *     pessimisticLockTtlMs?: int,
      * } $options
      */
     public function beginOptimistic(array $options = []): Transaction
@@ -492,6 +543,8 @@ final class TxnKvClient
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
+     *     optimisticLockTtlMs?: int,
+     *     pessimisticLockTtlMs?: int,
      * } $options
      */
     public function beginPessimistic(array $options = []): Transaction
@@ -513,6 +566,8 @@ final class TxnKvClient
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
+     *     optimisticLockTtlMs?: int,
+     *     pessimisticLockTtlMs?: int,
      * } $options
      */
     private function beginWithMode(array $options, bool $pessimistic, string $method): Transaction
@@ -604,6 +659,38 @@ final class TxnKvClient
         }
         if ($value < 0) {
             throw new InvalidArgumentException("options['lockWaitTimeMs'] must be >= 0");
+        }
+
+        return $value;
+    }
+
+    /**
+     * Resolve a lock TTL begin() option (optimisticLockTtlMs /
+     * pessimisticLockTtlMs, issue #429). A non-int or out-of-range value is
+     * rejected, as is a non-positive timeout elsewhere (issue #276).
+     *
+     * @param array<string, mixed> $options
+     */
+    private function resolveLockTtlMs(array $options, string $key, int $default): int
+    {
+        if (!array_key_exists($key, $options)) {
+            return $default;
+        }
+
+        $value = $options[$key];
+        if (!is_int($value)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be an int (milliseconds), %s given",
+                $key,
+                get_debug_type($value),
+            ));
+        }
+        if ($value < 1 || $value > TwoPhaseCommitter::MAX_LOCK_TTL_MS) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be between 1 and %d",
+                $key,
+                TwoPhaseCommitter::MAX_LOCK_TTL_MS,
+            ));
         }
 
         return $value;
@@ -737,6 +824,22 @@ final class TxnKvClient
     public function getMetrics(): MetricsInterface
     {
         return $this->metrics;
+    }
+
+    /**
+     * Drop the cached gRPC channels that were idle longer than `idleTtlMs`.
+     *
+     * The transport sweeps by itself when a request arrives. A long-running
+     * worker that can be quiet for a long time calls this from its own tick.
+     * No-op if the client is closed.
+     */
+    public function reapIdleChannels(): void
+    {
+        if ($this->closed) {
+            return;
+        }
+
+        $this->grpc->reapIdleChannels();
     }
 
     public function close(): void

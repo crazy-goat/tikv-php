@@ -255,11 +255,10 @@ GrpcException: Deadline exceeded
 
 3. **Large requests:**
    ```php
-   // Split large batches
-   $chunks = array_chunk($keys, 100);
-   foreach ($chunks as $chunk) {
-       $client->batchGet($chunk);
-   }
+   // The client splits a batch by region (512 keys, 16 KiB per RPC).
+   // Do not chunk the keys to make the RPC smaller.
+   // See operations.md#limits.
+   $client->batchGet($keys);
    ```
 
 ## Runtime Errors
@@ -710,21 +709,23 @@ cluster failures.
 BatchDeadlineExceededException: Batch operation exceeded its <deadlineMs> ms deadline (elapsed <elapsedMs> ms)
 ```
 
-**What it means:** `BatchAsyncExecutor` aborted a fanned-out batch because an
-explicit wall-clock deadline expired before all regions answered; some
+**What it means:** `BatchAsyncExecutor` aborted a fanned-out batch because the
+wall-clock batch deadline expired before all regions answered; some
 regions were never dispatched or their results were cancelled.
 
-**Likely cause:** The executor was invoked with an explicit deadline too small
-for the region count, or slow/unreachable TiKV nodes. Note: no shipped client
-option currently wires a batch deadline — every built-in operation runs the
-executor without one, so this exception is reachable only by calling
-`BatchAsyncExecutor` directly with `deadlineMs > 0`. For deadlines you can
-configure from the public API, see RetryBudgetExhaustedException below.
+**Likely cause:** The batch is too large for `batchDeadlineMs` (60000 ms by
+default), or TiKV nodes are slow or unreachable. Raise `batchDeadlineMs` in
+`options['timeout']`, or set it to `0` to disable the batch deadline.
+`getContext()['pendingRegions']` lists every region without a result, including
+the regions of windows that never started.
 
-**Solution:** Do not retry blindly — the batch is **partially applied**.
-Inspect `getContext()['pendingRegions']` / `['dispatchedRegions']`, re-drive
-only the affected keys/ranges, or raise the explicit deadline passed to
-`executeParallel()`. See
+**Solution:** A read (`batchGet`, scan, checksum) applies nothing, so retry the
+whole operation. Raise `batchDeadlineMs` in `options['timeout']` if the batch is
+too large. For writes, do not retry blindly: the batch is **partially applied**.
+`getContext()['pendingRegions']` and `['dispatchedRegions']` hold internal
+sub-batch or segment indices, not region IDs and not user keys. Treat the batch
+as partially applied and re-check per key. For scans the deadline applies per
+region batch, not per `scan()` call. See
 [BatchDeadlineExceededException](error-handling.md#exception-hierarchy).
 
 #### Batch Partial Failure
@@ -844,8 +845,10 @@ echo "Took: {$elapsed}s\n";
 
 3. **Batch size too large:**
    ```php
-   // Reduce batch size
-   $chunks = array_chunk($keys, 100);
+   // The client already splits a batch into sub-batches of at most
+   // 512 keys and 16 KiB (see operations.md#limits).
+   // A smaller chunk does not make an RPC smaller.
+   // Chunk only to bound memory or the scope of a partial failure.
    ```
 
 4. **Hot spot (all keys in one region):**
@@ -890,10 +893,10 @@ echo "Took: {$elapsed}s\n";
 
 2. **Large values:**
    ```php
-   // Check value sizes
-   $value = $client->get('large-key');
-   if (strlen($value) > 10 * 1024 * 1024) {
-       // Value > 10MB, consider chunking
+   // Check the size before put()
+   if (strlen($data) > RawKvClient::MAX_VALUE_SIZE) {
+       // put() rejects a value above 4 MiB with InvalidArgumentException.
+       // Split $data into chunks. See operations.md#limits.
    }
    ```
 

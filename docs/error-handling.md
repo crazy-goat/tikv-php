@@ -150,9 +150,11 @@ Verdict legend:
 | `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff |
 | `StoreNotFoundException` | **Do not retry blindly** — transient only after the stale cache entry expires (TTL/LRU sweep) or PD restores the store; the retry executor does *not* invalidate the region cache for it (it is not classified as a region error). A short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
-| `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()` for pending regions |
+| `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()['pendingRegions']` for the regions without a result. The deadline is finite by default (`batchDeadlineMs`, 60000 ms). `Transaction::commit()` never throws it after the commit point (see below) |
 
 ### Transaction::commit() and double-apply
+
+`BatchDeadlineExceededException` cannot cause a double apply. The secondary-commit fan-out runs after the commit point, so `commit()` logs a batch deadline there and returns normally. The leftover secondary locks are resolved by readers. The prewrite fan-out still throws it, because the transaction is not committed yet. A rollback fan-out throws it like a partial failure, and the transaction stays rollback-able: call `rollback()` again.
 
 `commit()` deserves special care because a network failure at exactly the
 wrong moment leaves the outcome *unknown*: the commit may have taken effect
@@ -269,6 +271,7 @@ only the timing it produces differs.
 | `RawKvClient::create()`, `RawKvClient::close()` | Yes | Yes | `create()` validates the options (`InvalidArgumentException` on a bad option) and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent — a second call does nothing |
 | `RawKvClient::getClusterId()`, `RawKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
 | `RawKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `RawKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 
 ### TxnKV operations
 
@@ -282,6 +285,7 @@ only the timing it produces differs.
 | `TxnKvClient::create()`, `TxnKvClient::close()` | Yes | Yes | `create()` validates the options and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent |
 | `TxnKvClient::getClusterId()`, `TxnKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
 | `TxnKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `TxnKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 | `Transaction::get()`, `Transaction::batchGet()`, `Transaction::scan()` | Yes | Yes | Read-only inside the transaction's snapshot at `startTs`, so a repeated read sees the same version of the data |
 | `Transaction::set()`, `Transaction::delete()` | Yes (same value) | **With care** | The value is buffered locally, so the same call twice writes the same thing. But in the default eager pessimistic mode the physical lock is acquired *before* the call returns: a failed `set()`/`delete()` may have left a lock behind and leaves the transaction unwritable (`InvalidStateException` on the next write). Repeating therefore converges only while the transaction is still writable. The transaction cannot be continued — discard it and begin a new one |
 | `Transaction::commit()` | **No** | **No** | See [Transaction commit and the new-transaction rule](#transaction-commit-and-the-new-transaction-rule) |
@@ -465,7 +469,7 @@ addresses on the RPC path just the same.
 | `delete(string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Same eager pessimistic-lock behavior and failure cleanup as `set()`; the tombstone remains buffered until commit |
 | `commit()` | `InvalidStateException`, `TiKvException` (incl. [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php)), `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | See [double-apply section](#transactioncommit-and-double-apply); since issue #213 prewrite runs inside the shared retry executor, so region errors and resolved `locked` conflicts are auto-retried while deadlocks/conflicts still escape |
 | `rollback()` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Only an `Active` transaction may be rolled back; a failed RPC leaves it active but non-writable so rollback can be retried |
-| `heartbeat(int $adviseLockTtlMs = 10000): int` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Extends the primary lock TTL |
+| `heartbeat(?int $adviseLockTtlMs = null): int` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Extends the primary lock TTL |
 
 (`TxnRetryableException` is a subclass of `TiKvException`, so rows listing
 `TiKvException` cover it implicitly; it is listed explicitly wherever the

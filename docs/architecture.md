@@ -139,7 +139,7 @@ final class RawKvClient
 - MVCC reads at transaction start timestamp
 - Pessimistic and optimistic transaction modes
 - Lock resolution for concurrent conflicts
-- Heartbeat to extend lock TTL for long-running transactions
+- Heartbeat to extend lock TTL for long-running transactions (opportunistic for pessimistic transactions, explicit `heartbeat()` otherwise; see [Configuration](configuration.md#lock-ttls-and-the-primary-lock-keepalive-txnkv))
 
 **Key Design Patterns**:
 - **Unit of Work**: Transaction tracks write set and read set
@@ -154,7 +154,7 @@ final class TxnKvClient
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self;
     
     // Transaction lifecycle
-    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int)
+    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int), optimisticLockTtlMs (int), pessimisticLockTtlMs (int)
     public function beginOptimistic(array $options = []): Transaction;   // begin() with pessimistic = false
     public function beginPessimistic(array $options = []): Transaction;  // begin() with pessimistic = true
     public function close(): void;
@@ -174,7 +174,7 @@ final class Transaction
     // Transaction control
     public function commit(): void;           // 2PC: prewrite + commit
     public function rollback(): void;
-    public function heartbeat(int $adviseLockTtlMs = 10000): int;
+    public function heartbeat(?int $adviseLockTtlMs = null): int;
     
     // Inspection
     public function getTxnId(): string;
@@ -279,6 +279,46 @@ Cache in RegionCache
     ↓
 Return RegionInfo
 ```
+
+### Key encoding and API versions
+
+**Current support:** the client supports TiKV API V1 (the default) and API V2 with keyspaces.
+Set `options['apiVersion']` to `2` to use API V2. The value `0` or `1` selects V1.
+Any other value throws `InvalidArgumentException`.
+See [API V2 and Keyspaces](configuration.md#api-v2-and-keyspaces) for the options and the cluster settings.
+
+The `Codec\` namespace (`src/Client/Codec/`) hides the key encoding behind `CodecInterface`.
+The namespace is internal. Do not depend on it. See the stability policy in the README.
+
+| Method | Purpose |
+|---|---|
+| `encodeKey()`, `decodeKey()` | Convert a user key to the stored key and back |
+| `encodeRegionKey()`, `decodeRegionKey()` | Convert a key for PD region lookups and back |
+| `encodeRange()`, `decodeRange()` | Convert a range `[start, end)` for PD region scans |
+| `getApiVersion()`, `getKeyspaceId()`, `getKeyspaceName()` | Report the API version and the keyspace |
+
+The classes in the namespace:
+
+| Class | Behavior |
+|---|---|
+| `CodecV1` | API V1. User keys pass through unchanged. It reports `APIVersion::V1` (protocol value 0), keyspace ID 0 and an empty keyspace name. |
+| `CodecV2` | API V2. It adds a 4-byte prefix to each user key: the mode byte and a 3-byte keyspace ID in network byte order. |
+| `MemComparableCodec` | Memory-comparable encoding (TiDB `EncodeBytes`) for region keys. It keeps the byte order of the keys. |
+| `Mode` | Enum `Raw` (prefix byte `0x72`) and `Txn` (prefix byte `0x78`). `CodecV2` uses the prefix byte. `CodecV1` uses the mode only to choose the region-key encoding. |
+
+Region keys depend on the API version and on the mode:
+
+| API version | Mode | User key | Region key (PD lookup) |
+|---|---|---|---|
+| V1 | `Raw` | unchanged | unchanged |
+| V1 | `Txn` | unchanged | memory-comparable encoded |
+| V2 | `Raw` or `Txn` | mode byte + keyspace ID + key | the prefixed key, memory-comparable encoded |
+
+`RawKvClient` builds its client in `Mode::Raw`. `TxnKvClient` builds its client in `Mode::Txn`.
+For API V1, both clients start with `CodecV1`.
+For API V2, `ConnectionFactory` asks PD for the ID of the keyspace and replaces the codec with a `CodecV2`.
+In `Mode::Txn`, `CodecV1::decodeRegionKey()` throws `\InvalidArgumentException` for a malformed encoded key.
+`CodecV2` throws `KeyOutOfBoundsException` for a key outside its keyspace.
 
 ### API V2 keyspace boundary
 
@@ -739,7 +779,7 @@ $client->batchGet($keys);  // 3 concurrent sends, responses collected in order
 - Group keys by region (sub-batched under the per-region RawKV caps)
 - Issue sends via `executeBatch*ForRegionAsync()`, returning un-waited `GrpcFuture` objects wrapped in `CheckedGrpcFuture`
 - `BatchAsyncExecutor::executeParallel()` invokes every per-region callable in the dispatch phase, then awaits responses in the wait phase
-- An optional `$deadlineMs` caps the wall-clock time for dispatch + wait; on overrun the executor raises `BatchDeadlineExceededException` and cancels any still-unfinished futures
+- A `$deadlineMs` argument (finite by default, `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`; `0` disables it) caps the wall-clock time for dispatch + wait; on overrun the executor raises `BatchDeadlineExceededException` and cancels any still-unfinished futures
 - On the first wait-phase failure, remaining futures are cancelled to prevent gRPC channel/completion-queue leaks
 - The rare split/merge slow path re-dispatches every sub-region's send during the dispatch phase and merges responses in the wait phase
 

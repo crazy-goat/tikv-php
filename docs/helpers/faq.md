@@ -2247,8 +2247,8 @@ an **unexpected throwable** escaping the wait phase (anything that is not a
 "the un-awaited futures are cancelled after a batch failure" must therefore
 drive one of those two paths — the deadline, or a non-`TiKvException` from a
 region's wait — and not a plain region error. Note that the batch deadline
-is off by default (`TimeoutConfig::$batchDeadlineMs = 0`), so the
-throwable-escape path is the only one a default client can reach.
+was off by default until #275 (`TimeoutConfig::$batchDeadlineMs` is now 60000), so on
+older code the throwable-escape path was the only one a default client could reach.
 
 ## An audit issue's premise can expire: the slow-log wrapper has kept the inner future since #183
 
@@ -2571,14 +2571,19 @@ To simulate a split in a committer test (for example "region no longer
 covers the whole key group"), return a region that contains the first
 key but not the others. Use a group of at least two keys.
 
-## GrpcClient: every RPC must complete through `completeRpc()`, never `rpcCompleted()` directly
+## GrpcClient: every RPC must be metered through `startRpc()` / `completeRpc()`, never `rpcStarted()` / `rpcCompleted()` directly
 
 `call()`, `callStreaming()` and `callAsync()` call `rpcStarted()` and then
 must call `rpcCompleted()` exactly once on every path (issue #274). The
 `try`/`finally` opens right after `rpcStarted()`, so channel acquisition,
-`new Call()` and the send phase are covered. Record the end through
-`GrpcClient::completeRpc()`: it swallows (and logs) a throwing metrics
-backend, because a throw from `finally` replaces the transport exception.
+`new Call()` and the send phase are covered. Record the start through
+`GrpcClient::startRpc()` and the end through `GrpcClient::completeRpc()`:
+both swallow (and log) a throwing metrics backend, because a throw from
+the emission would replace the transport exception — from `finally` for the
+completion, and before the call for the start (issue #759). A backend that
+throws from `rpcStarted()` alone breaks the
+`rpcStarted == rpcSucceeded + rpcFailed` invariant: its own counters are not
+trustworthy in that case.
 A protobuf message cannot be mocked or subclassed in a test (the
 descriptor lookup fails), so to fail a call early use
 `new GrpcClient(allowInsecure: false)`: `getChannel()` throws right after
@@ -2600,3 +2605,60 @@ for every store lookup. The parameter is now `StoreCacheInterface` with
 the default `new StoreCache()` (PHP 8.2 allows `new` in an initializer).
 `PdClient::close()` always clears the cache. A test that needs "no cache"
 must pass a mock of `StoreCacheInterface` whose `get()` returns `null`.
+
+## The idle sweep of `GrpcClient` must run on the cache-hit path too, and tests age channels with the injected clock (#277)
+
+`GrpcClient::evictIdleChannels()` used to run only on a cache **miss**, just
+before a new channel was created. A long-lived client that only reuses cached
+channels never reached it, so the handle of a store that left the cluster
+stayed in the cache for ever. `getChannel()` now also sweeps on a cache hit,
+at most once per interval (`idleTtlMs / 10`, clamped to 1 s .. `idleTtlMs`),
+because the sweep walks every cached channel. The hit path touches `lastUsed`
+of the returned channel **before** it sweeps, so the returned channel is never
+reaped. The sweep already skips channels with in-flight calls.
+`reapIdleChannels()` runs the same sweep on demand (a no-op after `close()`).
+
+The sweep drops the cached **handle** and frees the cache slot. It does not
+promise that the connection closes: `Channel::close()` is a reference-count
+decrement and the ext-grpc persistent channel can outlive the handle (see the
+entry "ext-grpc's persistent channels are shared and reference-counted
+(#283)").
+
+Test pitfalls:
+
+- Do not `sleep()` to age a channel. Pass the `clock` closure to the
+  `GrpcClient` constructor and advance your own variable
+  (`tests/Unit/Grpc/GrpcClientIdleSweepTest.php`). Add the file to the `Grpc`
+  suite and to the `Unit` exclude list in `phpunit.xml`.
+- ext-grpc shares one channel per target in the whole process. An address that
+  another test used for a failed RPC reports `TRANSIENT_FAILURE`, so
+  `getChannel()` reconnects and takes the cache-**miss** path, which hides the
+  cache-hit path under test. Use a unique, unused port per channel-cache test.
+
+Open limitation (#658): the experimental BatchCommands transport
+(`GrpcBatchCommandsTransport::forClient()`, flag `batchCommands`, off by
+default) gets its channel once and never marks it in flight or touches
+`lastUsed`. The idle sweep, like the LRU eviction, can drop that channel while
+its stream is open. The pool discards the broken stream and the caller falls
+back to the unary path, so the failure heals itself.
+
+## The batch deadline is finite by default, and checked only between waits (#275)
+
+`TimeoutConfig::$batchDeadlineMs` defaults to 60000. An explicit `0` still disables it.
+The constructor rejects a deadline below any per-call timeout of a batch fan-out, because a
+deadline below one call cannot cut that call short.
+
+`BatchAsyncExecutor` checks the deadline before each dispatch and before each wait. It never
+interrupts one blocking wait. Most fan-out callables use
+`CheckedGrpcFuture::fromRetryableDispatch()`, and its wait runs the whole `RetryExecutor` loop of
+one region (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms). The worst case is
+therefore `batchDeadlineMs` plus one region's full retry loop, not plus one per-call timeout.
+The constructor check does not use `readTimeoutMs`: only synchronous point reads use it.
+
+Before #275, `executeParallelCapped()` gave the full deadline to every window, so N windows
+could run N times longer than the deadline. All windows now share one budget. A test of this
+must make the pre-window check the only way to fail: a test that trips inside one window's
+wait does not prove the shared budget.
+
+The experimental BatchCommands multiplex path (`RawKvBatch::tryMultiplex`) is bounded per call
+only. It does not use the batch deadline.

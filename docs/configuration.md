@@ -404,6 +404,21 @@ the *connection* alive, not the *entry* in the cache). Lowering the cap
 limits the memory the channel cache can use; a channel is evicted only when
 another one is needed, so the cap never breaks a request.
 
+The transport drops an idle channel (one that was unused for `idleTtlMs`)
+when it opens a new channel. It also drops idle channels when a request
+reuses a cached channel, so the handle of a store that left the cluster does
+not stay in the cache. This sweep runs at most once per interval. The
+interval is one tenth of `idleTtlMs`, at least 1 second and at most
+`idleTtlMs`. The sweep drops the cached handle and frees the slot. It does
+not always close the connection: the ext-grpc persistent channel can outlive
+the handle (see the FAQ entry "ext-grpc's persistent channels are shared and
+reference-counted (#283)" in `docs/helpers/faq.md`). A channel with an
+in-flight call and the channel that the request uses are never dropped.
+
+A long-running worker that is quiet for a long time calls
+`$client->reapIdleChannels()` from its own tick to run the sweep without a
+request. `RawKvClient` and `TxnKvClient` have this method.
+
 ### Sharing One Transport Between Clients
 
 The gRPC transport is **long-lived and shared**: it caches one channel per
@@ -1199,6 +1214,62 @@ Details:
   never applies an unsafe fast commit, it just answers with a decline and the
   client proceeds with two-phase commit.
 
+## Lock TTLs and the Primary Lock Keepalive (TxnKV)
+
+A lock that a transaction holds expires after its TTL. After that, a
+concurrent transaction can resolve the lock and roll the owner back. The
+TTLs are set per transaction, on `begin()` (issue #429, GAP-15):
+
+```php
+$txn = $client->begin([
+    'optimisticLockTtlMs'  => 3000,  // default
+    'pessimisticLockTtlMs' => 30000, // default
+]);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `optimisticLockTtlMs` | `3000` | Baseline TTL of the optimistic prewrite locks, in milliseconds. The prewrite adds 10 ms for each mutation and caps the result at 120000 ms. |
+| `pessimisticLockTtlMs` | `30000` | TTL of the pessimistic locks and of the prewrite locks of a pessimistic transaction, in milliseconds. |
+
+Each value must be an `int` from `1` to `120000`. Any other value throws
+`InvalidArgumentException`.
+
+### Heartbeat interval and TTL
+
+TiKV counts a lock TTL from the start timestamp of the transaction: a lock
+is expired when `start time + TTL` is in the past. For this reason the client
+adds the time the transaction has already run (`uptime`) to every lock TTL: the
+pessimistic-lock requests, the prewrite requests and the heartbeats all
+carry `min(uptime + TTL, 3600000)` ms. A heartbeat can only raise a TTL, so
+a value at or below the current TTL changes nothing. The client stops extending
+a lock when the total TTL reaches one hour.
+
+The client sends a heartbeat in these cases:
+
+1. A pessimistic transaction sends a heartbeat inside `get()`, `batchGet()`,
+   `scan()`, `set()`, `delete()` and `commit()` when less than half of the lock TTL
+   remains. The first pessimistic lock starts the keepalive.
+2. `commit()` first sends a heartbeat when less than half of the TTL remains
+   (pessimistic transactions), and the prewrite sends a heartbeat between
+   region prewrites (issue #218).
+3. Your code calls `Transaction::heartbeat()`.
+
+An optimistic transaction holds no lock before `commit()`, so it sends no
+opportunistic heartbeat. A heartbeat for a lock that does not exist fails.
+
+PHP has no background thread. A transaction that waits on an external call
+without touching TiKV does not send a heartbeat. If the wait can be longer than
+half of the TTL, call `Transaction::heartbeat()` before the wait. Without
+an argument it asks for `uptime + TTL` of the transaction mode. An explicit
+argument is a total TTL in milliseconds, counted from the start of the
+transaction. The same applies to a single RPC that takes longer than the TTL.
+
+If a heartbeat fails, the operation throws the typed exception of
+`Transaction::heartbeat()` (issue #492) and the next operation tries again.
+The usual cause is a lock that is already gone. In that case, roll the
+transaction back.
+
 ## Pessimistic Lock Wait Timeout (TxnKV)
 
 A pessimistic-lock request tells TiKV how long it may block on a contended
@@ -1471,11 +1542,14 @@ $options = [
         'deleteRangeTimeoutMs' => 30000, // default: 30000
         'checksumTimeoutMs' => 30000,    // default: 30000
         'ingestTimeoutMs' => 60000,      // default: 60000 (SST ingest)
-        'batchDeadlineMs' => 0,          // default: 0 (disabled) — wall-clock deadline
+        'batchDeadlineMs' => 60000,      // default: 60000 — wall-clock deadline
                                          // for batch fan-out dispatch+wait across all
                                          // regions; exceeding it throws
                                          // BatchDeadlineExceededException after
-                                         // cancelling in-flight futures
+                                         // cancelling in-flight futures.
+                                         // 0 disables it. Must be >= every per-call
+                                         // timeout used inside a batch fan-out
+                                         // (not readTimeoutMs)
         'pdTimeoutMs' => 3000,           // default: 3000 (PD metadata RPCs)
         'tsoTimeoutMs' => 3000,          // default: 3000 (PD TSO)
         'lockResolveTimeoutMs' => 5000,  // default: 5000 (lock resolution)
@@ -1508,6 +1582,10 @@ When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught
 ### Default Timeouts
 
 By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
+
+`batchDeadlineMs` is finite by default (`TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, 60000 ms). When it is above `0`, it must not be less than any per-call timeout that a batch fan-out uses: `writeTimeoutMs`, `batchReadTimeoutMs`, `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs`, `checksumTimeoutMs` and `ingestTimeoutMs` (`readTimeoutMs` is not in the list: only point reads use it). If it is less, the `TimeoutConfig` constructor throws an `InvalidArgumentException` that names both fields. One wait is not interrupted by the deadline, so a deadline that is less than one call cannot be honoured. Such a setting has no meaning.
+
+The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs the whole retry loop of one region (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus one region's full retry loop. For scans the deadline applies per region batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
 
 Every key of the table above is configurable under its own name — the mapping is
 derived from `TimeoutConfig`'s constructor, so a field that is added to the
@@ -1564,16 +1642,7 @@ try {
 }
 ```
 
-Or use async patterns:
-
-```php
-// For batch operations, process in chunks
-$chunks = array_chunk($keys, 100);
-foreach ($chunks as $chunk) {
-    $results = $client->batchGet($chunk);
-    // Process results
-}
-```
+Batch methods already send their sub-batches in parallel (default concurrency 16, `RawKvClient::DEFAULT_MAX_CONCURRENCY`). When you set the `batchDeadlineMs` timeout option to a value above 0, it bounds the whole fan-out. The default is `60000` ms, and `0` disables it. The deadline is checked between waits, so one slow region can run up to its whole retry loop past it (see [Timeouts](#timeouts)).
 
 ## Production Configuration
 

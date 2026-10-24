@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
@@ -14,12 +15,15 @@ use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -109,6 +113,7 @@ final class TxnKvFanoutTest extends TestCase
         FanoutFakeGrpc $grpc,
         array $options = [],
         LoggerInterface $logger = new NullLogger(),
+        TimeoutConfig $timeoutConfig = new TimeoutConfig(),
     ): Transaction {
         $regionCache = new RegionCache();
         // Pre-populate the region cache so per-key region resolution during
@@ -137,6 +142,7 @@ final class TxnKvFanoutTest extends TestCase
             lockResolver: $lockResolver,
             regionResolver: $regionResolver,
             logger: $logger,
+            timeoutConfig: $timeoutConfig,
             enable1Pc: $options['onePc'] ?? false,
             enableAsyncCommit: $options['asyncCommit'] ?? false,
         );
@@ -627,6 +633,117 @@ final class TxnKvFanoutTest extends TestCase
             ],
             $context['errors'],
         );
+    }
+
+    /**
+     * A TimeoutConfig whose 30 ms batch deadline passes the constructor check
+     * (every per-call timeout is below it).
+     */
+    private function shortDeadlineConfig(): TimeoutConfig
+    {
+        return new TimeoutConfig(
+            readTimeoutMs: 10,
+            writeTimeoutMs: 10,
+            batchReadTimeoutMs: 10,
+            batchWriteTimeoutMs: 10,
+            scanTimeoutMs: 10,
+            deleteRangeTimeoutMs: 10,
+            checksumTimeoutMs: 10,
+            ingestTimeoutMs: 10,
+            batchDeadlineMs: 30,
+        );
+    }
+
+    /**
+     * Issue #275: the batch deadline is finite by default, so it can run out
+     * in the secondary-commit fan-out AFTER the primary commit. The
+     * transaction is committed then, and commit() must not throw: a caller
+     * that retries on an exception would apply the transaction twice.
+     */
+    public function testBatchDeadlineInTheSecondaryCommitFanOutDoesNotFailACommittedTransaction(): void
+    {
+        $regions = $this->makeRegions(3);
+        $this->stubPdClient($regions);
+        $commits = 0;
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 0.0,
+            responder: static function (string $method) use (&$commits): Message {
+                if ($method === 'KvCommit') {
+                    // The primary commit (first) is fast; each secondary
+                    // wait outlasts the whole 30 ms batch deadline.
+                    if ($commits++ > 0) {
+                        usleep(40_000);
+                    }
+
+                    return new CommitResponse();
+                }
+
+                return new PrewriteResponse();
+            },
+        );
+        $logger = $this->recordingLogger();
+        $txn = $this->createTransaction($regions, $grpc, [], $logger, $this->shortDeadlineConfig());
+        for ($i = 0; $i < 3; $i++) {
+            $txn->set("k{$i}", "v{$i}");
+        }
+
+        $txn->commit();
+
+        $messages = array_column($logger->records, 'message');
+        self::assertContains(
+            'Secondary commit fan-out hit the batch deadline; locks will be resolved by readers',
+            $messages,
+        );
+    }
+
+    /**
+     * Issue #275: a batch deadline in the rollback fan-out propagates like a
+     * partial failure. A silent return would report a failed cleanup as a
+     * success and leave the transaction closed, so nobody retries it.
+     */
+    public function testBatchDeadlineInTheRollbackFanOutPropagatesAndKeepsTheTransactionRollbackable(): void
+    {
+        $regions = $this->makeRegions(3);
+        $this->stubPdClient($regions);
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 0.0,
+            responder: static function (string $method): Message {
+                usleep(40_000);
+
+                return new BatchRollbackResponse();
+            },
+        );
+        $txn = $this->createTransaction($regions, $grpc, [], new NullLogger(), $this->shortDeadlineConfig());
+        for ($i = 0; $i < 3; $i++) {
+            $txn->set("k{$i}", "v{$i}");
+        }
+
+        try {
+            $txn->rollback();
+            self::fail('a batch deadline in the rollback fan-out must propagate');
+        } catch (BatchDeadlineExceededException) {
+            self::assertNotSame(TransactionStatus::RolledBack, $txn->getStatus());
+        }
+    }
+
+    /**
+     * @return AbstractLogger&object{records: list<array{message: string, context: array<string, mixed>}>}
+     */
+    private function recordingLogger(): AbstractLogger
+    {
+        return new class extends AbstractLogger {
+            /** @var list<array{message: string, context: array<string, mixed>}> */
+            public array $records = [];
+
+            /**
+             * @param mixed                $level
+             * @param array<string, mixed> $context
+             */
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                $this->records[] = ['message' => (string) $message, 'context' => $context];
+            }
+        };
     }
 
     /**

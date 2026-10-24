@@ -280,6 +280,7 @@ numeric-boundary vectors of #232 are now pinned as regression tests in
 clip, and the `deleteRange("20", "300")` / `('3', '9')` shapes). When adding a
 region-routing test, do not reuse alphabetic boundaries: pick boundaries whose
 first byte disagrees with their numeric value, or the test cannot fail.
+
 ## Issue #261's inverted region-cache acceptance criterion is not implemented on purpose (issue #261)
 
 Issue #261's acceptance criteria ask for `RegionCache::getByKey("99")` to
@@ -407,6 +408,7 @@ report what moved — never a new site-local layout; and let the fixture *derive
 expectations (a key pair is admitted to the discriminating table only when asking
 PHP what `$a < $b` says proves it disagrees with byte order, so the table cannot rot
 into pairs a pre-#186 comparison passes).
+
 ## A Raw-mode region boundary is stored bytes, not the key you split at (issue #188)
 
 PD stores the default keyspace's region boundaries memory-comparable encoded:
@@ -1219,3 +1221,135 @@ Cache lifetime tests: `TxnKvClientTest::testTransactionsShareOneResolvedStatusCa
 (second transaction meets the same lock, one `KvCheckTxnStatus`);
 `LockResolverBatchTest::testCachedRollbackSkipsSecondaryCheckForAsyncCommitLock` pins the
 cache-hit path for async-commit locks.
+
+## Atomic mode and plain writes use different TiKV paths (#399)
+
+`setAtomicForCAS(true)` makes `put()`, `delete()`, `batchPut()` and
+`batchDelete()` send `for_cas`. `RawCASRequest` has no `for_cas` field.
+
+TiKV routes a `for_cas` put or delete to `raw_batch_put_atomic` or
+`raw_batch_delete_atomic` (`RawAtomicStore`). `RawCompareAndSwap` takes
+the same path. Both commands run through the transaction scheduler and
+take latches on their keys (`gen_lock!`). A plain `raw_put` writes to the
+engine directly and takes no latch. Source: `src/storage/mod.rs`,
+`src/server/service/kv.rs` and `src/storage/txn/commands/` in `tikv/tikv`.
+
+So a CAS is atomic only against writers that also use the atomic path.
+The client cannot enforce this across processes. The docs tell the user to
+use one mode for all writers of the same keys.
+
+## Opportunistic primary-lock heartbeat: pessimistic only, every lock TTL is `uptime + TTL`, no timer (#429)
+
+PHP has no background thread, so the client cannot run client-go's
+`ttlManager` goroutine. Issue #429 adds a keepalive that runs inside
+`Transaction::get()`, `batchGet()`, `scan()`, `set()`, `delete()` and
+`commit()` (`TwoPhaseCommitter::heartbeatIfDue()`). Choices that should not be
+"simplified" away:
+
+1. **Pessimistic transactions only.** The keepalive starts when the first
+   eager pessimistic lock is acknowledged
+   (`TransactionState::$primaryLockExpiresAtMs`). An optimistic transaction
+   writes no lock before the prewrite, and `TxnHeartBeat` for a missing lock
+   fails with `TxnNotFound`. This matches client-go, which starts its
+   keepalive after the primary prewrite or the first pessimistic lock. A
+   deferred pessimistic transaction (`eagerPessimisticLocks => false`) also
+   has no lock before `commit()`.
+2. **Every lock TTL is `min(uptime + TTL, MAX_TXN_TTL_MS)`.** TiKV expires a
+   lock when `lock.ts.physical + ttl < now.physical`
+   (`check_txn_status.rs:55,176`), so a TTL is counted from the start
+   timestamp, and `TxnHeartBeat` only raises it (`txn_heart_beat.rs:79`).
+   client-go adds the elapsed time in the same three places: the heartbeat
+   (`keepAlive`, `2pc.go:1354,1390`), the prewrite (`txnLockTTL`,
+   `2pc.go:867-871`, applied to every 2PC transaction, `2pc.go:803`) and the
+   pessimistic-lock request (`pessimistic.go:214-215`).
+   `TwoPhaseCommitter::ttlWithUptimeMs()` does it for all three, so a
+   plain TTL is never sent: it would be a no-op for a heartbeat after the first
+   TTL, and an already-expired lock for a prewrite or a first lock written late
+   in the life of the transaction. TiKV keeps `max(lock_ttl, lock.ttl)` on
+   prewrite (`prewrite.rs:527`), so the larger prewrite TTL cannot shrink a
+   pessimistic lock. The uptime is the client clock since the start of the
+   `Transaction`. `begin()` reads that clock before it fetches the start
+   timestamp and runs the GC safe-point check, so the tracked start is never
+   later than the real one. `MAX_TXN_TTL_MS` is one hour (client-go's `MaxTxnTTL`); at
+   the cap the client sends no more heartbeats. `MAX_LOCK_TTL_MS` (120000)
+   caps only the per-mutation scaling of the optimistic TTL and the value of
+   the two TTL options. The prewrite heartbeat trigger (half of the base TTL
+   since the prewrite started) uses the base TTL, not the uptime TTL.
+3. **Trigger: less than half of the TTL remains**, computed from the tracked
+   expiry (`startedAtMs + granted TTL`), not from the time of the last
+   heartbeat. The two differ when the first lock is taken late in the life of
+   the transaction.
+4. **A failed heartbeat throws and keeps the expiry.** It surfaces the typed
+   exception of #492, and the next operation tries again. Swallowing it would
+   hide a lock that is already gone until `commit()`.
+5. **`Transaction::heartbeat()` defaults to `null`**, meaning `uptime + TTL`
+   of the mode. The old default 10000 was a no-op for a transaction older than
+   10 s. An explicit value is still a total TTL.
+
+The clock is an injectable `?\Closure` on `Transaction` (shared with
+`TwoPhaseCommitter`), the same seam as the prewrite heartbeat of #218.
+
+## The idle sweep touches the returned channel before it sweeps, and `reapIdleChannels()` is public on the clients (#277)
+
+Issue #277 asks that the sweep run **before** the cache lookup, so a channel
+that is idle past the TTL is reclaimed and not refreshed by the call that
+finds it. The code does the opposite: on a cache hit it sets `lastUsed` of the
+returned channel first and then sweeps. Reason: a recreate does not give a new
+connection. ext-grpc keeps the channel in its persistent table, so the new
+handle resolves to the same `grpc_channel` (see the #283 entries). Reclaiming
+the requested channel and building it again would add work and no benefit, and
+it would risk closing the handle that the caller is about to use. The sweep
+still reclaims every **other** idle channel, which is what the issue needs.
+
+Other decisions of #277:
+
+1. The sweep interval is `min(idleTtl, max(1 s, idleTtl / 10))`, so it scales
+   with the TTL. A fixed 30 s would exceed a small TTL.
+2. The clock is a `?\Closure` constructor argument (default `microtime(true)`).
+3. `reapIdleChannels()` is on `GrpcClientInterface` (workers may hold the
+   interface) and on `RawKvClient` and `TxnKvClient`, because a worker holds
+   those and cannot reach the `GrpcClient` that the factory builds. It is a
+   no-op after `close()`, like `closeChannel()`.
+4. `maxChannels` eviction runs down to the cap in one call. The soft-cap
+   warning is logged once per overshoot episode (re-armed when the cache is
+   back under the cap), not on every growth of the maximum: a fan-out over
+   1 000 stores raises the maximum on every new address and would still log
+   once per address.
+5. #658 (BatchCommands stream on an unprotected channel) is not fixed here: it
+   needs a way to hold a channel in flight for the lifetime of a stream, on
+   the interface, and the transport is experimental and off by default.
+
+
+## The batch deadline is finite by default (#275)
+
+`TimeoutConfig::$batchDeadlineMs` defaults to 60000 instead of 0. A batch could run without any
+wall-clock bound, so a slow cluster stalled a PHP worker for a long time. The call sites already
+passed the deadline (RawKV V1, ApiV2, TxnKV through `BatchAsyncExecutor`), so the default was
+the missing part.
+
+1. The default equals the largest default per-call timeout (`ingestTimeoutMs`, 60000). The
+   default configuration passes its own validation.
+2. A deadline above 0 must be at least every per-call timeout used inside a fan-out (all seven:
+   write, batch read, batch write, scan, delete-range, checksum, ingest; `readTimeoutMs` is
+   used only by synchronous point reads, never inside a fan-out). A smaller
+   deadline has no effect on one call, and the constructor throws `InvalidArgumentException`.
+3. `0` stays the explicit opt-out. This is the same contract as in #276: the batch deadline is
+   a wall-clock budget, not a gRPC deadline.
+4. The default of the `$deadlineMs` parameters of `executeParallel()` and
+   `executeParallelCapped()` is `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, so a direct caller is
+   no longer unbounded without saying so.
+5. The deadline is checked at dispatch and wait boundaries only. We do not interrupt a blocking
+   wait. One wait on a retryable call runs the whole retry loop of one region, so the worst
+   case is `batchDeadlineMs` plus one region's full retry loop (the retry deadline, 30000 ms,
+   plus one per-call timeout).
+6. `executeParallelCapped()` and the parallel scan (`RawKvScanner::scanSegmentsInParallel()`)
+   use one shared budget for all windows. A deadline is never a reason for the scan to fall
+   back to the sequential path, which has no deadline. For scans the deadline applies per region
+   batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. The exception reports the configured
+   deadline, the total elapsed time and every region without a result.
+7. TxnKV: a deadline in the secondary-commit fan-out happens after the commit point, so it is
+   logged and `commit()` does not throw (a retrying caller could apply the transaction
+   twice). A deadline in a rollback fan-out throws, like a
+   partial failure: an early return would report a failed cleanup as a success, `rollback()`
+   would mark the state `RolledBack` and close it, and nobody would retry.
+8. Not covered: the experimental BatchCommands multiplex path is bounded per call only.

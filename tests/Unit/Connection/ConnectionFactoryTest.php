@@ -215,21 +215,42 @@ class ConnectionFactoryTest extends TestCase
     // options['timeout']['batchDeadlineMs'] — batch fan-out deadline (issue #185 row 6)
     // ========================================================================
 
-    public function testTimeoutBatchDeadlineMsDefaultsToZeroDisabled(): void
+    public function testTimeoutBatchDeadlineMsDefaultsToAFiniteValue(): void
     {
         $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
 
+        $this->assertSame(TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS, $bundle->timeoutConfig->batchDeadlineMs);
+    }
+
+    public function testTimeoutBatchDeadlineMsZeroDisablesTheDeadline(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['batchDeadlineMs' => 0]],
+        );
+
         $this->assertSame(0, $bundle->timeoutConfig->batchDeadlineMs);
+    }
+
+    public function testTimeoutBatchDeadlineMsBelowAPerCallTimeoutIsRejectedByName(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchDeadlineMs (2500) must not be less than writeTimeoutMs (5000)');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['batchDeadlineMs' => 2500]],
+        );
     }
 
     public function testTimeoutBatchDeadlineMsIsThreadedThrough(): void
     {
         $bundle = ConnectionFactory::create(
             ['127.0.0.1:2379'],
-            options: ['timeout' => ['batchDeadlineMs' => 2500]],
+            options: ['timeout' => ['batchDeadlineMs' => 90000]],
         );
 
-        $this->assertSame(2500, $bundle->timeoutConfig->batchDeadlineMs);
+        $this->assertSame(90000, $bundle->timeoutConfig->batchDeadlineMs);
     }
 
     public function testTimeoutBatchDeadlineMsNonIntIsRejected(): void
@@ -412,7 +433,8 @@ class ConnectionFactoryTest extends TestCase
         self::assertNotEmpty($fields, 'TimeoutConfig must have timeout fields');
 
         foreach ($fields as $field) {
-            $configured = 4321;
+            // A batch deadline below a per-call timeout is rejected (#275).
+            $configured = $field === 'batchDeadlineMs' ? 90000 : 4321;
 
             $bundle = ConnectionFactory::create(
                 ['127.0.0.1:2379'],

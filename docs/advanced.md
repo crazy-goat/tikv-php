@@ -332,48 +332,11 @@ echo "Page views: $newCount\n";
 
 ### Batch Optimization
 
-#### Optimal Batch Sizes
+#### Batch Sizes
 
-```php
-class BatchOptimizer
-{
-    private const MAX_BATCH_SIZE = 1000;
-    private const TARGET_REGION_SIZE = 100;  // Keys per region
-    
-    public static function optimizeBatches(array $keys): array
-    {
-        // Split large batches into optimal chunks
-        if (count($keys) <= self::MAX_BATCH_SIZE) {
-            return [$keys];
-        }
-        
-        return array_chunk($keys, self::MAX_BATCH_SIZE);
-    }
-    
-    public static function parallelBatchGet(
-        RawKvClient $client,
-        array $keys,
-        int $concurrency = 5
-    ): array {
-        $batches = self::optimizeBatches($keys);
-        $results = [];
-        
-        // Process batches with limited concurrency
-        $queue = new SplQueue();
-        foreach ($batches as $batch) {
-            $queue->enqueue($batch);
-        }
-        
-        while (!$queue->isEmpty()) {
-            $batch = $queue->dequeue();
-            $batchResults = $client->batchGet($batch);
-            $results = array_merge($results, $batchResults);
-        }
-        
-        return $results;
-    }
-}
-```
+Do not write your own batch splitter. `batchGet`, `batchPut` and `batchDelete` already group keys by region.
+They split each group into sub-batches of at most 512 keys and 16 KiB, and send the sub-batches in parallel.
+See [Limits](operations.md#limits) for all constants.
 
 #### Write Batching
 
@@ -758,7 +721,7 @@ The interface has six methods (full reference with emitted tag examples:
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
 
-Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from `rpcCompleted()`, so the transport exception of the call is never replaced. The default is a zero-cost no-op
+Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from both `rpcStarted()` and `rpcCompleted()`, so the transport exception of a gRPC call is never replaced. The retry and region-cache counters are emitted directly and are not protected yet. The default is a zero-cost no-op
 (`NoOpMetrics`). A ready-made in-memory recorder for tests and benchmarks
 ships as [`InMemoryMetrics`](../src/Client/Observability/InMemoryMetrics.php)
 with `getRpcStarted(string $operation)`, `getRpcSucceeded(string $operation)`,

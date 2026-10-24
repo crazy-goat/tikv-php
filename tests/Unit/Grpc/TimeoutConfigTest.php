@@ -152,4 +152,62 @@ class TimeoutConfigTest extends TestCase
 
         new TimeoutConfig(batchDeadlineMs: -1);
     }
+
+    public function testBatchDeadlineDefaultsToAFiniteValue(): void
+    {
+        $this->assertSame(60000, TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS);
+        $this->assertSame(TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS, (new TimeoutConfig())->batchDeadlineMs);
+    }
+
+    public function testTheDefaultsPassTheBatchDeadlineCheck(): void
+    {
+        // The default deadline is not below the longest default per-call timeout.
+        $config = new TimeoutConfig();
+
+        $this->assertGreaterThanOrEqual($config->ingestTimeoutMs, $config->batchDeadlineMs);
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function fanOutTimeoutFields(): array
+    {
+        $fields = [];
+        foreach (
+            [
+            'writeTimeoutMs', 'batchReadTimeoutMs', 'batchWriteTimeoutMs',
+            'scanTimeoutMs', 'deleteRangeTimeoutMs', 'checksumTimeoutMs', 'ingestTimeoutMs',
+            ] as $field
+        ) {
+            $fields[$field] = [$field];
+        }
+
+        return $fields;
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('fanOutTimeoutFields')]
+    public function testABatchDeadlineBelowAPerCallTimeoutIsRejected(string $field): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('batchDeadlineMs (1000) must not be less than %s (2000)', $field));
+
+        // Every other per-call timeout is below the deadline, so only `$field` can trip the check.
+        $timeouts = array_fill_keys(array_keys(self::fanOutTimeoutFields()), 500);
+
+        new TimeoutConfig(...[...$timeouts, $field => 2000, 'batchDeadlineMs' => 1000]);
+    }
+
+    public function testABatchDeadlineEqualToTheLongestPerCallTimeoutIsAccepted(): void
+    {
+        $config = new TimeoutConfig(ingestTimeoutMs: 90000, batchDeadlineMs: 90000);
+
+        $this->assertSame(90000, $config->batchDeadlineMs);
+    }
+
+    public function testDisablingTheBatchDeadlineSkipsTheCheck(): void
+    {
+        $config = new TimeoutConfig(ingestTimeoutMs: 300000, batchDeadlineMs: 0);
+
+        $this->assertSame(0, $config->batchDeadlineMs);
+    }
 }
