@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\Support;
 
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use Google\Protobuf\Internal\Message;
 use Grpc\Call;
 use Grpc\Channel;
@@ -49,13 +51,18 @@ final class DeadEndpointGrpcFuture
             throw new \InvalidArgumentException(sprintf('%s is not a protobuf message', $responseClass));
         }
 
+        $timeout = $timeoutMs ?? GrpcClient::DEFAULT_TIMEOUT_MS;
+        if ($timeout <= 0) {
+            throw new InvalidArgumentException(sprintf('timeoutMs must be greater than 0, got %d', $timeout));
+        }
+
         $channel = new Channel('127.0.0.1:1', [
             'credentials' => ChannelCredentials::createInsecure(),
         ]);
         $call = new Call(
             $channel,
             "/{$service}/{$method}",
-            Timeval::now()->add(new Timeval(($timeoutMs ?? 30_000) * 1000)),
+            Timeval::now()->add(new Timeval($timeout * 1000)),
         );
         $call->startBatch([
             \Grpc\OP_SEND_INITIAL_METADATA => [],

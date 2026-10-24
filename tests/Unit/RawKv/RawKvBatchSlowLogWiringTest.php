@@ -39,7 +39,7 @@ use Psr\Log\NullLogger;
  * batch reads. This test goes through the public `batchGet()` instead, on
  * the API V2 transport with a mockable `callAsync()`
  * instead of a real gRPC call (the fan-out always goes through `callAsync()`
- * since #273). It stays in the `Grpc` suite it was written for.
+ * since #273). It needs no ext-grpc since #273.
  */
 class RawKvBatchSlowLogWiringTest extends TestCase
 {

@@ -430,11 +430,10 @@ final readonly class RawKvBatch
      * helper was one `match` arm away from arming an unbounded deadline in
      * this class, and nothing in the type system objected. The `default` arm
      * throws for the same reason — a new operation type has to be classified
-     * rather than silently inheriting "no deadline". Note the sibling helpers
-     * in `TxnReader` and `TwoPhaseCommitter` still answer `?int`, but their
-     * values reach `GrpcClient::call()` (which resolves `null` to the 30 s
-     * backstop) and never a `Timeval`; do not copy this shape to them, and do
-     * not copy theirs here.
+     * rather than silently inheriting "no deadline". The sibling helpers
+     * in `TxnReader` and `TwoPhaseCommitter` still answer `?int` (`null`
+     * resolves to `GrpcClient`'s 30 s default); do not copy either shape to
+     * the other.
      */
     private function timeoutMs(string $operationType): int
     {
