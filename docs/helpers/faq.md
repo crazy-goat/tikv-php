@@ -2571,6 +2571,19 @@ To simulate a split in a committer test (for example "region no longer
 covers the whole key group"), return a region that contains the first
 key but not the others. Use a group of at least two keys.
 
+## GrpcClient: every RPC must complete through `completeRpc()`, never `rpcCompleted()` directly
+
+`call()`, `callStreaming()` and `callAsync()` call `rpcStarted()` and then
+must call `rpcCompleted()` exactly once on every path (issue #274). The
+`try`/`finally` opens right after `rpcStarted()`, so channel acquisition,
+`new Call()` and the send phase are covered. Record the end through
+`GrpcClient::completeRpc()`: it swallows (and logs) a throwing metrics
+backend, because a throw from `finally` replaces the transport exception.
+A protobuf message cannot be mocked or subclassed in a test (the
+descriptor lookup fails), so to fail a call early use
+`new GrpcClient(allowInsecure: false)`: `getChannel()` throws right after
+`rpcStarted()`.
+
 ## Why does `composer update` not install the newest packages? (#311)
 
 `composer.json` pins `config.platform.php` to `8.2.0`, so Composer
