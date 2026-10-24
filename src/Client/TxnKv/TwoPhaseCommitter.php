@@ -82,7 +82,9 @@ use Psr\Log\NullLogger;
  * the scaled TTL only narrows that window. Application-level long
  * transactions — anything that keeps a transaction open between operations
  * — must call {@see \CrazyGoat\TiKV\Client\TxnKv\Transaction::heartbeat()}
- * themselves before the granted TTL elapses; 10 s is a safe default.
+ * themselves before the granted TTL elapses. Every lock TTL and every
+ * heartbeat advise is `min(uptime + TTL, MAX_TXN_TTL_MS)`, because TiKV counts
+ * a TTL from the start timestamp (issue #429).
  *
  * ## Opportunistic heartbeat (issue #429)
  *
@@ -235,13 +237,31 @@ final readonly class TwoPhaseCommitter
         return RegionContextFactory::fromRegionInfo($region, priority: $this->priority);
     }
 
-    public function nowMs(): int
+    private function nowMs(): int
     {
         if ($this->clock instanceof \Closure) {
             return ($this->clock)();
         }
 
         return (int) (microtime(true) * 1000);
+    }
+
+    /**
+     * A lock TTL that includes the time the transaction has already run
+     * (issues #429): `min(uptime + baseTtlMs, MAX_TXN_TTL_MS)`.
+     *
+     * TiKV counts a lock TTL from the start timestamp (a lock is expired when
+     * `lock.ts.physical + ttl < now`), so a lock written `uptime` ms after the
+     * start with a plain `baseTtlMs` would be born with only `baseTtlMs -
+     * uptime` left, or already expired. client-go adds the elapsed time the
+     * same way (`txnLockTTL`, `keepAlive`, pessimistic lock requests). The
+     * uptime is measured on the injectable client clock.
+     */
+    public function ttlWithUptimeMs(TransactionState $state, int $baseTtlMs): int
+    {
+        $uptimeMs = max(0, $this->nowMs() - $state->getStartedAtMs());
+
+        return min($uptimeMs + $baseTtlMs, self::MAX_TXN_TTL_MS);
     }
 
     /**
@@ -291,9 +311,13 @@ final readonly class TwoPhaseCommitter
         // drives the prewrite-heartbeat trigger and advise, so the pessimistic
         // path heartbeats against its own 30 s TTL rather than the smaller
         // optimistic one.
-        $lockTtlMs = $this->pessimistic
+        $baseLockTtlMs = $this->pessimistic
             ? $this->pessimisticLockTtlMs
             : $this->scaledOptimisticLockTtlMs($mutations);
+        // The TTL carried by the prewrite requests includes the uptime of the
+        // transaction (issue #429); the heartbeat trigger below keeps using
+        // the base TTL, because it measures time since the prewrite started.
+        $lockTtlMs = $this->ttlWithUptimeMs($state, $baseLockTtlMs);
         $prewriteStartedAtMs = $this->nowMs();
         $primaryLockWritten = false;
         $keysByRegion = $this->groupMutationsByRegion($mutations);
@@ -525,16 +549,22 @@ final readonly class TwoPhaseCommitter
             $state,
             $retryExecutor,
             $classifier,
-            $lockTtlMs,
+            $baseLockTtlMs,
             &$prewriteStartedAtMs,
             $onePc,
         ): void {
             if (
                 $primaryLockWritten
                 && !$onePc
-                && $this->nowMs() - $prewriteStartedAtMs >= intdiv($lockTtlMs, 2)
+                && $this->nowMs() - $prewriteStartedAtMs >= intdiv($baseLockTtlMs, 2)
             ) {
-                $this->heartbeat($primary, $state, $retryExecutor, $classifier, $lockTtlMs);
+                $this->heartbeat(
+                    $primary,
+                    $state,
+                    $retryExecutor,
+                    $classifier,
+                    $this->ttlWithUptimeMs($state, $baseLockTtlMs),
+                );
                 $prewriteStartedAtMs = $this->nowMs();
             }
         };
@@ -764,7 +794,7 @@ final readonly class TwoPhaseCommitter
             return false;
         }
 
-        $adviseMs = min($nowMs - $startedAtMs + $this->pessimisticLockTtlMs, self::MAX_TXN_TTL_MS);
+        $adviseMs = min(max(0, $nowMs - $startedAtMs) + $this->pessimisticLockTtlMs, self::MAX_TXN_TTL_MS);
         $grantedMs = $this->heartbeat($primary, $state, $retryExecutor, $classifier, $adviseMs);
         $state->setPrimaryLockExpiresAtMs($startedAtMs + ($grantedMs > 0 ? $grantedMs : $adviseMs));
 
@@ -1688,13 +1718,14 @@ final readonly class TwoPhaseCommitter
         int $forUpdateTs,
         bool $isFirstLock,
         int $waitTimeoutMs,
+        int $lockTtlMs,
     ): PessimisticLockRequest {
         $request = new PessimisticLockRequest();
         $request->setContext($this->buildContext($region));
         $request->setMutations($mutations);
         $request->setPrimaryLock($primary);
         $request->setStartVersion($this->startTs);
-        $request->setLockTtl($this->pessimisticLockTtlMs);
+        $request->setLockTtl($lockTtlMs);
         $request->setForUpdateTs($forUpdateTs);
         $request->setIsFirstLock($isFirstLock);
         $request->setWaitTimeout($waitTimeoutMs);
@@ -1756,6 +1787,7 @@ final readonly class TwoPhaseCommitter
         int $forUpdateTs,
         bool $isFirstLock,
         int $waitTimeoutMs,
+        int $lockTtlMs,
     ): array {
         $firstGroupIndex = array_key_first($keysByRegion);
         $firstAttempts = [];
@@ -1781,6 +1813,7 @@ final readonly class TwoPhaseCommitter
                 $forUpdateTs,
                 $isFirstLock && $groupIndex === $firstGroupIndex,
                 $waitTimeoutMs,
+                $lockTtlMs,
             );
 
             $this->logger->debug('PessimisticLock', [
@@ -1916,6 +1949,7 @@ final readonly class TwoPhaseCommitter
                 $forUpdateTs,
                 $isFirstLock,
                 $this->effectiveLockWaitTimeoutMs(0),
+                $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
             );
 
             try {
@@ -1981,6 +2015,7 @@ final readonly class TwoPhaseCommitter
                                     $forUpdateTs,
                                     $isFirstLock,
                                     $this->effectiveLockWaitTimeoutMs($elapsedMs),
+                                    $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                                 );
 
                                 $this->logger->debug('PessimisticLock', [

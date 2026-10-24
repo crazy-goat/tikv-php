@@ -108,7 +108,7 @@ final class TxnKvClient
      * begin() options[] key for the optimistic lock TTL baseline in
      * milliseconds (issue #429). The prewrite adds 10 ms per mutation to it
      * and caps the result at 120000 ms. Default: 3000. Must be between 1 and
-     * {@see TwoPhaseCommitter::MAX_LOCK_TTL_MS} (120000).
+     * 120000.
      */
     public const OPT_OPTIMISTIC_LOCK_TTL_MS = 'optimisticLockTtlMs';
 
@@ -116,7 +116,7 @@ final class TxnKvClient
      * begin() options[] key for the pessimistic lock TTL in milliseconds
      * (issue #429). A pessimistic transaction extends the primary lock
      * automatically once half of this TTL has elapsed. Default: 30000. Must
-     * be between 1 and {@see TwoPhaseCommitter::MAX_LOCK_TTL_MS} (120000).
+     * be between 1 and 120000.
      */
     public const OPT_PESSIMISTIC_LOCK_TTL_MS = 'pessimisticLockTtlMs';
 

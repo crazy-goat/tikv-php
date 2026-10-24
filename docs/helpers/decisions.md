@@ -1189,12 +1189,12 @@ The CI `lint` job runs `composer audit --locked`, so a new advisory
 fails the build. Downstream users of the library are not affected:
 Composer ignores the lock file of a dependency.
 
-## Opportunistic primary-lock heartbeat: pessimistic only, absolute TTL, no timer (#429)
+## Opportunistic primary-lock heartbeat: pessimistic only, every lock TTL is `uptime + TTL`, no timer (#429)
 
 PHP has no background thread, so the client cannot run client-go's
 `ttlManager` goroutine. Issue #429 adds a keepalive that runs inside
-`Transaction::get()`, `batchGet()`, `scan()`, `set()` and `delete()`
-(`TwoPhaseCommitter::heartbeatIfDue()`). Four choices that should not be
+`Transaction::get()`, `batchGet()`, `scan()`, `set()`, `delete()` and
+`commit()` (`TwoPhaseCommitter::heartbeatIfDue()`). Choices that should not be
 "simplified" away:
 
 1. **Pessimistic transactions only.** The keepalive starts when the first
@@ -1205,14 +1205,25 @@ PHP has no background thread, so the client cannot run client-go's
    keepalive after the primary prewrite or the first pessimistic lock. A
    deferred pessimistic transaction (`eagerPessimisticLocks => false`) also
    has no lock before `commit()`.
-2. **The advise is `uptime + TTL`, not `TTL`.** TiKV counts a lock TTL from the
-   start timestamp and `TxnHeartBeat` only raises the TTL. Advising a plain
-   `TTL` is a no-op after the first TTL has passed. The uptime is the client
-   clock since the start of the `Transaction`. The advise is capped at
-   `MAX_TXN_TTL_MS` (one hour, client-go's `MaxTxnTTL`); at the cap the client
-   sends no more heartbeats. `MAX_LOCK_TTL_MS` (120000) caps only the
-   per-mutation scaling of the configured TTL, and also the maximum of the
-   two TTL options.
+2. **Every lock TTL is `min(uptime + TTL, MAX_TXN_TTL_MS)`.** TiKV expires a
+   lock when `lock.ts.physical + ttl < now.physical`
+   (`check_txn_status.rs:55,176`), so a TTL is counted from the start
+   timestamp, and `TxnHeartBeat` only raises it (`txn_heart_beat.rs:79`).
+   client-go adds the elapsed time in the same three places: the heartbeat
+   (`keepAlive`, `2pc.go:1354,1390`), the prewrite (`txnLockTTL`,
+   `2pc.go:867-871`, applied to every 2PC transaction, `2pc.go:803`) and the
+   pessimistic-lock request (`pessimistic.go:214-215`).
+   `TwoPhaseCommitter::ttlWithUptimeMs()` does it for all three, so a
+   plain TTL is never sent: it would be a no-op for a heartbeat after the first
+   TTL, and an already-expired lock for a prewrite or a first lock written late
+   in the life of the transaction. TiKV keeps `max(lock_ttl, lock.ttl)` on
+   prewrite (`prewrite.rs:527`), so the larger prewrite TTL cannot shrink a
+   pessimistic lock. The uptime is the client clock since the start of the
+   `Transaction`. `MAX_TXN_TTL_MS` is one hour (client-go's `MaxTxnTTL`); at
+   the cap the client sends no more heartbeats. `MAX_LOCK_TTL_MS` (120000)
+   caps only the per-mutation scaling of the optimistic TTL and the value of
+   the two TTL options. The prewrite heartbeat trigger (half of the base TTL
+   since the prewrite started) uses the base TTL, not the uptime TTL.
 3. **Trigger: less than half of the TTL remains**, computed from the tracked
    expiry (`startedAtMs + granted TTL`), not from the time of the last
    heartbeat. The two differ when the first lock is taken late in the life of
@@ -1220,6 +1231,9 @@ PHP has no background thread, so the client cannot run client-go's
 4. **A failed heartbeat throws and keeps the expiry.** It surfaces the typed
    exception of #492, and the next operation tries again. Swallowing it would
    hide a lock that is already gone until `commit()`.
+5. **`Transaction::heartbeat()` defaults to `null`**, meaning `uptime + TTL`
+   of the mode. The old default 10000 was a no-op for a transaction older than
+   10 s. An explicit value is still a total TTL.
 
 The clock is an injectable `?\Closure` on `Transaction` (shared with
 `TwoPhaseCommitter`), the same seam as the prewrite heartbeat of #218.

@@ -380,4 +380,83 @@ final class PrimaryLockKeepAliveTest extends TestCase
 
         $txn->rollback();
     }
+
+    public function testFirstLockAfterMoreThanOneTtlOfUptimeIsNotBornExpired(): void
+    {
+        $txn = $this->transaction(true, pessimisticLockTtlMs: 10000);
+
+        $this->nowMs = 15000;
+        $txn->set('a1', 'v');
+
+        // uptime (15000) + TTL (10000): the lock lives until start + 25000.
+        self::assertSame(25000, (int) $this->lockRequests[0]->getLockTtl());
+
+        // The tracked expiry is start + 25000: no heartbeat while 5000 or more remain...
+        $this->nowMs = 20000;
+        $txn->get('a1');
+        self::assertCount(0, $this->heartbeatRequests);
+
+        // ...and one as soon as less than half the TTL remains.
+        $this->nowMs = 20001;
+        $txn->get('a1');
+        self::assertCount(1, $this->heartbeatRequests);
+        self::assertSame(30001, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
+
+        $txn->rollback();
+    }
+
+    public function testOptimisticCommitAfterThinkTimeCarriesUptimeInThePrewriteTtl(): void
+    {
+        $txn = $this->transaction(false);
+        $txn->set('a1', 'v');
+
+        $this->nowMs = 10000;
+        $txn->commit();
+
+        // uptime (10000) + scaled TTL (3000 + 10 * 1 mutation).
+        self::assertSame(13010, (int) $this->prewriteRequests[0]->getLockTtl());
+    }
+
+    public function testPrewriteTtlIsCappedAtTheMaximumTransactionTtl(): void
+    {
+        $txn = $this->transaction(false);
+        $txn->set('a1', 'v');
+
+        $this->nowMs = 5_000_000;
+        $txn->commit();
+
+        self::assertSame(TwoPhaseCommitter::MAX_TXN_TTL_MS, (int) $this->prewriteRequests[0]->getLockTtl());
+    }
+
+    public function testPessimisticCommitAfterAGapHeartbeatsBeforeThePrewrite(): void
+    {
+        $txn = $this->transaction(true, pessimisticLockTtlMs: 10000);
+        $txn->set('a1', 'v');
+
+        $this->nowMs = 6000;
+        $txn->commit();
+
+        self::assertCount(1, $this->heartbeatRequests);
+        self::assertSame(16000, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
+        // The prewrite then carries uptime + TTL as well.
+        self::assertSame(16000, (int) $this->prewriteRequests[0]->getLockTtl());
+    }
+
+    public function testExplicitHeartbeatWithoutAnArgumentAsksForUptimePlusTtl(): void
+    {
+        $txn = $this->transaction(true, pessimisticLockTtlMs: 10000);
+        $txn->set('a1', 'v');
+
+        $this->nowMs = 4000;
+        $granted = $txn->heartbeat();
+
+        self::assertSame(14000, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
+        self::assertSame(14000, $granted);
+
+        $this->nowMs = 5_000_000;
+        $txn->heartbeat();
+        self::assertSame(TwoPhaseCommitter::MAX_TXN_TTL_MS, (int) $this->heartbeatRequests[1]->getAdviseLockTtl());
+
+        $txn->rollback();
+    }
 }

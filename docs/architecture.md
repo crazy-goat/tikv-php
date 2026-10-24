@@ -174,7 +174,7 @@ final class Transaction
     // Transaction control
     public function commit(): void;           // 2PC: prewrite + commit
     public function rollback(): void;
-    public function heartbeat(int $adviseLockTtlMs = 10000): int;
+    public function heartbeat(?int $adviseLockTtlMs = null): int;
     
     // Inspection
     public function getTxnId(): string;

@@ -1220,18 +1220,22 @@ Each value must be an `int` from `1` to `120000`. Any other value throws
 
 ### Heartbeat interval and TTL
 
-TiKV counts a lock TTL from the start timestamp of the transaction. A
-heartbeat therefore asks for a total TTL: `uptime + TTL`. A value at or below
-the current TTL changes nothing. The client stops extending a lock when the
-total TTL reaches one hour (`TwoPhaseCommitter::MAX_TXN_TTL_MS`).
+TiKV counts a lock TTL from the start timestamp of the transaction: a lock
+is expired when `start time + TTL` is in the past. For this reason the client
+adds the time the transaction has already run (`uptime`) to every lock TTL: the
+pessimistic-lock requests, the prewrite requests and the heartbeats all
+carry `min(uptime + TTL, 3600000)` ms. A heartbeat can only raise a TTL, so
+a value at or below the current TTL changes nothing. The client stops extending
+a lock when the total TTL reaches one hour.
 
 The client sends a heartbeat in these cases:
 
 1. A pessimistic transaction sends a heartbeat inside `get()`, `batchGet()`,
-   `scan()`, `set()` and `delete()` when less than half of the lock TTL
+   `scan()`, `set()`, `delete()` and `commit()` when less than half of the lock TTL
    remains. The first pessimistic lock starts the keepalive.
-2. The prewrite of `commit()` sends a heartbeat between region prewrites
-   (issue #218).
+2. `commit()` first sends a heartbeat when less than half of the TTL remains
+   (pessimistic transactions), and the prewrite sends a heartbeat between
+   region prewrites (issue #218).
 3. Your code calls `Transaction::heartbeat()`.
 
 An optimistic transaction holds no lock before `commit()`, so it sends no
@@ -1239,8 +1243,10 @@ opportunistic heartbeat. A heartbeat for a lock that does not exist fails.
 
 PHP has no background thread. A transaction that waits on an external call
 without touching TiKV does not send a heartbeat. If the wait can be longer than
-half of the TTL, call `Transaction::heartbeat($uptimeMs + $ttlMs)` before the
-wait. The same applies to a single RPC that takes longer than the TTL.
+half of the TTL, call `Transaction::heartbeat()` before the wait. Without
+an argument it asks for `uptime + TTL` of the transaction mode. An explicit
+argument is a total TTL in milliseconds, counted from the start of the
+transaction. The same applies to a single RPC that takes longer than the TTL.
 
 If a heartbeat fails, the operation throws the typed exception of
 `Transaction::heartbeat()` (issue #492) and the next operation tries again.
