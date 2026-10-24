@@ -104,6 +104,49 @@ final class GrpcClientRpcCompletionTest extends TestCase
         }
     }
 
+    /**
+     * The other half of the metric: a backend that throws from
+     * `rpcStarted()` must not abort the call either (issue #759, GRPC-15).
+     *
+     * The `rpcStarted()` emission sits *before* the call, so a throw from it
+     * would abort a call that never happened and replace the transport
+     * exception the caller has to see.
+     */
+    public function testABackendThrowingFromRpcStartedDoesNotMaskTheTransportException(): void
+    {
+        $backendError = new \LogicException('metrics backend down');
+        $metrics = $this->createMock(MetricsInterface::class);
+        $metrics->expects($this->once())
+            ->method('rpcStarted')
+            ->willThrowException($backendError);
+        $metrics->expects($this->once())
+            ->method('rpcCompleted')
+            ->with(self::OPERATION, $this->isType('float'), false);
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects($this->once())
+            ->method('warning')
+            ->with(
+                $this->anything(),
+                $this->callback(
+                    static fn(array $context): bool => ($context['operation'] ?? null) === self::OPERATION
+                        && ($context['exception'] ?? null) === $backendError,
+                ),
+            );
+
+        $grpc = new GrpcClient(logger: $logger, allowInsecure: false, metrics: $metrics);
+
+        try {
+            $grpc->call(self::ADDRESS, 'tikvpb.Tikv', 'RawGet', new RawGetRequest(), RawGetResponse::class);
+            $this->fail('Expected InvalidStateException from the refused plaintext channel');
+        } catch (InvalidStateException) {
+            // The original exception, not the LogicException from the backend.
+            $this->addToAssertionCount(1);
+        } finally {
+            $grpc->close();
+        }
+    }
+
     public function testThrowingMetricsBackendDoesNotMaskTheTransportException(): void
     {
         $backendError = new \LogicException('metrics backend down');
