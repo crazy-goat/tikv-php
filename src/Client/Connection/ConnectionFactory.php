@@ -760,21 +760,21 @@ final class ConnectionFactory
             if ($key === 'batchDeadlineMs') {
                 if ($value < 0) {
                     throw new InvalidArgumentException(
-                        sprintf('timeout option "%s" must be greater than or equal to 0, got %d', $key, $value),
+                        sprintf("options['timeout'][%s] must be greater than or equal to 0, got %d", $key, $value),
                     );
                 }
                 continue;
             }
             if ($value <= 0) {
                 throw new InvalidArgumentException(
-                    sprintf('timeout option "%s" must be greater than 0, got %d', $key, $value),
+                    sprintf("options['timeout'][%s] must be greater than 0, got %d", $key, $value),
                 );
             }
         }
     }
 
     /**
-     * Reject a timeout option whose value is not a number.
+     * Reject an option whose value is not a number.
      *
      * A value of the wrong type was silently dropped before (issue #272,
      * GRPC-13): the option had no effect and the default applied, with no
@@ -782,18 +782,21 @@ final class ConnectionFactory
      * other option group in the factory already fails closed on a mistyped
      * value.
      *
-     * @param array<array-key, mixed> $timeouts
+     * @param array<array-key, mixed> $options
      * @param list<string> $recognised
+     * @param string $optionPath the option path as the user wrote it, e.g.
+     *                           "options['timeout']"
      */
-    private static function assertIntTimeoutOptions(array $timeouts, array $recognised): void
+    private static function assertIntOptions(array $options, array $recognised, string $optionPath): void
     {
-        foreach ($timeouts as $key => $value) {
+        foreach ($options as $key => $value) {
             if (!is_string($key) || !in_array($key, $recognised, true)) {
                 continue;
             }
             if (!is_int($value)) {
                 throw new InvalidArgumentException(sprintf(
-                    'timeout option "%s" must be an int (milliseconds), %s given',
+                    '%s[%s] must be an int (milliseconds), %s given',
+                    $optionPath,
                     $key,
                     get_debug_type($value),
                 ));
@@ -802,28 +805,25 @@ final class ConnectionFactory
     }
 
     /**
-     * Reject a slow-log threshold whose value is not a number, and name the
-     * option path the user wrote (issue #272, GRPC-13).
+     * Reject a slow-log threshold that is negative, naming the option path
+     * the user wrote (issue #272, GRPC-13).
      *
      * @param array<array-key, mixed> $thresholds
      * @param list<string> $recognised
      */
-    private static function assertIntSlowLogOptions(array $thresholds, array $recognised): void
+    private static function assertNonNegativeSlowLogOptions(array $thresholds, array $recognised): void
     {
         foreach ($thresholds as $key => $value) {
             if (!is_string($key) || !in_array($key, $recognised, true)) {
                 continue;
             }
             if (!is_int($value)) {
-                throw new InvalidArgumentException(sprintf(
-                    'slow-log option "%s" must be an int (milliseconds), %s given',
-                    $key,
-                    get_debug_type($value),
-                ));
+                // The type is checked by assertIntOptions() first.
+                continue;
             }
             if ($value < 0) {
                 throw new InvalidArgumentException(sprintf(
-                    'slow-log option "%s" must be greater than or equal to 0, got %d',
+                    "options['slowLog'][%s] must be greater than or equal to 0, got %d",
                     $key,
                     $value,
                 ));
@@ -864,7 +864,7 @@ final class ConnectionFactory
         $recognised = self::recognisedOptionKeys(TimeoutConfig::class);
 
         self::assertKnownOptionKeys($t, $recognised, "options['timeout']");
-        self::assertIntTimeoutOptions($t, $recognised);
+        self::assertIntOptions($t, $recognised, "options['timeout']");
         self::assertPositiveTimeoutOptions($t, $recognised);
 
         /** @var array<string, int> $values */
@@ -906,7 +906,8 @@ final class ConnectionFactory
         $recognised = self::recognisedOptionKeys(SlowLogConfig::class);
 
         self::assertKnownOptionKeys($s, $recognised, "options['slowLog']");
-        self::assertIntSlowLogOptions($s, $recognised);
+        self::assertIntOptions($s, $recognised, "options['slowLog']");
+        self::assertNonNegativeSlowLogOptions($s, $recognised);
 
         /** @var array<string, int> $values */
         $values = [];

@@ -201,7 +201,9 @@ class ConnectionFactoryTest extends TestCase
         // A mistyped value was silently dropped before (issue #272): the
         // option had no effect and the default applied, with no warning.
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('timeout option "ingestTimeoutMs" must be an int (milliseconds), string given');
+        $this->expectExceptionMessage(
+            "options['timeout'][ingestTimeoutMs] must be an int (milliseconds), string given",
+        );
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
@@ -233,7 +235,9 @@ class ConnectionFactoryTest extends TestCase
     public function testTimeoutBatchDeadlineMsNonIntIsRejected(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('timeout option "batchDeadlineMs" must be an int (milliseconds), string given');
+        $this->expectExceptionMessage(
+            "options['timeout'][batchDeadlineMs] must be an int (milliseconds), string given",
+        );
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
@@ -271,7 +275,7 @@ class ConnectionFactoryTest extends TestCase
     public function testANonPositiveTimeoutOptionIsRejected(string $key, int $value): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage(sprintf('timeout option "%s" must be greater than 0', $key));
+        $this->expectExceptionMessage(sprintf("options['timeout'][%s] must be greater than 0", $key));
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
@@ -312,6 +316,30 @@ class ConnectionFactoryTest extends TestCase
         );
     }
 
+    /**
+     * A group that is explicitly `null` means "not configured" — the same
+     * as leaving it out — not "wrong type".
+     */
+    public function testANullTimeoutOptionIsTreatedAsAbsent(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => null],
+        );
+
+        $this->assertSame(5000, $bundle->timeoutConfig->readTimeoutMs);
+    }
+
+    public function testANullSlowLogOptionIsTreatedAsAbsent(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => null],
+        );
+
+        $this->assertNull($bundle->slowLogConfig);
+    }
+
     public function testANonArraySlowLogOptionIsRejected(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -330,7 +358,9 @@ class ConnectionFactoryTest extends TestCase
     public function testANonIntSlowLogThresholdIsRejected(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('slow-log option "readThresholdMs" must be an int (milliseconds), string given');
+        $this->expectExceptionMessage(
+            "options['slowLog'][readThresholdMs] must be an int (milliseconds), string given",
+        );
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
@@ -345,7 +375,7 @@ class ConnectionFactoryTest extends TestCase
     public function testANegativeSlowLogThresholdNamesTheOption(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('slow-log option "readThresholdMs" must be greater than or equal to 0, got -1');
+        $this->expectExceptionMessage("options['slowLog'][readThresholdMs] must be greater than or equal to 0, got -1");
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
@@ -433,7 +463,7 @@ class ConnectionFactoryTest extends TestCase
     public function testANegativeBatchDeadlineOptionIsRejected(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('timeout option "batchDeadlineMs" must be greater than or equal to 0');
+        $this->expectExceptionMessage("options['timeout'][batchDeadlineMs] must be greater than or equal to 0");
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
@@ -495,7 +525,7 @@ class ConnectionFactoryTest extends TestCase
     ): void {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage(sprintf(
-            'timeout option "%s" must be an int (milliseconds), string given',
+            "options['timeout'][%s] must be an int (milliseconds), string given",
             $field,
         ));
 

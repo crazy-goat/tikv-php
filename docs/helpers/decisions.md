@@ -1004,7 +1004,7 @@ the thrown type. Pinned by `tests/Unit/TxnKv/TxnKvFanoutTest.php`
 `::testFailingRegionIsRetriedOnItsOwnWhilePeersAreNotResent`,
 `::testAggregatedPrewriteFailureNamesEveryFailingRegion`).
 
-## An option key the client does not know is an error, not a no-op (issue #272)
+## An option the client cannot apply is an error, not a no-op (issue #272)
 
 The concrete symptom — `options['timeout']['ingestTimeoutMs']` was dropped on
 the floor, so an operator who configured a five-minute SST ingest deadline got
@@ -1019,12 +1019,17 @@ fixed:
    lost one field, silently, and nothing noticed because the value it lost
    was only wrong on a slow store. A field that is added to the class is
    configurable the moment it exists.
-2. **An unknown key is rejected.** A silently dropped option has no effect
+2. **Three things are rejected: an unknown key, a value of the wrong type,
+   and a group that is not a map.** A silently dropped option has no effect
    and the default applies — the user believes a deadline was raised and it
-   was not. The TLS options already failed that way; the timeouts and the
-   slow-log thresholds now do too. Rejecting a key that was never read is a
-   behaviour change, but it converts a silent misconfiguration into a
-   startup error, which is the correct trade.
+   was not. The same is true of a value that is not applied because it has
+   the wrong type (`'readTimeoutMs' => '60000'` from an environment
+   variable), and of a group that is not a map at all
+   (`options['slowLog'] => 'x'` silently turned the slow logging *off*). The
+   TLS options already failed closed on a mistyped value; the timeouts and
+   the slow-log thresholds now do too. Rejecting what was never read is a
+   behaviour change, but it converts a silent misconfiguration into a startup
+   error, which is the correct trade.
 3. **The regression test is derived from the class as well.** The test that
    every field round-trips enumerates the constructor parameters, so a field
    that is added without a mapping fails the suite instead of the cluster.
