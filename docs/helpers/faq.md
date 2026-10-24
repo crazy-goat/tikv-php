@@ -2600,3 +2600,19 @@ for every store lookup. The parameter is now `StoreCacheInterface` with
 the default `new StoreCache()` (PHP 8.2 allows `new` in an initializer).
 `PdClient::close()` always clears the cache. A test that needs "no cache"
 must pass a mock of `StoreCacheInterface` whose `get()` returns `null`.
+
+## The idle sweep of `GrpcClient` must run on the cache-hit path too, and tests age channels with the injected clock (#277)
+
+`GrpcClient::evictIdleChannels()` used to run only on a cache **miss**, just
+before a new channel was created. A long-lived client that only reuses cached
+channels never reached it, so the channel of a store that left the cluster
+stayed open for ever. `getChannel()` now also sweeps on a cache hit, at most
+once per interval (`idleTtlMs / 10`, clamped to 1 s .. `idleTtlMs`), because
+the sweep walks every cached channel. The hit path touches `lastUsed` of the
+returned channel **before** it sweeps, so the returned channel is never
+reaped. The sweep already skips channels with in-flight calls.
+
+A test must not `sleep()` to age a channel. Pass the `clock` closure to the
+`GrpcClient` constructor and advance your own variable
+(`tests/Unit/Grpc/GrpcClientIdleSweepTest.php`). Add the file to the `Grpc`
+suite and to the `Unit` exclude list in `phpunit.xml`.

@@ -404,6 +404,14 @@ the *connection* alive, not the *entry* in the cache). Lowering the cap
 limits the memory the channel cache can use; a channel is evicted only when
 another one is needed, so the cap never breaks a request.
 
+The transport removes an idle channel (one that was unused for `idleTtlMs`)
+when it opens a new channel. It also removes idle channels when a request
+reuses a cached channel, so the channel of a store that left the cluster
+does not stay open. This sweep runs at most once per interval. The interval
+is one tenth of `idleTtlMs`, at least 1 second and at most `idleTtlMs`. A
+channel with an in-flight call and the channel that the request uses are
+never removed.
+
 ### Sharing One Transport Between Clients
 
 The gRPC transport is **long-lived and shared**: it caches one channel per

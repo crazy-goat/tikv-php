@@ -99,6 +99,14 @@ final class GrpcClient implements GrpcClientInterface
     private bool $closed = false;
 
     /**
+     * Time (seconds) of the last idle sweep, or null before the first one.
+     *
+     * The sweep runs on every cache miss and, at most once per
+     * `sweepIntervalSeconds()`, on the cache-hit path (issue #277).
+     */
+    private ?float $lastSweepAt = null;
+
+    /**
      * Maximum number of channels kept open at the same time.
      *
      * The client is meant to be long-lived and shared: the channel cache is
@@ -139,7 +147,9 @@ final class GrpcClient implements GrpcClientInterface
      *                        is evicted when the cap is reached. Must be >= 1.
      * @param int $idleTtlMs Idle time (ms) after which an unused channel is
      *                       evicted (default 10 minutes). A channel that is
-     *                       evicted is reopened on the next request.
+     *                       evicted is reopened on the next request. Idle
+     *                       channels are swept on every cache miss and, rate
+     *                       limited, on cache hits (issue #277).
      * @param bool $allowInsecure When true (default), an insecure (plaintext) gRPC channel
      *                            is created when no TLS configuration is provided or when
      *                            the TLS configuration has no credentials set. When false,
@@ -166,6 +176,9 @@ final class GrpcClient implements GrpcClientInterface
      *                             how often to ping an idle connection so NAT/firewall-dropped
      *                             flows are detected instead of silently dead.
      * @param int $keepaliveTimeoutMs grpc.keepalive_timeout_ms channel argument (default 3 s).
+     * @param (\Closure(): float)|null $clock Source of the current time in seconds
+     *                                         (default `microtime(true)`). Tests inject
+     *                                         a fake clock to age channels without sleeping.
      */
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
@@ -178,6 +191,7 @@ final class GrpcClient implements GrpcClientInterface
         private readonly int $maxSendMessageBytes = self::DEFAULT_MAX_SEND_MESSAGE_BYTES,
         private readonly int $keepaliveTimeMs = self::DEFAULT_KEEPALIVE_TIME_MS,
         private readonly int $keepaliveTimeoutMs = self::DEFAULT_KEEPALIVE_TIMEOUT_MS,
+        private readonly ?\Closure $clock = null,
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -577,7 +591,16 @@ final class GrpcClient implements GrpcClientInterface
             } else {
                 // Update last-used timestamp
                 $this->channels[$address]['lastUsed'] = $now;
-                return $this->channels[$address]['channel'];
+                $channel = $this->channels[$address]['channel'];
+
+                // A client that only ever hits the cache would keep the
+                // channels of departed stores for ever (issue #277). The
+                // returned channel was just touched, so it is never reaped.
+                if ($this->sweepDue($now)) {
+                    $this->evictIdleChannels($now);
+                }
+
+                return $channel;
             }
         }
 
@@ -607,6 +630,7 @@ final class GrpcClient implements GrpcClientInterface
      */
     private function evictIdleChannels(float $now): void
     {
+        $this->lastSweepAt = $now;
         $idleThreshold = $now - ($this->idleTtlMs / 1000);
 
         foreach ($this->channels as $address => $entry) {
@@ -622,6 +646,25 @@ final class GrpcClient implements GrpcClientInterface
                 $this->evictChannel($address);
             }
         }
+    }
+
+    /**
+     * Whether the cache-hit path may run an idle sweep now.
+     *
+     * The sweep walks every cached channel, so the hot path runs it at most
+     * once per interval: a tenth of the idle TTL, but at least one second and
+     * never more than the TTL itself (issue #277).
+     */
+    private function sweepDue(float $now): bool
+    {
+        if ($this->lastSweepAt === null) {
+            return true;
+        }
+
+        $ttlSeconds = $this->idleTtlMs / 1000;
+        $interval = min($ttlSeconds, max(1.0, $ttlSeconds / 10));
+
+        return $now - $this->lastSweepAt >= $interval;
     }
 
     /**
@@ -855,7 +898,7 @@ final class GrpcClient implements GrpcClientInterface
 
     private function now(): float
     {
-        return microtime(true);
+        return $this->clock instanceof \Closure ? ($this->clock)() : microtime(true);
     }
 
     /**
