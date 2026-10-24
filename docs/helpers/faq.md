@@ -2600,3 +2600,39 @@ for every store lookup. The parameter is now `StoreCacheInterface` with
 the default `new StoreCache()` (PHP 8.2 allows `new` in an initializer).
 `PdClient::close()` always clears the cache. A test that needs "no cache"
 must pass a mock of `StoreCacheInterface` whose `get()` returns `null`.
+
+## The idle sweep of `GrpcClient` must run on the cache-hit path too, and tests age channels with the injected clock (#277)
+
+`GrpcClient::evictIdleChannels()` used to run only on a cache **miss**, just
+before a new channel was created. A long-lived client that only reuses cached
+channels never reached it, so the handle of a store that left the cluster
+stayed in the cache for ever. `getChannel()` now also sweeps on a cache hit,
+at most once per interval (`idleTtlMs / 10`, clamped to 1 s .. `idleTtlMs`),
+because the sweep walks every cached channel. The hit path touches `lastUsed`
+of the returned channel **before** it sweeps, so the returned channel is never
+reaped. The sweep already skips channels with in-flight calls.
+`reapIdleChannels()` runs the same sweep on demand (a no-op after `close()`).
+
+The sweep drops the cached **handle** and frees the cache slot. It does not
+promise that the connection closes: `Channel::close()` is a reference-count
+decrement and the ext-grpc persistent channel can outlive the handle (see the
+entry "ext-grpc's persistent channels are shared and reference-counted
+(#283)").
+
+Test pitfalls:
+
+- Do not `sleep()` to age a channel. Pass the `clock` closure to the
+  `GrpcClient` constructor and advance your own variable
+  (`tests/Unit/Grpc/GrpcClientIdleSweepTest.php`). Add the file to the `Grpc`
+  suite and to the `Unit` exclude list in `phpunit.xml`.
+- ext-grpc shares one channel per target in the whole process. An address that
+  another test used for a failed RPC reports `TRANSIENT_FAILURE`, so
+  `getChannel()` reconnects and takes the cache-**miss** path, which hides the
+  cache-hit path under test. Use a unique, unused port per channel-cache test.
+
+Open limitation (#658): the experimental BatchCommands transport
+(`GrpcBatchCommandsTransport::forClient()`, flag `batchCommands`, off by
+default) gets its channel once and never marks it in flight or touches
+`lastUsed`. The idle sweep, like the LRU eviction, can drop that channel while
+its stream is open. The pool discards the broken stream and the caller falls
+back to the unary path, so the failure heals itself.

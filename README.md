@@ -142,7 +142,7 @@ that keeps existing, correct code working.
 | Surface | What it covers |
 |---|---|
 | `RawKv\RawKvClient` | every public method — the RawKV entry point |
-| `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `close()` — the TxnKV entry point |
+| `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `reapIdleChannels()`, `close()` — the TxnKV entry point |
 | `TxnKv\Transaction` | every public method — the transaction handle |
 | `RawKv\CasResult`, `RawKv\ChecksumResult` | the result DTOs of `compareAndSwap()` and `checksum()` |
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |

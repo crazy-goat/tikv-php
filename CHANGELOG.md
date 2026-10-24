@@ -23,9 +23,15 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Added
+
+- `RawKvClient::reapIdleChannels()` and `TxnKvClient::reapIdleChannels()` drop the cached gRPC channels that were idle longer than `idleTtlMs`, so a long-running worker that is quiet for a long time can reclaim them from its own tick. The call sends no RPC and is a no-op after `close()`. (#277)
+- **Breaking change:** `GrpcClientInterface` gained `reapIdleChannels(): void`; an own implementation must add this method (an empty body is enough when it caches no channels). `GrpcClient` and `ApiV2GrpcClient` already have it. (#277)
+
 ### Fixed
 
 - `README.md` and `docs/operations.md` now state the scope of `setAtomicForCAS(true)`. The flag is per client instance and makes `put()`, `delete()`, `batchPut()` and `batchDelete()` send `for_cas`; `compareAndSwap()` and `putIfAbsent()` require it. The docs also tell you to use one mode for all writers of the same keys. (#399)
+- `GrpcClient` now also sweeps idle channels on the cache-hit path of `getChannel()`, so the cached handles of stores that left the cluster no longer stay in the cache for ever in a client that only reuses cached channels (the sweep used to run only before a new channel was created). The sweep drops the cached handle and frees its slot; the ext-grpc persistent channel and its connection can outlive the handle. The sweep is rate limited to one run per `idleTtlMs / 10` (at least 1 s, at most `idleTtlMs`) and never closes the returned channel or a channel with in-flight calls. `GrpcClient::reapIdleChannels()` lets a long-running worker trigger the sweep itself. `GrpcClient` takes an optional `clock` closure for tests. `maxChannels` now evicts down to the cap in one call instead of one channel per new address, and the soft-cap warning is logged once per overshoot instead of once per new address. (#277)
 - `docs/operations.md` now has a Limits section with the real key, value, scan and batch constants and the exception that the client throws. It states that batches split automatically per region. `docs/advanced.md` no longer shows the redundant `BatchOptimizer` class, and the Best Practices examples no longer advise manual chunking. (#398)
 - `docs/configuration.md` now states the real log levels and shows sample log lines that exist in `src/` (issue #380, DOC-14). Region cache hits and misses are DEBUG records, not INFO. The invalidation record is `Region invalidated` with a `regionId` field and no `reason`. The sample keys use the `KeyRedactor` format. (#380)
 - `ScanIterator` now throws `TiKvException` when a page does not move the scan cursor forward — its last key does not advance the cursor, or its first key lies before it — instead of looping forever on a server that keeps answering a full page ending on the same key. Any forward scan was affected, bounded ones included (a constant last key keeps the cursor below `endKey`). Well-behaved servers return strictly increasing keys and are unaffected. (#312)

@@ -163,6 +163,19 @@ interface GrpcClientInterface
     public function closeChannel(string $address): void;
 
     /**
+     * Drop the cached channels that were idle longer than the idle TTL.
+     *
+     * The transport also sweeps by itself when a request arrives; a
+     * long-running worker calls this from its own tick to reclaim channels
+     * while it is quiet. A channel with in-flight calls is skipped. Dropping a
+     * channel drops the cached handle, not necessarily the connection: see
+     * {@see closeChannel()}.
+     *
+     * No-op if the client has already been closed.
+     */
+    public function reapIdleChannels(): void;
+
+    /**
      * Get or create a gRPC channel for the given address.
      *
      * @param string $address Target address (e.g., "127.0.0.1:2379")
