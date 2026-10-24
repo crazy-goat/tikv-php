@@ -280,17 +280,12 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
     }
 
     /**
-     * Documents the intentional current contract behind the #183 wait-phase
-     * retry. `RegionErrorHandler::check()` raises a bare
-     * `RegionException('BatchRequest', $serverError)` for a top-level
-     * non-region `error` string on RawBatchPut/RawBatchDelete responses —
-     * with no `errorKind` — and `ErrorClassifier` falls back to
-     * `BackoffType::RegionMiss` for any kind-less RegionException. A
-     * permanent server string such as "ttl is not enabled …" is therefore
-     * retried for up to the backoff budget. This mirrors the pre-existing
-     * single-key paths (`RawKvCrud::getKeyTTL`, `RawKvAtomic::compareAndSwap`)
-     * and is deliberately NOT reclassified in #183; the test pins it so a
-     * future classification change is a conscious decision (see CHANGELOG).
+     * A bare `RegionException('BatchRequest', $serverError)` raised for a
+     * top-level non-region `error` string on RawBatchPut/RawBatchDelete
+     * responses carries no `errorKind`, and `ErrorClassifier` now treats any
+     * kind-less `RegionException` as fatal (issue #251, REG-20). A
+     * permanent server string such as "ttl is not enabled …" therefore fails
+     * after a single attempt instead of being retried up to the budget.
      */
     public function testBareBatchErrorStringRegionExceptionIsFatal(): void
     {

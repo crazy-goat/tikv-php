@@ -589,9 +589,9 @@ class RetryExecutorFatalInvalidationTest extends TestCase
 
     /**
      * A RegionException without a typed kind carries no routing verdict
-     * either. Note such an exception is classified retryable (RegionMiss), so
-     * it never reaches the fatal path in the first place — the assertion
-     * pins the boundary of the predicate rather than a reachable case.
+     * either. Note such an exception is now classified fatal, so it never
+     * reaches the retry path in the first place — the assertion pins the
+     * boundary of the predicate rather than a reachable case.
      */
     public function testInvalidatesRoutingOnFatalRejectsRegionExceptionWithoutTypedKind(): void
     {

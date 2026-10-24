@@ -1718,7 +1718,7 @@ class TransactionTest extends TestCase
         $this->grpc->expects($this->exactly(2))
             ->method('call')
             ->willReturnOnConsecutiveCalls(
-                $this->throwException(new RegionException('test', 'region miss')),
+                $this->throwException(new RegionException('test', 'RegionNotFound')),
                 $response,
             );
 

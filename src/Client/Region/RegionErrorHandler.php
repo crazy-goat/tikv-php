@@ -30,8 +30,9 @@ final class RegionErrorHandler
      * Transactional callers must interpret a KeyError themselves (lock
      * resolution, write conflicts, GC aborts). They pass
      * $keyErrorsHandledByCaller = true, which skips checks 2 (KeyError only)
-     * and 3; every other caller gets a RegionException for a populated KeyError
-     * instead of a silently accepted response.
+     * and 3; every other caller gets a RegionException for a top-level
+     * KeyError, or a KeyErrorException for a per-pair KeyError, instead of a
+     * silently accepted response.
      *
      * When a $cache and $regionId are provided, the region is invalidated
      * from the cache before the exception is thrown. This is the consistent

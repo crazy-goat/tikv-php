@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Retry;
 
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
@@ -31,6 +32,12 @@ final class ErrorClassifier
         // keywords (e.g. "EpochNotMatch"), which would otherwise classify the
         // rejection as retryable and hide it behind up to 30 retries.
         if ($e instanceof InvalidStoreAddressException) {
+            return null;
+        }
+
+        // A per-pair KeyError is not a region error and must never be retried
+        // as a region miss (issue #251, REG-20).
+        if ($e instanceof KeyErrorException) {
             return null;
         }
 
