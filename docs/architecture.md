@@ -1006,7 +1006,7 @@ $sensitiveData = decrypt($encrypted, $key);
 3. **Metrics**: Built-in Prometheus/OpenTelemetry metrics
 4. **Async API**: Optional async/await support (PHP 8.1+)
 5. **Streaming**: Streaming scan for very large datasets
-6. **TxnHeartBeat**: A background heartbeat for long-running transactions. The committer already sends a heartbeat during the prewrite loop. `Transaction::heartbeat()` is manual, for the gaps between your own operations. No background heartbeat exists.
+6. **TxnHeartBeat**: Automatic heartbeat for long-running transactions
 
 ### Research Areas
 
