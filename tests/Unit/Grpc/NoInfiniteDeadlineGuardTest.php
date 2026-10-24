@@ -51,12 +51,6 @@ class NoInfiniteDeadlineGuardTest extends TestCase
      * Reviewed exceptions, as `file (relative to src/Client) => how many
      * `Timeval::infFuture()` sites that file may contain`.
      *
-     *  - `Grpc/GrpcClient.php` (1): the transport's own opt-out. `null`
-     *    resolves to {@see \CrazyGoat\TiKV\Client\Grpc\GrpcClient::DEFAULT_TIMEOUT_MS};
-     *    the only way to ask for no deadline at all is the explicit sentinel
-     *    `0`, which is the single convention the library spells "disabled"
-     *    with (issue #260). A caller has to *write* the sentinel — nothing
-     *    reaches it by omission.
      *  - `Grpc/BatchCommandsConnection.php` (1): a **stream** lifetime, not
      *    a unary call. The class opens one bidirectional `BatchCommands` stream
      *    per store and reuses it, so its `open()` takes a real `$deadlineMs`
@@ -65,10 +59,15 @@ class NoInfiniteDeadlineGuardTest extends TestCase
      *    calls `open()` with one argument), so no configured value can reach
      *    this site today.
      *
+     * `Grpc/GrpcClient.php` used to be allowlisted with one site: the
+     * transport's own "no deadline" sentinel `0`. It is gone since
+     * issue #276 (GRPC-17) — a non-positive `$timeoutMs` is now a
+     * configuration error, so the unary transport has no infinite deadline
+     * left to derive.
+     *
      * @var array<string, int>
      */
     private const ALLOWED = [
-        'Grpc/GrpcClient.php' => 1,
         'Grpc/BatchCommandsConnection.php' => 1,
     ];
 
@@ -113,9 +112,9 @@ class NoInfiniteDeadlineGuardTest extends TestCase
         );
 
         // Without this the test would also pass if the scan silently stopped
-        // finding anything — the two allowlisted sites below are its witness.
-        self::assertSame(2, $total, 'The scan found a different number of '
-            . 'Timeval::infFuture() sites than the two documented opt-outs; the scan is '
+        // finding anything — the one allowlisted site below is its witness.
+        self::assertSame(1, $total, 'The scan found a different number of '
+            . 'Timeval::infFuture() sites than the one documented opt-out; the scan is '
             . 'broken, not the source.');
     }
 

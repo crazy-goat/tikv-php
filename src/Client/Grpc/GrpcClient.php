@@ -126,8 +126,10 @@ final class GrpcClient implements GrpcClientInterface
      * C extension is not interrupted by `max_execution_time`, so a
      * half-open connection pinned a PHP-FPM worker for minutes or forever
      * and exhausted the whole pool. `null` now means "library default" and a
-     * caller who genuinely wants an unbounded call must say so with the
-     * explicit sentinel `0`.
+     * non-positive value is a configuration error (issue #276, GRPC-17):
+     * `0` used to be the "no deadline" sentinel, but a value of `0` is
+     * exactly what an unset environment variable coerces to, so it turned a
+     * configuration mistake into an unbounded call.
      */
     public const DEFAULT_TIMEOUT_MS = 30000;
 
@@ -352,7 +354,8 @@ final class GrpcClient implements GrpcClientInterface
      * @param class-string<T> $responseClass Response message class name
      * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds;
      *                            null = the library default
-     *                            ({@see self::DEFAULT_TIMEOUT_MS}), 0 = no deadline
+     *                            ({@see self::DEFAULT_TIMEOUT_MS}); a
+     *                            non-positive value throws
      * @return GrpcFuture Un-waited future resolving to T
      * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
      */
@@ -812,10 +815,10 @@ final class GrpcClient implements GrpcClientInterface
      *
      * `null` — a call site with no opinion — becomes the conservative
      * library default {@see self::DEFAULT_TIMEOUT_MS} rather than an
-     * unbounded deadline. A caller that genuinely wants no deadline has to
-     * pass the explicit non-positive sentinel `0`, which is the same way
-     * the rest of the library spells "disabled" (`TimeoutConfig`'s
-     * `batchDeadlineMs = 0`).
+     * unbounded deadline. A non-positive value is rejected by
+     * {@see self::deadline()} (issue #276, GRPC-17): it used to be the
+     * "no deadline" sentinel, but a user-supplied `0` is far more likely to
+     * be an accident than an intent.
      */
     private function resolveTimeoutMs(?int $timeoutMs): int
     {
@@ -833,9 +836,13 @@ final class GrpcClient implements GrpcClientInterface
     {
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
-        return $timeout > 0
-            ? Timeval::now()->add(new Timeval($timeout * 1000))
-            : Timeval::infFuture();
+        if ($timeout <= 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                sprintf('timeoutMs must be greater than 0, got %d', $timeout),
+            );
+        }
+
+        return Timeval::now()->add(new Timeval($timeout * 1000));
     }
 
     private function createTlsCredentials(): ChannelCredentials

@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -19,12 +21,14 @@ use PHPUnit\Framework\TestCase;
  * `max_execution_time` does not reach, so a half-open connection pinned the
  * worker until the kernel gave up (minutes, or never).
  *
- * `null` now means "the library default" and the explicit no-deadline
- * sentinel is the non-positive value `0` — the same spelling the rest of the
- * library already uses for "disabled" (`TimeoutConfig::$batchDeadlineMs`).
- * Asserted here through the private `resolveTimeoutMs()` seam, which is pure
- * PHP: the `Timeval` it feeds needs ext-grpc, so the object-level assertions
- * live in {@see GrpcClientTimevalDeadlineTest} (the `Grpc` suite).
+ * `null` now means "the library default". The explicit no-deadline sentinel
+ * `0` was removed in issue #276 (GRPC-17): it is also what an unset
+ * environment variable coerces to, so it turned a configuration mistake into
+ * a call that never expires. A non-positive timeout is now rejected.
+ * Asserted here through the private `resolveTimeoutMs()` and `deadline()`
+ * seams, which are pure PHP: the `Timeval` they feed needs ext-grpc, so the
+ * object-level assertions live in {@see GrpcClientTimevalDeadlineTest} (the
+ * `Grpc` suite).
  */
 class GrpcClientDeadlineTest extends TestCase
 {
@@ -47,12 +51,45 @@ class GrpcClientDeadlineTest extends TestCase
         self::assertSame(1, $this->resolveTimeoutMs(1));
     }
 
-    public function testZeroIsTheExplicitNoDeadlineSentinel(): void
+    public function testZeroIsNotResolvedToADeadline(): void
     {
-        // Must survive resolution untouched — it is the documented opt-out,
-        // and any coercion to the default here would silently bound a call
-        // its caller deliberately left unbounded.
+        // `0` used to survive resolution untouched — it was the documented
+        // "no deadline" opt-out. It is now a configuration error
+        // (issue #276, GRPC-17): `0` is what an unset environment variable
+        // coerces to, so the opt-out turned a configuration mistake into a
+        // call that never expires. The resolution still passes the value
+        // through; `deadline()` is the place that rejects it.
         self::assertSame(0, $this->resolveTimeoutMs(0));
+    }
+
+    /**
+     * A non-positive timeout never reaches `Timeval::infFuture()`: the
+     * deadline helper rejects it (issue #276, GRPC-17).
+     */
+    #[DataProvider('provideNonPositiveTimeouts')]
+    public function testANonPositiveTimeoutIsRejected(int $timeoutMs): void
+    {
+        $client = new GrpcClient();
+
+        // PHP 8.1+ makes reflection methods accessible by default;
+        // setAccessible() is a no-op and deprecated since PHP 8.5.
+        $method = new \ReflectionMethod(GrpcClient::class, 'deadline');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('timeoutMs must be greater than 0, got %d', $timeoutMs));
+
+        $method->invoke($client, $timeoutMs);
+    }
+
+    /**
+     * @return array<string, array{int}>
+     */
+    public static function provideNonPositiveTimeouts(): array
+    {
+        return [
+            'zero' => [0],
+            'negative' => [-1],
+        ];
     }
 
     private function resolveTimeoutMs(?int $timeoutMs): int

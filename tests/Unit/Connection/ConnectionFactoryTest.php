@@ -237,6 +237,55 @@ class ConnectionFactoryTest extends TestCase
     }
 
     // ========================================================================
+    // options['timeout'] — a non-positive timeout is a configuration error
+    // (issue #276, GRPC-17). The message names the option key the user
+    // wrote, not an internal field name.
+    // ========================================================================
+
+    /**
+     * @return array<string, array{string, int}>
+     */
+    public static function nonPositiveTimeoutOptionProvider(): array
+    {
+        return [
+            'readTimeoutMs' => ['readTimeoutMs', -1],
+            'writeTimeoutMs' => ['writeTimeoutMs', 0],
+            'batchReadTimeoutMs' => ['batchReadTimeoutMs', 0],
+            'batchWriteTimeoutMs' => ['batchWriteTimeoutMs', 0],
+            'scanTimeoutMs' => ['scanTimeoutMs', 0],
+            'deleteRangeTimeoutMs' => ['deleteRangeTimeoutMs', 0],
+            'checksumTimeoutMs' => ['checksumTimeoutMs', 0],
+            'ingestTimeoutMs' => ['ingestTimeoutMs', 0],
+            'pdTimeoutMs' => ['pdTimeoutMs', 0],
+            'tsoTimeoutMs' => ['tsoTimeoutMs', 0],
+            'lockResolveTimeoutMs' => ['lockResolveTimeoutMs', 0],
+        ];
+    }
+
+    #[DataProvider('nonPositiveTimeoutOptionProvider')]
+    public function testANonPositiveTimeoutOptionIsRejected(string $key, int $value): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('timeout option "%s" must be greater than 0', $key));
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => [$key => $value]],
+        );
+    }
+
+    public function testANegativeBatchDeadlineOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('timeout option "batchDeadlineMs" must be greater than or equal to 0');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['batchDeadlineMs' => -1]],
+        );
+    }
+
+    // ========================================================================
     // options['timeout']['pdTimeoutMs'|'tsoTimeoutMs'|'lockResolveTimeoutMs']
     // — metadata-plane deadlines (issue #260)
     // ========================================================================

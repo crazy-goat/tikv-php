@@ -475,17 +475,18 @@ final readonly class RawKvBatch
     /**
      * The batch deadline in milliseconds, always strictly positive.
      *
-     * `TimeoutConfig` documents `0` as "no deadline" for the store fields, and
-     * `GrpcClient` honours that sentinel — which is exactly why this method
-     * must not hand its value on unchanged: the batch fan-out does NOT go
-     * through `GrpcClient::call()`, it hand-rolls `new Call(...)` (the three
-     * `execute*ForRegionAsync()` methods) and forwards the value to
-     * `callAsync()` on the API V2 path, so a configured `0` reached
-     * `Timeval::infFuture()` on one path and an already-expired
-     * `new Timeval(0)` on the other. A non-positive configuration therefore
-     * resolves to the same conservative library default `GrpcClient` applies
-     * to a call site with no opinion (`null`), so no batch sub-request can
-     * arm a deadline that never expires (issue #184).
+     * `TimeoutConfig` rejects a non-positive value outright (issue #276,
+     * GRPC-17), so this method can only ever see a positive one. The
+     * fallback to the conservative library default stays as a second line of
+     * defence for the case where the batch fan-out is handed a `TimeoutConfig`
+     * built elsewhere: the batch fan-out does NOT go through
+     * `GrpcClient::call()`, it hand-rolls `new Call(...)` (the three
+     * `execute*ForRegionAsync()` methods), so it never reaches
+     * `GrpcClient::deadline()` and its 30 s backstop (issue #260). A
+     * non-positive value therefore resolves to the same conservative library
+     * default `GrpcClient` applies to a call site with no opinion (`null`),
+     * so no batch sub-request can arm a deadline that never expires
+     * (issue #184).
      *
      * The return type is `int`, not `?int`: the previous `?:` over a nullable
      * helper was one `match` arm away from arming an unbounded deadline in

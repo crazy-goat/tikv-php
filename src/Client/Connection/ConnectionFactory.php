@@ -677,6 +677,42 @@ final class ConnectionFactory
     }
 
     /**
+     * Reject non-positive timeout options before they reach
+     * {@see TimeoutConfig} (issue #276, GRPC-17).
+     *
+     * The check names the option key the user wrote, so the error points at
+     * the offending entry of the configuration array instead of at an
+     * internal field name. `batchDeadlineMs` keeps `0` as the documented
+     * "no overall batch deadline" value.
+     *
+     * @param array<array-key, mixed> $timeouts
+     */
+    private static function assertPositiveTimeoutOptions(array $timeouts): void
+    {
+        foreach ($timeouts as $key => $value) {
+            if (!is_string($key)) {
+                continue;
+            }
+            if (!is_int($value)) {
+                continue;
+            }
+            if ($key === 'batchDeadlineMs') {
+                if ($value < 0) {
+                    throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                        sprintf('timeout option "%s" must be greater than or equal to 0, got %d', $key, $value),
+                    );
+                }
+                continue;
+            }
+            if ($value <= 0) {
+                throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                    sprintf('timeout option "%s" must be greater than 0, got %d', $key, $value),
+                );
+            }
+        }
+    }
+
+    /**
      * Build TimeoutConfig from the options array.
      *
      * @param array<string, mixed> $options
@@ -687,6 +723,7 @@ final class ConnectionFactory
 
         if (isset($options['timeout']) && is_array($options['timeout'])) {
             $t = $options['timeout'];
+            self::assertPositiveTimeoutOptions($t);
             $timeoutConfig = new TimeoutConfig(
                 readTimeoutMs: isset($t['readTimeoutMs']) && is_int($t['readTimeoutMs'])
                     ? $t['readTimeoutMs'] : $timeoutConfig->readTimeoutMs,

@@ -23,17 +23,15 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: a non-positive timeout is now a configuration error instead of "no deadline at all" (issue #276, GRPC-17). `TimeoutConfig` rejects a non-positive value for every timeout field (`batchDeadlineMs` excepted — it keeps `0` as "no overall batch deadline"), `ConnectionFactory` rejects a non-positive `options['timeout']` entry and names the offending key, and `GrpcClient::call()` / `callAsync()` / `callStreaming()` throw `InvalidArgumentException` for a non-positive `$timeoutMs`. `0` used to be the documented "no deadline" sentinel, but it is also what an unset environment variable coerces to (`(int) getenv('TIKV_READ_TIMEOUT_MS')` yields `0`), so a configuration mistake turned into a call that never expires — and a gRPC call that never expires cannot be interrupted by PHP. `SlowLogConfig` keeps `0` as its documented "disabled" value and now rejects a negative threshold. **Migration:** replace every `0` timeout with a large finite value; there is no unbounded-call mode any more.
+- An unmapped `RegionException` (no typed `ErrorKind`) is now classified as fatal instead of `BackoffType::RegionMiss`, so permanent misconfiguration errors such as "invalid cf" fail after a single attempt instead of being retried 30 times. A per-pair `KeyError` is now reported as `KeyErrorException` rather than `RegionException`, so it is no longer retried as a region miss. (#251)
+
 ### Fixed
 
 - `RegionCache::put()` now ignores a region whose epoch is strictly older than the cached one for the same ID, preventing stale `scanRegions` results from downgrading a fresher entry. (#249)
-
-### Fixed
-
 - `TlsConfigBuilder::readFile()` no longer emits a PHP warning exposing the resolved certificate path when the file is unreadable. (#553)
-
-### Changed
-
-- An unmapped `RegionException` (no typed `ErrorKind`) is now classified as fatal instead of `BackoffType::RegionMiss`, so permanent misconfiguration errors such as "invalid cf" fail after a single attempt instead of being retried 30 times. A per-pair `KeyError` is now reported as `KeyErrorException` rather than `RegionException`, so it is no longer retried as a region miss. (#251)
 
 ## [v0.9.0] - 2026-10-21
 

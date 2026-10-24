@@ -7,7 +7,6 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
-use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
@@ -81,33 +80,22 @@ class RawKvBatchDeadlineTest extends TestCase
     public static function provideNonPositiveTimeoutConfigurations(): array
     {
         return [
-            // TimeoutConfig documents 0 as "no deadline" for the store fields,
-            // and GrpcClient honours that sentinel — which is exactly why
-            // RawKvBatch must not forward it: it does not go through
-            // GrpcClient::call().
+            // TimeoutConfig rejects a non-positive value outright, so the
+            // batch fan-out can never be handed one (issue #276, GRPC-17).
             'zero' => [0],
             'negative' => [-1],
         ];
     }
 
     #[DataProvider('provideNonPositiveTimeoutConfigurations')]
-    public function testEveryConfiguredTimeoutResolvesToAPositiveDeadline(int $configuredMs): void
+    public function testANonPositiveConfiguredTimeoutIsRejected(int $configuredMs): void
     {
-        $config = new TimeoutConfig(
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchReadTimeoutMs must be greater than 0');
+
+        new TimeoutConfig(
             batchReadTimeoutMs: $configuredMs,
             batchWriteTimeoutMs: $configuredMs,
-        );
-
-        $read = $this->timeoutMs('batch_read', $config);
-        $write = $this->timeoutMs('batch_write', $config);
-
-        self::assertSame(GrpcClient::DEFAULT_TIMEOUT_MS, $read);
-        self::assertSame(GrpcClient::DEFAULT_TIMEOUT_MS, $write);
-        self::assertGreaterThan(
-            0,
-            $read,
-            'A non-positive configured timeout must fall back to the conservative library '
-            . 'default, never to an unbounded (or already expired) deadline (issue #184).',
         );
     }
 

@@ -23,6 +23,23 @@ final readonly class SlowLogConfig
         public int $deleteRangeThresholdMs = 2000,
         public int $checksumThresholdMs = 3000,
     ) {
+        $thresholds = [
+            'readThresholdMs' => $this->readThresholdMs,
+            'writeThresholdMs' => $this->writeThresholdMs,
+            'batchReadThresholdMs' => $this->batchReadThresholdMs,
+            'batchWriteThresholdMs' => $this->batchWriteThresholdMs,
+            'scanThresholdMs' => $this->scanThresholdMs,
+            'deleteRangeThresholdMs' => $this->deleteRangeThresholdMs,
+            'checksumThresholdMs' => $this->checksumThresholdMs,
+        ];
+
+        foreach ($thresholds as $name => $value) {
+            if ($value < 0) {
+                throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                    sprintf('%s must be greater than or equal to 0, got %d', $name, $value),
+                );
+            }
+        }
     }
 
     /**
