@@ -244,11 +244,14 @@ final class TxnReaderKeyOrderTest extends TestCase
         $result = $this->createTransaction()->scan('9', '', 100);
 
         // The wire range ["9", "100") is empty bytewise, so nothing comes
-        // back — the point is that the scan stops there instead of issuing a
-        // second request.
+        // back — the point is that the scan stops there instead of advancing
+        // the cursor. The only extra request is the single bounded re-ask of
+        // the empty answer for the SAME range (issue #512).
         $this->assertSame([], array_column($result, 'key'));
-        $this->assertCount(1, $capturedRequests);
-        $this->assertSame('9', $capturedRequests[0]->getStartKey());
-        $this->assertSame('100', $capturedRequests[0]->getEndKey());
+        $this->assertCount(2, $capturedRequests);
+        foreach ($capturedRequests as $captured) {
+            $this->assertSame('9', $captured->getStartKey());
+            $this->assertSame('100', $captured->getEndKey());
+        }
     }
 }

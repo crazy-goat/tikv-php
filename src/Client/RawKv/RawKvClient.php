@@ -1231,6 +1231,22 @@ final class RawKvClient
     // Lifecycle
     // ========================================================================
 
+    /**
+     * Drop the cached gRPC channels that were idle longer than `idleTtlMs`.
+     *
+     * The transport sweeps by itself when a request arrives. A long-running
+     * worker that can be quiet for a long time calls this from its own tick.
+     * No-op if the client is closed.
+     */
+    public function reapIdleChannels(): void
+    {
+        if ($this->closed) {
+            return;
+        }
+
+        $this->grpc->reapIdleChannels();
+    }
+
     public function close(): void
     {
         if ($this->closed) {

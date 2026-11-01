@@ -864,7 +864,11 @@ Facts verified empirically (PHPUnit 11.5.57, issue #361):
 
 ## Rector version drift: local rector ≠ CI rector (no committed composer.lock)
 
-The repo has **no committed `composer.lock`**, so CI's `composer install`
+Historical note: since #311 `composer.lock` is committed and CI installs
+from it, so this drift only appears after a `composer update`. Entry below
+describes the state before that.
+
+The repo had **no committed `composer.lock`**, so CI's `composer install`
 resolves the latest rector within `^2.3` every run, while local devs use
 whatever `vendor/` happens to hold (this repo historically pinned 2.4.3).
 When rector 2.6.x shipped (2026-08), CI's Lint job started flagging 8 files
@@ -1073,6 +1077,12 @@ flake, not a code regression. If it recurs, suspect the scan loop in
 `TxnReader::executeScanForRegion()` — an empty batch with `$pending > 0` and no
 split exits silently (see `while (true)` loop, `break` conditions); a one-off
 empty answer for non-empty data is never retried.
+Fixed in #512: such an empty batch is now re-asked once (see
+`MAX_EMPTY_SCAN_REATTEMPTS`, and decisions.md for the trade-off). Tests: a
+mocked `KvScan` that answers empty is now called twice, and any `getByKey()`
+consecutive-return stub needs one more value. The truncation probe is
+re-asked too: a transient empty probe would otherwise make `scan(limit: 0)`
+return a truncated range silently.
 
 E2E note: `docker-compose run --rm php-test …` recreates the tikv
 containers it depends on; if the cluster was just (re)started the run
@@ -1401,25 +1411,25 @@ temporarily replacing the warning-early-return with `self::fail()`) and activate
 automatically when the fix merges — no env var to clean up later, and no
 duplicate tests alongside the fix PR's own coverage.
 
-## RawKvBatch hardcodes `new Call(...)` — retries are tested via the wait boundary or a dead channel
+## RawKvBatch dispatches through `callAsync()` — tests use a dead endpoint, not a dead channel (issue #273)
 
-`RawKvBatch::execute*ForRegionAsync()` constructs `\Grpc\Call` directly, so
-the transport cannot be injected with a mocked Call (which `GrpcFutureTest`
-does for the future itself). A response-borne region error therefore cannot
-be delivered end-to-end through `batchGet()` in unit tests. Before #183 the
-contract was pinned at the wait-boundary composition
-(`CheckedGrpcFuture::fromGrpcFuture(...)` through
-`BatchAsyncExecutor::executeParallel()`, issue #330); those tests were
-replaced when #183 moved the retry into
-`CheckedGrpcFuture::fromRetryableDispatch()`. The current coverage:
+`RawKvBatch::execute*ForRegionAsync()` used to build `\Grpc\Call` on
+`getChannel()` itself, so its calls were never counted as in-flight and an LRU
+eviction could close the channel under them (#278). They now call
+`GrpcClientInterface::callAsync()` only; `getChannel()` is not used by the
+batch fan-out any more. `GrpcFuture` is `final`, so a mocked `callAsync()`
+cannot return a double: tests that need a real future against a dead
+endpoint use `Tests\Unit\Support\DeadEndpointGrpcFuture::callback()` as the
+`willReturnCallback()` of `callAsync` (needs ext-grpc, so they stay in the
+`Grpc` suite). A response-borne region error still cannot be delivered
+end-to-end through `batchGet()` in unit tests. The current coverage:
 `CheckedGrpcFutureRetryableDispatchTest` pins the retry/invalidate/
 switchLeader/terminal behaviour with synthetic `fromCallable()` futures, and
 `RawKvBatchTest::testBatch*WithRetryReResolvesRegionOnEveryAttempt` reaches
 the real `RawKvBatch` dispatch path by invoking the private `*WithRetry`
-methods via reflection against a dead `127.0.0.1:1` channel, asserting
-`pdClient->getRegion` and `grpc->getChannel` are each called exactly twice
-with `maxAttempts: 2` — one resolution/send per attempt, which the old
-dispatch-only-retry code could not produce.
+methods via reflection against a dead `127.0.0.1:1` endpoint, asserting
+`pdClient->getRegion` and `grpc->callAsync` are each called exactly twice
+with `maxAttempts: 2`.
 
 ## Several legacy RawKvBatchTest TTL tests dispatch nothing (silently before #187)
 
@@ -1437,7 +1447,7 @@ declines. If you instead want the PD path exercised, stub
 as well, and note that a dispatch also needs
 `$this->pdClient->method('getStore')->willReturn($this->defaultStore())`
 (missing getStore makes dispatch fail early with "Store 1 not found in PD"
-before `getChannel()` is reached).
+before `callAsync()` is reached).
 
 ## Unit tests can silently pass because batch grouping dropped every key — check for a missing scanRegions mock
 
@@ -1571,9 +1581,9 @@ stray call site to the existing knob is the whole fix. When an audit issue also 
 "reject batches above a documented key-count maximum", that is a separate, breaking API
 decision (needs a chosen cap + semver note) — do not silently fold it into a concurrency fix.
 
-Testing the cap through `RawKvBatch` (Grpc suite only — the wire path constructs real
-`\Grpc\Call` objects from `GrpcClientInterface::getChannel()`, so no ext-grpc = no test):
-mock `getChannel()` to count concurrent dispatches and return a real channel to a dead
+Testing the cap through `RawKvBatch` (Grpc suite only — the wire path needs a real
+`GrpcFuture`, which is `final`, so no ext-grpc = no test): mock `callAsync()` with
+`DeadEndpointGrpcFuture::callback()` to count dispatches against a dead
 endpoint (`127.0.0.1:1`); the sends succeed, the waits fail, and the test asserts the
 peak in-flight count equals the window size while expecting
 `BatchPartialFailureException` (which also proves partial-failure semantics survive
@@ -1912,7 +1922,7 @@ To observe *region re-resolution per attempt* specifically, do not count
 `regionCache->getByKey()`: the executor also calls it once per retryable
 failure for its own invalidation lookup, so the count is attempts + retries.
 Force a cache miss (`getByKey` → null), stub `pdClient->getRegion`, and count
-that (and/or `grpc->getChannel`, exactly one per dispatch): with
+that (and/or `grpc->callAsync`, exactly one per dispatch): with
 `maxAttempts: 2` both are exactly 2, while the old dispatch-only-retry code
 resolved once. Reference:
 `RawKvBatchTest::testBatchGetWithRetryReResolvesRegionOnEveryAttempt`.
@@ -2158,11 +2168,9 @@ Two implementation traps:
   `spl_object_id()`: an object id is reused once the channel it belonged to is
   gone, and a late settle must not release a slot of a different channel.
 
-Caveat: the protection only covers calls issued through
-`GrpcClient::callAsync()`. `RawKvBatch`'s V1 path still builds
-`\Grpc\Call` itself on a raw `getChannel()` handle, so its calls are not
-counted — that path is routed through `callAsync()` by GRPC-14 (#273), which
-is still open.
+Since #273 the V1 batch fan-out also goes through `callAsync()`, so every
+unary call is counted. `callAsync()` also emits `rpcStarted()` and, when the
+future settles (exactly once, also on cancellation), `rpcCompleted()`.
 
 ## A PD mock that ignores the `ScanRegions` limit breaks the batched region loader (issue #282)
 
@@ -2240,8 +2248,8 @@ an **unexpected throwable** escaping the wait phase (anything that is not a
 "the un-awaited futures are cancelled after a batch failure" must therefore
 drive one of those two paths — the deadline, or a non-`TiKvException` from a
 region's wait — and not a plain region error. Note that the batch deadline
-is off by default (`TimeoutConfig::$batchDeadlineMs = 0`), so the
-throwable-escape path is the only one a default client can reach.
+was off by default until #275 (`TimeoutConfig::$batchDeadlineMs` is now 60000), so on
+older code the throwable-escape path was the only one a default client could reach.
 
 ## An audit issue's premise can expire: the slow-log wrapper has kept the inner future since #183
 
@@ -2356,12 +2364,12 @@ operation's anchor key: the key itself for a single-key read or write, the
 otherwise (the scan cursor, the exclusive upper bound of a reverse scan, the
 per-region sub-range start of a range operation).
 
-A threshold of `0` disables that operation type — the guard is
-`if ($threshold <= 0)`, so a *negative* threshold silently disables the
-warning as well. `ConnectionFactory::buildSlowLogConfig()` never throws: a
-non-array `slowLog` value, or a non-int threshold, is silently ignored (the
-default wins), unlike `options['tls']` and `options['grpc']`, which fail
-closed.
+A threshold of `0` disables that operation type. A *negative* threshold is a
+configuration error (`InvalidArgumentException`), and so is an unknown key or
+a non-int value inside `options['slowLog']` (issue #272) — a non-array
+`slowLog` value fails closed too, like `options['tls']`. The guard itself is
+`if ($threshold <= 0)`, so the negative case would have disabled the warning
+silently; the constructor now rejects it first.
 
 ## Infection forces `stopOnDefect="true"` — one PHP warning truncates the whole mutation score
 
@@ -2499,3 +2507,159 @@ what the user has to do: configure the logger's level and handlers before
 the client is built, and build a new client after changing them. A
 limitation that is only described in the commit message is a limitation
 that the next integrator re-discovers the hard way.
+
+## `0` means "disabled" in one knob and "invalid" in another — the knob decides
+
+`0` is overloaded across the configuration surface, and the two meanings
+contradict each other:
+
+- **A gRPC timeout** (`TimeoutConfig`, `options['timeout']`) — `0` is a
+  configuration error and throws `InvalidArgumentException`. It used to mean
+  "no deadline at all", but that is exactly what an unset environment
+  variable coerces to: `(int) getenv('TIKV_READ_TIMEOUT_MS')` yields `0` when
+  the variable is missing, so the "opt-out" turned a typo into a call that
+  never expires (issue #276, GRPC-17).
+- **`batchDeadlineMs`** — `0` disables the overall wall-clock budget of the
+  batch fan-out. It is not a gRPC deadline: it bounds the dispatch and the
+  wait, and it never reaches `Timeval`.
+- **The slow-log thresholds** — `0` disables the warning for that operation
+  type. A *negative* value is a configuration error.
+
+So the rule is not "0 is never allowed" and not "0 always disables": each
+config class states and enforces its own contract, and the error message
+names the offending field or option key. When you read a `0` in a
+configuration file, ask which knob it belongs to before assuming what it
+does — and prefer a large finite value for anything that bounds a call.
+
+## An `options['timeout']` / `options['slowLog']` entry the client cannot apply is a startup error, not a no-op
+
+A configuration key the client does not know used to be **silently
+dropped**: the option had no effect, the built-in default applied, and
+nothing said so. The worst case is a key that is nearly right —
+`options['timeout'] => ['ingestTimeout' => 300000]` instead of
+`ingestTimeoutMs` — where the operator believes a five-minute SST ingest
+deadline was configured and the client runs with the 60-second default.
+
+Both groups are now mapped from the config class's own constructor
+(`TimeoutConfig`, `SlowLogConfig`), so a field is configurable under its own
+name as soon as it exists, and an unknown key — or a value of the wrong type
+— is reported with an `InvalidArgumentException` naming the key instead of
+being ignored. The same fail-closed rule the TLS options have always had.
+
+The general rule: **an option that cannot be applied must not be silently
+ignored.** Either it is applied, or the client refuses to start. Two things
+count as "absent" and keep the default: the option group is not there at all,
+or it is explicitly `null`. Everything else — an unknown key, a value of the
+wrong type, a group that is a string instead of a map — is an error.
+
+## MCE marker for a key is 0xFF - pad, not a fixed value (issue #252)
+
+The issue text quotes `6162630000000000f9` for `abc`. That is wrong: `abc`
+has 3 bytes, pad = 5, so the marker is `fa`. `f9` is the marker of a
+2-byte key. `MemComparableCodec` already follows TiDB `EncodeBytes`
+(since #415). Compute a vector from `0xFF - pad`, do not copy it from an
+issue.
+
+## A test double for `PdClient::getRegion()` must contain the key (#253)
+
+`RegionResolver::getRegionInfo()` rejects a PD answer whose range does
+not contain the requested key. It throws a retryable `RegionException`
+with `ErrorKind::RegionNotFound` and does not cache the region. A test
+that mocks `getRegion()` with an arbitrary region now fails with
+`RetryBudgetExhaustedException` after 30 attempts.
+
+To simulate a split in a committer test (for example "region no longer
+covers the whole key group"), return a region that contains the first
+key but not the others. Use a group of at least two keys.
+
+## GrpcClient: every RPC must be metered through `startRpc()` / `completeRpc()`, never `rpcStarted()` / `rpcCompleted()` directly
+
+`call()`, `callStreaming()` and `callAsync()` call `rpcStarted()` and then
+must call `rpcCompleted()` exactly once on every path (issue #274). The
+`try`/`finally` opens right after `rpcStarted()`, so channel acquisition,
+`new Call()` and the send phase are covered. Record the start through
+`GrpcClient::startRpc()` and the end through `GrpcClient::completeRpc()`:
+both swallow (and log) a throwing metrics backend, because a throw from
+the emission would replace the transport exception — from `finally` for the
+completion, and before the call for the start (issue #759). A backend that
+throws from `rpcStarted()` alone breaks the
+`rpcStarted == rpcSucceeded + rpcFailed` invariant: its own counters are not
+trustworthy in that case.
+A protobuf message cannot be mocked or subclassed in a test (the
+descriptor lookup fails), so to fail a call early use
+`new GrpcClient(allowInsecure: false)`: `getChannel()` throws right after
+`rpcStarted()`.
+
+## Why does `composer update` not install the newest packages? (#311)
+
+`composer.json` pins `config.platform.php` to `8.2.0`, so Composer
+resolves for the lowest supported PHP, whatever PHP the host runs.
+Commit the changed `composer.lock` with the change that needs it. Use
+`composer update <package>` to move one package. Run `composer audit`
+after each update.
+
+## Why is the `PdClient` store cache not nullable? (#298)
+
+`PdClient` used to accept `?StoreCacheInterface $storeCache = null`. A
+`PdClient` built with three arguments then sent one `GetStore` RPC to PD
+for every store lookup. The parameter is now `StoreCacheInterface` with
+the default `new StoreCache()` (PHP 8.2 allows `new` in an initializer).
+`PdClient::close()` always clears the cache. A test that needs "no cache"
+must pass a mock of `StoreCacheInterface` whose `get()` returns `null`.
+
+## The idle sweep of `GrpcClient` must run on the cache-hit path too, and tests age channels with the injected clock (#277)
+
+`GrpcClient::evictIdleChannels()` used to run only on a cache **miss**, just
+before a new channel was created. A long-lived client that only reuses cached
+channels never reached it, so the handle of a store that left the cluster
+stayed in the cache for ever. `getChannel()` now also sweeps on a cache hit,
+at most once per interval (`idleTtlMs / 10`, clamped to 1 s .. `idleTtlMs`),
+because the sweep walks every cached channel. The hit path touches `lastUsed`
+of the returned channel **before** it sweeps, so the returned channel is never
+reaped. The sweep already skips channels with in-flight calls.
+`reapIdleChannels()` runs the same sweep on demand (a no-op after `close()`).
+
+The sweep drops the cached **handle** and frees the cache slot. It does not
+promise that the connection closes: `Channel::close()` is a reference-count
+decrement and the ext-grpc persistent channel can outlive the handle (see the
+entry "ext-grpc's persistent channels are shared and reference-counted
+(#283)").
+
+Test pitfalls:
+
+- Do not `sleep()` to age a channel. Pass the `clock` closure to the
+  `GrpcClient` constructor and advance your own variable
+  (`tests/Unit/Grpc/GrpcClientIdleSweepTest.php`). Add the file to the `Grpc`
+  suite and to the `Unit` exclude list in `phpunit.xml`.
+- ext-grpc shares one channel per target in the whole process. An address that
+  another test used for a failed RPC reports `TRANSIENT_FAILURE`, so
+  `getChannel()` reconnects and takes the cache-**miss** path, which hides the
+  cache-hit path under test. Use a unique, unused port per channel-cache test.
+
+Open limitation (#658): the experimental BatchCommands transport
+(`GrpcBatchCommandsTransport::forClient()`, flag `batchCommands`, off by
+default) gets its channel once and never marks it in flight or touches
+`lastUsed`. The idle sweep, like the LRU eviction, can drop that channel while
+its stream is open. The pool discards the broken stream and the caller falls
+back to the unary path, so the failure heals itself.
+
+## The batch deadline is finite by default, and checked only between waits (#275)
+
+`TimeoutConfig::$batchDeadlineMs` defaults to 60000. An explicit `0` still disables it.
+The constructor rejects a deadline below any per-call timeout of a batch fan-out, because a
+deadline below one call cannot cut that call short.
+
+`BatchAsyncExecutor` checks the deadline before each dispatch and before each wait. It never
+interrupts one blocking wait. Most fan-out callables use
+`CheckedGrpcFuture::fromRetryableDispatch()`, and its wait runs the whole `RetryExecutor` loop of
+one region (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms). The worst case is
+therefore `batchDeadlineMs` plus one region's full retry loop, not plus one per-call timeout.
+The constructor check does not use `readTimeoutMs`: only synchronous point reads use it.
+
+Before #275, `executeParallelCapped()` gave the full deadline to every window, so N windows
+could run N times longer than the deadline. All windows now share one budget. A test of this
+must make the pre-window check the only way to fail: a test that trips inside one window's
+wait does not prove the shared budget.
+
+The experimental BatchCommands multiplex path (`RawKvBatch::tryMultiplex`) is bounded per call
+only. It does not use the batch deadline.

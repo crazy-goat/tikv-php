@@ -41,6 +41,21 @@ final class TransactionState
     private bool $closed = false;
     private ?int $maxForUpdateTs = null;
 
+    /**
+     * Client clock time (ms) at which the primary lock expires, or null while
+     * the transaction holds no primary lock. TiKV counts a lock TTL from the
+     * transaction start, so this is `startedAtMs + granted TTL` (issue #429).
+     */
+    private ?int $primaryLockExpiresAtMs = null;
+
+    /**
+     * @param int $startedAtMs Client clock time (ms) at which the transaction
+     *                         began; the base of the lock TTL (issue #429)
+     */
+    public function __construct(private readonly int $startedAtMs = 0)
+    {
+    }
+
     public function isActive(): bool
     {
         return $this->status === TransactionStatus::Active && !$this->closed;
@@ -338,6 +353,23 @@ final class TransactionState
     public function getPessimisticPrimaryKey(): ?string
     {
         return $this->pessimisticPrimaryKey;
+    }
+
+    // -- Primary lock keepalive (issue #429) ---------------------------------------
+
+    public function getStartedAtMs(): int
+    {
+        return $this->startedAtMs;
+    }
+
+    public function getPrimaryLockExpiresAtMs(): ?int
+    {
+        return $this->primaryLockExpiresAtMs;
+    }
+
+    public function setPrimaryLockExpiresAtMs(int $expiresAtMs): void
+    {
+        $this->primaryLockExpiresAtMs = $expiresAtMs;
     }
 
     // -- For Update TS ------------------------------------------------------------

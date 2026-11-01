@@ -99,6 +99,17 @@ final class GrpcClient implements GrpcClientInterface
     private bool $closed = false;
 
     /**
+     * Time (seconds) of the last idle sweep, or null before the first one.
+     *
+     * The sweep runs on every cache miss and, at most once per
+     * `sweepDue()`, on the cache-hit path (issue #277).
+     */
+    private ?float $lastSweepAt = null;
+
+    /** Whether the soft-cap overshoot of the current episode was logged. */
+    private bool $softCapWarned = false;
+
+    /**
      * Maximum number of channels kept open at the same time.
      *
      * The client is meant to be long-lived and shared: the channel cache is
@@ -126,8 +137,10 @@ final class GrpcClient implements GrpcClientInterface
      * C extension is not interrupted by `max_execution_time`, so a
      * half-open connection pinned a PHP-FPM worker for minutes or forever
      * and exhausted the whole pool. `null` now means "library default" and a
-     * caller who genuinely wants an unbounded call must say so with the
-     * explicit sentinel `0`.
+     * non-positive value is a configuration error (issue #276, GRPC-17):
+     * `0` used to be the "no deadline" sentinel, but a value of `0` is
+     * exactly what an unset environment variable coerces to, so it turned a
+     * configuration mistake into an unbounded call.
      */
     public const DEFAULT_TIMEOUT_MS = 30000;
 
@@ -137,7 +150,9 @@ final class GrpcClient implements GrpcClientInterface
      *                        is evicted when the cap is reached. Must be >= 1.
      * @param int $idleTtlMs Idle time (ms) after which an unused channel is
      *                       evicted (default 10 minutes). A channel that is
-     *                       evicted is reopened on the next request.
+     *                       evicted is reopened on the next request. Idle
+     *                       channels are swept on every cache miss and, rate
+     *                       limited, on cache hits (issue #277).
      * @param bool $allowInsecure When true (default), an insecure (plaintext) gRPC channel
      *                            is created when no TLS configuration is provided or when
      *                            the TLS configuration has no credentials set. When false,
@@ -164,6 +179,9 @@ final class GrpcClient implements GrpcClientInterface
      *                             how often to ping an idle connection so NAT/firewall-dropped
      *                             flows are detected instead of silently dead.
      * @param int $keepaliveTimeoutMs grpc.keepalive_timeout_ms channel argument (default 3 s).
+     * @param (\Closure(): float)|null $clock Source of the current time in seconds
+     *                                         (default `microtime(true)`). Tests inject
+     *                                         a fake clock to age channels without sleeping.
      */
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
@@ -176,6 +194,7 @@ final class GrpcClient implements GrpcClientInterface
         private readonly int $maxSendMessageBytes = self::DEFAULT_MAX_SEND_MESSAGE_BYTES,
         private readonly int $keepaliveTimeMs = self::DEFAULT_KEEPALIVE_TIME_MS,
         private readonly int $keepaliveTimeoutMs = self::DEFAULT_KEEPALIVE_TIMEOUT_MS,
+        private readonly ?\Closure $clock = null,
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -216,14 +235,20 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
+        // The timeout is validated before anything else happens: a
+        // non-positive value is a configuration error and must not be
+        // counted as an RPC, must not create (and cache) a channel and must
+        // not be reported as a failed call (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
         $operation = $service . '/' . $method;
-        $this->metrics->rpcStarted($operation);
+        $this->startRpc($operation);
         $start = hrtime(true);
         $success = false;
         try {
             $channel = $this->getChannel($address);
 
-            $deadline = $this->deadline($timeoutMs);
+            $deadline = $this->deadline($timeout);
 
             $call = new Call(
                 $channel,
@@ -257,8 +282,7 @@ final class GrpcClient implements GrpcClientInterface
 
             return $response;
         } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            $this->metrics->rpcCompleted($operation, $durationMs, $success);
+            $this->completeRpc($operation, $start, $success);
         }
     }
 
@@ -274,14 +298,20 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
+        // The timeout is validated before anything else happens: a
+        // non-positive value is a configuration error and must not be
+        // counted as an RPC, must not create (and cache) a channel and must
+        // not be reported as a failed call (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
+
         $operation = $service . '/' . $method;
-        $this->metrics->rpcStarted($operation);
+        $this->startRpc($operation);
         $start = hrtime(true);
         $success = false;
         try {
             $channel = $this->getChannel($address);
 
-            $deadline = $this->deadline($timeoutMs);
+            $deadline = $this->deadline($timeout);
 
             $call = new Call(
                 $channel,
@@ -328,8 +358,7 @@ final class GrpcClient implements GrpcClientInterface
 
             return $response;
         } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            $this->metrics->rpcCompleted($operation, $durationMs, $success);
+            $this->completeRpc($operation, $start, $success);
         }
     }
 
@@ -352,9 +381,11 @@ final class GrpcClient implements GrpcClientInterface
      * @param class-string<T> $responseClass Response message class name
      * @param int|null $timeoutMs Optional gRPC call timeout in milliseconds;
      *                            null = the library default
-     *                            ({@see self::DEFAULT_TIMEOUT_MS}), 0 = no deadline
+     *                            ({@see self::DEFAULT_TIMEOUT_MS}); a
+     *                            non-positive value throws
      * @return GrpcFuture Un-waited future resolving to T
      * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callAsync(
         string $address,
@@ -368,35 +399,96 @@ final class GrpcClient implements GrpcClientInterface
             throw new InvalidStateException('gRPC client is closed');
         }
 
-        $channel = $this->getChannel($address);
+        // The timeout is validated before anything is opened or metered: a
+        // non-positive value is a configuration error and must not create
+        // (and cache) a channel, or emit rpcStarted(), before it is raised
+        // (issue #276, GRPC-17).
+        $timeout = $this->resolveTimeoutMs($timeoutMs);
 
-        $deadline = $this->deadline($timeoutMs);
+        $operation = $service . '/' . $method;
+        $this->startRpc($operation);
+        $start = hrtime(true);
 
-        $call = new Call(
-            $channel,
-            "/{$service}/{$method}",
-            $deadline,
-        );
+        try {
+            $channel = $this->getChannel($address);
 
-        $call->startBatch([
-            \Grpc\OP_SEND_INITIAL_METADATA => [],
-            \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
-            \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
-        ]);
+            $deadline = $this->deadline($timeout);
+
+            $call = new Call(
+                $channel,
+                "/{$service}/{$method}",
+                $deadline,
+            );
+
+            $call->startBatch([
+                \Grpc\OP_SEND_INITIAL_METADATA => [],
+                \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
+                \Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
+            ]);
+        } catch (\Throwable $e) {
+            // The RPC never started: complete it here, because no future
+            // exists to settle it.
+            $this->completeRpc($operation, $start, false);
+
+            throw $e;
+        }
 
         // The call is live on the channel from here on. Count it as
         // in-flight so that no eviction can close the channel under it
         // (issue #278); the counter is released when the future settles
-        // — successfully, with an error, or on cancellation.
+        // — successfully, with an error, or on cancellation. The same
+        // settlement records the RPC metric, so it is emitted exactly once
+        // per call (issue #273).
         $this->markInFlight($address, $channel);
 
         return new GrpcFuture(
             $call,
             $responseClass,
-            onSettled: function (bool $success) use ($channel): void {
+            onSettled: function (bool $success) use ($channel, $operation, $start): void {
                 $this->releaseInFlight($channel);
+                $this->completeRpc($operation, $start, $success);
             },
         );
+    }
+
+    /**
+     * Record the start of an RPC. A metrics backend that throws is logged
+     * and swallowed: the emission sits *before* the call, so a throw from it
+     * would abort a call that never happened and replace the transport
+     * exception the caller has to see (issue #759, GRPC-15).
+     *
+     * The `rpcStarted == rpcSucceeded + rpcFailed` invariant holds for every
+     * backend that records what it is told. A backend that throws from
+     * `rpcStarted()` alone breaks it — its own counters are not trustworthy
+     * in that case.
+     */
+    private function startRpc(string $operation): void
+    {
+        try {
+            $this->metrics->rpcStarted($operation);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Metrics backend threw from rpcStarted()', [
+                'operation' => $operation,
+                'exception' => $e,
+            ]);
+        }
+    }
+
+    /**
+     * Record the end of an RPC. A metrics backend that throws is logged and
+     * swallowed: this runs in `finally` blocks, where a throw would replace
+     * the transport exception that is propagating (issue #274, GRPC-15).
+     */
+    private function completeRpc(string $operation, int|float $startNs, bool $success): void
+    {
+        try {
+            $this->metrics->rpcCompleted($operation, (hrtime(true) - $startNs) / 1_000_000, $success);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Metrics backend threw from rpcCompleted()', [
+                'operation' => $operation,
+                'exception' => $e,
+            ]);
+        }
     }
 
     public function __destruct()
@@ -525,7 +617,16 @@ final class GrpcClient implements GrpcClientInterface
             } else {
                 // Update last-used timestamp
                 $this->channels[$address]['lastUsed'] = $now;
-                return $this->channels[$address]['channel'];
+                $channel = $this->channels[$address]['channel'];
+
+                // A client that only ever hits the cache would keep the
+                // channels of departed stores for ever (issue #277). The
+                // returned channel was just touched, so it is never reaped.
+                if ($this->sweepDue($now)) {
+                    $this->evictIdleChannels($now);
+                }
+
+                return $channel;
             }
         }
 
@@ -536,6 +637,23 @@ final class GrpcClient implements GrpcClientInterface
         $this->enforceMaxChannels();
 
         return $this->createChannel($address, $now);
+    }
+
+    /**
+     * Drop the cached channels that were idle longer than `idleTtlMs`.
+     *
+     * The idle sweep also runs inside `getChannel()`, but only when a request
+     * arrives. A long-running worker that can be quiet for a long time calls
+     * this from its own tick. A channel with in-flight calls is skipped.
+     * No-op if the client has already been closed.
+     */
+    public function reapIdleChannels(): void
+    {
+        if ($this->closed) {
+            return;
+        }
+
+        $this->evictIdleChannels($this->now());
     }
 
     /**
@@ -555,6 +673,7 @@ final class GrpcClient implements GrpcClientInterface
      */
     private function evictIdleChannels(float $now): void
     {
+        $this->lastSweepAt = $now;
         $idleThreshold = $now - ($this->idleTtlMs / 1000);
 
         foreach ($this->channels as $address => $entry) {
@@ -573,7 +692,27 @@ final class GrpcClient implements GrpcClientInterface
     }
 
     /**
-     * If the channel cache is at capacity, evict the least recently used channel.
+     * Whether the cache-hit path may run an idle sweep now.
+     *
+     * The sweep walks every cached channel, so the hot path runs it at most
+     * once per interval: a tenth of the idle TTL, but at least one second and
+     * never more than the TTL itself (issue #277).
+     */
+    private function sweepDue(float $now): bool
+    {
+        if ($this->lastSweepAt === null) {
+            return true;
+        }
+
+        $ttlSeconds = $this->idleTtlMs / 1000;
+        $interval = min($ttlSeconds, max(1.0, $ttlSeconds / 10));
+
+        return $now - $this->lastSweepAt >= $interval;
+    }
+
+    /**
+     * If the channel cache is at capacity, evict the least recently used idle
+     * channels (the ones with no in-flight calls) until it is below the cap.
      *
      * `maxChannels` is a soft cap: a channel with in-flight calls is never
      * evicted, so when every cached channel is busy the cache is allowed to
@@ -584,38 +723,65 @@ final class GrpcClient implements GrpcClientInterface
     private function enforceMaxChannels(): void
     {
         if (count($this->channels) < $this->maxChannels) {
+            // Back under the cap: the next overshoot is a new episode and
+            // is logged again.
+            $this->softCapWarned = false;
+
             return;
         }
 
-        // Find the least recently used channel that has no live calls.
-        $lruAddress = null;
-        $lruTime = PHP_FLOAT_MAX;
-        foreach ($this->channels as $address => $entry) {
-            if ($entry['inFlight'] > 0) {
-                continue;
+        // Evict down to the cap, not one channel per call: an over-cap cache
+        // would otherwise shrink by one address per new address and stay
+        // above the cap for a long time. Every pass removes one channel from
+        // the cache, so the loop ends.
+        while (count($this->channels) >= $this->maxChannels) {
+            // Find the least recently used channel that has no live calls.
+            $lruAddress = null;
+            $lruTime = PHP_FLOAT_MAX;
+            foreach ($this->channels as $address => $entry) {
+                if ($entry['inFlight'] > 0) {
+                    continue;
+                }
+                if ($entry['lastUsed'] < $lruTime) {
+                    $lruTime = $entry['lastUsed'];
+                    $lruAddress = $address;
+                }
             }
-            if ($entry['lastUsed'] < $lruTime) {
-                $lruTime = $entry['lastUsed'];
-                $lruAddress = $address;
-            }
-        }
 
-        if ($lruAddress === null) {
-            $this->logger->warning('Channel cache at capacity but all channels are busy; exceeding soft cap', [
+            if ($lruAddress === null) {
+                $this->warnSoftCapExceeded();
+
+                return;
+            }
+
+            $this->logger->debug('Evicting LRU channel to enforce max channels', [
+                'address' => $lruAddress,
                 'maxChannels' => $this->maxChannels,
-                // The size of the cache, not the number of busy channels:
-                // every cached channel is busy in this branch.
-                'cachedChannels' => count($this->channels),
             ]);
+            $this->evictChannel($lruAddress);
+        }
 
+        $this->softCapWarned = false;
+    }
+
+    /**
+     * Log the soft-cap overshoot once per episode, not once per new address:
+     * a fan-out over a thousand stores would otherwise log ~1000 lines. The
+     * flag is cleared when the cache is back under the cap.
+     */
+    private function warnSoftCapExceeded(): void
+    {
+        if ($this->softCapWarned) {
             return;
         }
 
-        $this->logger->debug('Evicting LRU channel to enforce max channels', [
-            'address' => $lruAddress,
+        $this->softCapWarned = true;
+        $this->logger->warning('Channel cache at capacity but all channels are busy; exceeding soft cap', [
             'maxChannels' => $this->maxChannels,
+            // The size of the cache, not the number of busy channels:
+            // every cached channel is busy in this branch.
+            'cachedChannels' => count($this->channels),
         ]);
-        $this->evictChannel($lruAddress);
     }
 
     /**
@@ -803,7 +969,7 @@ final class GrpcClient implements GrpcClientInterface
 
     private function now(): float
     {
-        return microtime(true);
+        return $this->clock instanceof \Closure ? ($this->clock)() : microtime(true);
     }
 
     /**
@@ -812,30 +978,51 @@ final class GrpcClient implements GrpcClientInterface
      *
      * `null` — a call site with no opinion — becomes the conservative
      * library default {@see self::DEFAULT_TIMEOUT_MS} rather than an
-     * unbounded deadline. A caller that genuinely wants no deadline has to
-     * pass the explicit non-positive sentinel `0`, which is the same way
-     * the rest of the library spells "disabled" (`TimeoutConfig`'s
-     * `batchDeadlineMs = 0`).
+     * unbounded deadline. A non-positive value is rejected here
+     * (issue #276, GRPC-17): it used to be the "no deadline" sentinel, but a
+     * user-supplied `0` is far more likely to be an accident than an intent.
+     *
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When the resolved timeout is not positive
      */
     private function resolveTimeoutMs(?int $timeoutMs): int
     {
-        return $timeoutMs ?? self::DEFAULT_TIMEOUT_MS;
+        $timeout = $timeoutMs ?? self::DEFAULT_TIMEOUT_MS;
+
+        if ($timeout <= 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                sprintf('timeoutMs must be greater than 0, got %d', $timeout),
+            );
+        }
+
+        return $timeout;
     }
 
     /**
      * Build the gRPC deadline for a call (issue #260).
      *
-     * The single place where a deadline is derived from a `$timeoutMs`
-     * argument, so {@see self::resolveTimeoutMs()} cannot be honoured in
-     * one entry point and forgotten in another.
+     * The single place where a deadline is derived from a timeout, so
+     * {@see self::resolveTimeoutMs()} cannot be honoured in one entry point
+     * and forgotten in another. It takes the **resolved** timeout (a
+     * strictly positive number of milliseconds), so the rejection of a
+     * non-positive value happens in {@see self::resolveTimeoutMs()} — before
+     * a channel is opened (issue #276, GRPC-17).
+     *
+     * The guard below is defence in depth: ext-grpc does not reject a
+     * negative `Timeval`, it builds a deadline already in the past.
      */
-    private function deadline(?int $timeoutMs): Timeval
+    private function deadline(int $timeoutMs): Timeval
     {
-        $timeout = $this->resolveTimeoutMs($timeoutMs);
+        // Defence in depth: the caller resolves the timeout (and rejects a
+        // non-positive one) before it gets here, but a raw value that
+        // reached this method would build a deadline already in the past —
+        // every call would fail with DEADLINE_EXCEEDED (issue #276).
+        if ($timeoutMs <= 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                sprintf('timeoutMs must be greater than 0, got %d', $timeoutMs),
+            );
+        }
 
-        return $timeout > 0
-            ? Timeval::now()->add(new Timeval($timeout * 1000))
-            : Timeval::infFuture();
+        return Timeval::now()->add(new Timeval($timeoutMs * 1000));
     }
 
     private function createTlsCredentials(): ChannelCredentials

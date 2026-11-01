@@ -46,6 +46,7 @@ final readonly class LockResolver
         private int $callerStartTs,
         private TimeoutConfig $timeoutConfig = new TimeoutConfig(),
         private LoggerInterface $logger = new NullLogger(),
+        private ResolvedTxnStatusCache $statusCache = new ResolvedTxnStatusCache(),
     ) {
     }
 
@@ -84,13 +85,105 @@ final readonly class LockResolver
             'lockTs' => $lockTs,
         ]);
 
-        $status = $this->checkTxnStatus($primaryLock, $lockTs, $notLeaderOwnedByRetryExecutor);
+        $status = $this->resolveStatus($primaryLock, $lockTs, $notLeaderOwnedByRetryExecutor);
 
+        $this->resolveLockWithStatus($lock, $lockTs, $status, $remainingDeadlineMs, $notLeaderOwnedByRetryExecutor);
+    }
+
+    /**
+     * Resolve several locks at once (issue #428): one status check per
+     * transaction (none when the outcome is cached), then one KvResolveLock
+     * per (region, transaction) carrying every key of that transaction in
+     * the region.
+     *
+     * Transactions that finished are resolved first. When some transaction
+     * is still alive, a single {@see TxnRetryableException} is thrown after
+     * the others were resolved, so the caller's RetryExecutor owns the
+     * backoff exactly as for {@see resolveLock()}. Async-commit
+     * transactions keep the single-lock recovery path.
+     *
+     * @param list<LockInfo> $locks
+     * @param bool $notLeaderOwnedByRetryExecutor see {@see resolveLock()}
+     */
+    public function resolveLocks(
+        array $locks,
+        int $remainingDeadlineMs = 0,
+        bool $notLeaderOwnedByRetryExecutor = true,
+    ): void {
+        /** @var array<int, list<LockInfo>> $byTxn */
+        $byTxn = [];
+        foreach ($locks as $lock) {
+            $byTxn[(int) $lock->getLockVersion()][] = $lock;
+        }
+
+        /** @var array<int, list<string>> $keysByTxn keys resolvable with a plain ResolveLock */
+        $keysByTxn = [];
+        /** @var array<int, int> $commitTsByTxn */
+        $commitTsByTxn = [];
+        $retryable = null;
+
+        foreach ($byTxn as $lockTs => $txnLocks) {
+            $first = $txnLocks[0];
+            $this->logger->debug('Resolving locks of one transaction', [
+                'lockTs' => $lockTs,
+                'lockCount' => count($txnLocks),
+            ]);
+
+            $status = $this->resolveStatus($this->primaryOf($first), $lockTs, $notLeaderOwnedByRetryExecutor);
+            $commitTs = $status['commitTs'] ?? 0;
+
+            if ($commitTs > 0 || $status['final']) {
+                $commitTsByTxn[$lockTs] = $commitTs;
+                $keysByTxn[$lockTs] = array_map(
+                    static fn (LockInfo $txnLock): string => (string) $txnLock->getKey(),
+                    $txnLocks,
+                );
+                continue;
+            }
+
+            // Async-commit, live or undetermined: the single-lock path decides.
+            try {
+                $this->resolveLockWithStatus(
+                    $first,
+                    $lockTs,
+                    $status,
+                    $remainingDeadlineMs,
+                    $notLeaderOwnedByRetryExecutor,
+                );
+            } catch (TxnRetryableException $e) {
+                $retryable ??= $e;
+            }
+        }
+
+        foreach ($keysByTxn as $lockTs => $keys) {
+            $this->resolveKeys(
+                $lockTs,
+                $commitTsByTxn[$lockTs],
+                array_values(array_unique($keys)),
+                $notLeaderOwnedByRetryExecutor,
+            );
+        }
+
+        if ($retryable instanceof TxnRetryableException) {
+            throw $retryable;
+        }
+    }
+
+    /**
+     * @param array{commitTs: ?int, lockTtl: ?int, final: bool} $status
+     */
+    private function resolveLockWithStatus(
+        LockInfo $lock,
+        int $lockTs,
+        array $status,
+        int $remainingDeadlineMs,
+        bool $notLeaderOwnedByRetryExecutor,
+    ): void {
         $commitTs = $status['commitTs'] ?? null;
 
         if ($commitTs !== null && $commitTs > 0) {
             $this->resolveLockCommitted($lock, $lockTs, $commitTs);
-        } elseif ($commitTs === 0) {
+        } elseif ($commitTs === 0 && !$status['final']) {
             // Async-commit lock (issue #419): the primary lock carries the
             // commit decision, so before spending the TTL wait ask the
             // secondary regions for their state via KvCheckSecondaryLocks.
@@ -145,7 +238,47 @@ final readonly class LockResolver
     }
 
     /**
-     * @return array{commitTs: ?int, lockTtl: ?int}
+     * Primary key of the lock's transaction; a lock without primary info
+     * (e.g. pessimistic) names itself.
+     */
+    private function primaryOf(LockInfo $lock): string
+    {
+        $primary = (string) $lock->getPrimaryLock();
+
+        return $primary !== '' ? $primary : (string) $lock->getKey();
+    }
+
+    /**
+     * Status of the transaction that owns a lock: the cached final outcome
+     * when known, otherwise a KvCheckTxnStatus round trip whose result is
+     * cached when it is final (issue #428).
+     *
+     * @return array{commitTs: ?int, lockTtl: ?int, final: bool}
+     */
+    private function resolveStatus(
+        string $primaryKey,
+        int $lockTs,
+        bool $notLeaderOwnedByRetryExecutor,
+    ): array {
+        $cached = $this->statusCache->get($lockTs);
+        if ($cached !== null) {
+            $this->logger->debug('Transaction status cache hit', [
+                'lockTs' => $lockTs,
+                'commitTs' => $cached,
+            ]);
+            return ['commitTs' => $cached, 'lockTtl' => 0, 'final' => true];
+        }
+
+        $status = $this->checkTxnStatus($primaryKey, $lockTs, $notLeaderOwnedByRetryExecutor);
+        if ($status['final']) {
+            $this->statusCache->put($lockTs, $status['commitTs'] ?? 0);
+        }
+
+        return $status;
+    }
+
+    /**
+     * @return array{commitTs: ?int, lockTtl: ?int, final: bool}
      */
     private function checkTxnStatus(
         string $primaryKey,
@@ -211,9 +344,17 @@ final readonly class LockResolver
             $lockTtl = (int) $response->getLockTtl();
         }
 
+        $commitTs = (int) $response->getCommitVersion();
+
         return [
-            'commitTs' => (int) $response->getCommitVersion(),
+            'commitTs' => $commitTs,
             'lockTtl' => $lockTtl,
+            // Only a commit or an explicit rollback is final. NoAction,
+            // MinCommitTSPushed, pessimistic rollback and "lock not exist,
+            // do nothing" can still change, so they are never cached.
+            'final' => $commitTs > 0
+                || $action === Action::TTLExpireRollback
+                || $action === Action::LockNotExistRollback,
         ];
     }
 
@@ -381,6 +522,54 @@ final readonly class LockResolver
                 notLeaderOwnedByRetryExecutor: false,
                 keyErrorsHandledByCaller: true,
             );
+        }
+    }
+
+    /**
+     * One KvResolveLock per region for the given keys of one transaction.
+     *
+     * @param list<string> $keys
+     */
+    private function resolveKeys(int $lockTs, int $commitTs, array $keys, bool $notLeaderOwnedByRetryExecutor): void
+    {
+        $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
+
+        foreach ($keysByRegion as $regionData) {
+            $region = $regionData['region'];
+            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+
+            $request = new ResolveLockRequest();
+            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setStartVersion($lockTs);
+            $request->setCommitVersion($commitTs);
+            $request->setKeys($regionData['keys']);
+
+            $this->logger->debug('Batch resolve locks', [
+                'regionId' => $region->regionId,
+                'keyCount' => count($regionData['keys']),
+                'lockTs' => $lockTs,
+                'commitTs' => $commitTs,
+            ]);
+
+            /** @var ResolveLockResponse $response */
+            $response = $this->grpc->call(
+                $address,
+                'tikvpb.Tikv',
+                'KvResolveLock',
+                $request,
+                ResolveLockResponse::class,
+                $this->timeoutConfig->lockResolveTimeoutMs,
+            );
+
+            RegionErrorHandler::check(
+                $response,
+                $this->regionCache,
+                $region->regionId,
+                notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+                keyErrorsHandledByCaller: true,
+            );
+
+            $this->invalidateRegionFor($regionData['keys'][0]);
         }
     }
 

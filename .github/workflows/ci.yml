@@ -70,6 +70,9 @@ jobs:
           "$HOME/.local/bin/shellcheck" --version
           "$HOME/.local/bin/hadolint" --version
 
+      - name: Audit dependencies
+        run: composer audit --locked
+
       - name: Lint
         run: bin/lint.sh
 

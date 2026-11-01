@@ -19,6 +19,7 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Tests\Unit\Batch\FakeBatchCommandsTransport;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
+use CrazyGoat\TiKV\Tests\Unit\Support\DeadEndpointGrpcFuture;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -107,9 +108,7 @@ final class RawKvBatchBatchCommandsGrpcTest extends TestCase
         // existing RawKvBatchTest dispatch-count tests.
         $this->requireGrpcExtension();
         $this->stubCluster();
-        $this->grpc->method('getChannel')->willReturn(new \Grpc\Channel('127.0.0.1:1', [
-            'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-        ]));
+        $this->grpc->method('callAsync')->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         $batch = $this->createRawKvBatch(null);
 
@@ -122,14 +121,12 @@ final class RawKvBatchBatchCommandsGrpcTest extends TestCase
         // A stream-layer failure must transparently re-dispatch every entry
         // on the existing unary fan-out: against a dead endpoint that
         // surfaces as the usual BatchPartialFailureException from the unary
-        // path (proving the fallback ran) — and getChannel WAS called.
+        // path (proving the fallback ran) — and callAsync WAS called.
         $this->requireGrpcExtension();
         $this->stubCluster();
-        $this->grpc->expects($this->atLeastOnce())->method('getChannel')->willReturnCallback(
-            fn (): \Grpc\Channel => new \Grpc\Channel('127.0.0.1:1', [
-                'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-            ]),
-        );
+        $this->grpc->expects($this->atLeastOnce())
+            ->method('callAsync')
+            ->willReturnCallback(DeadEndpointGrpcFuture::callback());
 
         $fake = new FakeBatchCommandsTransport(
             throwOnCall: new BatchCommandsStreamException('stream closed'),

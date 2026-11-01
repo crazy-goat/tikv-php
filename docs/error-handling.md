@@ -36,6 +36,7 @@ extends `\InvalidArgumentException` directly — it is **not** a
     ├── HealthCheckException                       src/Client/Exception/
     ├── InvalidStateException                      src/Client/Exception/
     ├── InvalidStoreAddressException               src/Client/Exception/
+    ├── KeyErrorException                          src/Client/Exception/
     ├── PdException                                src/Client/Exception/
     ├── RegionException                            src/Client/Exception/
     ├── ScanLimitExceededException                 src/Client/Exception/
@@ -52,13 +53,13 @@ extends `\InvalidArgumentException` directly — it is **not** a
 └── InvalidArgumentException                        src/Client/Exception/
 ```
 
-All eighteen `TiKvException` subclasses are `final`; `TiKvException` itself is
+All nineteen `TiKvException` subclasses are `final`; `TiKvException` itself is
 the only non-final class in the tree (it is the intended base for any custom
 project-wide exception work).
 
 > The client never throws a raw `\Exception`, `\RuntimeException` or
 > `\InvalidArgumentException`: everything that can reach your code is one of
-> the eighteen classes above.
+> the nineteen classes above.
 
 `TiKvException` itself is also thrown **directly** — no more specific subclass —
 at sixteen `throw new TiKvException(...)` statements across multiple call
@@ -92,6 +93,7 @@ contract changes (noted per row):
 | [`BatchPartialFailureException`](../src/Client/Exception/BatchPartialFailureException.php) | `TiKvException` | A fanned-out batch operation failed on some regions; accessors: `getRegionErrors()`, `getTotalRegions()` |
 | [`ClientClosedException`](../src/Client/Exception/ClientClosedException.php) | `TiKvException` | The operation was attempted after `$client->close()` |
 | [`GrpcException`](../src/Client/Exception/GrpcException.php) | `TiKvException` | gRPC transport/status error; carries `public readonly int $grpcStatusCode` |
+| [`KeyErrorException`](../src/Client/Exception/KeyErrorException.php) | `TiKvException` | A per-pair `KeyError` reported on a response where key errors are not handled by the caller (e.g. a per-pair error on a raw scan); previously reported as `RegionException` and retried as a region miss |
 | [`HealthCheckException`](../src/Client/Exception/HealthCheckException.php) | `TiKvException` | `healthCheck()` could not reach PD; wraps the underlying cause via `getPrevious()` |
 | [`InvalidArgumentException`](../src/Client/Exception/InvalidArgumentException.php) | `\InvalidArgumentException` | Invalid argument (empty key, oversized key/value, negative scan limit, bad option value). **Outside** the `TiKvException` hierarchy |
 | [`InvalidStateException`](../src/Client/Exception/InvalidStateException.php) | `TiKvException` | Client/transaction is in a state that cannot serve the call (e.g. CAS without atomic mode, transaction already committed) |
@@ -148,9 +150,11 @@ Verdict legend:
 | `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff |
 | `StoreNotFoundException` | **Do not retry blindly** — transient only after the stale cache entry expires (TTL/LRU sweep) or PD restores the store; the retry executor does *not* invalidate the region cache for it (it is not classified as a region error). A short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
-| `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()` for pending regions |
+| `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()['pendingRegions']` for the regions without a result. The deadline is finite by default (`batchDeadlineMs`, 60000 ms). `Transaction::commit()` never throws it after the commit point (see below) |
 
 ### Transaction::commit() and double-apply
+
+`BatchDeadlineExceededException` cannot cause a double apply. The secondary-commit fan-out runs after the commit point, so `commit()` logs a batch deadline there and returns normally. The leftover secondary locks are resolved by readers. The prewrite fan-out still throws it, because the transaction is not committed yet. A rollback fan-out throws it like a partial failure, and the transaction stays rollback-able: call `rollback()` again.
 
 `commit()` deserves special care because a network failure at exactly the
 wrong moment leaves the outcome *unknown*: the commit may have taken effect
@@ -250,7 +254,7 @@ only the timing it produces differs.
 | `RawKvClient::getKeyTTL()` | Yes | Yes | Read-only. The TTL keeps counting down, so the second answer can be smaller |
 | `RawKvClient::batchGet()` | Yes | Yes | Read-only. A `BatchPartialFailureException` returns **no** results — re-run the whole call |
 | `RawKvClient::scan()`, `RawKvClient::scanPrefix()`, `RawKvClient::reverseScan()`, `RawKvClient::batchScan()` | Yes | Yes | Read-only. The rows are the same set the first call returned unless the data changed in between |
-| `RawKvClient::scanIterator()`, `RawKvClient::scanPrefixIterator()` | Yes | Yes | Read-only, but **lazy**: the failure surfaces from the iteration, not from the factory call. A new iterator starts again at the beginning of the range |
+| `RawKvClient::scanIterator()`, `RawKvClient::scanPrefixIterator()` | Yes | Yes | Read-only, but **lazy**: the failure surfaces from the iteration, not from the factory call. A new iterator starts again at the beginning of the range. Exception: the cursor-progress `TiKvException` (#312) is not transient, so do not loop on it |
 | `ScanIterator::current()`, `ScanIterator::key()`, `ScanIterator::next()`, `ScanIterator::valid()`, `ScanIterator::rewind()` | Yes | Yes | Read-only. `next()` and `valid()` issue the scan RPCs, so an ambiguous failure surfaces from the iteration, not from the factory call — repeat the iteration from the beginning of the range (`rewind()` restarts the same iterator at the range's first key) |
 | `RawKvClient::checksum()` | Yes | Yes | Read-only. The merged CRC64-XOR covers the whole range because a failed region aborts the call with a `BatchPartialFailureException` instead of returning a partial result |
 | `RawKvClient::put()` | Yes | Yes | The same key/value is written again, so the final value is the same. With a TTL the **TTL restarts on every attempt** — the TTL travels as a relative number of seconds and TiKV computes the expiry when it applies the write — so a retry extends the key's lifetime. In atomic mode the write also carries `for_cas` and takes TiKV's atomic path, but it stays an unconditional overwrite of the same value |
@@ -267,6 +271,7 @@ only the timing it produces differs.
 | `RawKvClient::create()`, `RawKvClient::close()` | Yes | Yes | `create()` validates the options (`InvalidArgumentException` on a bad option) and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent — a second call does nothing |
 | `RawKvClient::getClusterId()`, `RawKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
 | `RawKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `RawKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 
 ### TxnKV operations
 
@@ -280,6 +285,7 @@ only the timing it produces differs.
 | `TxnKvClient::create()`, `TxnKvClient::close()` | Yes | Yes | `create()` validates the options and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent |
 | `TxnKvClient::getClusterId()`, `TxnKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
 | `TxnKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `TxnKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 | `Transaction::get()`, `Transaction::batchGet()`, `Transaction::scan()` | Yes | Yes | Read-only inside the transaction's snapshot at `startTs`, so a repeated read sees the same version of the data |
 | `Transaction::set()`, `Transaction::delete()` | Yes (same value) | **With care** | The value is buffered locally, so the same call twice writes the same thing. But in the default eager pessimistic mode the physical lock is acquired *before* the call returns: a failed `set()`/`delete()` may have left a lock behind and leaves the transaction unwritable (`InvalidStateException` on the next write). Repeating therefore converges only while the transaction is still writable. The transaction cannot be continued — discard it and begin a new one |
 | `Transaction::commit()` | **No** | **No** | See [Transaction commit and the new-transaction rule](#transaction-commit-and-the-new-transaction-rule) |
@@ -463,7 +469,7 @@ addresses on the RPC path just the same.
 | `delete(string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Same eager pessimistic-lock behavior and failure cleanup as `set()`; the tombstone remains buffered until commit |
 | `commit()` | `InvalidStateException`, `TiKvException` (incl. [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php)), `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | See [double-apply section](#transactioncommit-and-double-apply); since issue #213 prewrite runs inside the shared retry executor, so region errors and resolved `locked` conflicts are auto-retried while deadlocks/conflicts still escape |
 | `rollback()` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Only an `Active` transaction may be rolled back; a failed RPC leaves it active but non-writable so rollback can be retried |
-| `heartbeat(int $adviseLockTtlMs = 10000): int` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Extends the primary lock TTL |
+| `heartbeat(?int $adviseLockTtlMs = null): int` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Extends the primary lock TTL |
 
 (`TxnRetryableException` is a subclass of `TiKvException`, so rows listing
 `TiKvException` cover it implicitly; it is listed explicitly wherever the

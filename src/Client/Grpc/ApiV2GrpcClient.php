@@ -59,6 +59,12 @@ final readonly class ApiV2GrpcClient implements GrpcClientInterface
      * @param class-string<T> $responseClass
      * @return T
      */
+    /**
+     * @template T of Message
+     * @param class-string<T> $responseClass
+     * @return T
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
+     */
     public function call(
         string $address,
         string $service,
@@ -81,6 +87,12 @@ final readonly class ApiV2GrpcClient implements GrpcClientInterface
         return $transformed;
     }
 
+    /**
+     * @template T of Message
+     * @param class-string<T> $responseClass
+     * @return GrpcFuture Un-waited future resolving to T
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
+     */
     public function callAsync(
         string $address,
         string $service,
@@ -110,6 +122,7 @@ final readonly class ApiV2GrpcClient implements GrpcClientInterface
      * @template T of Message
      * @param class-string<T> $responseClass
      * @return T
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callStreaming(
         string $address,
@@ -146,6 +159,11 @@ final readonly class ApiV2GrpcClient implements GrpcClientInterface
     public function closeChannel(string $address): void
     {
         $this->inner->closeChannel($address);
+    }
+
+    public function reapIdleChannels(): void
+    {
+        $this->inner->reapIdleChannels();
     }
 
     public function getChannel(string $address): Channel

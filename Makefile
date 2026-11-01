@@ -85,7 +85,6 @@ clean:
 	@echo "Cleaning everything..."
 	docker-compose down -v --remove-orphans
 	@rm -rf vendor/
-	@rm -f composer.lock
 	@echo "Clean complete!"
 
 # Run basic example

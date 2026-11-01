@@ -280,6 +280,7 @@ numeric-boundary vectors of #232 are now pinned as regression tests in
 clip, and the `deleteRange("20", "300")` / `('3', '9')` shapes). When adding a
 region-routing test, do not reuse alphabetic boundaries: pick boundaries whose
 first byte disagrees with their numeric value, or the test cannot fail.
+
 ## Issue #261's inverted region-cache acceptance criterion is not implemented on purpose (issue #261)
 
 Issue #261's acceptance criteria ask for `RegionCache::getByKey("99")` to
@@ -407,6 +408,7 @@ report what moved — never a new site-local layout; and let the fixture *derive
 expectations (a key pair is admitted to the discriminating table only when asking
 PHP what `$a < $b` says proves it disagrees with byte order, so the table cannot rot
 into pairs a pre-#186 comparison passes).
+
 ## A Raw-mode region boundary is stored bytes, not the key you split at (issue #188)
 
 PD stores the default keyspace's region boundaries memory-comparable encoded:
@@ -722,13 +724,11 @@ Two decisions from #260 that should not be "simplified" away:
    deadline the gRPC C core never expires — and `Grpc\Call::startBatch()` is
    a blocking call *inside* the C extension, so neither `max_execution_time`
    nor `set_time_limit()` can rescue a worker pinned on a half-open
-   connection. `null` now resolves to `GrpcClient::DEFAULT_TIMEOUT_MS` (30 s),
-   and the only way to ask for an unbounded call is the explicit non-positive
-   sentinel `0` — deliberately the same spelling `TimeoutConfig`'s
-   `batchDeadlineMs = 0` already uses for "disabled", so there is one
-   convention rather than two. The 30 s backstop is defence in depth, not the
-   fix: the real deadlines are named per call site, so a 30 s default never
-   has to be the one that fires.
+   connection. `null` now resolves to `GrpcClient::DEFAULT_TIMEOUT_MS` (30 s).
+   The 30 s backstop is defence in depth, not the fix: the real deadlines are
+   named per call site, so a 30 s default never has to be the one that fires.
+   The "no deadline" sentinel `0` that used to sit next to it is gone — see
+   the decision on a non-positive timeout below.
 2. **PD, TSO and lock resolution have their own `TimeoutConfig` fields**
    (`pdTimeoutMs` / `tsoTimeoutMs` / `lockResolveTimeoutMs`, all finite
    defaults) rather than borrowing a store field. They are separate because
@@ -775,16 +775,12 @@ rule that class is now held to:
    PHP-FPM pool. The class of bug is not a bad value but a **`null` that
    silently means "forever"**, and nothing in PHP's type system objects to a
    `?:` over a `?int` that produces it. So the nullable deadline helper is
-   gone: `RawKvBatch::timeoutMs()` returns `int` with a `default => throw`, and
-   a non-positive configured value resolves to
-   `GrpcClient::DEFAULT_TIMEOUT_MS` — because `TimeoutConfig`'s `0` is a
-   *transport-level* opt-out, and a hand-rolled `new Call(...)` is not the
-   transport.
-2. **Two sites may legitimately produce one, and they are enumerated, counted
-   and justified**: `GrpcClient::deadline()`'s explicit `0` sentinel (the
-   library's single "disabled" spelling, from #260) and
+   gone: `RawKvBatch::timeoutMs()` returns `int` with a `default => throw`.
+2. **No site may produce one.** The two that used to be enumerated — the
+   unary transport's explicit `0` sentinel and
    `BatchCommandsConnection::open()`'s `$deadlineMs` stream-lifetime parameter
-   (a bidirectional stream, not a unary call; production never passes `0`).
+   — are both gone since #276 (GRPC-17): a non-positive value is a
+   configuration error, so there is no way to ask for an unbounded call.
 3. **`NoInfiniteDeadlineGuardTest` keeps it that way.** A guard is the right
    instrument precisely because the bug is an *absent* value: a behavioural
    test can only assert the paths it drives, and a value assertion says nothing
@@ -793,9 +789,9 @@ rule that class is now held to:
    every shape that can produce an unbounded deadline must mention it somewhere,
    so `match`, `??`, `if` and a hardcoded one are all caught, and a count-based
    allowlist (the `NoSilentRegionDropGuardTest` precedent) forces a conscious
-   review whenever a site is added or removed. It carries an
-   `assertSame(2, …)` witness so a scan that silently stops finding anything
-   fails too.
+   review whenever a site is added or removed. The allowlist is empty now, so
+   the guard's witness is a **scan of a snippet** that contains an
+   `infFuture()`: a scan that silently stops finding anything fails too.
 
 The same reasoning is why the *retry* half is a test and not a refactor: a
 shared `RetryExecutor` is the documented collaborator `Transaction` memoizes
@@ -807,6 +803,35 @@ the wall-clock deadline, the #233 fatal-path interaction, and the attempt cap.
 Do not collapse the three bounds into one value: the 30 s wall clock is the
 binding one for a `ServerBusy` storm (1–2 s sleeps), the sleep budgets are what
 bound a millisecond-scale retry storm that no wall clock would catch.
+
+## A non-positive timeout is a configuration error, not a "disabled" spelling (issue #276)
+
+Issue #276 removed the last way to ask for an unbounded gRPC call. The
+decision worth recording is *where* the rule is enforced, because the
+alternative — validating only at the transport — was tried first and is worse:
+
+1. **The rule is enforced where the value is configured, not only where it is
+   used.** `TimeoutConfig`'s constructor rejects a non-positive value for
+   every timeout field, and `ConnectionFactory` rejects a non-positive
+   `options['timeout']` entry *before* the `TimeoutConfig` is built, so the
+   error names the option key the user wrote. Validating only in
+   `GrpcClient::deadline()` would have produced the same failure, but late: the
+   error would surface on the first RPC instead of at construction, and the
+   message would name an internal field rather than the configuration entry
+   that carries the mistake.
+2. **`0` is not a safe spelling for "disabled" in a timeout.** It was the
+   library's documented "no deadline" sentinel, and it is also exactly what
+   `(int) getenv('TIKV_READ_TIMEOUT_MS')` yields when the variable is unset —
+   so the sentinel turned a configuration mistake into a call that never
+   expires. The two knobs that still spell "disabled" as `0` are not timeouts
+   in that sense: `batchDeadlineMs` is a wall-clock budget for the batch
+   executor (it never reaches a gRPC deadline) and the slow-log thresholds
+   disable a log line. Each config class states and enforces its own contract
+   rather than leaving the meaning of `0` to be discovered at the transport.
+3. **The change is a breaking one and says so.** A deployment that runs with a
+   zero timeout now fails at construction — which is the desired outcome,
+   because the previous behaviour was a latent outage. `CHANGELOG.md` carries
+   the **BREAKING** marker and a migration note.
 
 ## The ext-grpc channel semantics are verified, not assumed (issue #283)
 
@@ -981,6 +1006,38 @@ the thrown type. Pinned by `tests/Unit/TxnKv/TxnKvFanoutTest.php`
 `::testFailingRegionIsRetriedOnItsOwnWhilePeersAreNotResent`,
 `::testAggregatedPrewriteFailureNamesEveryFailingRegion`).
 
+## An option the client cannot apply is an error, not a no-op (issue #272)
+
+The concrete symptom — `options['timeout']['ingestTimeoutMs']` was dropped on
+the floor, so an operator who configured a five-minute SST ingest deadline got
+the 60-second default and no warning — was fixed by #580, which re-added the
+key to the hand-written list. Issue #272 records the decision that keeps it
+fixed:
+
+1. **The mapping is derived from the config class, not written out.** The
+   factory reads `TimeoutConfig`'s and `SlowLogConfig`'s constructor
+   parameters and maps `options['timeout']` / `options['slowLog']` onto them
+   by name. A hand-written list is a list that drifts: the list had already
+   lost one field, silently, and nothing noticed because the value it lost
+   was only wrong on a slow store. A field that is added to the class is
+   configurable the moment it exists.
+2. **Three things are rejected: an unknown key, a value of the wrong type,
+   and a group that is not a map.** A silently dropped option has no effect
+   and the default applies — the user believes a deadline was raised and it
+   was not. The same is true of a value that is not applied because it has
+   the wrong type (`'readTimeoutMs' => '60000'` from an environment
+   variable), and of a group that is not a map at all
+   (`options['slowLog'] => 'x'` silently turned the slow logging *off*). The
+   TLS options already failed closed on a mistyped value; the timeouts and
+   the slow-log thresholds now do too. Rejecting what was never read is a
+   behaviour change, but it converts a silent misconfiguration into a startup
+   error, which is the correct trade. An option group that is absent — or
+   explicitly `null` — is not a misconfiguration: it means "not configured"
+   and keeps the default.
+3. **The regression test is derived from the class as well.** The test that
+   every field round-trips enumerates the constructor parameters, so a field
+   that is added without a mapping fails the suite instead of the cluster.
+
 ## The transport belongs to whoever created it (issue #407)
 
 The gRPC transport is **long-lived and shared** — one instance keeps the channel
@@ -1076,3 +1133,223 @@ decisions inside it are worth keeping:
    and that its removal breaks a consumer that instantiated it directly. No
    deprecation cycle precedes it: no API ever returned the class, and
    `docs/release-workflow.md` allows breaking changes before `1.0.0`.
+
+## ScanIterator enforces cursor progress but has no page ceiling (issue #312)
+
+`ScanIterator` throws `TiKvException` when a page does not progress: the
+first key lies before the cursor, or a key is not strictly greater than
+the key before it. Together these keep every key at or after the cursor,
+so the next cursor (`lastKey . "\x00"`) always moves forward. All
+checks use `KeyOrder`, so the comparison is bytewise (`"99"` is greater
+than `"100"`; see the #232 and #180 entries). Any forward scan can hang
+without the checks, bounded ones too: a constant last key keeps the cursor
+below `endKey`. The cost is O(batchSize) compares per page.
+
+There is deliberately **no page or row ceiling**. The iterator promises
+constant-memory streaming of ranges of any size. A server that fabricates
+a growing key space is not distinguishable from a large real one, so a
+ceiling would break legitimate scans.
+
+One case stays open. A server that answers a one-row page equal to the
+cursor key (`batchSize = 1`) makes the cursor grow by one `"\x00"` per
+page. It passes the checks, as in the one-byte advance of the #288 entry.
+The caller bounds the iteration (a row count, a deadline, `break`).
+
+## An empty KvScan batch is re-asked once, outside RetryExecutor (#512)
+
+`TxnReader::executeScanForRegion()` re-asks a sub-range once when it
+answers an empty batch while the limit is unsatisfied and the scan would
+end there. The probe of `assertRangeNotTruncated()` is covered too: a
+transient empty probe would hide a truncated whole-range scan (#440).
+Trade-offs:
+
+- `MAX_EMPTY_SCAN_REATTEMPTS = 1`, counted per sub-range: the counter
+  resets when a batch is non-empty and when the scan moves to the next
+  region after a split.
+- Limit 0 normalizes to 10240, so every empty sub-range now costs two
+  KvScan RPCs plus a `BackoffType::RegionMiss` sleep of about 2 ms.
+- The sleep is a plain `usleep()` outside `RetryExecutor`: it does not
+  count against `maxBackoffMs` or the retry deadline and emits no
+  retry metric.
+- A persistent empty answer is accepted after the re-ask and logged at
+  debug level with a redacted key.
+
+## `composer.lock` is committed and pinned to the lowest PHP (#311)
+
+The lock file is tracked and CI and the Docker image install from it.
+Before this, every run resolved the newest dev tools. A new Rector,
+PHPStan or `php-code-coverage` release could turn `master` red, and a
+vulnerable `squizlabs/php_codesniffer` went unnoticed.
+
+`composer.json` sets `config.platform.php` to `8.2.0`, the lowest
+supported PHP. Without it, a resolve on a newer host PHP (8.5) picks
+packages such as `symfony/string` 8.x that need PHP 8.4.1 or later. The
+lock then breaks the PHP 8.2 and 8.3 CI jobs and the PHP 8.3 Docker
+image. Raise the pin only when `require.php` drops a PHP version.
+
+The CI `lint` job runs `composer audit --locked`, so a new advisory
+fails the build. Downstream users of the library are not affected:
+Composer ignores the lock file of a dependency.
+
+## Resolved transaction statuses are cached, FIFO, 2048, final outcomes only (#428)
+
+`TxnKvClient` owns one `ResolvedTxnStatusCache` and passes it to the `LockResolver` of every transaction (a final outcome per start ts is global, as in client-go's store-level `resolved`). It maps start ts to
+commit ts (0 means rolled back), FIFO eviction, 2048 entries as in client-go.
+The size is a constant (`DEFAULT_CAPACITY`) and is not an option, because no
+user-facing option group fits it.
+
+Only a final outcome enters the cache: a commit ts above 0, or an explicit
+`TTLExpireRollback` or `LockNotExistRollback` action. `NoAction` and
+`MinCommitTSPushed` (the lock is alive), `TTLExpirePessimisticRollback` and
+`LockNotExistDoNothing` can still change, so they are never cached. A status
+of `commit_ts = 0` without a rollback action is not a rollback proof.
+
+A cache hit skips the async-commit secondary check, because a final rollback
+of the primary is final for every secondary too.
+
+`resolveLocks()` sends `ResolveLockRequest.keys`, so it resolves only the
+locks it saw. The single-lock `resolveLock()` still sends no keys, so TiKV
+resolves every lock of that transaction in the region. Locks of a live
+transaction do not block the others: they are resolved first, and one
+`TxnRetryableException` follows. Pinned by `LockResolverBatchTest` and
+`ResolvedTxnStatusCacheTest`.
+
+Known follow-up: `NoAction` with `lock_ttl = 0` and `commit_ts = 0` is resolved as
+rolled back but is not cached, unlike client-go.
+
+Cache lifetime tests: `TxnKvClientTest::testTransactionsShareOneResolvedStatusCache`
+(second transaction meets the same lock, one `KvCheckTxnStatus`);
+`LockResolverBatchTest::testCachedRollbackSkipsSecondaryCheckForAsyncCommitLock` pins the
+cache-hit path for async-commit locks.
+
+## Atomic mode and plain writes use different TiKV paths (#399)
+
+`setAtomicForCAS(true)` makes `put()`, `delete()`, `batchPut()` and
+`batchDelete()` send `for_cas`. `RawCASRequest` has no `for_cas` field.
+
+TiKV routes a `for_cas` put or delete to `raw_batch_put_atomic` or
+`raw_batch_delete_atomic` (`RawAtomicStore`). `RawCompareAndSwap` takes
+the same path. Both commands run through the transaction scheduler and
+take latches on their keys (`gen_lock!`). A plain `raw_put` writes to the
+engine directly and takes no latch. Source: `src/storage/mod.rs`,
+`src/server/service/kv.rs` and `src/storage/txn/commands/` in `tikv/tikv`.
+
+So a CAS is atomic only against writers that also use the atomic path.
+The client cannot enforce this across processes. The docs tell the user to
+use one mode for all writers of the same keys.
+
+## Opportunistic primary-lock heartbeat: pessimistic only, every lock TTL is `uptime + TTL`, no timer (#429)
+
+PHP has no background thread, so the client cannot run client-go's
+`ttlManager` goroutine. Issue #429 adds a keepalive that runs inside
+`Transaction::get()`, `batchGet()`, `scan()`, `set()`, `delete()` and
+`commit()` (`TwoPhaseCommitter::heartbeatIfDue()`). Choices that should not be
+"simplified" away:
+
+1. **Pessimistic transactions only.** The keepalive starts when the first
+   eager pessimistic lock is acknowledged
+   (`TransactionState::$primaryLockExpiresAtMs`). An optimistic transaction
+   writes no lock before the prewrite, and `TxnHeartBeat` for a missing lock
+   fails with `TxnNotFound`. This matches client-go, which starts its
+   keepalive after the primary prewrite or the first pessimistic lock. A
+   deferred pessimistic transaction (`eagerPessimisticLocks => false`) also
+   has no lock before `commit()`.
+2. **Every lock TTL is `min(uptime + TTL, MAX_TXN_TTL_MS)`.** TiKV expires a
+   lock when `lock.ts.physical + ttl < now.physical`
+   (`check_txn_status.rs:55,176`), so a TTL is counted from the start
+   timestamp, and `TxnHeartBeat` only raises it (`txn_heart_beat.rs:79`).
+   client-go adds the elapsed time in the same three places: the heartbeat
+   (`keepAlive`, `2pc.go:1354,1390`), the prewrite (`txnLockTTL`,
+   `2pc.go:867-871`, applied to every 2PC transaction, `2pc.go:803`) and the
+   pessimistic-lock request (`pessimistic.go:214-215`).
+   `TwoPhaseCommitter::ttlWithUptimeMs()` does it for all three, so a
+   plain TTL is never sent: it would be a no-op for a heartbeat after the first
+   TTL, and an already-expired lock for a prewrite or a first lock written late
+   in the life of the transaction. TiKV keeps `max(lock_ttl, lock.ttl)` on
+   prewrite (`prewrite.rs:527`), so the larger prewrite TTL cannot shrink a
+   pessimistic lock. The uptime is the client clock since the start of the
+   `Transaction`. `begin()` reads that clock before it fetches the start
+   timestamp and runs the GC safe-point check, so the tracked start is never
+   later than the real one. `MAX_TXN_TTL_MS` is one hour (client-go's `MaxTxnTTL`); at
+   the cap the client sends no more heartbeats. `MAX_LOCK_TTL_MS` (120000)
+   caps only the per-mutation scaling of the optimistic TTL and the value of
+   the two TTL options. The prewrite heartbeat trigger (half of the base TTL
+   since the prewrite started) uses the base TTL, not the uptime TTL.
+3. **Trigger: less than half of the TTL remains**, computed from the tracked
+   expiry (`startedAtMs + granted TTL`), not from the time of the last
+   heartbeat. The two differ when the first lock is taken late in the life of
+   the transaction.
+4. **A failed heartbeat throws and keeps the expiry.** It surfaces the typed
+   exception of #492, and the next operation tries again. Swallowing it would
+   hide a lock that is already gone until `commit()`.
+5. **`Transaction::heartbeat()` defaults to `null`**, meaning `uptime + TTL`
+   of the mode. The old default 10000 was a no-op for a transaction older than
+   10 s. An explicit value is still a total TTL.
+
+The clock is an injectable `?\Closure` on `Transaction` (shared with
+`TwoPhaseCommitter`), the same seam as the prewrite heartbeat of #218.
+
+## The idle sweep touches the returned channel before it sweeps, and `reapIdleChannels()` is public on the clients (#277)
+
+Issue #277 asks that the sweep run **before** the cache lookup, so a channel
+that is idle past the TTL is reclaimed and not refreshed by the call that
+finds it. The code does the opposite: on a cache hit it sets `lastUsed` of the
+returned channel first and then sweeps. Reason: a recreate does not give a new
+connection. ext-grpc keeps the channel in its persistent table, so the new
+handle resolves to the same `grpc_channel` (see the #283 entries). Reclaiming
+the requested channel and building it again would add work and no benefit, and
+it would risk closing the handle that the caller is about to use. The sweep
+still reclaims every **other** idle channel, which is what the issue needs.
+
+Other decisions of #277:
+
+1. The sweep interval is `min(idleTtl, max(1 s, idleTtl / 10))`, so it scales
+   with the TTL. A fixed 30 s would exceed a small TTL.
+2. The clock is a `?\Closure` constructor argument (default `microtime(true)`).
+3. `reapIdleChannels()` is on `GrpcClientInterface` (workers may hold the
+   interface) and on `RawKvClient` and `TxnKvClient`, because a worker holds
+   those and cannot reach the `GrpcClient` that the factory builds. It is a
+   no-op after `close()`, like `closeChannel()`.
+4. `maxChannels` eviction runs down to the cap in one call. The soft-cap
+   warning is logged once per overshoot episode (re-armed when the cache is
+   back under the cap), not on every growth of the maximum: a fan-out over
+   1 000 stores raises the maximum on every new address and would still log
+   once per address.
+5. #658 (BatchCommands stream on an unprotected channel) is not fixed here: it
+   needs a way to hold a channel in flight for the lifetime of a stream, on
+   the interface, and the transport is experimental and off by default.
+
+
+## The batch deadline is finite by default (#275)
+
+`TimeoutConfig::$batchDeadlineMs` defaults to 60000 instead of 0. A batch could run without any
+wall-clock bound, so a slow cluster stalled a PHP worker for a long time. The call sites already
+passed the deadline (RawKV V1, ApiV2, TxnKV through `BatchAsyncExecutor`), so the default was
+the missing part.
+
+1. The default equals the largest default per-call timeout (`ingestTimeoutMs`, 60000). The
+   default configuration passes its own validation.
+2. A deadline above 0 must be at least every per-call timeout used inside a fan-out (all seven:
+   write, batch read, batch write, scan, delete-range, checksum, ingest; `readTimeoutMs` is
+   used only by synchronous point reads, never inside a fan-out). A smaller
+   deadline has no effect on one call, and the constructor throws `InvalidArgumentException`.
+3. `0` stays the explicit opt-out. This is the same contract as in #276: the batch deadline is
+   a wall-clock budget, not a gRPC deadline.
+4. The default of the `$deadlineMs` parameters of `executeParallel()` and
+   `executeParallelCapped()` is `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, so a direct caller is
+   no longer unbounded without saying so.
+5. The deadline is checked at dispatch and wait boundaries only. We do not interrupt a blocking
+   wait. One wait on a retryable call runs the whole retry loop of one region, so the worst
+   case is `batchDeadlineMs` plus one region's full retry loop (the retry deadline, 30000 ms,
+   plus one per-call timeout).
+6. `executeParallelCapped()` and the parallel scan (`RawKvScanner::scanSegmentsInParallel()`)
+   use one shared budget for all windows. A deadline is never a reason for the scan to fall
+   back to the sequential path, which has no deadline. For scans the deadline applies per region
+   batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. The exception reports the configured
+   deadline, the total elapsed time and every region without a result.
+7. TxnKV: a deadline in the secondary-commit fan-out happens after the commit point, so it is
+   logged and `commit()` does not throw (a retrying caller could apply the transaction
+   twice). A deadline in a rollback fan-out throws, like a
+   partial failure: an early return would report a failed cleanup as a success, `rollback()`
+   would mark the state `RolledBack` and close it, and nobody would retry.
+8. Not covered: the experimental BatchCommands multiplex path is bounded per call only.

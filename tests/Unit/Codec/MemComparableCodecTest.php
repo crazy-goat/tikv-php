@@ -39,6 +39,10 @@ class MemComparableCodecTest extends TestCase
                 '0102030405060708ff0000000000000000f7',
             ],
             'split boundary' => ["\x01\x00", '0100000000000000f9'],
+            // 'abc' is 3 bytes, so pad = 5 and the marker is 0xFF - 5 = 0xFA.
+            // Issue #252 quotes 0xF9, which is the marker of a 2-byte key.
+            'abc' => ['abc', '6162630000000000fa'],
+            'two bytes' => ['ab', '6162000000000000f9'],
             'hello' => ['hello', '68656c6c6f000000fc'],
             'mrr' => ['mrr', '6d72720000000000fa'],
         ];
@@ -122,6 +126,62 @@ class MemComparableCodecTest extends TestCase
         $this->assertSame($expected, $decoded, 'MCE encoding must preserve sort order');
     }
 
+    public function testEncodedKeysSortCorrectlyAcrossGroupBoundary(): void
+    {
+        $keys = [
+            str_repeat("\x00", 7),
+            str_repeat("\x00", 8),
+            str_repeat("\x00", 9),
+            str_repeat("\x00", 7) . "\xff",
+            str_repeat("\xff", 8),
+            str_repeat("\xff", 8) . "\x00",
+            str_repeat('k', 16),
+            str_repeat('k', 16) . 'k',
+            '10',
+            '9',
+        ];
+
+        foreach ($keys as $a) {
+            foreach ($keys as $b) {
+                $this->assertSame(
+                    strcmp($a, $b) <=> 0,
+                    strcmp($this->codec->encode($a), $this->codec->encode($b)) <=> 0,
+                    bin2hex($a) . ' vs ' . bin2hex($b),
+                );
+            }
+        }
+    }
+
+    public function testRandomBinaryKeysRoundTripAndKeepSortOrder(): void
+    {
+        $rng = new \Random\Randomizer(new \Random\Engine\Mt19937(252));
+        $keys = [];
+        for ($i = 0; $i < 400; ++$i) {
+            $len = $rng->getInt(0, 20);
+            $key = '';
+            for ($j = 0; $j < $len; ++$j) {
+                // Bias toward the bytes that matter for padding and markers.
+                $key .= \chr($rng->getInt(0, 3) === 0 ? [0x00, 0xFF][$rng->getInt(0, 1)] : $rng->getInt(0, 255));
+            }
+            $keys[] = $key;
+        }
+
+        foreach ($keys as $key) {
+            $this->assertSame($key, $this->codec->decode($this->codec->encode($key)), bin2hex($key));
+        }
+
+        $sample = \array_slice($keys, 0, 150);
+        foreach ($sample as $a) {
+            foreach ($sample as $b) {
+                $this->assertSame(
+                    strcmp($a, $b) <=> 0,
+                    strcmp($this->codec->encode($a), $this->codec->encode($b)) <=> 0,
+                    bin2hex($a) . ' vs ' . bin2hex($b),
+                );
+            }
+        }
+    }
+
     // ========================================================================
     //  Malformed input
     // ========================================================================
@@ -154,6 +214,14 @@ class MemComparableCodecTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('Invalid MCE marker');
         $this->codec->decode(str_repeat("\x00", 8) . "\xf6");
+    }
+
+    public function testDecodeThrowsOnMarkerBelowValidRange(): void
+    {
+        // Marker 0x00 implies pad = 255.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid MCE marker');
+        $this->codec->decode(str_repeat("\x01", 8) . "\x00");
     }
 
     public function testDecodeThrowsOnNonZeroPadding(): void

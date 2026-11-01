@@ -9,7 +9,7 @@ use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
-use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
@@ -52,7 +52,7 @@ class RawKvScannerPairErrorTest extends TestCase
         $response = new RawScanResponse();
         $response->setKvs([$pair]);
 
-        $this->expectException(RegionException::class);
+        $this->expectException(KeyErrorException::class);
         $this->expectExceptionMessage('per-pair error');
 
         $this->parse($response);

@@ -9,11 +9,13 @@ use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
+use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
@@ -112,6 +114,25 @@ final readonly class RegionResolver
 
         $this->metrics->regionCacheMiss('region_resolution');
         $region = $this->pdClient->getRegion($key);
+
+        // Issue #253 (REG-22): PD serves GetRegion from a possibly stale
+        // region tree, so during a split it can answer with a region that no
+        // longer covers the key. Caching it would poison the cache: the
+        // request then fails with a fatal KeyNotInRegion for the whole TTL.
+        // The answer is rejected as a retryable region miss instead, and
+        // nothing is cached.
+        if (!KeyOrder::inRange($key, $region->startKey, $region->endKey)) {
+            throw new RegionException(
+                'RegionResolver',
+                sprintf(
+                    'PD returned region %d that does not contain key %s',
+                    $region->regionId,
+                    KeyRedactor::redact($key),
+                ),
+                errorKind: ErrorKind::RegionNotFound,
+            );
+        }
+
         $this->regionCache->put($region);
 
         return $region;

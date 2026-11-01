@@ -236,6 +236,25 @@ class RegionCache implements RegionCacheInterface
         }
 
         $existing = $this->entriesById[$region->regionId] ?? null;
+        if ($existing instanceof RegionEntry) {
+            // Never move backwards in time: a region whose epoch is strictly
+            // older than the cached one (same ID) is stale and must not
+            // overwrite the fresher entry (issue #249, REG-18).
+            $existingRegion = $existing->region;
+            if (
+                $region->epochVersion < $existingRegion->epochVersion
+                || ($region->epochVersion === $existingRegion->epochVersion
+                    && $region->epochConfVer < $existingRegion->epochConfVer)
+            ) {
+                if ($this->debugEnabled) {
+                    $this->logger->debug('Region cache ignored stale epoch', [
+                        'regionId' => $region->regionId,
+                    ]);
+                }
+                return;
+            }
+        }
+
         if (
             $existing instanceof RegionEntry
             && $existing->region->startKey === $region->startKey

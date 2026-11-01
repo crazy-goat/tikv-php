@@ -146,6 +146,10 @@ final class BenchStore implements GrpcClientInterface
     {
     }
 
+    public function reapIdleChannels(): void
+    {
+    }
+
     public function getChannel(string $address): Channel
     {
         throw new RuntimeException('getChannel is not used by the benchmark');

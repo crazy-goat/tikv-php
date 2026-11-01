@@ -18,12 +18,11 @@ use Grpc\Channel;
  *   (30 s). `null` used to mean "no deadline", which is why a blocking
  *   `Grpc\Call::startBatch()` on a half-open connection could pin a worker
  *   past `max_execution_time`;
- * - a non-positive int (`0`) — the explicit opt-out: no deadline at all.
- *
- * The sentinel is `0` rather than a separate method because it is how the
- * rest of the library already spells "disabled" (`TimeoutConfig`'s
- * `batchDeadlineMs = 0`), and because a call site must be able to decide
- * per call.
+ * - a non-positive int (`0`, a negative number) — a **configuration error**
+ *   that throws `InvalidArgumentException` (issue #276, GRPC-17). `0` used
+ *   to be the explicit opt-out for "no deadline at all", but it is also what
+ *   an unset environment variable coerces to, so the opt-out turned a
+ *   configuration mistake into an unbounded call.
  *
  * The ext-grpc semantics behind {@see GrpcClientInterface::close()} — a
  * `Grpc\Channel` is reference-counted and kept in ext-grpc's process-global
@@ -43,10 +42,12 @@ interface GrpcClientInterface
      * @param Message $request Protobuf request message
      * @param class-string<T> $responseClass Response message class name
      * @param int|null $timeoutMs Deadline in milliseconds; null = the library
-     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS}),
-     *                            0 = no deadline
+     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS});
+     *                            a non-positive value throws
+     *                            `InvalidArgumentException`
      * @return T Response message
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException On gRPC error
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function call(
         string $address,
@@ -73,10 +74,12 @@ interface GrpcClientInterface
      * @param Message $request Protobuf request message
      * @param class-string<T> $responseClass Response message class name
      * @param int|null $timeoutMs Deadline in milliseconds; null = the library
-     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS}),
-     *                            0 = no deadline
+     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS});
+     *                            a non-positive value throws
+     *                            `InvalidArgumentException`
      * @return GrpcFuture Un-waited future resolving to T
      * @throws \CrazyGoat\TiKV\Client\Exception\InvalidStateException When the client has been closed
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callAsync(
         string $address,
@@ -100,10 +103,12 @@ interface GrpcClientInterface
      * @param Message[] $requests Sequence of request messages to stream
      * @param class-string<T> $responseClass Response message class name
      * @param int|null $timeoutMs Deadline in milliseconds; null = the library
-     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS}),
-     *                            0 = no deadline
+     *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS});
+     *                            a non-positive value throws
+     *                            `InvalidArgumentException`
      * @return T Response message
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException On gRPC error
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $timeoutMs is not positive
      */
     public function callStreaming(
         string $address,
@@ -156,6 +161,19 @@ interface GrpcClientInterface
      * @param string $address Channel address to close
      */
     public function closeChannel(string $address): void;
+
+    /**
+     * Drop the cached channels that were idle longer than the idle TTL.
+     *
+     * The transport also sweeps by itself when a request arrives; a
+     * long-running worker calls this from its own tick to reclaim channels
+     * while it is quiet. A channel with in-flight calls is skipped. Dropping a
+     * channel drops the cached handle, not necessarily the connection: see
+     * {@see closeChannel()}.
+     *
+     * No-op if the client has already been closed.
+     */
+    public function reapIdleChannels(): void;
 
     /**
      * Get or create a gRPC channel for the given address.

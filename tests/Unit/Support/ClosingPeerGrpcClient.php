@@ -99,6 +99,11 @@ final class ClosingPeerGrpcClient implements GrpcClientInterface
         $this->inner->close();
     }
 
+    public function reapIdleChannels(): void
+    {
+        $this->inner->reapIdleChannels();
+    }
+
     public function closeChannel(string $address): void
     {
         $this->inner->closeChannel($address);

@@ -155,7 +155,7 @@ final class TlsConfigBuilder
 
         // Canonicalize the path to resolve symlinks and ../ segments
         $resolved = realpath($path);
-        if ($resolved === false) {
+        if ($resolved === false || !is_readable($resolved)) {
             throw new InvalidArgumentException('Cannot read TLS file: file does not exist or is not readable');
         }
 
@@ -171,7 +171,7 @@ final class TlsConfigBuilder
             }
         }
 
-        $content = file_get_contents($resolved);
+        $content = @file_get_contents($resolved);
         if ($content === false) {
             throw new InvalidArgumentException('Cannot read TLS file: read failed');
         }

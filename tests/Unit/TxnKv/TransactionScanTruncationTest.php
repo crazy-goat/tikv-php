@@ -178,9 +178,10 @@ final class TransactionScanTruncationTest extends TestCase
         $result = $this->createTransaction(3)->scan('', '', 0);
 
         // A range with exactly the cap is complete: it is returned, not
-        // refused. The probe still runs — it is what tells the two apart.
+        // refused. The probe still runs — it is what tells the two apart —
+        // and its empty answer is re-asked once (issue #512).
         $this->assertSame(['k1', 'k2', 'k3'], array_column($result, 'key'));
-        $this->assertCount(2, $capturedRequests);
+        $this->assertCount(3, $capturedRequests);
         $this->assertSame('k3' . "\x00", $capturedRequests[1]->getStartKey());
         $this->assertSame(1, $capturedRequests[1]->getLimit());
     }

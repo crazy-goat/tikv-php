@@ -37,10 +37,9 @@ use Psr\Log\NullLogger;
  * wiring: deleting the call site in `RawKvBatch::batchGetWithRetry()`
  * would leave them green while the slow log silently stopped working for
  * batch reads. This test goes through the public `batchGet()` instead, on
- * the API V2 transport — the one path that uses the mockable `callAsync()`
- * instead of the hand-rolled `new \Grpc\Call(...)`. It still needs the
- * gRPC extension (`RawKvBatch::deadlineFor()` builds a `\Grpc\Timeval`
- * before the API V2 branch), so it lives in the `Grpc` suite.
+ * the API V2 transport with a mockable `callAsync()`
+ * instead of a real gRPC call (the fan-out always goes through `callAsync()`
+ * since #273). It needs no ext-grpc since #273.
  */
 class RawKvBatchSlowLogWiringTest extends TestCase
 {

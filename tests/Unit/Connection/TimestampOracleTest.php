@@ -11,6 +11,7 @@ use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -20,6 +21,54 @@ use Psr\Log\NullLogger;
 
 class TimestampOracleTest extends TestCase
 {
+    /**
+     * A non-positive TSO deadline is a configuration error (issue #276,
+     * GRPC-17) and is reported here, where the mistake was made, instead of
+     * deep inside the transport.
+     */
+    public function testANonPositiveTsoTimeoutIsRejected(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getClusterId')->willReturn(1);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('tsoTimeoutMs must be greater than 0, got 0');
+
+        new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+            tsoTimeoutMs: 0,
+        );
+    }
+
+    /**
+     * A non-positive timeout passed to a call is rejected at the call site,
+     * not deep inside the transport (issue #276, GRPC-17).
+     */
+    public function testANonPositiveCallTimeoutIsRejected(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getClusterId')->willReturn(1);
+
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            fn() => $pdClient->getClusterId(),
+            fn(int $id) => $pdClient->setClusterId($id),
+            new NullLogger(),
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('timeoutMs must be greater than 0, got 0');
+
+        $oracle->getTimestamp(0);
+    }
+
     public function testGetTimestampReturnsComposedTimestamp(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);

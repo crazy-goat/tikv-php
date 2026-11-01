@@ -41,6 +41,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -56,6 +57,12 @@ use Psr\Log\NullLogger;
  */
 final readonly class TxnReader
 {
+    /**
+     * Re-asks allowed for a KvScan sub-range that answered empty while the
+     * limit was still unsatisfied (issue #512).
+     */
+    private const MAX_EMPTY_SCAN_REATTEMPTS = 1;
+
     /**
      * @param int $startTs Transaction start timestamp (constant for the lifetime of the reader)
      */
@@ -561,16 +568,57 @@ final readonly class TxnReader
                 $this->handleReadKeyError($error, $regionKeys[0] ?? '', 'BatchGet');
             }
 
+            $pairErrors = [];
             foreach ($response->getPairs() as $index => $pair) {
                 $pairError = $pair->getError();
                 if ($pairError instanceof KeyError) {
                     $fallbackKey = is_int($index) ? ($regionKeys[$index] ?? $pair->getKey()) : $pair->getKey();
-                    $this->handleReadKeyError($pairError, $fallbackKey, 'BatchGet');
+                    $pairErrors[] = [$pairError, $fallbackKey];
                 }
             }
+            $this->handleReadKeyErrors($pairErrors, 'BatchGet');
 
             return $response;
         }, $future);
+    }
+
+    private function lockRetryMessage(string $operation): string
+    {
+        return $operation === 'Get'
+            ? 'Lock encountered, resolved - retry'
+            : sprintf('Lock encountered during %s, resolved - retry', $operation);
+    }
+
+    /**
+     * Handle the per-pair KeyErrors of one batchGet or scan response. Every
+     * lock is resolved in one batch (one status check per transaction, one
+     * KvResolveLock per region and transaction, issue #428) before a single
+     * retry is requested. Without locks the first error raises as in
+     * {@see handleReadKeyError()}.
+     *
+     * @param list<array{KeyError, string}> $pairErrors each error with its fallback key
+     */
+    private function handleReadKeyErrors(array $pairErrors, string $operation): void
+    {
+        $locks = [];
+        foreach ($pairErrors as [$error, $fallbackKey]) {
+            $locked = $error->getLocked();
+            if ($locked !== null) {
+                if ($locked->getKey() === '') {
+                    $locked->setKey($fallbackKey);
+                }
+                $locks[] = $locked;
+            }
+        }
+
+        if ($locks !== []) {
+            $this->lockResolver->resolveLocks($locks);
+            throw new TxnRetryableException($this->lockRetryMessage($operation), BackoffType::TxnLock);
+        }
+
+        foreach ($pairErrors as [$error, $fallbackKey]) {
+            $this->handleReadKeyError($error, $fallbackKey, $operation);
+        }
     }
 
     /**
@@ -590,10 +638,7 @@ final readonly class TxnReader
                 ? $rawPrimary
                 : ($locked->getKey() !== '' ? $locked->getKey() : $fallbackKey);
             $this->lockResolver->resolveLock($primary, $locked);
-            $lockMessage = $operation === 'Get'
-                ? 'Lock encountered, resolved - retry'
-                : sprintf('Lock encountered during %s, resolved - retry', $operation);
-            throw new TxnRetryableException($lockMessage, BackoffType::TxnLock);
+            throw new TxnRetryableException($this->lockRetryMessage($operation), BackoffType::TxnLock);
         }
 
         $retryable = $error->getRetryable();
@@ -628,6 +673,7 @@ final readonly class TxnReader
         $results = [];
         $pending = $limit;
         $cursorStart = $startKey;
+        $emptyReattempts = 0;
 
         while (true) {
             // Resolve on the current start key: the sub-range starts inside
@@ -707,22 +753,29 @@ final readonly class TxnReader
                 }
 
                 $subResults = [];
+                $pairErrors = [];
                 foreach ($response->getPairs() as $pair) {
                     $pairError = $pair->getError();
                     if ($pairError instanceof KeyError) {
-                        $this->handleReadKeyError($pairError, $pair->getKey(), 'Scan');
+                        $pairErrors[] = [$pairError, $pair->getKey()];
                     }
                     $subResults[] = [
                         'key' => $pair->getKey(),
                         'value' => $pair->getValue(),
                     ];
                 }
+                $this->handleReadKeyErrors($pairErrors, 'Scan');
 
                 return $subResults;
             }, $classifier);
 
             foreach ($batch as $row) {
                 $results[] = $row;
+            }
+
+            $emptyBatch = $batch === [];
+            if (!$emptyBatch) {
+                $emptyReattempts = 0;
             }
 
             if ($pending > 0) {
@@ -745,9 +798,27 @@ final readonly class TxnReader
                 || KeyOrder::lte($freshEndKey, $cursorStart)
                 || ($endKey !== '' && KeyOrder::gte($freshEndKey, $endKey))
             ) {
+                // An empty answer for a still-unsatisfied limit that would end
+                // the scan is the one shape a transient empty KvScan batch
+                // takes (issue #512). Re-ask the same range a bounded number
+                // of times before accepting it as the end of the data.
+                if ($emptyBatch && $pending > 0) {
+                    if ($emptyReattempts < self::MAX_EMPTY_SCAN_REATTEMPTS) {
+                        usleep(BackoffType::RegionMiss->sleepMs($emptyReattempts) * 1000);
+                        $emptyReattempts++;
+                        continue;
+                    }
+
+                    $this->logger->debug('TxnKV scan accepted an empty batch after re-attempts', [
+                        'startKey' => KeyRedactor::redact($cursorStart),
+                        'pending' => $pending,
+                        'reattempts' => $emptyReattempts,
+                    ]);
+                }
                 break;
             }
             $cursorStart = $freshEndKey;
+            $emptyReattempts = 0;
         }
 
         return $results;

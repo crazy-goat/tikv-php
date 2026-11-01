@@ -10,6 +10,7 @@ use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
@@ -604,6 +605,10 @@ final readonly class RawKvScanner
      * enumeration (which would leave a hole before the next segment). Reads
      * are idempotent, so discarding a partial concurrent result is safe.
      *
+     * The batch deadline spans all windows. A {@see BatchDeadlineExceededException}
+     * is never a reason to fall back (the sequential path has no deadline): it
+     * is rethrown with the configured deadline.
+     *
      * @param list<array{RegionInfo, string, string}> $segments
      * @param string $scanEnd exclusive end of the range the segments cover
      * @return array<array{key: string, value: ?string}>
@@ -621,8 +626,24 @@ final readonly class RawKvScanner
         $segmentCount = count($segments);
         $lastIndex = -1;
         $lastFreshEnd = '';
+        $deadlineMs = $this->timeoutConfig->batchDeadlineMs;
+        $startTimeMs = (int) (microtime(true) * 1000);
 
         for ($offset = 0; $offset < $segmentCount && $remaining > 0; $offset += $this->maxConcurrency) {
+            // One batch deadline for ALL windows (issue #275): each window gets
+            // what is left of it, so N windows cannot take N times the deadline.
+            $windowDeadlineMs = $deadlineMs;
+            if ($deadlineMs > 0) {
+                $elapsedMs = (int) (microtime(true) * 1000) - $startTimeMs;
+                if ($elapsedMs >= $deadlineMs) {
+                    throw new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
+                        'dispatchedRegions' => array_keys(array_slice($segments, 0, $offset, true)),
+                        'pendingRegions' => array_keys(array_slice($segments, $offset, null, true)),
+                    ]);
+                }
+                $windowDeadlineMs = $deadlineMs - $elapsedMs;
+            }
+
             /** @var array<int, array{RegionInfo, string, string}> $window */
             $window = array_slice($segments, $offset, $this->maxConcurrency, true);
 
@@ -658,7 +679,19 @@ final readonly class RawKvScanner
                 $responses = $this->createBatchExecutor()->executeParallelCapped(
                     $calls,
                     $this->maxConcurrency,
-                    $this->timeoutConfig->batchDeadlineMs,
+                    $windowDeadlineMs,
+                );
+            } catch (BatchDeadlineExceededException) {
+                // An exhausted deadline is not a reason to fall back: the
+                // sequential path has no deadline at all. Report the
+                // configured deadline and the segments without a result.
+                throw new BatchDeadlineExceededException(
+                    $deadlineMs,
+                    (int) (microtime(true) * 1000) - $startTimeMs,
+                    [
+                        'dispatchedRegions' => array_keys(array_slice($segments, 0, $offset + count($window), true)),
+                        'pendingRegions' => array_keys(array_slice($segments, $offset, null, true)),
+                    ],
                 );
             } catch (TiKvException) {
                 return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);

@@ -128,6 +128,8 @@ final class LockTtlScalingTest extends TestCase
             regionResolver: $resolver,
             maxBackoffMs: 20000,
             retryDeadlineMs: 3000,
+            // Fixed clock: no uptime is added to the TTL (issue #429).
+            clock: fn (): int => $this->nowMs,
         );
 
         for ($i = 0; $i < 500; ++$i) {
@@ -149,7 +151,7 @@ final class LockTtlScalingTest extends TestCase
     public function testOptimisticLockTtlIsCappedAtMaximum(): void
     {
         $committer = $this->createCommitter();
-        $method = new \ReflectionMethod(TwoPhaseCommitter::class, 'optimisticLockTtlMs');
+        $method = new \ReflectionMethod(TwoPhaseCommitter::class, 'scaledOptimisticLockTtlMs');
 
         $mutations = array_fill(0, 15000, new Mutation());
 
@@ -184,7 +186,8 @@ final class LockTtlScalingTest extends TestCase
 
         self::assertCount(1, $this->heartbeatRequests);
         self::assertGreaterThan(3000, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
-        self::assertSame(3020, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
+        // TiKV counts the TTL from the start: uptime (5000) + TTL (3020).
+        self::assertSame(8020, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
         self::assertSame('a1', $this->heartbeatRequests[0]->getPrimaryLock());
     }
 
@@ -279,7 +282,7 @@ final class LockTtlScalingTest extends TestCase
         self::assertCount(1, $this->prewriteRequests);
         self::assertSame(30000, (int) $this->prewriteRequests[0]->getLockTtl());
         self::assertCount(1, $this->heartbeatRequests);
-        self::assertSame(30000, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
+        self::assertSame(50000, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
     }
 
     private function createCommitter(

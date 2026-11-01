@@ -13,6 +13,7 @@ use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -195,45 +196,301 @@ class ConnectionFactoryTest extends TestCase
         $this->assertSame(45000, $bundle->timeoutConfig->ingestTimeoutMs);
     }
 
-    public function testTimeoutIngestTimeoutMsNonIntFallsBackToDefault(): void
+    public function testTimeoutIngestTimeoutMsNonIntIsRejected(): void
     {
-        $bundle = ConnectionFactory::create(
+        // A mistyped value was silently dropped before (issue #272): the
+        // option had no effect and the default applied, with no warning.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['timeout'][ingestTimeoutMs] must be an int (milliseconds), string given",
+        );
+
+        ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['timeout' => ['ingestTimeoutMs' => '45000']],
         );
-
-        $this->assertSame(60000, $bundle->timeoutConfig->ingestTimeoutMs);
     }
 
     // ========================================================================
     // options['timeout']['batchDeadlineMs'] — batch fan-out deadline (issue #185 row 6)
     // ========================================================================
 
-    public function testTimeoutBatchDeadlineMsDefaultsToZeroDisabled(): void
+    public function testTimeoutBatchDeadlineMsDefaultsToAFiniteValue(): void
     {
         $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
 
+        $this->assertSame(TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS, $bundle->timeoutConfig->batchDeadlineMs);
+    }
+
+    public function testTimeoutBatchDeadlineMsZeroDisablesTheDeadline(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['batchDeadlineMs' => 0]],
+        );
+
         $this->assertSame(0, $bundle->timeoutConfig->batchDeadlineMs);
+    }
+
+    public function testTimeoutBatchDeadlineMsBelowAPerCallTimeoutIsRejectedByName(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('batchDeadlineMs (2500) must not be less than writeTimeoutMs (5000)');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['batchDeadlineMs' => 2500]],
+        );
     }
 
     public function testTimeoutBatchDeadlineMsIsThreadedThrough(): void
     {
         $bundle = ConnectionFactory::create(
             ['127.0.0.1:2379'],
-            options: ['timeout' => ['batchDeadlineMs' => 2500]],
+            options: ['timeout' => ['batchDeadlineMs' => 90000]],
         );
 
-        $this->assertSame(2500, $bundle->timeoutConfig->batchDeadlineMs);
+        $this->assertSame(90000, $bundle->timeoutConfig->batchDeadlineMs);
     }
 
-    public function testTimeoutBatchDeadlineMsNonIntFallsBackToDefault(): void
+    public function testTimeoutBatchDeadlineMsNonIntIsRejected(): void
     {
-        $bundle = ConnectionFactory::create(
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['timeout'][batchDeadlineMs] must be an int (milliseconds), string given",
+        );
+
+        ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['timeout' => ['batchDeadlineMs' => '2500']],
         );
+    }
 
-        $this->assertSame(0, $bundle->timeoutConfig->batchDeadlineMs);
+    // ========================================================================
+    // options['timeout'] — a non-positive timeout is a configuration error
+    // (issue #276, GRPC-17). The message names the option key the user
+    // wrote, not an internal field name.
+    // ========================================================================
+
+    /**
+     * @return array<string, array{string, int}>
+     */
+    public static function nonPositiveTimeoutOptionProvider(): array
+    {
+        return [
+            'readTimeoutMs' => ['readTimeoutMs', -1],
+            'writeTimeoutMs' => ['writeTimeoutMs', 0],
+            'batchReadTimeoutMs' => ['batchReadTimeoutMs', 0],
+            'batchWriteTimeoutMs' => ['batchWriteTimeoutMs', 0],
+            'scanTimeoutMs' => ['scanTimeoutMs', 0],
+            'deleteRangeTimeoutMs' => ['deleteRangeTimeoutMs', 0],
+            'checksumTimeoutMs' => ['checksumTimeoutMs', 0],
+            'ingestTimeoutMs' => ['ingestTimeoutMs', 0],
+            'pdTimeoutMs' => ['pdTimeoutMs', 0],
+            'tsoTimeoutMs' => ['tsoTimeoutMs', 0],
+            'lockResolveTimeoutMs' => ['lockResolveTimeoutMs', 0],
+        ];
+    }
+
+    #[DataProvider('nonPositiveTimeoutOptionProvider')]
+    public function testANonPositiveTimeoutOptionIsRejected(string $key, int $value): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf("options['timeout'][%s] must be greater than 0", $key));
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => [$key => $value]],
+        );
+    }
+
+    /**
+     * A key the factory does not know is a misconfiguration, not a no-op:
+     * a silently dropped option has no effect and the default applies, with
+     * no warning anywhere (issue #272, GRPC-13). The TLS options already
+     * fail this way.
+     */
+    public function testAnUnknownTimeoutOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Unrecognised option(s) in options['timeout']: notATimeout");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['notATimeout' => 0]],
+        );
+    }
+
+    /**
+     * A group that is not a map at all is a misconfiguration of the same
+     * class as an unknown key — `options['tls']` already fails closed on it
+     * (issue #272, GRPC-13).
+     */
+    public function testANonArrayTimeoutOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['timeout'] must be an array, got string");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => 'readTimeoutMs=1000'],
+        );
+    }
+
+    /**
+     * A group that is explicitly `null` means "not configured" — the same
+     * as leaving it out — not "wrong type".
+     */
+    public function testANullTimeoutOptionIsTreatedAsAbsent(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => null],
+        );
+
+        $this->assertSame(5000, $bundle->timeoutConfig->readTimeoutMs);
+    }
+
+    public function testANullSlowLogOptionIsTreatedAsAbsent(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => null],
+        );
+
+        $this->assertNull($bundle->slowLogConfig);
+    }
+
+    public function testANonArraySlowLogOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['slowLog'] must be an array, got string");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => 'readThresholdMs=100'],
+        );
+    }
+
+    /**
+     * A slow-log threshold of the wrong type was silently dropped before
+     * (issue #272): the option had no effect and the default applied.
+     */
+    public function testANonIntSlowLogThresholdIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['slowLog'][readThresholdMs] must be an int (milliseconds), string given",
+        );
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => ['readThresholdMs' => '250']],
+        );
+    }
+
+    /**
+     * The slow-log error names the option the user wrote, not the internal
+     * field — like the timeout group does.
+     */
+    public function testANegativeSlowLogThresholdNamesTheOption(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['slowLog'][readThresholdMs] must be greater than or equal to 0, got -1");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => ['readThresholdMs' => -1]],
+        );
+    }
+
+    public function testAnUnknownSlowLogOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Unrecognised option(s) in options['slowLog']: notAThreshold");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => ['notAThreshold' => 0]],
+        );
+    }
+
+    /**
+     * Every {@see TimeoutConfig} field is configurable through
+     * `options['timeout']` under its own name — the factory derives the
+     * list of keys it validates from that class, so a new field is
+     * validated as soon as it exists and no key can drift.
+     */
+    public function testEveryTimeoutConfigFieldIsConfigurableByItsOwnName(): void
+    {
+        $parameters = (new \ReflectionMethod(TimeoutConfig::class, '__construct'))->getParameters();
+
+        $fields = [];
+        foreach ($parameters as $parameter) {
+            $fields[] = $parameter->getName();
+        }
+
+        self::assertNotEmpty($fields, 'TimeoutConfig must have timeout fields');
+
+        foreach ($fields as $field) {
+            // A batch deadline below a per-call timeout is rejected (#275).
+            $configured = $field === 'batchDeadlineMs' ? 90000 : 4321;
+
+            $bundle = ConnectionFactory::create(
+                ['127.0.0.1:2379'],
+                options: ['timeout' => [$field => $configured]],
+            );
+
+            self::assertSame(
+                $configured,
+                $bundle->timeoutConfig->{$field},
+                "options['timeout']['{$field}'] must reach TimeoutConfig::\${$field}",
+            );
+        }
+    }
+
+    /**
+     * The same for the slow-log thresholds: every
+     * {@see SlowLogConfig} field is configurable through `options['slowLog']`
+     * under its own name (issue #272, GRPC-13).
+     */
+    public function testEverySlowLogConfigFieldIsConfigurableByItsOwnName(): void
+    {
+        $parameters = (new \ReflectionMethod(SlowLogConfig::class, '__construct'))->getParameters();
+
+        $fields = [];
+        foreach ($parameters as $parameter) {
+            $fields[] = $parameter->getName();
+        }
+
+        self::assertNotEmpty($fields, 'SlowLogConfig must have threshold fields');
+
+        foreach ($fields as $field) {
+            $configured = 4321;
+
+            $bundle = ConnectionFactory::create(
+                ['127.0.0.1:2379'],
+                options: ['slowLog' => [$field => $configured]],
+            );
+
+            self::assertNotNull($bundle->slowLogConfig, 'options[slowLog] must build a SlowLogConfig');
+            self::assertSame(
+                $configured,
+                $bundle->slowLogConfig->{$field},
+                "options['slowLog']['{$field}'] must reach SlowLogConfig::\${$field}",
+            );
+        }
+    }
+
+    public function testANegativeBatchDeadlineOptionIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['timeout'][batchDeadlineMs] must be greater than or equal to 0");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => ['batchDeadlineMs' => -1]],
+        );
     }
 
     // ========================================================================
@@ -285,16 +542,19 @@ class ConnectionFactoryTest extends TestCase
     }
 
     #[DataProvider('metadataDeadlineProvider')]
-    public function testTimeoutMetadataDeadlineNonIntFallsBackToDefault(
+    public function testTimeoutMetadataDeadlineNonIntIsRejected(
         string $field,
-        int $default,
     ): void {
-        $bundle = ConnectionFactory::create(
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf(
+            "options['timeout'][%s] must be an int (milliseconds), string given",
+            $field,
+        ));
+
+        ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: ['timeout' => [$field => '3000']],
         );
-
-        $this->assertSame($default, $bundle->timeoutConfig->{$field});
     }
 
     /**

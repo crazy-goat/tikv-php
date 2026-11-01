@@ -118,6 +118,10 @@ final class FanoutFakeGrpc implements GrpcClientInterface
     {
     }
 
+    public function reapIdleChannels(): void
+    {
+    }
+
     public function closeChannel(string $address): void
     {
     }

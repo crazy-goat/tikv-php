@@ -28,7 +28,7 @@ RUN ln -sf /usr/bin/php83 /usr/bin/php
 WORKDIR /app
 
 # Copy composer files first for better caching
-COPY composer.json ./
+COPY composer.json composer.lock ./
 
 # Install dependencies
 RUN composer install --no-interaction --no-scripts --no-autoloader

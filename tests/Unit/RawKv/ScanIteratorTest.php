@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\RawKv\ScanIterator;
 use PHPUnit\Framework\TestCase;
@@ -272,6 +273,208 @@ class ScanIteratorTest extends TestCase
             iterator_to_array($iterator),
         );
         $this->assertSame(2, $calls);
+    }
+
+    // ========================================================================
+    // Cursor progress (server-trust boundary)
+    // ========================================================================
+
+    public function testConstantFullBatchWithEmptyEndKeyThrowsInsteadOfHanging(): void
+    {
+        $calls = 0;
+        $scanFn = function () use (&$calls): array {
+            $calls++;
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
+            return [
+                ['key' => 'k1', 'value' => 'v1'],
+                ['key' => 'k2', 'value' => 'v2'],
+            ];
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 2);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Scan cursor did not advance');
+
+        iterator_to_array($iterator);
+    }
+
+    public function testConstantFullBatchWithBoundedEndKeyThrowsInsteadOfHanging(): void
+    {
+        $calls = 0;
+        $scanFn = function () use (&$calls): array {
+            $calls++;
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
+            return [
+                ['key' => 'k1', 'value' => 'v1'],
+                ['key' => 'k2', 'value' => 'v2'],
+            ];
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', 'z', 2);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Scan cursor did not advance');
+
+        iterator_to_array($iterator);
+    }
+
+    public function testPageStartingBeforeTheCursorThrows(): void
+    {
+        $calls = 0;
+        $scanFn = function () use (&$calls): array {
+            $calls++;
+
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
+            return $calls === 1
+                ? [['key' => 'k1', 'value' => '1'], ['key' => 'k5', 'value' => '5']]
+                : [['key' => 'k2', 'value' => '2'], ['key' => 'k9', 'value' => '9']];
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 2);
+        $seen = [];
+
+        try {
+            foreach ($iterator as $key => $value) {
+                $seen[$key] = $value;
+            }
+            $this->fail('Expected TiKvException');
+        } catch (TiKvException) {
+            $this->assertSame(['k1' => '1', 'k5' => '5'], $seen);
+            $this->assertSame(2, $calls);
+        }
+    }
+
+    public function testPageWithDuplicateKeyAtTheCursorThrows(): void
+    {
+        $scanFn = fn(): array => [['key' => 'c', 'value' => '1'], ['key' => 'c', 'value' => '2']];
+
+        $iterator = new ScanIterator($scanFn, 'c', '', 2);
+
+        $this->expectException(TiKvException::class);
+
+        $iterator->valid();
+    }
+
+    public function testPageWithMiddleDuplicateKeyThrows(): void
+    {
+        $scanFn = fn(): array => [
+            ['key' => 'k3', 'value' => '1'],
+            ['key' => 'k4', 'value' => '2'],
+            ['key' => 'k4', 'value' => '3'],
+            ['key' => 'k6', 'value' => '4'],
+        ];
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 4);
+
+        $this->expectException(TiKvException::class);
+
+        $iterator->valid();
+    }
+
+    public function testNumericCursorBelowPageEndIsByteOrdered(): void
+    {
+        // Bytewise "99" > "100", so a page ending on "99" advances a "100" cursor.
+        $scanFn = fn(): array => [['key' => '99', 'value' => 'v']];
+
+        $iterator = new ScanIterator($scanFn, '100', '', 5);
+
+        $this->assertSame(['99' => 'v'], iterator_to_array($iterator));
+    }
+
+    public function testNumericPageEndBelowCursorIsByteOrdered(): void
+    {
+        // Bytewise "100" < "99", so a page ending on "100" does not advance a "99" cursor.
+        $scanFn = fn(): array => [['key' => '100', 'value' => 'v']];
+
+        $iterator = new ScanIterator($scanFn, '99', '', 5);
+
+        $this->expectException(TiKvException::class);
+
+        $iterator->valid();
+    }
+
+    public function testConstantFullPageOnAllFfCursorThrows(): void
+    {
+        $key = "\xFF\xFF";
+        $calls = 0;
+        $scanFn = function () use (&$calls, $key): array {
+            $calls++;
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
+            return [['key' => $key, 'value' => 'v']];
+        };
+
+        $iterator = new ScanIterator($scanFn, "\xFF", '', 1);
+
+        $this->expectException(TiKvException::class);
+
+        iterator_to_array($iterator, false);
+    }
+
+    public function testBatchEndingBelowTheCursorThrows(): void
+    {
+        $scanFn = fn(): array => [['key' => 'a', 'value' => 'v']];
+
+        $iterator = new ScanIterator($scanFn, 'm', '', 1);
+
+        $this->expectException(TiKvException::class);
+
+        $iterator->valid();
+    }
+
+    public function testNonAdvancingCursorIsDetectedOnTheSecondPage(): void
+    {
+        $calls = 0;
+        $scanFn = function () use (&$calls): array {
+            $calls++;
+
+            if ($calls > 100) {
+                $this->fail('Iterator did not stop on a non-advancing cursor');
+            }
+
+            return [['key' => 'k1', 'value' => 'v1']];
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 1);
+        $seen = [];
+
+        try {
+            foreach ($iterator as $key => $value) {
+                $seen[$key] = $value;
+            }
+            $this->fail('Expected TiKvException');
+        } catch (TiKvException) {
+            $this->assertSame(['k1' => 'v1'], $seen);
+            $this->assertSame(2, $calls);
+        }
+    }
+
+    public function testStrictlyAdvancingFullBatchesWithEmptyEndKeyStillComplete(): void
+    {
+        $scanFn = (fn(string $startKey): array => match ($startKey) {
+            'a' => [['key' => 'k1', 'value' => '1'], ['key' => 'k2', 'value' => '2']],
+            "k2\x00" => [['key' => 'k3', 'value' => '3'], ['key' => 'k4', 'value' => '4']],
+            default => [],
+        });
+
+        $iterator = new ScanIterator($scanFn, 'a', '', 2);
+
+        $this->assertSame(
+            ['k1' => '1', 'k2' => '2', 'k3' => '3', 'k4' => '4'],
+            iterator_to_array($iterator),
+        );
     }
 
     // ========================================================================

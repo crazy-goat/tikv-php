@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Retry;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
@@ -295,11 +296,17 @@ class ErrorClassifierTest extends TestCase
         );
     }
 
-    public function testRegionExceptionWithoutKindReturnsRegionMiss(): void
+    public function testRegionExceptionWithoutKindIsFatal(): void
     {
-        $this->assertSame(
-            BackoffType::RegionMiss,
+        $this->assertNull(
             ErrorClassifier::classify(new RegionException('test', 'region error')),
+        );
+    }
+
+    public function testKeyErrorExceptionIsFatal(): void
+    {
+        $this->assertNull(
+            ErrorClassifier::classify(new KeyErrorException('per-pair error for key k: retryable: too old')),
         );
     }
 

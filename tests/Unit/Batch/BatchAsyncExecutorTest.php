@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
+use Google\Protobuf\Internal\Message;
 use Grpc\Call;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -492,5 +493,117 @@ class BatchAsyncExecutorTest extends TestCase
 
         $this->expectException(BatchDeadlineExceededException::class);
         $executor->executeParallelCapped($calls, maxConcurrency: 1, deadlineMs: 10);
+    }
+
+    /**
+     * The budget is shared by all windows (issue #275): every window alone
+     * stays below the deadline, but together they exceed it, so the batch
+     * must throw between windows instead of restarting the clock per window.
+     */
+    public function testDeadlineIsSharedByAllWindows(): void
+    {
+        $executor = new BatchAsyncExecutor(new NullLogger());
+
+        $calls = [];
+        foreach ([1, 2, 3, 4] as $regionId) {
+            $calls[$regionId] = static function () use ($regionId): int {
+                usleep(15_000); // 15 ms: one window alone is under the 40 ms deadline
+
+                return $regionId;
+            };
+        }
+
+        $this->expectException(BatchDeadlineExceededException::class);
+        $executor->executeParallelCapped($calls, maxConcurrency: 1, deadlineMs: 40);
+    }
+
+    /**
+     * Window 1 finishes past the deadline (its wait is not interrupted), so
+     * the between-windows check must stop the batch before any callable of
+     * window 2 runs.
+     */
+    public function testWindowTwoIsNeverDispatchedAfterWindowOneExhaustsTheDeadline(): void
+    {
+        $executor = new BatchAsyncExecutor(new NullLogger());
+        $secondWindowRan = false;
+
+        $calls = [
+            1 => static fn(): GrpcFuture => GrpcFuture::fromWaiter(static function (): Message {
+                usleep(30_000); // ends past the 20 ms deadline
+
+                return new RawGetResponse();
+            }),
+            2 => static function () use (&$secondWindowRan): int {
+                $secondWindowRan = true;
+
+                return 2;
+            },
+        ];
+
+        try {
+            $executor->executeParallelCapped($calls, maxConcurrency: 1, deadlineMs: 20);
+            $this->fail('the deadline must stop the batch between windows');
+        } catch (BatchDeadlineExceededException $e) {
+            $this->assertFalse($secondWindowRan, 'no callable of window 2 may run');
+            $this->assertSame(20, $e->getDeadlineMs());
+            $this->assertGreaterThanOrEqual(20, $e->getElapsedMs());
+            $this->assertSame([1], $e->getContext()['dispatchedRegions']);
+            $this->assertSame([2], $e->getContext()['pendingRegions']);
+        }
+    }
+
+    /**
+     * A deadline that runs out inside a window is reported with the
+     * configured deadline, the total elapsed time and every region that has
+     * no result, not with the window-local view of the inner executor.
+     */
+    public function testDeadlineInsideALaterWindowReportsTheWholeBatch(): void
+    {
+        $executor = new BatchAsyncExecutor(new NullLogger());
+
+        $calls = [
+            1 => static fn(): GrpcFuture => GrpcFuture::fromWaiter(static function (): Message {
+                usleep(15_000);
+
+                return new RawGetResponse();
+            }),
+            2 => static fn(): int => 2,
+            3 => static function (): int {
+                usleep(40_000); // blocks window 2 past the remaining budget
+
+                return 3;
+            },
+            4 => static fn(): int => 4,
+        ];
+
+        try {
+            $executor->executeParallelCapped($calls, maxConcurrency: 2, deadlineMs: 40);
+            $this->fail('the deadline must stop the batch');
+        } catch (BatchDeadlineExceededException $e) {
+            $this->assertSame(40, $e->getDeadlineMs(), 'the configured deadline, not the remaining budget');
+            $this->assertGreaterThanOrEqual(40, $e->getElapsedMs(), 'the total elapsed time');
+            /** @var list<int> $dispatched */
+            $dispatched = $e->getContext()['dispatchedRegions'];
+            sort($dispatched);
+            $this->assertSame([1, 2, 3], $dispatched);
+            $this->assertSame([3, 4], $e->getContext()['pendingRegions']);
+        }
+    }
+
+    public function testTheDeadlineParameterDefaultsToAFiniteValue(): void
+    {
+        foreach (['executeParallel', 'executeParallelCapped'] as $method) {
+            $parameters = (new \ReflectionMethod(BatchAsyncExecutor::class, $method))->getParameters();
+            $deadline = array_values(array_filter(
+                $parameters,
+                static fn(\ReflectionParameter $parameter): bool => $parameter->getName() === 'deadlineMs',
+            ))[0];
+
+            $this->assertSame(
+                \CrazyGoat\TiKV\Client\Grpc\TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS,
+                $deadline->getDefaultValue(),
+                $method . '() must not default to "no deadline"',
+            );
+        }
     }
 }

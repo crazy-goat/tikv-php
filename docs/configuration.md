@@ -404,6 +404,21 @@ the *connection* alive, not the *entry* in the cache). Lowering the cap
 limits the memory the channel cache can use; a channel is evicted only when
 another one is needed, so the cap never breaks a request.
 
+The transport drops an idle channel (one that was unused for `idleTtlMs`)
+when it opens a new channel. It also drops idle channels when a request
+reuses a cached channel, so the handle of a store that left the cluster does
+not stay in the cache. This sweep runs at most once per interval. The
+interval is one tenth of `idleTtlMs`, at least 1 second and at most
+`idleTtlMs`. The sweep drops the cached handle and frees the slot. It does
+not always close the connection: the ext-grpc persistent channel can outlive
+the handle (see the FAQ entry "ext-grpc's persistent channels are shared and
+reference-counted (#283)" in `docs/helpers/faq.md`). A channel with an
+in-flight call and the channel that the request uses are never dropped.
+
+A long-running worker that is quiet for a long time calls
+`$client->reapIdleChannels()` from its own tick to run the sweep without a
+request. `RawKvClient` and `TxnKvClient` have this method.
+
 ### Sharing One Transport Between Clients
 
 The gRPC transport is **long-lived and shared**: it caches one channel per
@@ -645,8 +660,9 @@ $tlsConfig = $builder->build();
 
 // Use with custom client construction
 $grpc = new GrpcClient($logger, $tlsConfig);
-// The store cache is the fourth argument of PdClient: without it every
-// store address is looked up in PD again on every request.
+// The store cache is the fourth argument of PdClient. It is mandatory: when
+// you omit it, PdClient creates a default StoreCache. Pass your own to set
+// the TTL, the size or the logger.
 $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
 // The client closes the transport it was given in close() — pass
@@ -834,12 +850,14 @@ new client after you change them.
 
 ### What Gets Logged
 
-The client logs:
+The client writes these levels:
 
-- **DEBUG**: Connection attempts, cache operations, request details
-- **INFO**: Successful operations, region cache hits/misses
-- **WARNING**: Retry attempts, region invalidations, slow operations (only when the `slowLog` option is enabled — see [Slow Operation Logging](#slow-operation-logging))
-- **ERROR**: Failed operations, exhausted retries, fatal errors
+- **DEBUG**: Region cache hits and misses, store cache hits and misses, channel opening and eviction, request detail. This level is verbose. Do not use it in production.
+- **INFO**: Region and store invalidation, region leader switch, PD failover, transaction start, fallback from one-phase or async commit to two-phase commit.
+- **WARNING**: Retry attempts (`Retrying operation`), failed regions in a batch, channel reconnects, partial prewrite failure, `Pessimistic lock retry budget exhausted`, a skipped GC safe-point check, and slow operations (only when the `slowLog` option is enabled — see [Slow Operation Logging](#slow-operation-logging)).
+- **ERROR**: The general retry loop (`RetryExecutor`) writes `Retry attempt cap exhausted`, `Retry budget exhausted`, `ServerBusy budget exhausted`, `Retry deadline exhausted` and `Fatal error, not retrying`. The client also writes ERROR records for an exhausted batch deadline, a failed TSO request, an undetermined primary commit, and failed `close()` steps.
+
+Region cache hits and misses are **not** INFO records. A logger at the `INFO` level does not show them.
 
 Keys in the log details are redacted — see
 [Log Redaction](#log-redaction) for the exact format.
@@ -988,9 +1006,11 @@ $client = RawKvClient::create(
 ```
 
 Every key is optional and keeps its default when it is omitted. A threshold of
-`0` — or any negative value — disables the warning for that operation type,
-so `'readThresholdMs' => 0` silences the read warning while the other six stay
-active. Omitting the whole `slowLog` key disables slow logging entirely.
+`0` disables the warning for that operation type, so `'readThresholdMs' => 0`
+silences the read warning while the other six stay active. A negative value is
+a configuration error and throws `InvalidArgumentException`, and so is a key
+the client does not know or a value that is not an integer. Omitting the whole
+`slowLog` key disables slow logging entirely.
 
 | Option key               | Default | Operations covered                                                                    |
 |--------------------------|---------|---------------------------------------------------------------------------------------|
@@ -1193,6 +1213,62 @@ Details:
 - Both modes remain safe under TiKV's own server-side guards — the server
   never applies an unsafe fast commit, it just answers with a decline and the
   client proceeds with two-phase commit.
+
+## Lock TTLs and the Primary Lock Keepalive (TxnKV)
+
+A lock that a transaction holds expires after its TTL. After that, a
+concurrent transaction can resolve the lock and roll the owner back. The
+TTLs are set per transaction, on `begin()` (issue #429, GAP-15):
+
+```php
+$txn = $client->begin([
+    'optimisticLockTtlMs'  => 3000,  // default
+    'pessimisticLockTtlMs' => 30000, // default
+]);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `optimisticLockTtlMs` | `3000` | Baseline TTL of the optimistic prewrite locks, in milliseconds. The prewrite adds 10 ms for each mutation and caps the result at 120000 ms. |
+| `pessimisticLockTtlMs` | `30000` | TTL of the pessimistic locks and of the prewrite locks of a pessimistic transaction, in milliseconds. |
+
+Each value must be an `int` from `1` to `120000`. Any other value throws
+`InvalidArgumentException`.
+
+### Heartbeat interval and TTL
+
+TiKV counts a lock TTL from the start timestamp of the transaction: a lock
+is expired when `start time + TTL` is in the past. For this reason the client
+adds the time the transaction has already run (`uptime`) to every lock TTL: the
+pessimistic-lock requests, the prewrite requests and the heartbeats all
+carry `min(uptime + TTL, 3600000)` ms. A heartbeat can only raise a TTL, so
+a value at or below the current TTL changes nothing. The client stops extending
+a lock when the total TTL reaches one hour.
+
+The client sends a heartbeat in these cases:
+
+1. A pessimistic transaction sends a heartbeat inside `get()`, `batchGet()`,
+   `scan()`, `set()`, `delete()` and `commit()` when less than half of the lock TTL
+   remains. The first pessimistic lock starts the keepalive.
+2. `commit()` first sends a heartbeat when less than half of the TTL remains
+   (pessimistic transactions), and the prewrite sends a heartbeat between
+   region prewrites (issue #218).
+3. Your code calls `Transaction::heartbeat()`.
+
+An optimistic transaction holds no lock before `commit()`, so it sends no
+opportunistic heartbeat. A heartbeat for a lock that does not exist fails.
+
+PHP has no background thread. A transaction that waits on an external call
+without touching TiKV does not send a heartbeat. If the wait can be longer than
+half of the TTL, call `Transaction::heartbeat()` before the wait. Without
+an argument it asks for `uptime + TTL` of the transaction mode. An explicit
+argument is a total TTL in milliseconds, counted from the start of the
+transaction. The same applies to a single RPC that takes longer than the TTL.
+
+If a heartbeat fails, the operation throws the typed exception of
+`Transaction::heartbeat()` (issue #492) and the next operation tries again.
+The usual cause is a lock that is already gone. In that case, roll the
+transaction back.
 
 ## Pessimistic Lock Wait Timeout (TxnKV)
 
@@ -1439,13 +1515,15 @@ Store addresses are also cached:
 
 ### Cache Statistics
 
-Monitor cache performance via logs:
+Monitor cache performance via logs. The region cache writes these records (PSR-3 message and context):
 
 ```
-[INFO] Region cache hit: region_id=123
-[INFO] Region cache miss: key="user:123"
-[INFO] Invalidated region: region_id=123, reason=EpochNotMatch
+DEBUG  Region cache hit    {"key":"\"7573657231\" (5 bytes)","regionId":123}
+DEBUG  Region cache miss   {"key":"\"7573657231\" (5 bytes)"}
+INFO   Region invalidated  {"regionId":123}
 ```
+
+The hit and miss records need a logger that handles `DEBUG`. The `key` field is always redacted — see [Log Redaction](#log-redaction). The invalidation record has no `reason` field.
 
 ## Timeouts
 
@@ -1464,11 +1542,14 @@ $options = [
         'deleteRangeTimeoutMs' => 30000, // default: 30000
         'checksumTimeoutMs' => 30000,    // default: 30000
         'ingestTimeoutMs' => 60000,      // default: 60000 (SST ingest)
-        'batchDeadlineMs' => 0,          // default: 0 (disabled) — wall-clock deadline
+        'batchDeadlineMs' => 60000,      // default: 60000 — wall-clock deadline
                                          // for batch fan-out dispatch+wait across all
                                          // regions; exceeding it throws
                                          // BatchDeadlineExceededException after
-                                         // cancelling in-flight futures
+                                         // cancelling in-flight futures.
+                                         // 0 disables it. Must be >= every per-call
+                                         // timeout used inside a batch fan-out
+                                         // (not readTimeoutMs)
         'pdTimeoutMs' => 3000,           // default: 3000 (PD metadata RPCs)
         'tsoTimeoutMs' => 3000,          // default: 3000 (PD TSO)
         'lockResolveTimeoutMs' => 5000,  // default: 5000 (lock resolution)
@@ -1492,15 +1573,29 @@ per-region problem the retry executor already handles. `pdTimeoutMs` covers
 `KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`.
 
 Every gRPC call carries a deadline. `GrpcClientInterface::call()`'s `$timeoutMs`
-argument of `null` means the library default (30 s) and a value of `0` is the
-explicit opt-out meaning "no deadline at all" — see [Deadlines are never
-infinite](#deadlines-are-never-infinite).
+argument of `null` means the library default (30 s); a non-positive value is a
+configuration error and throws `InvalidArgumentException` — see [Deadlines are
+never infinite](#deadlines-are-never-infinite).
 
 When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught and retried by the retry executor unless the budget is exhausted.
 
 ### Default Timeouts
 
-By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Set any value to `0` to disable it (not recommended in production).
+By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
+
+`batchDeadlineMs` is finite by default (`TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, 60000 ms). When it is above `0`, it must not be less than any per-call timeout that a batch fan-out uses: `writeTimeoutMs`, `batchReadTimeoutMs`, `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs`, `checksumTimeoutMs` and `ingestTimeoutMs` (`readTimeoutMs` is not in the list: only point reads use it). If it is less, the `TimeoutConfig` constructor throws an `InvalidArgumentException` that names both fields. One wait is not interrupted by the deadline, so a deadline that is less than one call cannot be honoured. Such a setting has no meaning.
+
+The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs the whole retry loop of one region (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus one region's full retry loop. For scans the deadline applies per region batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
+
+Every key of the table above is configurable under its own name — the mapping is
+derived from `TimeoutConfig`'s constructor, so a field that is added to the
+class is configurable the moment it exists. A key the client does not know is
+reported instead of silently dropped: `options['timeout'] => ['ingestTimeout' => 300000]`
+(a missing `Ms`) throws `InvalidArgumentException` naming the unknown key
+rather than quietly applying the 60-second default. A value of the wrong type
+(`'readTimeoutMs' => '60000'`) is rejected the same way, and the group itself
+must be an array — unless it is absent or explicitly `null`, which both mean
+"not configured". The same holds for `options['slowLog']`.
 
 ### Deadlines are never infinite
 
@@ -1520,12 +1615,15 @@ argument of `call()`, `callAsync()` and `callStreaming()` reads as:
 |--------------|--------------------------------------------------------------|
 | positive int | that many milliseconds from now                              |
 | `null`       | the library default — `GrpcClient::DEFAULT_TIMEOUT_MS` (30 s)  |
-| `0`          | explicit opt-out: no deadline at all                          |
+| `0` or less  | a configuration error — `InvalidArgumentException` is thrown   |
 
-A caller that omits the argument therefore gets a bounded call; only a caller that
-passes `0` (or a `TimeoutConfig` field set to `0`) gets an unbounded one. Prefer a
-large finite value: an unbounded call is a resource that a hung peer can pin
-indefinitely, in a process that has no way to give the slot back.
+A caller that omits the argument therefore gets a bounded call, and there is no
+way to ask for an unbounded one. `0` used to be the explicit opt-out, but it is
+also what an unset environment variable coerces to — `(int) getenv('TIKV_READ_TIMEOUT_MS')`
+yields `0` when the variable is missing — so the opt-out turned a configuration
+mistake into a call that never expires. Prefer a large finite value: an
+unbounded call is a resource that a hung peer can pin indefinitely, in a process
+that has no way to give the slot back.
 
 ### Handling Slow Operations
 
@@ -1544,16 +1642,7 @@ try {
 }
 ```
 
-Or use async patterns:
-
-```php
-// For batch operations, process in chunks
-$chunks = array_chunk($keys, 100);
-foreach ($chunks as $chunk) {
-    $results = $client->batchGet($chunk);
-    // Process results
-}
-```
+Batch methods already send their sub-batches in parallel (default concurrency 16, `RawKvClient::DEFAULT_MAX_CONCURRENCY`). When you set the `batchDeadlineMs` timeout option to a value above 0, it bounds the whole fan-out. The default is `60000` ms, and `0` disables it. The deadline is checked between waits, so one slow region can run up to its whole retry loop past it (see [Timeouts](#timeouts)).
 
 ## Production Configuration
 
@@ -1677,6 +1766,8 @@ The library emits the following counter tags:
 | `regionCacheHit()`             | `'region_resolution'`      | Region was found in the cache                     |
 | `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
 | `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader region error (`RegionErrorHandler`), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on other retryable errors, a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. Invalidating an ID that is not cached emits nothing. |
+
+For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
 
 Reasons are mutually exclusive per drop; the current source emits
 `'region_error'`, `'not_leader'`, `'retry_region_error'`,

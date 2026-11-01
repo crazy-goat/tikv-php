@@ -46,14 +46,27 @@ final class BatchCommandsConnection implements BatchCommandsStreamInterface
 
     /**
      * Open a BatchCommands stream on the given channel.
+     *
+     * The stream lifetime is a deadline like every other one: a
+     * non-positive `$deadlineMs` is a configuration error and throws
+     * (issue #276, GRPC-17). `0` used to mean "no deadline at all", which
+     * armed the one deadline the gRPC C core never expires — and a stream
+     * that never expires is exactly what a silently dead store needs to
+     * hang the batch fan-out forever.
+     *
+     * @throws \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException When $deadlineMs is not positive
      */
     public static function open(
         Channel $channel,
         int $deadlineMs = self::DEFAULT_STREAM_DEADLINE_MS,
     ): self {
-        $deadline = $deadlineMs > 0
-            ? Timeval::now()->add(new Timeval($deadlineMs * 1000))
-            : Timeval::infFuture();
+        if ($deadlineMs <= 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                sprintf('deadlineMs must be greater than 0, got %d', $deadlineMs),
+            );
+        }
+
+        $deadline = Timeval::now()->add(new Timeval($deadlineMs * 1000));
 
         $call = new Call($channel, '/tikvpb.Tikv/BatchCommands', $deadline);
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use PHPUnit\Framework\TestCase;
 
@@ -83,5 +84,18 @@ class SlowLogConfigTest extends TestCase
         $this->assertSame(0, $config->getThreshold('write'));
         // Non-zero thresholds still work
         $this->assertSame(500, $config->getThreshold('batch_read'));
+    }
+
+    // ========================================================================
+    // Issue #276 (GRPC-17): `0` means "disabled" here — a documented
+    // contract — but a negative threshold is a configuration error.
+    // ========================================================================
+
+    public function testANegativeThresholdIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('readThresholdMs must be greater than or equal to 0, got -1');
+
+        new SlowLogConfig(readThresholdMs: -1);
     }
 }

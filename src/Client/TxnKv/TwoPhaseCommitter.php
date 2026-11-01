@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
@@ -82,11 +83,30 @@ use Psr\Log\NullLogger;
  * the scaled TTL only narrows that window. Application-level long
  * transactions — anything that keeps a transaction open between operations
  * — must call {@see \CrazyGoat\TiKV\Client\TxnKv\Transaction::heartbeat()}
- * themselves before the granted TTL elapses; 10 s is a safe default.
+ * themselves before the granted TTL elapses. Every lock TTL and every
+ * heartbeat advise is `min(uptime + TTL, MAX_TXN_TTL_MS)`, because TiKV counts
+ * a TTL from the start timestamp (issue #429).
+ *
+ * ## Opportunistic heartbeat (issue #429)
+ *
+ * A pessimistic transaction holds its primary lock from the first
+ * set()/delete(). {@see heartbeatIfDue()} lets every Transaction operation that
+ * touches TiKV extend that lock once half of its TTL has elapsed. An
+ * optimistic transaction writes no lock before the prewrite, so it has
+ * nothing to extend until commit() runs.
+ *
+ * The optimistic baseline and the pessimistic TTL are configurable per
+ * transaction. A transaction that blocks outside TiKV for longer than half the
+ * TTL must still call Transaction::heartbeat() itself (PHP has no timer).
  */
 final readonly class TwoPhaseCommitter
 {
-    private const OPTIMISTIC_LOCK_TTL_MS = 3000;
+    /**
+     * Default optimistic lock TTL baseline (before the per-mutation scaling).
+     * Configurable per transaction (issue #429); see
+     * {@see \CrazyGoat\TiKV\Client\TxnKv\TxnKvClient::OPT_OPTIMISTIC_LOCK_TTL_MS}.
+     */
+    public const DEFAULT_OPTIMISTIC_LOCK_TTL_MS = 3000;
 
     /**
      * Additional optimistic lock TTL granted per write-set mutation (issue
@@ -101,14 +121,23 @@ final readonly class TwoPhaseCommitter
      * client-go's `maxLockTTL`. Caps the prewrite liveness window for a
      * pathologically large write set.
      */
-    private const MAX_LOCK_TTL_MS = 120000;
+    public const MAX_LOCK_TTL_MS = 120000;
 
     /**
-     * Pessimistic locks use a fixed TTL (deliberately out of scope for
-     * issue #218): the pessimistic path locks every key up front and the
-     * prewrite heartbeat contract applies to the optimistic write path only.
+     * Default pessimistic lock TTL. Used for the pessimistic-lock requests
+     * and for the prewrite of a pessimistic transaction. Configurable per
+     * transaction (issue #429); see
+     * {@see \CrazyGoat\TiKV\Client\TxnKv\TxnKvClient::OPT_PESSIMISTIC_LOCK_TTL_MS}.
      */
-    private const PESSIMISTIC_LOCK_TTL_MS = 30000;
+    public const DEFAULT_PESSIMISTIC_LOCK_TTL_MS = 30000;
+
+    /**
+     * Upper bound for the lock TTL that a heartbeat asks for (issue #429).
+     * Mirrors client-go's `MaxTxnTTL` (one hour). TiKV counts a lock TTL from
+     * the start timestamp, so a heartbeat asks for `uptime + TTL`; once that
+     * reaches this bound the client stops extending the lock.
+     */
+    public const MAX_TXN_TTL_MS = 3600000;
     private const PESSIMISTIC_LOCK_RETRY_DELAY_MS = 100;
     private const PESSIMISTIC_LOCK_MAX_REGROUPS = 10;
     private const ROLLBACK_MAX_REGROUPS = 10;
@@ -178,6 +207,10 @@ final readonly class TwoPhaseCommitter
          * from the remaining lock-wait budget.
          */
         private int $lockWaitTimeMs = self::DEFAULT_LOCK_WAIT_TIME_MS,
+        /** Optimistic lock TTL baseline in milliseconds (issue #429). */
+        private int $optimisticLockTtlMs = self::DEFAULT_OPTIMISTIC_LOCK_TTL_MS,
+        /** Pessimistic lock TTL in milliseconds (issue #429). */
+        private int $pessimisticLockTtlMs = self::DEFAULT_PESSIMISTIC_LOCK_TTL_MS,
     ) {
     }
 
@@ -215,6 +248,24 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
+     * A lock TTL that includes the time the transaction has already run
+     * (issues #429): `min(uptime + baseTtlMs, MAX_TXN_TTL_MS)`.
+     *
+     * TiKV counts a lock TTL from the start timestamp (a lock is expired when
+     * `lock.ts.physical + ttl < now`), so a lock written `uptime` ms after the
+     * start with a plain `baseTtlMs` would be born with only `baseTtlMs -
+     * uptime` left, or already expired. client-go adds the elapsed time the
+     * same way (`txnLockTTL`, `keepAlive`, pessimistic lock requests). The
+     * uptime is measured on the injectable client clock.
+     */
+    public function ttlWithUptimeMs(TransactionState $state, int $baseTtlMs): int
+    {
+        $uptimeMs = max(0, $this->nowMs() - $state->getStartedAtMs());
+
+        return min($uptimeMs + $baseTtlMs, self::MAX_TXN_TTL_MS);
+    }
+
+    /**
      * Lock TTL for the optimistic prewrite, scaled with the write-set size.
      * Baseline 3000 ms + LOCK_TTL_PER_MUTATION_MS per mutation, capped at
      * MAX_LOCK_TTL_MS. (client-go scales by byte size; mutation count is the
@@ -222,9 +273,9 @@ final readonly class TwoPhaseCommitter
      *
      * @param Mutation[] $mutations
      */
-    private function optimisticLockTtlMs(array $mutations): int
+    private function scaledOptimisticLockTtlMs(array $mutations): int
     {
-        $ttl = self::OPTIMISTIC_LOCK_TTL_MS + count($mutations) * self::LOCK_TTL_PER_MUTATION_MS;
+        $ttl = $this->optimisticLockTtlMs + count($mutations) * self::LOCK_TTL_PER_MUTATION_MS;
 
         return min($ttl, self::MAX_LOCK_TTL_MS);
     }
@@ -261,9 +312,13 @@ final readonly class TwoPhaseCommitter
         // drives the prewrite-heartbeat trigger and advise, so the pessimistic
         // path heartbeats against its own 30 s TTL rather than the smaller
         // optimistic one.
-        $lockTtlMs = $this->pessimistic
-            ? self::PESSIMISTIC_LOCK_TTL_MS
-            : $this->optimisticLockTtlMs($mutations);
+        $baseLockTtlMs = $this->pessimistic
+            ? $this->pessimisticLockTtlMs
+            : $this->scaledOptimisticLockTtlMs($mutations);
+        // The TTL carried by the prewrite requests includes the uptime of the
+        // transaction (issue #429); the heartbeat trigger below keeps using
+        // the base TTL, because it measures time since the prewrite started.
+        $lockTtlMs = $this->ttlWithUptimeMs($state, $baseLockTtlMs);
         $prewriteStartedAtMs = $this->nowMs();
         $primaryLockWritten = false;
         $keysByRegion = $this->groupMutationsByRegion($mutations);
@@ -495,16 +550,22 @@ final readonly class TwoPhaseCommitter
             $state,
             $retryExecutor,
             $classifier,
-            $lockTtlMs,
+            $baseLockTtlMs,
             &$prewriteStartedAtMs,
             $onePc,
         ): void {
             if (
                 $primaryLockWritten
                 && !$onePc
-                && $this->nowMs() - $prewriteStartedAtMs >= intdiv($lockTtlMs, 2)
+                && $this->nowMs() - $prewriteStartedAtMs >= intdiv($baseLockTtlMs, 2)
             ) {
-                $this->heartbeat($primary, $state, $retryExecutor, $classifier, $lockTtlMs);
+                $this->heartbeat(
+                    $primary,
+                    $state,
+                    $retryExecutor,
+                    $classifier,
+                    $this->ttlWithUptimeMs($state, $baseLockTtlMs),
+                );
                 $prewriteStartedAtMs = $this->nowMs();
             }
         };
@@ -693,6 +754,52 @@ final readonly class TwoPhaseCommitter
 
             return (int) $response->getLockTtl();
         }, $classifier);
+    }
+
+    /**
+     * Opportunistic keepalive for the primary pessimistic lock (issue #429).
+     *
+     * Sends a heartbeat when the primary lock is written and fewer than half
+     * of the pessimistic lock TTL remain before it expires. Does nothing when
+     * the transaction holds no primary lock yet: an optimistic transaction
+     * writes its locks only in the prewrite (inside {@see commit()}), and a
+     * heartbeat for a lock that does not exist fails with TxnNotFound.
+     *
+     * TiKV counts a lock TTL from the start timestamp, so the heartbeat asks
+     * for `uptime + TTL`, capped at {@see self::MAX_TXN_TTL_MS}. A heartbeat
+     * failure is thrown as the typed exception of {@see heartbeat()}
+     * (issue #492) and the expiry stays unchanged, so the next operation
+     * tries again.
+     *
+     * @return bool true when a heartbeat was sent
+     *
+     * @throws TiKvException
+     */
+    public function heartbeatIfDue(
+        TransactionState $state,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
+        int $nowMs,
+    ): bool {
+        $expiresAtMs = $state->getPrimaryLockExpiresAtMs();
+        $primary = $state->getPessimisticPrimaryKey();
+        if ($expiresAtMs === null || $primary === null) {
+            return false;
+        }
+
+        $startedAtMs = $state->getStartedAtMs();
+        if (
+            $expiresAtMs >= $startedAtMs + self::MAX_TXN_TTL_MS
+            || $expiresAtMs - $nowMs >= intdiv($this->pessimisticLockTtlMs, 2)
+        ) {
+            return false;
+        }
+
+        $adviseMs = min(max(0, $nowMs - $startedAtMs) + $this->pessimisticLockTtlMs, self::MAX_TXN_TTL_MS);
+        $grantedMs = $this->heartbeat($primary, $state, $retryExecutor, $classifier, $adviseMs);
+        $state->setPrimaryLockExpiresAtMs($startedAtMs + ($grantedMs > 0 ? $grantedMs : $adviseMs));
+
+        return true;
     }
 
     /**
@@ -1182,16 +1289,22 @@ final readonly class TwoPhaseCommitter
         }
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
-        // Note on exception semantics (issue #291 review): with
-        // batchDeadlineMs > 0 a BatchDeadlineExceededException can escape
-        // commit() AFTER the status was already set to Committed above —
-        // the secondary commits were dispatched but not all awaited within
-        // the deadline. This is deliberate: the primary is durably
-        // committed (the commit point), so the data is durable either way;
-        // leftover secondary locks are resolved by readers. Do NOT catch it
-        // here and do NOT change the status — the deadline defaults to
-        // 0 (disabled).
-        $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
+        // Exception semantics (issues #291 and #275): the batch deadline is
+        // finite by default, so BatchDeadlineExceededException can occur
+        // here AFTER the status was set to Committed — the secondary
+        // commits were dispatched but not all awaited within the deadline.
+        // The primary is durably committed (the commit point), so the
+        // transaction IS committed. Throwing would invite a retrying caller
+        // to apply it twice. Log it like any other secondary-commit failure
+        // and return; leftover secondary locks are resolved by readers.
+        try {
+            $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
+        } catch (BatchDeadlineExceededException $e) {
+            $this->logger->warning(
+                'Secondary commit fan-out hit the batch deadline; locks will be resolved by readers',
+                ['exception' => $e],
+            );
+        }
     }
 
     /**
@@ -1612,13 +1725,14 @@ final readonly class TwoPhaseCommitter
         int $forUpdateTs,
         bool $isFirstLock,
         int $waitTimeoutMs,
+        int $lockTtlMs,
     ): PessimisticLockRequest {
         $request = new PessimisticLockRequest();
         $request->setContext($this->buildContext($region));
         $request->setMutations($mutations);
         $request->setPrimaryLock($primary);
         $request->setStartVersion($this->startTs);
-        $request->setLockTtl(self::PESSIMISTIC_LOCK_TTL_MS);
+        $request->setLockTtl($lockTtlMs);
         $request->setForUpdateTs($forUpdateTs);
         $request->setIsFirstLock($isFirstLock);
         $request->setWaitTimeout($waitTimeoutMs);
@@ -1680,6 +1794,7 @@ final readonly class TwoPhaseCommitter
         int $forUpdateTs,
         bool $isFirstLock,
         int $waitTimeoutMs,
+        int $lockTtlMs,
     ): array {
         $firstGroupIndex = array_key_first($keysByRegion);
         $firstAttempts = [];
@@ -1705,6 +1820,7 @@ final readonly class TwoPhaseCommitter
                 $forUpdateTs,
                 $isFirstLock && $groupIndex === $firstGroupIndex,
                 $waitTimeoutMs,
+                $lockTtlMs,
             );
 
             $this->logger->debug('PessimisticLock', [
@@ -1840,6 +1956,7 @@ final readonly class TwoPhaseCommitter
                 $forUpdateTs,
                 $isFirstLock,
                 $this->effectiveLockWaitTimeoutMs(0),
+                $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
             );
 
             try {
@@ -1905,6 +2022,7 @@ final readonly class TwoPhaseCommitter
                                     $forUpdateTs,
                                     $isFirstLock,
                                     $this->effectiveLockWaitTimeoutMs($elapsedMs),
+                                    $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                                 );
 
                                 $this->logger->debug('PessimisticLock', [

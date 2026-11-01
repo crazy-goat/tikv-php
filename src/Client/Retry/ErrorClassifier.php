@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\Retry;
 
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
@@ -31,6 +32,12 @@ final class ErrorClassifier
         // keywords (e.g. "EpochNotMatch"), which would otherwise classify the
         // rejection as retryable and hide it behind up to 30 retries.
         if ($e instanceof InvalidStoreAddressException) {
+            return null;
+        }
+
+        // A per-pair KeyError is not a region error and must never be retried
+        // as a region miss (issue #251, REG-20).
+        if ($e instanceof KeyErrorException) {
             return null;
         }
 
@@ -124,19 +131,11 @@ final class ErrorClassifier
             return BackoffType::MaxTimestampNotSynced;
         }
 
-        // Fatal flashback errors
-        if (str_contains($message, 'FlashbackInProgress')) {
-            return null;
-        }
-        if (str_contains($message, 'FlashbackNotPrepared')) {
-            return null;
-        }
-
-        // Generic exception type checks
-        if ($e instanceof RegionException) {
-            return BackoffType::RegionMiss;
-        }
-
+        // Generic exception type checks. An unmapped RegionException (no typed
+        // ErrorKind) is fatal by default: unknown errors must not be retried
+        // (issue #251, REG-20). Retryable cases are enumerated explicitly
+        // above and via the typed ErrorKind path. A kind-less RegionException
+        // therefore falls through to the final fatal return below.
         return null;
     }
 

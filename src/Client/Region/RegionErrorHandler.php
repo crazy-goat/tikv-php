@@ -11,6 +11,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 
@@ -29,8 +30,9 @@ final class RegionErrorHandler
      * Transactional callers must interpret a KeyError themselves (lock
      * resolution, write conflicts, GC aborts). They pass
      * $keyErrorsHandledByCaller = true, which skips checks 2 (KeyError only)
-     * and 3; every other caller gets a RegionException for a populated KeyError
-     * instead of a silently accepted response.
+     * and 3; every other caller gets a RegionException for a top-level
+     * KeyError, or a KeyErrorException for a per-pair KeyError, instead of a
+     * silently accepted response.
      *
      * When a $cache and $regionId are provided, the region is invalidated
      * from the cache before the exception is thrown. This is the consistent
@@ -114,10 +116,11 @@ final class RegionErrorHandler
 
         foreach ($pairs as $pair) {
             if ($pair->hasError()) {
-                throw new RegionException(
-                    operation: $response instanceof RawBatchGetResponse ? 'BatchGet' : 'PerPairError',
-                    message: self::describeKeyError($pair->getKey(), $pair->getError()),
-                );
+                throw new KeyErrorException(sprintf(
+                    '%s failed: %s',
+                    $response instanceof RawBatchGetResponse ? 'BatchGet' : 'PerPairError',
+                    self::describeKeyError($pair->getKey(), $pair->getError()),
+                ));
             }
         }
     }
