@@ -874,7 +874,7 @@ $client->batchGet($keys);  // 3 concurrent sends, responses collected in order
 - Group keys by region (sub-batched under the per-region RawKV caps)
 - Issue sends via `executeBatch*ForRegionAsync()`, returning un-waited `GrpcFuture` objects wrapped in `CheckedGrpcFuture`
 - `BatchAsyncExecutor::executeParallel()` invokes every per-region callable in the dispatch phase, then awaits responses in the wait phase
-- A `$deadlineMs` argument (finite by default, `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`; `0` disables it) caps the wall-clock time for dispatch + wait; on overrun the executor raises `BatchDeadlineExceededException` and cancels any still-unfinished futures
+- A `$deadlineMs` argument (finite by default, `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`; `0` disables it) caps the wall-clock time for dispatch + wait; on overrun the executor raises `BatchDeadlineExceededException` and cancels any still-unfinished futures. One budget covers every window of the fan-out, and it is checked before each dispatch and before each wait, never inside one blocking wait
 - On the first wait-phase failure, remaining futures are cancelled to prevent gRPC channel/completion-queue leaks
 - The rare split/merge slow path re-dispatches every sub-region's send during the dispatch phase and merges responses in the wait phase
 
