@@ -233,6 +233,7 @@ final readonly class LockResolver
                     $lockTs,
                     $secondary['commitTs'],
                     $asyncSecondaries,
+                    $notLeaderOwnedByRetryExecutor,
                     $deadlineAtMs,
                 );
                 $this->invalidateRegionFor((string) $lock->getKey());
@@ -554,12 +555,14 @@ final readonly class LockResolver
      * commit ts (0 rolls the transaction back).
      *
      * @param list<string> $secondaries
+     * @param bool $notLeaderOwnedByRetryExecutor see {@see resolveLock()}
      */
     private function resolveAsyncCommitLocks(
         LockInfo $lock,
         int $lockTs,
         int $commitTs,
         array $secondaries,
+        bool $notLeaderOwnedByRetryExecutor,
         int $deadlineAtMs = 0,
     ): void {
         $keys = [...$secondaries, (string) $lock->getKey()];
@@ -606,7 +609,7 @@ final readonly class LockResolver
                 $response,
                 $this->regionCache,
                 $region->regionId,
-                notLeaderOwnedByRetryExecutor: false,
+                notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
                 keyErrorsHandledByCaller: true,
             );
         }

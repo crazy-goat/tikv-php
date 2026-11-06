@@ -1982,7 +1982,9 @@ At executor-owned call sites, NotLeader drops are owned exclusively by the
 retry loop's leader handling: `RegionErrorHandler::check()` leaves the region
 cached so it can switch to a valid hint. Call sites without a surrounding
 retry executor pass `notLeaderOwnedByRetryExecutor: false` and self-invalidate
-with the same `'not_leader'` reason.
+with the same `'not_leader'` reason. `LockResolver` takes the flag from its
+caller and threads it through every region-error check it performs, including
+the async-commit finalization (`resolveAsyncCommitLocks()`, issue #568).
 
 `InMemoryMetrics` ships the same counters in-process, suitable for tests
 and benchmarks — see `getRpcStarted()`, `getRpcSucceeded()`, `getRetries()`,

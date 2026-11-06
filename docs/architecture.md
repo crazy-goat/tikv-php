@@ -456,9 +456,23 @@ heap records.
 ```php
 class LockResolver
 {
-    public function resolveLock(string $primaryLock, LockInfo $lock, int $remainingDeadlineMs = 0): void;
+    public function resolveLock(
+        string $primaryLock,
+        LockInfo $lock,
+        int $remainingDeadlineMs = 0,
+        bool $notLeaderOwnedByRetryExecutor = true,
+    ): void;
 }
 ```
+
+The last flag is a property of the call site, not of the resolver: a
+`resolveLock()` running inside a `RetryExecutor::execute()` closure leaves
+NotLeader handling to `RetryExecutor::handleNotLeader()` (valid-hint leader
+switching), while a direct call site such as the pessimistic-lock loop passes
+`false` so `RegionErrorHandler::check()` self-invalidates with `'not_leader'`.
+The resolver threads the flag through every region-error check it performs —
+`KvCheckTxnStatus`, `KvCheckSecondaryLocks`, the batch `KvResolveLock`, and the
+async-commit finalization (`resolveAsyncCommitLocks()`, issue #568).
 
 **Lock Resolution Flow**:
 ```
@@ -475,7 +489,8 @@ Transaction encounters lock on key
     ┌────┴────┐
     │ Status? │
     ├─────────┤
-    │ Locked  │──Retryable (executor backs off within the deadline)
+    │ Locked  │──Throw TxnRetryableException (the caller's
+    │         │  RetryExecutor owns the backoff within the deadline)
     │ Committed│──ResolveLock with commitTs
     │ RolledBack│──ResolveLock (cleanup)
     └─────────┘

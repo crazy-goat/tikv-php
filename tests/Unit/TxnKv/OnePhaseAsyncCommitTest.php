@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Errorpb\Error;
+use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksResponse;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
@@ -697,5 +699,105 @@ class OnePhaseAsyncCommitTest extends TestCase
         $this->assertCount(1, $resolves);
         $this->assertSame(0, (int) $resolves[0]->getCommitVersion());
         $this->assertSame(self::START_TS, (int) $resolves[0]->getStartVersion());
+    }
+
+    private function makeUndecidedStatusResponse(): CheckTxnStatusResponse
+    {
+        $status = new CheckTxnStatusResponse();
+        $status->setCommitVersion(0);
+        $status->setLockTtl(3000);
+
+        return $status;
+    }
+
+    private function makeLockedSecondaryResponse(): CheckSecondaryLocksResponse
+    {
+        $secondaryLock = new LockInfo();
+        $secondaryLock->setKey('s2');
+        $secondaryLock->setLockVersion(self::START_TS);
+        $locked = new CheckSecondaryLocksResponse();
+        $locked->setLocks([$secondaryLock]);
+
+        return $locked;
+    }
+
+    private function makeNotLeaderResolveResponse(): ResolveLockResponse
+    {
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(1);
+        $regionError = new Error();
+        $regionError->setMessage('not leader');
+        $regionError->setNotLeader($notLeader);
+        $response = new ResolveLockResponse();
+        $response->setRegionError($regionError);
+
+        return $response;
+    }
+
+    /**
+     * Drive an async-commit lock whose finalizing KvResolveLock answers
+     * NotLeader. The flag decides who owns the NotLeader drop (issue #568).
+     */
+    private function resolveAsyncCommitAgainstNotLeader(bool $notLeaderOwnedByRetryExecutor): void
+    {
+        $this->stubRegionLookup([$this->makeRegion(1, '', '')]);
+
+        $queue = [
+            ['method' => 'KvCheckTxnStatus', 'response' => $this->makeUndecidedStatusResponse()],
+            ['method' => 'KvCheckSecondaryLocks', 'response' => $this->makeLockedSecondaryResponse()],
+            ['method' => 'KvResolveLock', 'response' => $this->makeNotLeaderResolveResponse()],
+        ];
+        $index = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+            ?object $request = null,
+        ) use (
+            &$queue,
+            &$index
+        ): object {
+            $call = $queue[$index++] ?? null;
+            if ($call === null || $call['method'] !== $method) {
+                throw new \RuntimeException("Unexpected method at $index: $method");
+            }
+            return $call['response'];
+        });
+
+        $resolver = new LockResolver(
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            $this->pdClient,
+            self::START_TS,
+        );
+        $resolver->resolveLock(
+            'p',
+            $this->makeAsyncLock(),
+            notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+        );
+    }
+
+    public function testAsyncCommitResolveNotLeaderLeavesRegionCachedWhenExecutorOwned(): void
+    {
+        // The enclosing RetryExecutor's handleNotLeader() owns the drop and
+        // can switch to the hinted leader; check() must not invalidate here.
+        $this->regionCache->expects($this->never())->method('invalidate');
+        $this->expectException(RegionException::class);
+
+        $this->resolveAsyncCommitAgainstNotLeader(true);
+    }
+
+    public function testAsyncCommitResolveNotLeaderInvalidatesWhenNotOwnedByRetryExecutor(): void
+    {
+        // No retry executor wraps this call, so check() must self-invalidate
+        // with 'not_leader' before throwing, as it already does on the
+        // CheckTxnStatus / CheckSecondaryLocks paths.
+        $this->regionCache->expects($this->once())
+            ->method('invalidate')
+            ->with(1, 'not_leader');
+        $this->expectException(RegionException::class);
+
+        $this->resolveAsyncCommitAgainstNotLeader(false);
     }
 }
