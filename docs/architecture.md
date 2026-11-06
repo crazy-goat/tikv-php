@@ -216,6 +216,15 @@ Optimistic Transaction                   Pessimistic Transaction
 └──────────────────────┘
 ```
 
+Pessimistic-lock requests are split by the same `maxTxnBatchSize` /
+`maxTxnBatchCount` limits as prewrite and commit (issue #430), so one region
+can require several lock requests. `PessimisticLockRequest.is_first_lock` is
+carried only by the batch whose mutations contain the transaction's primary
+key (issue #225); it is not tied to the first region or the first request, and
+a retry of that batch keeps the flag. TiKV uses it to decide whether the
+transaction can be skipped by the deadlock detector, so flagging a secondary
+batch would hide a real lock-wait cycle.
+
 ### 3. TimestampOracle
 
 **Location**: `src/Client/Connection/TimestampOracle.php`
