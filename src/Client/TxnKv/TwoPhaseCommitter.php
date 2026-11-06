@@ -677,8 +677,10 @@ final readonly class TwoPhaseCommitter
 
         // Primary commit failures are not retried here: transport failures
         // leave the outcome undetermined, and post-commit-point errors must
-        // never trigger transaction rollback.
-        $this->commitKeys($allKeys, $state, $retryExecutor, $classifier);
+        // never trigger transaction rollback. Pass the primary derived above
+        // so the commit phase selects exactly the batch the prewrite phase
+        // treated as primary (issue #430 review, point 4).
+        $this->commitKeys($allKeys, $primary, $state, $retryExecutor, $classifier);
     }
 
     // ---------------------------------------------------------------
@@ -1203,9 +1205,16 @@ final readonly class TwoPhaseCommitter
      * rejected with a "primary not committed" error.
      *
      * @param string[] $keys
+     * @param string $primary The transaction's primary key, derived by
+     *        {@see commit()} as the pessimistic primary when one exists and
+     *        the first write key otherwise. Passing it keeps the commit
+     *        phase's primary batch identical to the prewrite phase's, even
+     *        when the two derivations would disagree (issue #430 review,
+     *        point 4).
      */
     private function commitKeys(
         array $keys,
+        string $primary,
         TransactionState $state,
         RetryExecutor $retryExecutor,
         callable $classifier,
@@ -1223,11 +1232,10 @@ final readonly class TwoPhaseCommitter
             );
         }
 
-        $primary = $state->getPrimaryKey();
-
         // Resolve the batch that carries the primary key so we can commit it
         // first. A region may need more than one commit request now, so the
-        // primary is identified by its batch, not by its region.
+        // primary is identified by its batch, not by its region. $primary is
+        // the same value the prewrite phase used (issue #430 review, point 4).
         $primaryBatchIndex = null;
         foreach ($keysByRegion as $index => $batch) {
             if (in_array($primary, $batch['keys'], true)) {

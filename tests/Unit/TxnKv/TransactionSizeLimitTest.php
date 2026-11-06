@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
@@ -25,6 +26,7 @@ use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -90,6 +92,26 @@ final class TransactionSizeLimitTest extends TestCase
         $this->regionCache->method('put');
         $this->pdClient->method('getRegion')->willReturn($region);
         $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($store);
+    }
+
+    /**
+     * Two adjacent regions split at "m": keys below "m" belong to the left
+     * region, keys from "m" upwards to the right one. The cache answers every
+     * key so the test exercises the per-region grouping, not PD resolution.
+     */
+    private function stubTwoRegions(RegionInfo $left, RegionInfo $right): void
+    {
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+
+        $regionFor = static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $left : $right;
+
+        $this->regionCache->method('getByKey')->willReturnCallback($regionFor);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturnCallback($regionFor);
+        $this->pdClient->method('scanRegions')->willReturn([$left, $right]);
         $this->pdClient->method('getStore')->willReturn($store);
     }
 
@@ -285,6 +307,14 @@ final class TransactionSizeLimitTest extends TestCase
         }
     }
 
+    public function testTransactionTooLargeExceptionIsClassifiedAsFatal(): void
+    {
+        self::assertNull(
+            ErrorClassifier::classify(TransactionTooLargeException::entryCount(3, 2)),
+            'TransactionTooLargeException must never be retried',
+        );
+    }
+
     // ========================================================================
     // Transaction: queryability and "no RPC before the limit check"
     // ========================================================================
@@ -401,7 +431,20 @@ final class TransactionSizeLimitTest extends TestCase
         return $keys;
     }
 
-    public function testPrewriteAndCommitAreSplitByCountPerRegion(): void
+    /**
+     * @param list<string> $keys
+     */
+    private function assertKeysBelongToOneRegion(array $keys): void
+    {
+        $sides = array_unique(array_map(
+            static fn(string $key): int => KeyOrder::lt($key, 'm') ? 1 : 2,
+            $keys,
+        ));
+
+        self::assertCount(1, $sides, 'a request must not mix keys from two regions');
+    }
+
+    public function testPrewriteAndCommitAreSplitByCountPerBatch(): void
     {
         $this->stubSingleRegion($this->makeRegion());
         $this->pdClient->method('getTimestamp')->willReturn(2000);
@@ -435,7 +478,49 @@ final class TransactionSizeLimitTest extends TestCase
         self::assertSame(['k1', 'k2'], iterator_to_array($this->commitRequests[0]->getKeys()));
     }
 
-    public function testPrewriteAndCommitAreSplitByBytesPerRegion(): void
+    public function testPrewriteAndCommitAreSplitPerRegionWithoutMixingRegions(): void
+    {
+        $this->stubTwoRegions(
+            $this->makeRegion(1, '', 'm'),
+            $this->makeRegion(2, 'm', ''),
+        );
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+        $this->capturePrewriteAndCommit();
+
+        // Alternating keys: a global split would produce [a1, m1] / [a2, m2]
+        // and mix regions, while the per-region grouping must produce
+        // [a1, a2] / [m1, m2].
+        $txn = $this->makeTransaction(['maxTxnBatchCount' => 2]);
+        $keys = ['a1', 'm1', 'a2', 'm2'];
+        foreach ($keys as $index => $key) {
+            $txn->set($key, 'v' . $index);
+        }
+        $txn->commit();
+
+        self::assertSame(TransactionStatus::Committed, $txn->getStatus());
+        self::assertCount(2, $this->prewriteRequests);
+        self::assertCount(2, $this->commitRequests);
+
+        foreach ($this->prewriteRequests as $request) {
+            $requestKeys = self::prewriteKeys([$request]);
+            self::assertCount(2, $requestKeys);
+            $this->assertKeysBelongToOneRegion($requestKeys);
+        }
+        foreach ($this->commitRequests as $request) {
+            $requestKeys = self::commitKeys([$request]);
+            self::assertCount(2, $requestKeys);
+            $this->assertKeysBelongToOneRegion($requestKeys);
+        }
+
+        // The primary key (a1) is in the first batch, and that batch is
+        // dispatched first in both phases.
+        self::assertSame(['a1', 'a2'], self::prewriteKeys([$this->prewriteRequests[0]]));
+        self::assertSame(['a1', 'a2'], self::commitKeys([$this->commitRequests[0]]));
+        self::assertSame(['m1', 'm2'], self::prewriteKeys([$this->prewriteRequests[1]]));
+        self::assertSame(['m1', 'm2'], self::commitKeys([$this->commitRequests[1]]));
+    }
+
+    public function testPrewriteAndCommitAreSplitByBytesPerBatch(): void
     {
         $this->stubSingleRegion($this->makeRegion());
         $this->pdClient->method('getTimestamp')->willReturn(2000);
@@ -460,6 +545,28 @@ final class TransactionSizeLimitTest extends TestCase
         foreach ($this->commitRequests as $request) {
             self::assertCount(1, $request->getKeys());
         }
+    }
+
+    public function testPrewriteAndCommitKeepItemsThatExactlyFillTheByteBudgetInOneBatch(): void
+    {
+        $this->stubSingleRegion($this->makeRegion());
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+        $this->capturePrewriteAndCommit();
+
+        // Two 5-byte keys with empty values: 10 payload bytes in prewrite and
+        // 10 key bytes in commit. The splitter starts a new batch only when
+        // the next item would exceed the budget, so both stay in one request
+        // (a > to >= regression would split them).
+        $txn = $this->makeTransaction(['maxTxnBatchSize' => 10]);
+        $txn->set('abcde', '');
+        $txn->set('fghij', '');
+        $txn->commit();
+
+        self::assertSame(TransactionStatus::Committed, $txn->getStatus());
+        self::assertCount(1, $this->prewriteRequests);
+        self::assertCount(1, $this->commitRequests);
+        self::assertSame(['abcde', 'fghij'], self::prewriteKeys($this->prewriteRequests));
+        self::assertSame(['abcde', 'fghij'], self::commitKeys($this->commitRequests));
     }
 
     public function testOnePhaseCommitIsDisabledWhenTheRegionNeedsMultipleBatches(): void
@@ -514,6 +621,33 @@ final class TransactionSizeLimitTest extends TestCase
         );
     }
 
+    public function testCommitStartsWithThePrimaryBatchWhenItIsNotTheFirstBatch(): void
+    {
+        $this->stubSingleRegion($this->makeRegion());
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+        $this->capturePrewriteAndCommit();
+
+        $txn = $this->makeTransaction(['maxTxnBatchCount' => 1]);
+        foreach (['a1', 'a2', 'a3', 'a4'] as $index => $key) {
+            $txn->set($key, 'v' . $index);
+        }
+
+        $state = (new \ReflectionProperty(Transaction::class, 'state'))->getValue($txn);
+        self::assertInstanceOf(TransactionState::class, $state);
+        // A pessimistic primary that is not the first write key. The prewrite
+        // phase already honours it; the commit phase must select the same
+        // batch, not blindly commit batch 0 (issue #430 review, point 4).
+        $state->setPessimisticPrimaryKey('a3');
+
+        $txn->commit();
+
+        self::assertSame(TransactionStatus::Committed, $txn->getStatus());
+        self::assertCount(4, $this->prewriteRequests);
+        self::assertCount(4, $this->commitRequests);
+        self::assertSame(['a3'], self::prewriteKeys([$this->prewriteRequests[0]]));
+        self::assertSame(['a3'], self::commitKeys([$this->commitRequests[0]]));
+    }
+
     public function testFailedSecondaryBatchDoesNotCommitTheTransaction(): void
     {
         $this->stubSingleRegion($this->makeRegion());
@@ -564,7 +698,15 @@ final class TransactionSizeLimitTest extends TestCase
             self::assertSame('simulated secondary batch failure', $e->getMessage());
         }
 
-        self::assertNotSame(TransactionStatus::Committed, $txn->getStatus());
+        // The primary batch was prewritten, the second failed: the
+        // transaction must stay Active with its buffered write set and the
+        // primary lock recoverable, never rolled back or marked committed.
+        self::assertSame(TransactionStatus::Active, $txn->getStatus());
+        self::assertSame(4, $txn->getWriteSetCount());
+        self::assertNull($txn->getCommitTs());
+        self::assertCount(2, $this->prewriteRequests);
+        self::assertSame(['k1', 'k2'], self::prewriteKeys([$this->prewriteRequests[0]]));
+        self::assertSame(['k3', 'k4'], self::prewriteKeys([$this->prewriteRequests[1]]));
         self::assertCount(0, $this->commitRequests);
     }
 
