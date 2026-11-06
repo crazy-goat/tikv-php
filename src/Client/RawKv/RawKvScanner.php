@@ -502,8 +502,10 @@ final readonly class RawKvScanner
      * method's caps: `limit = 0` returns the whole prefix (paginated
      * internally, guarded by {@see self::$maxScanRows}, which throws
      * {@see ScanLimitExceededException} instead of truncating), and a bounded
-     * scan returns at most `limit` rows (issue #440). The unbounded,
-     * constant-memory alternative is {@see self::scanPrefixIterator()}.
+     * scan returns at most `limit` rows (issue #440). A negative `limit` is
+     * rejected before any RPC (see {@see self::validateScanLimit()}). The
+     * unbounded, constant-memory alternative is
+     * {@see self::scanPrefixIterator()}.
      *
      * @return array<array{key: string, value: ?string}>
      */
@@ -1442,6 +1444,11 @@ final readonly class RawKvScanner
      * internally — issue #191), while an explicit limit above the per-RPC
      * {@see self::MAX_SCAN_LIMIT} is rejected because one RawScan RPC cannot
      * exceed it.
+     *
+     * A negative limit is rejected before it can reach
+     * {@see RawScanRequest::setLimit()}, a `uint32` protobuf field where
+     * `-1` serialises to `4294967295` and turns the scan effectively
+     * unbounded (issue #332).
      */
     private function validateScanLimit(int $limit): int
     {

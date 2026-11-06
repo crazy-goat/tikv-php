@@ -576,6 +576,13 @@ unsigned value. `batchScan`/`scanIterator` use a `<= 0` guard with their
 own ('eachLimit'/'batchSize' must be greater than 0) messages; the scan
 limit itself uses the 'Scan limit must be 0 or greater' message.
 
+Issue #310 was filed before the fix shipped in v0.4.0 (#332); by the time it
+was picked up, `scan(-1)` already threw. The remaining gap was that nothing
+asserted the rejection happens before the scan RPC (a pessimistic
+`Transaction::scan()` still fetches its read timestamp first), so #310 adds
+tests and docs, not a guard — check the code before implementing an audit
+finding (the same premise-expiry trap as #394 and #361 above).
+
 ## Metrics on a shared collaborator: nullable + accessor + in-place attach, and one sole owner per emission reason
 
 Issue #474 (regionInvalidated()) settled three rules worth reusing:

@@ -637,9 +637,11 @@ $client = RawKvClient::create($pdEndpoints);
 InvalidArgumentException: ...
 ```
 
-**What it means:** Input validation failed *before* any RPC was sent —
-empty/oversized keys or values, negative or too-large scan limits, bad
-option values. Note this class extends `\InvalidArgumentException`
+**What it means:** Input validation failed *before* the operation sent its
+request to TiKV — empty/oversized keys or values, negative or too-large scan
+limits, bad option values. (A pessimistic `Transaction::scan()` refreshes its
+read timestamp through PD first, so that TSO request may already have been
+sent; the scan RPC is not.) Note this class extends `\InvalidArgumentException`
 directly and is **not** a `TiKvException`, so `catch (TiKvException)` will
 not catch it.
 
