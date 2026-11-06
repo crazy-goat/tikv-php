@@ -544,7 +544,7 @@ class TxnKvClientTest extends TestCase
     }
 
     // ========================================================================
-    // begin() — priority propagation
+    // begin() — priority option (stored on the transaction, sent on the wire)
     // ========================================================================
 
     public function testBeginWithPriorityReachesTheRpcContext(): void
@@ -632,8 +632,12 @@ class TxnKvClientTest extends TestCase
         return $store;
     }
 
-    public function testBeginWithoutPriorityDefaultsToZero(): void
+    public function testBeginWithoutPriorityStoresNormalOnTransaction(): void
     {
+        // A constructor round-trip, not a wire-level guarantee: begin() must
+        // store CommandPri::Normal on the Transaction when no priority option
+        // is given. The Context of a default-priority request is pinned by
+        // TransactionTest::testDefaultPriorityIsNormalOnEveryRequestContext().
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(5000);
         $pdClient->method('getClusterId')->willReturn(null);
@@ -642,7 +646,7 @@ class TxnKvClientTest extends TestCase
         $client = new TxnKvClient($pdClient, $grpc);
         $txn = $client->begin();
 
-        $this->assertSame(0, $txn->getPriority());
+        $this->assertSame(CommandPri::Normal, $txn->getPriority());
     }
 
     // ========================================================================
