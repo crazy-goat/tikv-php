@@ -257,11 +257,11 @@ $client->batchDelete(['k1', 'k2']);
 
 ```php
 // Range scan [startKey, endKey). limit: 0 (the default) returns the whole
-// range: the client pages internally and buffers every row, guarded by
-// options['maxScanRows'] (default 100000).
+// range: the client pages internally at MAX_SCAN_LIMIT (10240) rows per RPC
+// and buffers every row, guarded by options['maxScanRows'] (default 100000).
 $results = $client->scan('user:a', 'user:z');
 
-// Prefix scan (convenience method)
+// Prefix scan (convenience method, same pagination and cap as scan())
 $results = $client->scanPrefix('user:');
 
 // Results format:
