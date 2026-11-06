@@ -230,17 +230,32 @@ final readonly class RetryExecutor
 
                         if (
                             $e instanceof GrpcException
-                            && $failedStoreId !== null
                             && $this->indicatesBrokenConnection($e)
                         ) {
-                            // Resolve the channel address BEFORE dropping the
-                            // store entry: resolveStoreAddress() reads the
-                            // store cache, and invalidating first would force
-                            // a PD GetStore just to close a channel.
-                            try {
-                                $address = $this->regionResolver->resolveStoreAddress($failedStoreId);
-                                $this->grpc->closeChannel($address);
-                            } catch (StoreNotFoundException) {
+                            // The exception carries the address the failed
+                            // attempt was sent to (set by GrpcClient /
+                            // GrpcFuture at throw time). That is authoritative
+                            // even when the RPC was nested inside the retried
+                            // operation — lock resolution talks to the
+                            // primary's region, not the read's/write's region
+                            // (issue #248). Fall back to the provider/cached
+                            // leader only for exceptions that predate the
+                            // field or synthetic test failures.
+                            $failedAddress = $e->targetAddress;
+                            if ($failedAddress === null && $failedStoreId !== null) {
+                                // Resolve the channel address BEFORE dropping
+                                // the store entry: resolveStoreAddress() reads
+                                // the store cache, and invalidating first
+                                // would force a PD GetStore just to close a
+                                // channel.
+                                try {
+                                    $failedAddress = $this->regionResolver->resolveStoreAddress($failedStoreId);
+                                } catch (StoreNotFoundException) {
+                                }
+                            }
+
+                            if ($failedAddress !== null) {
+                                $this->grpc->closeChannel($failedAddress);
                             }
                         }
 

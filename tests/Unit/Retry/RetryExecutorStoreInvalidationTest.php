@@ -441,6 +441,12 @@ class RetryExecutorStoreInvalidationTest extends TestCase
      * the catch block runs. A concurrent leader switch (or a range operation
      * that targeted a different store) must not make the executor tear down
      * the healthy new leader's channel.
+     *
+     * Note: this test already passes on the pre-#248 code because #247
+     * introduced the provider; it guards that base behaviour, not this PR's
+     * change. `testPutClosesTheTargetStoreChannelNotAChangedCachedLeader` and
+     * `testExceptionTargetAddressWinsOverTheProvider` are the #248 regression
+     * tests.
      */
     public function testTransportFailureClosesTheTargetStoreNotTheCachedLeader(): void
     {
@@ -495,6 +501,45 @@ class RetryExecutorStoreInvalidationTest extends TestCase
             'the cached leader store must not be invalidated by a failure of another store',
         );
         $this->assertSame($targetNewAddress, $storeCache->get(2)?->getAddress());
+    }
+
+    /**
+     * Regression (issue #248, P1): a GrpcException carries the address the
+     * failed attempt was sent to. That address wins over the caller's target
+     * provider, which describes the enclosing operation, not a nested RPC
+     * such as lock resolution against another region's primary.
+     */
+    public function testExceptionTargetAddressWinsOverTheProvider(): void
+    {
+        [$storeCache, $regionCache, $resolver] = $this->cacheWithStaleAddress();
+
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls);
+        $this->grpc->expects($this->once())
+            ->method('closeChannel')
+            ->with('primary-store:20160');
+
+        $attempts = 0;
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$attempts, $resolver): string {
+                $attempts++;
+                $resolver->resolveStoreAddress(self::STORE_ID);
+                if ($attempts === 1) {
+                    throw new GrpcException(
+                        'connection reset',
+                        GrpcStatusCode::Unavailable->value,
+                        'primary-store:20160',
+                    );
+                }
+
+                return 'ok';
+            },
+            $this->zeroSleepClassifier(),
+            targetStoreId: static fn (): int => self::STORE_ID,
+        );
+
+        $this->assertSame('ok', $result);
     }
 
     /**

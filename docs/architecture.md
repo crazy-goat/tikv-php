@@ -805,7 +805,9 @@ the sequential retrying path.
   executor, so a replica-read follower or a store whose cached leader changed
   during the attempt is the one torn down (issue #248). Only `UNAVAILABLE`
   closes a channel; a `DEADLINE_EXCEEDED` on a slow but healthy connection is
-  retried without a re-handshake
+  retried without a re-handshake. The exception carries the address of the
+  failed call, so a nested lock-resolution RPC against another region also
+  closes its own channel
 
 ### 4. Automatic Retries
 

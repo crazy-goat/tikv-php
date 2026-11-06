@@ -48,6 +48,11 @@ final class GrpcFuture
      *                                               hook to release the in-flight
      *                                               slot of the channel the call
      *                                               ran on (issue #278).
+     * @param string|null $targetAddress Address the call was sent to, copied
+     *                                   onto a thrown {@see GrpcException}
+     *                                   so the retry executor can close the
+     *                                   channel that actually failed
+     *                                   (issue #248).
      */
     public function __construct(
         private readonly ?Call $call,
@@ -56,6 +61,7 @@ final class GrpcFuture
         private readonly ?\Closure $waiter = null,
         private readonly ?\Closure $canceller = null,
         private readonly ?\Closure $onSettled = null,
+        private readonly ?string $targetAddress = null,
     ) {
     }
 
@@ -156,7 +162,7 @@ final class GrpcFuture
             $status = GrpcResponseParser::extractStatus($event);
 
             if ($status['code'] !== \Grpc\STATUS_OK) {
-                throw new GrpcException($status['details'], $status['code']);
+                throw new GrpcException($status['details'], $status['code'], $this->targetAddress);
             }
 
             $result = GrpcResponseParser::deserialize($event, $this->responseClass);
