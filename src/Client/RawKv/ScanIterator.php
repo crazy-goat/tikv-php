@@ -22,7 +22,7 @@ use Iterator;
  * large datasets without exhausting PHP memory.
  *
  * Usage:
- *   foreach ($client->scanIterator('start', 'end') as $key => $value) {
+ *   foreach ($client->scanIterator('start', 'stop') as $key => $value) {
  *       // process one key-value at a time
  *   }
  *

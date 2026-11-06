@@ -394,9 +394,9 @@ foreach ($client->scanPrefixIterator('log:2024-01-', batchSize: 1000, keyOnly: t
 
 The iterator fetches a page of up to `batchSize` rows (default `1024`, bounds
 `1 <= batchSize <= 10240`) per underlying `scan()` call and continues from
-after the page's last key until the range is exhausted. `batchSize` is
-validated immediately; scan RPCs (and their `RegionException` / `GrpcException`
-failures) happen lazily during iteration. The iterator is rewindable —
+after the page's last key until the range is exhausted. `batchSize` and the
+range order are validated immediately; scan RPCs (and their `RegionException` /
+`GrpcException` failures) happen lazily during iteration. The iterator is rewindable —
 `rewind()` re-scans from the original start key — and there is no reverse
 variant. Full semantics: [Iterating Large Ranges](operations.md#iterating-large-ranges).
 

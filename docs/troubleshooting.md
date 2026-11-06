@@ -701,7 +701,7 @@ after `close()`; create a fresh client if needed.
 Other real messages thrown as `InvalidStateException`:
 
 - `CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))` — call `$client->setAtomicForCAS(true)` before `compareAndSwap()`/`putIfAbsent()`
-- `Transaction is not active` — transaction already committed/rolled back; start a new one
+- `Transaction is not active` — transaction already committed or rolled back (including a live transaction rolled back by `TxnKvClient::close()`); start a new one
 - `Write set is empty, no primary key` — `commit()` on a transaction with no buffered writes
 - `commitTs must be set before committing; commit() must run first.`
 - `TLS config is required for TLS credentials`
