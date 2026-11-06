@@ -1129,7 +1129,7 @@ final class RawKvClient
      * @throws StoreNotFoundException When PD no longer knows the store that
      *         backs a region
      * @throws RetryBudgetExhaustedException When a region's retry attempt cap
-     *         or wall-clock deadline is exhausted
+     *         or the operation's wall-clock deadline is exhausted
      * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
      *         limit is 0 and more than `options['maxScanRows']` rows match
      */
@@ -1174,7 +1174,7 @@ final class RawKvClient
      * @throws StoreNotFoundException When PD no longer knows the store that
      *         backs a region
      * @throws RetryBudgetExhaustedException When a region's retry attempt cap
-     *         or wall-clock deadline is exhausted
+     *         or the operation's wall-clock deadline is exhausted
      * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
      *         limit is 0 and more than `options['maxScanRows']` rows match
      */
@@ -1223,7 +1223,7 @@ final class RawKvClient
      * @throws StoreNotFoundException When PD no longer knows the store that
      *         backs a region
      * @throws RetryBudgetExhaustedException When a region's retry attempt cap
-     *         or wall-clock deadline is exhausted
+     *         or the operation's wall-clock deadline is exhausted
      * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
      *         limit is 0 and more than `options['maxScanRows']` rows match
      */
