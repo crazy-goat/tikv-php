@@ -23,6 +23,8 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+## [v0.10.0] - 2026-11-06
+
 ### Added
 
 - `begin()`, `beginOptimistic()` and `beginPessimistic()` accept opt-in write-set limits and request batching (issue #430). `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` (each `0` = unlimited, the default) bound the transaction's write set; exceeding one throws the new typed `TransactionTooLargeException` from `set()`/`delete()` before the write is buffered and before any RPC (so a pessimistic transaction takes no eager lock for a rejected write). Overwriting a key accounts for the entry it replaces. `Transaction::getWriteSetSize()` and `Transaction::getWriteSetCount()` expose the current size for monitoring. `maxTxnBatchSize` (default 16384 bytes) and `maxTxnBatchCount` (default 512) split each region's prewrite mutations and commit keys into multiple requests through the existing `RawKvSplitter`, reducing the risk of an oversized `PrewriteRequest`/`CommitRequest` being rejected with `RaftEntryTooLarge` (the bound covers key+value payload bytes, not request framing, `Context`, `primary_lock` or the async `secondaries` list, and a single oversized mutation still forms its own batch); 1PC stays single-batch and async commit keeps the primary batch last. (#430)
