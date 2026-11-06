@@ -934,6 +934,11 @@ final class TxnKvClient
      *
      * Use as a lightweight health check. Does not touch any user data.
      *
+     * Returns the cluster ID on success, or null if PD responded without a
+     * cluster-ID header. When `options['expectedClusterId']` is set, a
+     * response without a cluster ID fails with HealthCheckException instead
+     * of returning null.
+     *
      * @throws ClientClosedException When the client has been closed
      * @throws HealthCheckException When the PD probe fails
      */

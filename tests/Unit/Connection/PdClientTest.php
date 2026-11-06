@@ -1125,6 +1125,185 @@ class PdClientTest extends TestCase
     }
 
     // ========================================================================
+    //  expectedClusterId (issue #308, SEC-05)
+    // ========================================================================
+
+    public function testExpectedClusterIdAcceptsMatchingHeaderId(): void
+    {
+        $response = $this->makeGetRegionResponse();
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+        $result = $client->getRegion('key');
+
+        $this->assertSame(1, $result->regionId);
+        $this->assertSame(12345, $client->getClusterId());
+    }
+
+    public function testExpectedClusterIdRejectsMismatchingHeaderId(): void
+    {
+        $response = $this->makeGetRegionResponse();
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 999);
+
+        try {
+            $client->getRegion('key');
+            $this->fail('Expected TiKvException for a mismatching header cluster ID');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 999, server reported 12345',
+                $e->getMessage(),
+            );
+        }
+
+        // The server-reported ID must not be adopted.
+        $this->assertNull($client->getClusterId());
+    }
+
+    public function testExpectedClusterIdRejectsMismatchingErrorStringId(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->willThrowException(new GrpcException('mismatch cluster id, need 999 but got 0', 2));
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+
+        try {
+            $client->getRegion('key');
+            $this->fail('Expected TiKvException for a mismatching error-string cluster ID');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 12345, server reported 999',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertNull($client->getClusterId());
+    }
+
+    public function testExpectedClusterIdRejectsHeaderlessResponse(): void
+    {
+        $response = new GetRegionResponse();
+        $response->setRegion($this->makeRegion('', ''));
+        $response->setLeader($this->makePeer(1, 1));
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+
+        try {
+            $client->getRegion('key');
+            $this->fail('Expected TiKvException for a response without a cluster-ID header');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID missing: expected 12345, response carried none',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertNull($client->getClusterId());
+    }
+
+    public function testEstablishedClusterIdCannotBeOverwrittenByErrorString(): void
+    {
+        $response = $this->makeGetRegionResponse();
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnCallback(function () use ($response): Message {
+                static $callCount = 0;
+                $callCount++;
+                if ($callCount === 1) {
+                    return $response;
+                }
+
+                throw new GrpcException('mismatch cluster id, need 999 but got 0', 2);
+            });
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $client->getRegion('key1');
+        $this->assertSame(12345, $client->getClusterId());
+
+        try {
+            $client->getRegion('key2');
+            $this->fail('Expected TiKvException for an error-string overwrite');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: established 12345, server reported 999',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(12345, $client->getClusterId());
+    }
+
+    public function testExpectedClusterIdIsCheckedOnLaterResponseHeaders(): void
+    {
+        $matching = $this->makeGetRegionResponse();
+
+        $mismatchingHeader = new ResponseHeader();
+        $mismatchingHeader->setClusterId(999);
+        $mismatching = new GetRegionResponse();
+        $mismatching->setHeader($mismatchingHeader);
+        $mismatching->setRegion($matching->getRegion());
+        $mismatching->setLeader($matching->getLeader());
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls($matching, $mismatching);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+        $client->getRegion('key1');
+        $this->assertSame(12345, $client->getClusterId());
+
+        try {
+            $client->getRegion('key2');
+            $this->fail('Expected TiKvException for a later mismatching header');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 12345, server reported 999',
+                $e->getMessage(),
+            );
+        }
+    }
+
+    public function testSetClusterIdRejectsValueThatDiffersFromExpected(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Cluster ID mismatch: expected 12345, server reported 999');
+
+        $client->setClusterId(999);
+    }
+
+    public function testExpectedClusterIdRejectsZero(): void
+    {
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('expectedClusterId must be greater than 0, got 0');
+
+        new PdClient($this->createMock(GrpcClientInterface::class), 'pd:2379', expectedClusterId: 0);
+    }
+
+    public function testExpectedClusterIdRejectsNegative(): void
+    {
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('expectedClusterId must be greater than 0, got -1');
+
+        new PdClient($this->createMock(GrpcClientInterface::class), 'pd:2379', expectedClusterId: -1);
+    }
+
+    // ========================================================================
     //  learnClusterId tests (indirect via getRegion)
     // ========================================================================
 
