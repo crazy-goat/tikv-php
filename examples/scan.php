@@ -3,6 +3,11 @@
  * TiKV PHP Client - Scanning Example
  * 
  * Demonstrates range scanning, prefix scanning, and reverse scanning.
+ *
+ * Unbounded scan()/scanPrefix() calls page internally at MAX_SCAN_LIMIT
+ * (10240) rows per RPC but buffer the whole result; past
+ * options['maxScanRows'] (default 100000) they throw instead of truncating.
+ * The prefix scan below uses the lazy iterator to stay memory-flat.
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -39,13 +44,14 @@ try {
     }
     echo "   Found " . count($results) . " records\n\n";
     
-    // 2. Prefix Scan
+    // 2. Prefix Scan (lazy iterator: constant memory, no row cap)
     echo "2. Prefix Scan 'scan:product:'\n";
-    $results = $client->scanPrefix('scan:product:');
-    foreach ($results as $result) {
-        echo "   {$result['key']} => {$result['value']}\n";
+    $productCount = 0;
+    foreach ($client->scanPrefixIterator('scan:product:') as $key => $value) {
+        echo "   {$key} => {$value}\n";
+        $productCount++;
     }
-    echo "   Found " . count($results) . " records\n\n";
+    echo "   Found {$productCount} records\n\n";
     
     // 3. Limited Scan
     echo "3. Limited Scan (limit=3)\n";
@@ -55,7 +61,8 @@ try {
     }
     echo "   Found " . count($results) . " records (limited to 3)\n\n";
     
-    // 4. Key-Only Scan
+    // 4. Key-Only Scan (values not retrieved; for a prefix larger than
+    //    options['maxScanRows'], default 100000, use scanPrefixIterator)
     echo "4. Key-Only Scan (values not retrieved)\n";
     $results = $client->scanPrefix('scan:user:', keyOnly: true);
     foreach ($results as $result) {
