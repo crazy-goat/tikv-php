@@ -7,7 +7,9 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -197,6 +199,16 @@ final class TxnKvClient
     private readonly RegionResolver $regionResolver;
 
     /**
+     * Transactions begun by this client that have not been closed yet,
+     * tracked weakly so tracking does not extend their lifetime. close()
+     * rolls the still-active ones back before releasing the transport and
+     * PD client they depend on (issue #226, TXN-21).
+     *
+     * @var list<\WeakReference<Transaction>>
+     */
+    private array $liveTransactions = [];
+
+    /**
      * Final transaction outcomes shared by the LockResolver of every
      * transaction of this client (issue #428). Bounded, FIFO.
      */
@@ -258,6 +270,7 @@ final class TxnKvClient
             replicaReadPolicy: self::resolveReplicaReadPolicy($options),
             metrics: $bundle->metrics,
             ownsGrpcClient: $bundle->ownsGrpcClient,
+            codec: $bundle->codec,
         );
     }
 
@@ -302,6 +315,15 @@ final class TxnKvClient
          * to every transaction. Test seam (issue #429); defaults to the wall clock.
          */
         private readonly ?Closure $clock = null,
+        /**
+         * Key codec supplied by the construction path. The derived
+         * EpochNotMatch payload codec (issue #246) is V1 TxnKV's
+         * memory-comparable codec. For API V2 this property is `CodecV2`,
+         * but the derived payload codec is null because `ApiV2GrpcClient`
+         * already decodes response region boundaries; applying the V2 codec
+         * again would fail or corrupt the cached range.
+         */
+        private readonly ?CodecInterface $codec = new CodecV1(Mode::Txn),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -318,6 +340,10 @@ final class TxnKvClient
             // cache in place — never rebind or clone it.
             $this->regionCache->attachMetricsIfAbsent($this->metrics);
         }
+        // ApiV2GrpcClient already decodes response region boundaries, so a
+        // V2 codec must not be applied to an EpochNotMatch payload a second
+        // time (issue #246).
+        $payloadCodec = $this->codec instanceof CodecV2 ? null : $this->codec;
         $this->regionResolver = $regionResolver
             ?? new RegionResolver(
                 $this->pdClient,
@@ -328,6 +354,7 @@ final class TxnKvClient
                 $this->logger,
                 $this->pdEndpoints,
                 $this->allowedStorePorts,
+                $payloadCodec,
             );
     }
 
@@ -527,7 +554,7 @@ final class TxnKvClient
             statusCache: $this->resolvedStatusCache,
         );
 
-        return new Transaction(
+        $transaction = new Transaction(
             txnId: $txnId,
             startTs: $startTs,
             pessimistic: $pessimistic,
@@ -557,6 +584,11 @@ final class TxnKvClient
             maxTxnBatchSize: $maxTxnBatchSize,
             maxTxnBatchCount: $maxTxnBatchCount,
         );
+
+        $this->pruneFinishedTransactions();
+        $this->liveTransactions[] = \WeakReference::create($transaction);
+
+        return $transaction;
     }
 
     /**
@@ -966,6 +998,19 @@ final class TxnKvClient
         $this->grpc->reapIdleChannels();
     }
 
+    /**
+     * Release the client's resources.
+     *
+     * Transactions this client began that are still active are rolled back
+     * first, while the transport and the PD client they depend on are still
+     * open (issue #226, TXN-21). A rollback failure is logged and does not
+     * abort the shutdown; the transaction keeps its destructor fallback.
+     * The region cache is then cleared, the owned transport is closed and the
+     * PD client is closed.
+     *
+     * Idempotent and never throws. The transaction rollback can perform
+     * network I/O and block while its retry loop runs.
+     */
     public function close(): void
     {
         if ($this->closed) {
@@ -973,6 +1018,8 @@ final class TxnKvClient
         }
 
         $this->closed = true;
+
+        $this->rollbackLiveTransactions();
 
         try {
             $this->regionCache->clear();
@@ -996,6 +1043,64 @@ final class TxnKvClient
         } catch (\Throwable $e) {
             $this->logger->error('Failed to close PD client', ['exception' => $e]);
         }
+    }
+
+    /**
+     * Roll back every transaction this client began that is still active.
+     *
+     * Runs before the region cache, transport and PD client are released, so
+     * an abandoned transaction does not leave its locks behind until the TTL
+     * expires (issue #226, TXN-21). A failure is logged, not propagated:
+     * close() must never throw, and the transaction's own destructor keeps
+     * its rollback fallback.
+     */
+    private function rollbackLiveTransactions(): void
+    {
+        $references = $this->liveTransactions;
+        $this->liveTransactions = [];
+
+        foreach ($references as $reference) {
+            $transaction = $reference->get();
+            // A closed transaction always carries a terminal status, so the
+            // status check also excludes an already committed or rolled back
+            // one (see Transaction::__destruct()).
+            if (
+                !$transaction instanceof Transaction
+                || $transaction->getStatus() !== TransactionStatus::Active
+            ) {
+                continue;
+            }
+
+            try {
+                $transaction->rollback();
+            } catch (\Throwable $e) {
+                $this->logger->error('Transaction rollback failed during client close', [
+                    'txnId' => $transaction->getTxnId(),
+                    'exception' => $e,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Drop weak references whose transaction was destroyed or reached a
+     * terminal status, so the list only tracks transactions that can still
+     * be rolled back.
+     */
+    private function pruneFinishedTransactions(): void
+    {
+        $live = [];
+        foreach ($this->liveTransactions as $reference) {
+            $transaction = $reference->get();
+            if (
+                $transaction instanceof Transaction
+                && $transaction->getStatus() === TransactionStatus::Active
+            ) {
+                $live[] = $reference;
+            }
+        }
+
+        $this->liveTransactions = $live;
     }
 
     public function __destruct()

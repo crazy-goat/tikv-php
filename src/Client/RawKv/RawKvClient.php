@@ -9,7 +9,9 @@ use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsMultiplexer;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -275,6 +277,7 @@ final class RawKvClient
             maxScanRows: self::resolveMaxScanRows($options),
             batchCommands: self::resolveBatchCommands($options),
             ownsGrpcClient: $bundle->ownsGrpcClient,
+            codec: $bundle->codec,
         );
     }
 
@@ -325,6 +328,15 @@ final class RawKvClient
          * other clients.
          */
         private readonly bool $ownsGrpcClient = true,
+        /**
+         * Key codec supplied by the construction path. `epochNotMatchCodec()`
+         * derives the EpochNotMatch payload codec from it (issue #246): V1
+         * RawKV passes a passthrough `CodecV1(Mode::Raw)`, while API V2
+         * passes `CodecV2` and the derived payload codec is null because
+         * `ApiV2GrpcClient` already decodes response region boundaries.
+         * Null itself also means passthrough for a hand-built client.
+         */
+        private readonly ?CodecInterface $codec = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -355,6 +367,7 @@ final class RawKvClient
             $this->logger,
             $this->pdEndpoints,
             $this->allowedStorePorts,
+            $this->epochNotMatchCodec(),
         );
         $this->crud = $crud ?? new RawKvCrud(
             $grpc,
@@ -663,6 +676,19 @@ final class RawKvClient
         return $policy;
     }
 
+    /**
+     * The codec for EpochNotMatch payload boundaries, or null when they are
+     * already in user-key space (issue #246).
+     *
+     * ApiV2GrpcClient decodes every response region boundary before the
+     * error reaches the client, so applying a V2 codec a second time would
+     * fail or corrupt the cached range.
+     */
+    private function epochNotMatchCodec(): ?CodecInterface
+    {
+        return $this->codec instanceof CodecV2 ? null : $this->codec;
+    }
+
     private function createRetryExecutor(): RetryExecutor
     {
         $regionResolver = new RegionResolver(
@@ -674,6 +700,7 @@ final class RawKvClient
             $this->logger,
             $this->pdEndpoints,
             $this->allowedStorePorts,
+            $this->epochNotMatchCodec(),
         );
 
         return new RetryExecutor(
@@ -1022,8 +1049,10 @@ final class RawKvClient
     /**
      * @throws ClientClosedException
      * @throws InvalidArgumentException When batchSize is below 1 or above
-     *         MAX_SCAN_LIMIT. The scan RPCs run during iteration; the
-     *         exceptions they raise are documented on {@see ScanIterator}.
+     *         MAX_SCAN_LIMIT, or when the range is reversed (`$startKey` sorts
+     *         after a non-empty `$endKey`). The scan RPCs run during
+     *         iteration; the exceptions they raise are documented on
+     *         {@see ScanIterator}.
      */
     public function scanIterator(
         string $startKey,
@@ -1091,7 +1120,8 @@ final class RawKvClient
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When the limit is invalid or the range
+     *         is reversed (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchDeadlineExceededException When a page fanned out across
@@ -1187,7 +1217,8 @@ final class RawKvClient
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When the limit is invalid or the range
+     *         is reversed (`$startKey` sorts before a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws KeyErrorException When the response carries a per-pair key error
@@ -1216,7 +1247,8 @@ final class RawKvClient
      * @return array<array<array{key: string, value: ?string}>>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When `eachLimit` is invalid or a range
+     *         is reversed (`$startKey` sorts after a non-empty `$endKey`)
      * @throws BatchPartialFailureException A per-range or per-region failure —
      *     including a `RegionException`, a `GrpcException`, a region's
      *     exhausted retry budget or a missing store — is reported inside
@@ -1241,6 +1273,8 @@ final class RawKvClient
 
     /**
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When the range is reversed
+     *         (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted
@@ -1291,6 +1325,8 @@ final class RawKvClient
 
     /**
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When the range is reversed
+     *         (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted
