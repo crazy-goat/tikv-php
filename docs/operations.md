@@ -11,7 +11,11 @@ Complete reference for all TiKV RawKV operations supported by the PHP client.
 5. [TTL Operations](#ttl-operations)
 6. [Atomic Operations](#atomic-operations)
 7. [Data Integrity](#data-integrity)
-8. [Bulk Import (SST Ingest)](#bulk-import-sst-ingest)
+8. [Error Handling](#error-handling)
+9. [Limits](#limits)
+10. [Connection lifecycle and process model](#connection-lifecycle-and-process-model)
+11. [Best Practices](#best-practices)
+12. [Bulk Import (SST Ingest)](#bulk-import-sst-ingest)
 
 ## Basic CRUD Operations
 
@@ -1057,6 +1061,156 @@ The client sends the sub-batches in parallel. A batch is not atomic. See [Batch 
 
 The TxnKV client has no key or value size check of its own. The `MAX_KEY_SIZE` and `MAX_VALUE_SIZE` constants apply to RawKV only.
 A transactional scan has its own cap of 10240 rows. See [Scan](#scan).
+
+## Connection lifecycle and process model
+
+The client is **not thread-safe**: its caches are plain mutable state with no
+locking. Use one instance at a time per PHP process, build a fresh one in each
+forked child, and never share an instance between threads or processes.
+
+### What a client holds
+
+| State | Default | Behaviour |
+|---|---|---|
+| gRPC channel cache | one channel per address, soft cap **64**, idle TTL **600000 ms** (10 minutes) | LRU eviction when a new address needs a slot; idle channels are swept on a cache miss and, rate-limited, on a cache hit |
+| Region cache | **10000** entries, TTL **600 s** plus up to **60 s** of jitter | LRU eviction at the cap; an entry is dropped on a region error or when a newer region supersedes its range |
+| PD client | store cache (**128** entries), TSO pool (**64** timestamps) | endpoint rotation, cluster-ID cache, timestamp batching |
+
+The channel cap is **soft**: eviction never closes a channel that still
+carries in-flight calls, so a batch that fans out over more stores than the
+cap holds grows the cache past 64 while the calls are in flight. It stays
+above the cap after they settle: it only shrinks on a later cache miss (idle
+channels are evicted down to the cap) or when the idle TTL drops them (the
+overshoot is logged at warning level). Raise `maxChannels` when that warning
+appears.
+
+Both caches only pay off when the client instance is reused. `maxChannels`
+and `idleTtlMs` are `create()` options — see
+[Channel Pool](configuration.md#channel-pool-maxchannels-idlettlms). The
+region-cache sizing is **not** exposed by `create()`: `ttlSeconds`,
+`jitterSeconds` and `maxEntries` are constructor arguments of `RegionCache`,
+so only a client assembled by hand can change them:
+
+```php
+$client = new RawKvClient(
+    $pdClient,
+    $grpcClient,
+    new RegionCache(ttlSeconds: 60),
+    ownsGrpcClient: false, // the transport is the application's
+);
+```
+
+`create()` always builds the default. A hand-assembled client closes the
+transport it was given unless you pass `ownsGrpcClient: false` — see
+[Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients).
+A `RegionCache` passed to the constructor is still cleared by `close()` (the
+client has no ownership flag for it), so do not share one between clients
+that you close independently. The same applies to the `PdClient`: `close()`
+always closes it (there is no `ownsPdClient` flag), resetting its store
+cache, TSO pool and leader-discovery state.
+
+### Long-running workers and CLI daemons (recommended)
+
+Create one client at startup, reuse it for the life of the process, and call
+`close()` on shutdown. Channels and region entries stay warm, so steady-state
+traffic does not pay a PD lookup per key.
+
+```php
+$client = RawKvClient::create(['127.0.0.1:2379']);
+
+try {
+    while ($job = $queue->next()) {
+        $client->put($job->key, $job->value);
+    }
+} finally {
+    $client->close();
+}
+```
+
+A worker that can be quiet for longer than `idleTtlMs` does not need to
+reconnect: call `reapIdleChannels()` from its own tick to drop the cached
+handles that have been idle longer than `idleTtlMs`. The next request reopens
+a handle if it needs one. Dropping a handle is not a reconnect: ext-grpc's
+persistent table keeps the channel warm until the process ends or the
+per-target persist bound drops the entry.
+
+### PHP-FPM and other per-request runtimes
+
+A client created per request starts with a **cold region cache**, so the
+first operation that touches a region pays a PD lookup for it
+(`GetRegion` / `ScanRegions`). The PHP-side channel handles are rebuilt too,
+but the TCP connections need not be: ext-grpc keeps a process-global
+persistent channel per target, so a later request served by the same FPM
+worker can reuse the connection — the region cache (and the PHP-side handle
+cache) cannot survive the request, the connection can
+([What the shared channel really is](configuration.md#what-the-shared-channel-really-is)).
+
+Create the client lazily and keep it as a singleton for the request lifetime
+(a DI container scoped to the request is fine). Do not create more than one
+client per request: each one carries its own region cache, so a second client
+repeats every PD lookup and, if it builds its own transport, doubles the
+channel handles. A client cannot be persisted between requests — PHP resets
+userland state, and a live channel is not serializable.
+
+### `close()` semantics
+
+`close()` releases the client's resources in three steps, each with its own
+guard: it clears the region cache, closes the gRPC transport if the client
+owns it, and closes the PD client (always — there is no ownership flag for
+it). A failing step is logged at error level and does not stop the others, so:
+
+- `close()` is **idempotent** — a second call does nothing;
+- `close()` **never throws**.
+
+For a client that owns its transport, `close()` is **not graceful**: it
+closes the channels that still carry in-flight calls, so an operation that is
+running when the client is closed fails — finish outstanding operations
+before calling `close()`, or expect them to fail. A client built with
+`options['grpcClient']` does not close the shared transport, so its in-flight
+calls continue (and become the application's responsibility when it closes
+the transport).
+
+`__destruct()` calls `close()`, so a forgotten `close()` is not a leak: the
+caches and handles are released when the object is destroyed. In a
+long-running process, still call `close()` explicitly so resources are
+released at a known point instead of at an arbitrary destructor.
+
+For a client that owns its transport, `close()` releases this client's
+channel handles, not necessarily the TCP connection: ext-grpc's persistent
+table keeps the channel warm until the process ends or the per-target persist
+bound drops the entry, and a channel created beyond that bound is private to
+its handle, so closing it can release the underlying channel (see
+[What the shared channel really is](configuration.md#what-the-shared-channel-really-is)).
+A client built with `options['grpcClient']` closes no transport at all — the
+application closes the transport it supplied (see
+[Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients)).
+
+After `close()`, the client's own operations that talk to the cluster throw
+`ClientClosedException`. The lifecycle methods and client-local getters and
+setters remain callable: `close()`, `reapIdleChannels()`, `getMetrics()`,
+`setAtomicForCAS()` / `isAtomicForCAS()`, `setColumnFamily()` /
+`getColumnFamily()` and `getClusterId()` (which returns `null` after close
+because the PD client resets the cached cluster ID). A `Transaction` obtained
+before `close()` holds the transport and the PD client directly and does not
+check the client's closed flag: with an owned transport its RPCs fail with
+`InvalidStateException`; with a shared transport they can still reach TiKV.
+Finish open transactions before closing the client (see below).
+
+### Transactions
+
+An active `Transaction` is rolled back by its destructor when it goes out of
+scope, and a failed destructor rollback is logged. That is a safety net, not
+the contract:
+
+- call `commit()` or `rollback()` explicitly. Destructor timing is not
+  guaranteed, and the destructor rollback is a real RPC that can block
+  shutdown while it retries;
+- until the rollback succeeds or the lock TTL expires, the transaction's
+  server-side locks stay in place and block other writers;
+- close the client only after the transactions are finished: a client that
+  owns and closed its transport cannot roll them back, so the locks stay
+  until their TTL expires. With a shared transport the rollback may still
+  reach TiKV, but relying on that is fragile.
 
 ## Best Practices
 
