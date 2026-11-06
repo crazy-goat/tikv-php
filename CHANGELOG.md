@@ -32,6 +32,7 @@ policy now classifies as internal.
 
 ### Fixed
 
+- `ScanIterator` and `scanPrefixIterator()` now check the owning client before every page fetch, so iterating or continuing to iterate after `RawKvClient::close()` throws `ClientClosedException` instead of issuing a `RawScan` on a closed channel. (#344)
 - `docs/architecture.md` now has a Key encoding and API versions section. It documents `CodecInterface`, `CodecV1`, `CodecV2`, `MemComparableCodec` and `Mode`, and states that the client supports API V1 and API V2. (#401)
 - `README.md` and `docs/operations.md` now state the scope of `setAtomicForCAS(true)`. The flag is per client instance and makes `put()`, `delete()`, `batchPut()` and `batchDelete()` send `for_cas`; `compareAndSwap()` and `putIfAbsent()` require it. The docs also tell you to use one mode for all writers of the same keys. (#399)
 - Lock TTLs now include the time the transaction has already run, because TiKV counts a lock TTL from the start timestamp. Before, a pessimistic lock taken, an optimistic prewrite sent or a heartbeat issued after more than one TTL of uptime carried a plain TTL: the locks were born expired and the heartbeat did nothing. Pessimistic-lock requests, prewrite requests and heartbeats now carry `min(uptime + TTL, 1 hour)`. `Transaction::heartbeat()` without an argument asks for `uptime + TTL` instead of a fixed 10000 ms, and a pessimistic `commit()` sends a heartbeat first when less than half of the TTL remains. (#429)

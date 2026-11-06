@@ -481,6 +481,42 @@ class ScanIteratorTest extends TestCase
     // Validation
     // ========================================================================
 
+    public function testGuardIsCheckedBeforeEveryPageFetch(): void
+    {
+        $guardCalls = 0;
+        $guard = function () use (&$guardCalls): void {
+            $guardCalls++;
+            if ($guardCalls > 1) {
+                throw new TiKvException('closed');
+            }
+        };
+
+        $scanFn = fn(): array => [
+            ['key' => 'k1', 'value' => 'v1'],
+            ['key' => 'k2', 'value' => 'v2'],
+        ];
+
+        $iterator = new ScanIterator($scanFn, 'a', 'z', 2, false, '', $guard);
+
+        // The first page fetch runs the guard; moving inside the buffered
+        // page does not (no RPC is needed), and the next page fetch runs it
+        // again.
+        $this->assertTrue($iterator->valid());
+        $this->assertSame(1, $guardCalls);
+
+        $iterator->next();
+        $this->assertSame('k2', $iterator->key());
+        $this->assertSame(1, $guardCalls);
+
+        try {
+            $iterator->next();
+            $this->fail('Expected the closed guard to abort the next page fetch');
+        } catch (TiKvException $e) {
+            $this->assertSame('closed', $e->getMessage());
+        }
+        $this->assertSame(2, $guardCalls);
+    }
+
     public function testBatchSizeMustBePositive(): void
     {
         $this->expectException(InvalidArgumentException::class);

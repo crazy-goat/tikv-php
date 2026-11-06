@@ -7,6 +7,8 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawCASResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawChecksumResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse;
@@ -278,9 +280,15 @@ class RawKvClientTest extends TestCase
 
     public function testCloseIsIdempotent(): void
     {
+        // A second close() must not close the gRPC transport or PD client
+        // again: closing a gRPC channel twice is undefined behaviour in the C
+        // extension (issue #344).
+        $this->grpc->expects($this->once())->method('close');
+        $this->pdClient->expects($this->once())->method('close');
+
         $this->client->close();
         $this->client->close();
-        $this->expectNotToPerformAssertions();
+        $this->client->close();
     }
 
     public function testCloseContinuesWhenGrpcCloseThrows(): void
@@ -367,6 +375,7 @@ class RawKvClientTest extends TestCase
         yield 'batchScan' => ['batchScan', [[['a', 'b']], 10]];
         yield 'scanIterator' => ['scanIterator', ['start', 'end']];
         yield 'scanPrefixIterator' => ['scanPrefixIterator', ['prefix']];
+        yield 'ingest' => ['ingest', [['key' => 'value']]];
     }
 
     // ========================================================================
@@ -659,6 +668,89 @@ class RawKvClientTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Batch keys must be strings or ints, bool given');
         $this->client->batchGet([true]); // @phpstan-ignore argument.type
+    }
+
+    public function testCloseDuringInFlightBatchGetLetsDispatchedSubRequestsFinish(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response1 = new RawBatchGetResponse();
+        $pair1 = new KvPair();
+        $pair1->setKey('a1');
+        $pair1->setValue('v1');
+        $response1->setPairs([$pair1]);
+
+        $response2 = new RawBatchGetResponse();
+        $pair2 = new KvPair();
+        $pair2->setKey('z1');
+        $pair2->setValue('v2');
+        $response2->setPairs([$pair2]);
+
+        $closed = false;
+        /** @var list<string> $events */
+        $events = [];
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                    string $responseClass,
+                    ?int $timeoutMs = null,
+                ) use (
+                    $response1,
+                    $response2,
+                    &$closed,
+                    &$events,
+                ): GrpcFuture {
+                    /** @var RawBatchGetRequest $request */
+                    $response = $request->getKeys()[0] === 'a1' ? $response1 : $response2;
+                    $events[] = 'dispatch';
+
+                    return GrpcFuture::fromWaiter(function () use ($response, &$closed, &$events): Message {
+                        if (!$closed) {
+                            $closed = true;
+                            $events[] = 'close';
+                            $this->client->close();
+                        }
+
+                        return $response;
+                    });
+                },
+            );
+
+        // Both sub-requests are dispatched before the first wait; closing the
+        // client while they are in flight must not cancel work that already
+        // reached the wire. New operations are rejected by the closed guard
+        // (closedOperationsProvider).
+        $this->assertSame(['a1' => 'v1', 'z1' => 'v2'], $this->client->batchGet(['a1', 'z1']));
+        $this->assertTrue($closed);
+        $this->assertSame(['dispatch', 'dispatch', 'close'], $events);
     }
 
     // ========================================================================
@@ -991,6 +1083,59 @@ class RawKvClientTest extends TestCase
         $iterator = $this->client->scanPrefixIterator('prefix_');
 
         $this->assertInstanceOf(ScanIterator::class, $iterator);
+    }
+
+    public function testScanIteratorThrowsClientClosedExceptionWhenClosedMidIteration(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+
+        // Exactly one page is fetched before the client is closed; a second
+        // page fetch would be an RPC on a closed channel (issue #344).
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturn($this->scanResponseWithKeys('k1', 'k2'));
+
+        $iterator = $this->client->scanIterator('a', 'z', 2);
+
+        $this->assertTrue($iterator->valid());
+        $this->assertSame('k1', $iterator->key());
+
+        $this->client->close();
+
+        // Walk off the buffered page; the next page fetch must fail closed
+        // instead of issuing a RawScan.
+        $iterator->next();
+        $this->assertSame('k2', $iterator->key());
+
+        $this->expectException(ClientClosedException::class);
+        $this->expectExceptionMessage('Client is closed');
+
+        $iterator->next();
+    }
+
+    public function testScanPrefixIteratorThrowsClientClosedExceptionWhenClosedMidIteration(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturn($this->scanResponseWithKeys('prefix_k1', 'prefix_k2'));
+
+        $iterator = $this->client->scanPrefixIterator('prefix_', 2);
+
+        $this->assertTrue($iterator->valid());
+        $this->client->close();
+
+        $iterator->next();
+        $this->expectException(ClientClosedException::class);
+
+        $iterator->next();
     }
 
     // ========================================================================
@@ -2976,14 +3121,6 @@ class RawKvClientTest extends TestCase
     // ========================================================================
     // Ingest (SST bulk import)
     // ========================================================================
-
-    public function testIngestThrowsClientClosedException(): void
-    {
-        $this->client->close();
-
-        $this->expectException(ClientClosedException::class);
-        $this->client->ingest(['key' => 'value']);
-    }
 
     public function testIngestWithEmptyArrayDoesNothing(): void
     {
