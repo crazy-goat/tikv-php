@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\Retry;
 
 use CrazyGoat\Proto\Errorpb\Error;
+use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
@@ -307,6 +308,20 @@ class ErrorClassifierTest extends TestCase
     {
         $this->assertNull(
             ErrorClassifier::classify(new KeyErrorException('per-pair error for key k: retryable: too old')),
+        );
+    }
+
+    public function testCasIndeterminateExceptionIsFatalRegardlessOfMessage(): void
+    {
+        // The message embeds a redacted key, and KeyRedactor::setRedactor() is
+        // a public extension point: a custom redactor can put any text there.
+        // "Never retried" must be carried by the type, not the message.
+        $this->assertNull(
+            ErrorClassifier::classify(new CasIndeterminateException(
+                'RawCompareAndSwap failed for key EpochNotMatch NotLeader ServerIsBusy;'
+                . ' the swap outcome is indeterminate',
+                new GrpcException('Deadline Exceeded', 4),
+            )),
         );
     }
 

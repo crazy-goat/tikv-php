@@ -116,7 +116,7 @@ final readonly class TxnReader
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $state, &$excludedStore, $budget, &$targetStoreId): ?string {
+            function () use ($key, $state, &$excludedStore, &$targetStoreId, $budget): ?string {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
@@ -539,12 +539,12 @@ final readonly class TxnReader
         $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys, $budget, &$targetStoreId): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, &$targetStoreId, $budget): CheckedGrpcFuture {
                 return $this->batchGetForRegionAsync(
                     $this->regionResolver->getRegionInfo($firstKey),
                     $regionKeys,
-                    $budget,
                     $targetStoreId,
+                    $budget,
                 );
             },
             $retryExecutor,
@@ -566,8 +566,8 @@ final readonly class TxnReader
     private function batchGetForRegionAsync(
         RegionInfo $region,
         array $regionKeys,
-        ?RetryBudget $budget = null,
         int &$targetStoreId = 0,
+        ?RetryBudget $budget = null,
     ): CheckedGrpcFuture {
         $target = RegionContextFactory::resolveTarget(
             $region,
@@ -745,8 +745,8 @@ final readonly class TxnReader
                 $maxScanLimit,
                 &$excludedStore,
                 &$freshEndKey,
-                $budget,
                 &$targetStoreId,
+                $budget,
             ): array {
                 // Resolve the region on every attempt so cache invalidation
                 // and leader switching performed by the retry executor take

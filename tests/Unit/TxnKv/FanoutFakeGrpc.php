@@ -116,7 +116,7 @@ final class FanoutFakeGrpc implements GrpcClientInterface
         string $address,
         string $service,
         string $method,
-        array $requests,
+        iterable $requests,
         string $responseClass,
         ?int $timeoutMs = null,
     ): Message {
