@@ -100,7 +100,7 @@ server) after enabling the extension.
 The library is **pre-1.0**. It follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), but before `1.0.0`
 a breaking change bumps the **minor** version — so a `0.x` release may break
-your code, and `0.9.0 → 0.10.0` is not a safe upgrade on its own.
+your code, and `0.10.0 → 0.11.0` is not a safe upgrade on its own.
 
 [`CHANGELOG.md`](CHANGELOG.md) marks every breaking change of the public API
 below with a **BREAKING** prefix and a migration note. A change that breaks a
@@ -109,23 +109,23 @@ migration note and needs no version bump of its own.
 
 ### Which version to require
 
-The current release is **v0.9.0**. Require the exact version, or allow patch
+The current release is **v0.10.0**. Require the exact version, or allow patch
 releases inside the current minor line only:
 
 ```json
 {
     "require": {
-        "crazy-goat/tikv-client": "~0.9.0"
+        "crazy-goat/tikv-client": "~0.10.0"
     }
 }
 ```
 
-`~0.9.0` (equivalently `^0.9.0` or `0.9.*`) resolves to `>=0.9.0 <0.10.0`, so
-it never pulls `0.10.0` — and therefore never pulls a breaking change. Use
-`"0.9.0"` instead when you want a reproducible build.
+`~0.10.0` (equivalently `^0.10.0` or `0.10.*`) resolves to `>=0.10.0 <0.11.0`, so
+it never pulls `0.11.0` — and therefore never pulls a breaking change. Use
+`"0.10.0"` instead when you want a reproducible build.
 
 Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
-`~0.9` all resolve to a range that includes `0.10.0` and every later release.
+`~0.10` all resolve to a range that includes `0.11.0` and every later release.
 
 The versions above follow the releases: every one of them is updated in the
 same pull request as the changelog section of the release, because the guard
@@ -464,7 +464,7 @@ pessimistic lock, so it never waits for one.
 |---|---|---|
 | Lock timing | physical lock during each `set()` / `delete()` | lock acquired during prewrite at `commit()` |
 | Where a conflict surfaces | the write call, or `commit()` for the deferred mode | `commit()` |
-| Lock TTL | fixed 30 s | `3000 ms + 10 ms` per write-set mutation, capped at `120000 ms` |
+| Lock TTL | default 30 s (`pessimisticLockTtlMs`), extended automatically | default `3000 ms + 10 ms` per write-set mutation, capped at `120000 ms` (`optimisticLockTtlMs`) |
 | Fits | contended writes (transfers, counters) | low contention (config, caching) |
 
 The value stays buffered until `commit()` in both modes. In default eager
@@ -535,10 +535,13 @@ The full table, with accessors and the reasoning per row, is in
 #### Long-running transactions
 
 A transaction that stays open between operations keeps its locks only for the
-granted TTL, and **heartbeats are not automatic between your own calls** — the
-client only heartbeats the primary lock on its own while the prewrite loop
-runs. Call `Transaction::heartbeat()` before the previously granted TTL
-elapses (10 s is a safe default); it returns the TTL TiKV actually granted.
+granted TTL. A **pessimistic** transaction extends its primary lock
+automatically: every `get()`, `batchGet()`, `scan()`, `set()` and `delete()`
+sends a `TxnHeartBeat` when less than half of the lock TTL remains. An
+optimistic transaction holds no lock before `commit()`, so it sends none. A
+transaction that waits without touching TiKV still needs an explicit
+`Transaction::heartbeat()` before the previously granted TTL elapses (10 s is
+a safe default); it returns the TTL TiKV actually granted.
 
 ```php
 $txn = $txnClient->begin();
@@ -856,7 +859,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 - ✅ **Scan** — Range scan `[startKey, endKey)` with limit and keyOnly options
 - ✅ **ReverseScan** — Reverse range scan (native `reverse=true`)
 - ✅ **ScanPrefix** — Prefix-based scanning
-- ✅ **ScanIterator / ScanPrefixIterator** — Lazy auto-paginating scan iterators (`ScanIterator`), constant memory for large ranges
+- ✅ **ScanIterator / ScanPrefixIterator** — Lazy auto-paginating scan iterators (`ScanIterator`), constant memory for large ranges; they throw `ClientClosedException` after the owning client is closed
 - ✅ **BatchScan** — Multiple non-contiguous range scanning
 
 ### Range Operations
@@ -880,12 +883,15 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 
 ### Transaction Capabilities
 - ✅ **TxnKvClient / Transaction** — ACID transactions with snapshot reads and two-phase commit
-- ✅ **Pessimistic & Optimistic** — pessimistic locks by default; lock heartbeat for long transactions
+- ✅ **Pessimistic & Optimistic** — pessimistic locks by default; the primary lock of a pessimistic transaction is kept alive automatically, and `heartbeat()` remains for a transaction that waits without touching TiKV
+- ✅ **Transaction size limits and request batching** — `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` bound the write set and throw `TransactionTooLargeException` before any RPC; `getWriteSetSize()` / `getWriteSetCount()` expose its size; `maxTxnBatchSize` / `maxTxnBatchCount` split prewrite and commit requests per region
+- ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` is sent automatically when less than half of the lock TTL remains; `optimisticLockTtlMs` / `pessimisticLockTtlMs` set the lock TTLs
+- ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` of final transaction outcomes
 - ✅ **Conflict retry** — typed `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`
 - ✅ **GC safe points** — `holdGcSafePoint()` / `releaseGcSafePoint()` for reads that outlive `gc_life_time`
 - ✅ **Replica reads** — `options['replicaRead']` picks the replica that serves a read — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` — on both clients
 - ✅ **One-phase and async commit** — the `begin()` options `enable1Pc` and `enableAsyncCommit`
-- ✅ **Transaction state** — `getTxnId()`, `getStartTs()`, `getCommitTs()`, `getStatus()`, `isPessimistic()`, `getPriority()`, `getWriteSet()`, `getReadSet()`
+- ✅ **Transaction state** — `getTxnId()`, `getStartTs()`, `getCommitTs()`, `getStatus()`, `isPessimistic()`, `getPriority()`, `getWriteSet()`, `getWriteSetSize()`, `getWriteSetCount()`, `getReadSet()`
 
 ### Observability
 - ✅ **Metrics** — `options['metrics']` injects a `MetricsInterface` backend (`InMemoryMetrics` ships with the library for tests and benchmarks); `getMetrics()` returns the backend in use
@@ -893,6 +899,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 - ✅ **Cluster ID** — `getClusterId()` returns the cluster ID learned from PD
 - ✅ **Slow log** — `options['slowLog']` logs the RawKV operations that are slower than their per-operation threshold
 - ✅ **PSR-3 Logging** — Structured logging with any PSR-3 logger
+- ✅ **Idle channel reaping** — `reapIdleChannels()` on both clients drops cached gRPC channels idle longer than `idleTtlMs`, for a worker to call from its own tick
 
 ### API Versions and Codec
 - ✅ **API V1 and V2** — `options['apiVersion']` and `options['keyspace']`; V2 prefixes the keys with the mode and the keyspace ID
@@ -932,8 +939,14 @@ client does not build, so they are rejected instead of being ignored.
 `TxnKvClient::begin()` takes its own options per transaction: `pessimistic`
 (the default is `true`), `priority` (0 Normal, 1 Low, 2 High), `enable1Pc`
 (one-phase commit), `enableAsyncCommit`, `eagerPessimisticLocks` (pessimistic
-locking at write time — the default — or at commit time) and `lockWaitTimeMs`
-(how long TiKV may wait for a contended lock).
+locking at write time — the default — or at commit time), `lockWaitTimeMs`
+(how long TiKV may wait for a contended lock), `optimisticLockTtlMs`
+(optimistic lock TTL baseline, default 3000 ms), `pessimisticLockTtlMs`
+(pessimistic lock TTL, default 30000 ms), `maxTxnEntryCount` /
+`maxTxnEntrySize` / `maxTxnTotalSize` (write-set bounds, each 0 = unlimited),
+`maxTxnBatchSize` (bytes per prewrite/commit request per region, default
+16384) and `maxTxnBatchCount` (mutations/keys per prewrite/commit request per
+region, default 512).
 
 Two settings are methods on the client rather than options:
 `setAtomicForCAS()` / `isAtomicForCAS()` (see
@@ -1146,6 +1159,9 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Per-key TTL in BatchPut**
 - ✅ **Scan limit enforcement** — MAX 10240 rows per RPC; `limit: 0` returns the whole range, bounded by `options['maxScanRows']`
 - ✅ **Batch auto-splitting by size/count**
+- ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache`
+- ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` when less than half of the lock TTL remains, with `optimisticLockTtlMs` / `pessimisticLockTtlMs`
+- ✅ **Transaction size limits and request batching** — write-set limits with `TransactionTooLargeException`, `getWriteSetSize()` / `getWriteSetCount()`, and prewrite/commit splitting by `maxTxnBatchSize` / `maxTxnBatchCount`
 
 ### Planned
 
@@ -1158,15 +1174,12 @@ feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
 - ⬜ **The remaining gRPC channel parameters** — compression, the HTTP/2 initial window size and `keepalive_permit_without_calls` are still hard-coded (the message sizes and the keepalive times are configurable already) ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
-- ⬜ **Automatic transaction lock keepalive** — the primary lock is kept alive on its own for long-running transactions; today `heartbeat()` has to be called by hand ([#429](https://github.com/crazy-goat/tikv-php/issues/429))
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ⬜ **Resource control and resource groups** — per-request resource-group tags ([#427](https://github.com/crazy-goat/tikv-php/issues/427))
 - ⬜ **Background region-cache refresh and region preloading** ([#425](https://github.com/crazy-goat/tikv-php/issues/425))
 - ⬜ **Store health checking and failover to healthy replicas** ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ⬜ **`RawBatchScan` RPC for multi-range scans** — `batchScan()` is a client-side loop today ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
-- ⬜ **Batch lock resolution and a resolved-transaction-status cache** ([#428](https://github.com/crazy-goat/tikv-php/issues/428))
-- ⬜ **Transaction size and memory limits** ([#430](https://github.com/crazy-goat/tikv-php/issues/430))
 - ⬜ **Explicit key-locking API for pessimistic transactions** ([#436](https://github.com/crazy-goat/tikv-php/issues/436))
 - ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 - ⬜ **The remaining `kvrpcpb.Context` control fields** — isolation level, not-fill-cache, request source ([#426](https://github.com/crazy-goat/tikv-php/issues/426))
