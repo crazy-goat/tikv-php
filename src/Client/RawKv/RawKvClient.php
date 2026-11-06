@@ -1403,7 +1403,10 @@ final class RawKvClient
      *
      * Returns the cluster ID on success. Returns null if PD responded
      * but the response header did not carry a cluster ID (callers may
-     * treat null as "reachable but identity unknown").
+     * treat null as "reachable but identity unknown"). When
+     * `options['expectedClusterId']` is set, a response without a
+     * cluster ID is a protocol violation and the probe fails with
+     * HealthCheckException instead of returning null.
      *
      * @throws ClientClosedException When the client has been closed
      * @throws HealthCheckException When the PD probe fails
