@@ -29,7 +29,7 @@ extends `\InvalidArgumentException` directly — it is **not** a
 ```
 \RuntimeException
 └── TiKvException                                  src/Client/Exception/
-    ├── BatchCommandsStreamException                src/Client/Exception/  (internal; never escapes)
+    ├── BatchCommandsStreamException                src/Client/Exception/  (internal; does not escape RawKvClient)
     ├── BatchDeadlineExceededException              src/Client/Exception/
     ├── BatchPartialFailureException                src/Client/Exception/
     ├── ClientClosedException                       src/Client/Exception/
@@ -92,7 +92,7 @@ contract changes (noted per row):
 
 | Class | Parent | Meaning |
 |---|---|---|
-| [`BatchCommandsStreamException`](../src/Client/Exception/BatchCommandsStreamException.php) | `TiKvException` | Internal BatchCommands stream failure (peer half-close, malformed message, drain deadline). The multiplexer catches it and falls back to the unary path, so it does not escape `RawKvClient` |
+| [`BatchCommandsStreamException`](../src/Client/Exception/BatchCommandsStreamException.php) | `TiKvException` | Internal BatchCommands stream failure (peer half-close, malformed message, drain deadline). `RawKvBatch::tryMultiplex()` catches it and falls back to the unary path, so it does not escape `RawKvClient`; a direct caller of `BatchCommandsMultiplexer` can still see it |
 | [`BatchDeadlineExceededException`](../src/Client/Exception/BatchDeadlineExceededException.php) | `TiKvException` | A batch operation exceeded its wall-clock deadline; accessors: `getDeadlineMs()`, `getElapsedMs()`, `getContext()` |
 | [`BatchPartialFailureException`](../src/Client/Exception/BatchPartialFailureException.php) | `TiKvException` | A fanned-out batch operation failed on some regions; accessors: `getRegionErrors()`, `getTotalRegions()` |
 | [`ClientClosedException`](../src/Client/Exception/ClientClosedException.php) | `TiKvException` | The operation was attempted after `$client->close()` |
@@ -418,8 +418,7 @@ a jittered delay; see
 
 One row per public method. "Throws" lists every exception class the method
 can raise, verified against both the `@throws` annotations and the method
-bodies (several scan methods validate limits even where no annotation says
-so). Three configuration/routing exceptions are deliberately *not* repeated
+bodies. Three configuration/routing exceptions are deliberately *not* repeated
 in every row: `InvalidStoreAddressException` can escape any operation that
 resolves a store address on the RPC path, `PdException` can escape any
 operation that resolves a region or a store through PD, and — with
@@ -433,14 +432,19 @@ can no longer return `[]` for a failed `ScanRegions`, so `deleteRange()`
 cannot report success having deleted nothing.)
 
 `StoreNotFoundException` and `RetryBudgetExhaustedException` *are* listed on
-the operations that can throw them directly. The fanned-out batch and range
-operations (`batchGet()`, `batchPut()`, `batchDelete()`, `batchScan()`,
-`deleteRange()`, `deletePrefix()` and `checksum()`) report a per-region
-failure — including a region's exhausted retry budget or a missing store —
-inside `BatchPartialFailureException::getRegionErrors()` instead; they throw
-the wrapper, not the wrapped type. `ingest()` has no `RetryExecutor`, so a
-missing store escapes directly and `RetryBudgetExhaustedException` is not
-reachable there at all.
+the operations that can throw them directly. On the default unary path, the
+fanned-out batch and range operations (`batchGet()`, `batchPut()`,
+`batchDelete()`, `batchScan()`, `deleteRange()`, `deletePrefix()` and
+`checksum()`) report a per-region failure — including a region's exhausted
+retry budget or a missing store — inside
+`BatchPartialFailureException::getRegionErrors()` instead of throwing the
+wrapped type. With `options['batchCommands']` enabled, the multiplexed entry
+setup resolves store addresses before that wrapper, so
+`StoreNotFoundException` can escape `batchGet()`, `batchPut()` and
+`batchDelete()` directly, and `batchGet()` can also let a per-pair
+`KeyErrorException` escape. `ingest()` has no `RetryExecutor`, so a missing
+store escapes directly and `RetryBudgetExhaustedException` is not reachable
+there at all.
 
 | Method | Throws | Notes |
 |---|---|---|
@@ -454,19 +458,19 @@ reachable there at all.
 | `getKeyTTL(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Returns `null` when the key has no TTL |
 | `compareAndSwap(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | `InvalidStateException` with `CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))` when atomic mode is off |
 | `putIfAbsent(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Delegates to `compareAndSwap()`; requires atomic mode (`setAtomicForCAS(true)`), same `InvalidStateException` message |
-| `batchGet(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `KeyErrorException`, `StoreNotFoundException` | Empty input returns `[]` without RPC. A region's `RetryBudgetExhaustedException` is reported inside `BatchPartialFailureException::getRegionErrors()`. `KeyErrorException` and `StoreNotFoundException` escape directly only with `options['batchCommands']` enabled |
-| `batchPut(array, int\|array $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `StoreNotFoundException` | Per-key validation happens before any send; retry-budget and missing-store failures are wrapped as for `batchGet()` |
-| `batchDelete(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `StoreNotFoundException` | As above |
+| `batchGet(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `KeyErrorException`, `StoreNotFoundException`, `TiKvException` | Empty input returns `[]` without RPC. A region's `RetryBudgetExhaustedException` is reported inside `BatchPartialFailureException::getRegionErrors()`. `KeyErrorException` and `StoreNotFoundException` escape directly only with `options['batchCommands']` enabled. `TiKvException` is the fail-closed unresolved-region error before any send |
+| `batchPut(array, int\|array $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `StoreNotFoundException`, `TiKvException` | Per-key validation happens before any send. On the default unary path, retry-budget and missing-store failures are wrapped as for `batchGet()`; with `options['batchCommands']`, a missing store can escape directly. `TiKvException` is the fail-closed unresolved-region error before any send |
+| `batchDelete(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `StoreNotFoundException`, `TiKvException` | Per-key validation happens before any send. On the default unary path, retry-budget and missing-store failures are wrapped as for `batchGet()`; with `options['batchCommands']`, a missing store can escape directly. `TiKvException` is the fail-closed unresolved-region error before any send |
 | `scanIterator(...)` | `ClientClosedException`, `InvalidArgumentException` | `batchSize` validated synchronously in the factory call (`ScanIterator::__construct`, bounds 1..10240); the underlying scan RPCs — and their retry-budget/store exceptions — happen during iteration |
 | `scanPrefixIterator(string, int $batchSize = 1024, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException` | Same synchronous validation as `scanIterator()` |
 | `ScanIterator::next()` / `ScanIterator::valid()` | `ClientClosedException`, `RegionException`, `GrpcException`, `KeyErrorException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `TiKvException` | Fetch the next page. The iterator throws the scan exceptions lazily; `TiKvException` also covers a page that does not advance the cursor |
 | `scan(string, string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchDeadlineExceededException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Limit validated (`'Scan limit must be 0 or greater'`; max 10240 per RPC). `limit: 0` returns the whole range by paging internally; collecting more than `options['maxScanRows']` rows throws `ScanLimitExceededException` instead of truncating (issue #191). A bounded scan returns at most `limit` rows, so a result whose count equals the limit may be truncated (issue #440). `BatchDeadlineExceededException` comes from a page fanned out across several regions |
 | `scanPrefix(string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchDeadlineExceededException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Delegates to `scan()`; same `limit: 0` pagination + guard semantics |
 | `reverseScan(...)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Limit validated; `limit: 0` pages internally (descending bound moves down each page) and is guarded by `options['maxScanRows']` |
-| `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved. A region's retry-budget/store failure is wrapped in `BatchPartialFailureException` |
-| `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole. A region's retry-budget/store failure is wrapped |
-| `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics |
-| `checksum(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Concurrent per-region checksums; idempotent. A region's retry-budget/store failure is wrapped |
+| `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved. A region's retry-budget/store failure is wrapped in `BatchPartialFailureException` |
+| `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole. A region's retry-budget/store failure is wrapped |
+| `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics |
+| `checksum(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Concurrent per-region checksums; idempotent. A region's retry-budget/store failure is wrapped |
 | `ingest(array, ?int $ttl = null)` | `ClientClosedException`, `InvalidArgumentException`, `GrpcException`, `RegionException`, `InvalidStoreAddressException`, `StoreNotFoundException`, `BatchDeadlineExceededException`, `TiKvException` | SST import path; store mode switches fan out concurrently. `ingest()` has no `RetryExecutor`, so a missing store escapes directly and `RetryBudgetExhaustedException` is not thrown |
 | `getClusterId(): ?int` | — | Returns `null` when unknown; no exceptions documented |
 | `healthCheck(): ?int` | `ClientClosedException`, `HealthCheckException` | Wraps any PD failure into `HealthCheckException` |
@@ -475,9 +479,9 @@ reachable there at all.
 
 ## Transaction Operations
 
-The same routing exceptions noted in the RawKvClient section
-(`StoreNotFoundException`, `InvalidStoreAddressException`) can escape any
-method below whose row includes `RegionException` — they resolve store
+`StoreNotFoundException`, `InvalidStoreAddressException`, `PdException`
+(and, under API V2, `KeyOutOfBoundsException`) can escape any method below
+whose row includes `RegionException` — they resolve regions or store
 addresses on the RPC path just the same.
 
 | Method | Throws | Notes |

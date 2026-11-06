@@ -1215,8 +1215,6 @@ final class RawKvClient
      *     `getRegionErrors()`; it is wrapped, not thrown directly
      * @throws BatchDeadlineExceededException When the range fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
-     * @throws TiKvException When a range's region lookup fails closed (for
-     *     example PD returned no region for a key)
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly = false): array
     {
@@ -1242,8 +1240,6 @@ final class RawKvClient
      *     `getRegionErrors()`; it is wrapped, not thrown directly
      * @throws BatchDeadlineExceededException When the range fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
-     * @throws TiKvException When a region lookup fails closed or a region
-     *     shrank after enumeration (the call refuses a partial delete)
      */
     public function deleteRange(string $startKey, string $endKey): void
     {
@@ -1262,8 +1258,6 @@ final class RawKvClient
      *     `getRegionErrors()`; it is wrapped, not thrown directly
      * @throws BatchDeadlineExceededException When the range fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
-     * @throws TiKvException When a region lookup fails closed or a region
-     *     shrank after enumeration (the call refuses a partial delete)
      */
     public function deletePrefix(string $prefix): void
     {
@@ -1292,8 +1286,6 @@ final class RawKvClient
      *     `getRegionErrors()`; it is wrapped, not thrown directly
      * @throws BatchDeadlineExceededException When the range fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
-     * @throws TiKvException When a region lookup fails closed or a region
-     *     shrank after enumeration (the call refuses a partial checksum)
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
