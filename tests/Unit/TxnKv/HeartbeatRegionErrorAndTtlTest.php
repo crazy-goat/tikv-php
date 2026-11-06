@@ -58,6 +58,14 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
     /** The region PD hands out on cache misses (overridable per test). */
     private RegionInfo $pdRegion;
 
+    /**
+     * Kept until the test ends so the transaction's destructor rollback does
+     * not add a KvBatchRollback to the RPC assertions. The rollback is a real
+     * safety-net RPC (see docs/operations.md); these tests assert the
+     * heartbeat calls only.
+     */
+    private ?Transaction $transaction = null;
+
     protected function setUp(): void
     {
         $this->metrics = new InMemoryMetrics();
@@ -187,10 +195,10 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
 
     private function heartbeat(int $priority = 0): int
     {
-        $txn = $this->createTransaction($priority);
-        $txn->set('key1', 'value1');
+        $this->transaction = $this->createTransaction($priority);
+        $this->transaction->set('key1', 'value1');
 
-        return $txn->heartbeat(10000);
+        return $this->transaction->heartbeat(10000);
     }
 
     /**
