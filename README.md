@@ -1168,7 +1168,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Batch Async Execution**
 - ✅ **Retry with Exponential Backoff**
 - ✅ **Per-key TTL in BatchPut**
-- ✅ **Scan limit enforcement** — MAX 10240 rows per RPC; `limit: 0` returns the whole range, bounded by `options['maxScanRows']`
+- ✅ **Scan limit enforcement** — MAX 10240 rows per RPC; `limit: 0` returns the whole range, bounded by `options['maxScanRows']`; a negative limit throws `InvalidArgumentException` before any RPC
 - ✅ **Batch auto-splitting by size/count**
 - ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache`
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` when less than half of the lock TTL remains, with `optimisticLockTtlMs` / `pessimisticLockTtlMs`
