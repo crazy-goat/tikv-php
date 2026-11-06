@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
+use CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
@@ -54,6 +56,69 @@ final class RawKvBatchDeadlineEnforcementTest extends TestCase
         $this->expectException(BatchDeadlineExceededException::class);
 
         $batch->batchGet(['a', 'b'], $this->retryExecutor());
+    }
+
+    /**
+     * A positive deadline is a ceiling, not a minimum: a batch that answers
+     * inside the budget returns its results unchanged.
+     */
+    public function testBatchGetWithAPositiveDeadlineThatFinishesInTimeIsUnaffected(): void
+    {
+        $this->grpc->method('callAsync')->willReturnCallback(
+            static fn(): GrpcFuture => GrpcFuture::fromWaiter(static function (): Message {
+                usleep(1_000);
+
+                return new RawBatchGetResponse();
+            }),
+        );
+
+        $batch = $this->batch($this->timeoutConfig(batchDeadlineMs: 5000));
+
+        self::assertSame(['a' => null, 'b' => null], $batch->batchGet(['a', 'b'], $this->retryExecutor()));
+    }
+
+    /**
+     * `batchPut` fans out through the same executor and must pass the
+     * configured deadline, not the executor default (issue #341).
+     */
+    public function testBatchPutEnforcesTheConfiguredBatchDeadline(): void
+    {
+        $this->grpc->method('callAsync')->willReturnOnConsecutiveCalls(
+            GrpcFuture::fromWaiter(static function (): Message {
+                usleep(500_000);
+
+                return new RawBatchPutResponse();
+            }),
+            GrpcFuture::fromWaiter(static fn(): Message => new RawBatchPutResponse()),
+        );
+
+        $batch = $this->batch($this->timeoutConfig(batchDeadlineMs: 200));
+
+        $this->expectException(BatchDeadlineExceededException::class);
+
+        $batch->batchPut(['a' => '1', 'b' => '2'], 0, $this->retryExecutor());
+    }
+
+    /**
+     * `batchDelete` fans out through the same executor and must pass the
+     * configured deadline, not the executor default (issue #341).
+     */
+    public function testBatchDeleteEnforcesTheConfiguredBatchDeadline(): void
+    {
+        $this->grpc->method('callAsync')->willReturnOnConsecutiveCalls(
+            GrpcFuture::fromWaiter(static function (): Message {
+                usleep(500_000);
+
+                return new RawBatchDeleteResponse();
+            }),
+            GrpcFuture::fromWaiter(static fn(): Message => new RawBatchDeleteResponse()),
+        );
+
+        $batch = $this->batch($this->timeoutConfig(batchDeadlineMs: 200));
+
+        $this->expectException(BatchDeadlineExceededException::class);
+
+        $batch->batchDelete(['a', 'b'], $this->retryExecutor());
     }
 
     public function testBatchGetWithTheDeadlineDisabledRunsEveryWindow(): void
@@ -193,14 +258,14 @@ final class RawKvBatchDeadlineEnforcementTest extends TestCase
         );
     }
 
-    private function batch(TimeoutConfig $timeoutConfig): RawKvBatch
+    private function batch(TimeoutConfig $timeoutConfig, int $maxConcurrency = 1): RawKvBatch
     {
         return new RawKvBatch(
             $this->grpc,
             $this->resolver(),
             $timeoutConfig,
             new NullLogger(),
-            maxConcurrency: 1,
+            maxConcurrency: $maxConcurrency,
         );
     }
 
