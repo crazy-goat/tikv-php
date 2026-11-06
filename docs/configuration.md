@@ -13,10 +13,11 @@ Complete guide to configuring the TiKV PHP Client for development and production
 7. [Batch Commands Multiplexing (Experimental)](#batch-commands-multiplexing-experimental)
 8. [Fast Commit Modes (TxnKV)](#fast-commit-modes-txnkv)
 9. [Transaction Priority (TxnKV)](#transaction-priority-txnkv)
-10. [Retry and Backoff](#retry-and-backoff)
-11. [Caching](#caching)
-12. [Timeouts](#timeouts)
-13. [Production Configuration](#production-configuration)
+10. [Request Context Controls (issue #426, GAP-12)](#request-context-controls-issue-426-gap-12)
+11. [Retry and Backoff](#retry-and-backoff)
+12. [Caching](#caching)
+13. [Timeouts](#timeouts)
+14. [Production Configuration](#production-configuration)
 
 ## Basic Configuration
 
@@ -36,6 +37,7 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadMode;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
 
@@ -116,6 +118,16 @@ $options = [
     // ReplicaReadPolicy controlling which peer serves read requests.
     // Default: leader-only (unchanged behaviour). See "Replica Reads".
     'replicaRead' => new ReplicaReadPolicy(ReplicaReadMode::PreferLeader),
+    // Optional kvrpcpb.Context control fields (issue #426): isolation level,
+    // not-fill-cache, server-side max execution duration, request source,
+    // resource group tag/name and busy threshold. Applied to every request
+    // this client sends. Omitted: none of the fields is written, so the
+    // serialized Context stays byte-for-byte unchanged. See "Request Context
+    // Controls" below.
+    'requestContext' => new RequestContextOptions(
+        notFillCache: true,
+        requestSource: RequestContextOptions::DEFAULT_REQUEST_SOURCE,
+    ),
     // Experimental BatchCommands stream multiplexing for the RawKV batch
     // fan-outs (issue #418). Must be a boolean, default false. See
     // "Batch Commands Multiplexing" below.
@@ -1620,6 +1632,70 @@ path uses the default or `'priority' => 2`.
 
 The value is forwarded to TiKV unchanged — it is not validated, so use one
 of the three values above.
+
+## Request Context Controls (issue #426, GAP-12)
+
+`options['requestContext']` on `RawKvClient::create()` and
+`TxnKvClient::create()` takes a
+`CrazyGoat\TiKV\Client\Region\RequestContextOptions` object. It populates the
+optional control fields of `kvrpcpb.Context` on every request the client
+sends. The object is immutable and has no mutable setters: build a new one to
+change a value.
+
+```php
+use CrazyGoat\Proto\Kvrpcpb\IsolationLevel;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+
+$client = RawKvClient::create(['127.0.0.1:2379'], options: [
+    'requestContext' => new RequestContextOptions(
+        isolationLevel: IsolationLevel::SI,
+        notFillCache: true,                       // full scan must not evict the block cache
+        maxExecutionDurationMs: 2000,             // TiKV stops working on an abandoned request
+        requestSource: 'nightly-export',          // load attribution in TiKV metrics
+        resourceGroupTag: 'analytics',
+        busyThresholdMs: 100,
+        resourceGroupName: 'batch',
+    ),
+]);
+```
+
+| Field | `Context` field | Default | Effect |
+|---|---|---|---|
+| `isolationLevel` | `isolation_level` | `IsolationLevel::SI` (0) | TxnKV read isolation: `SI`, `RC` or `RCCheckTS`. |
+| `notFillCache` | `not_fill_cache` | `false` | Keeps the request out of TiKV's block cache, so a scan does not evict the working set. |
+| `maxExecutionDurationMs` | `max_execution_duration_ms` | `0` (unset) | Server-side execution bound in milliseconds. It is **not** derived from `timeout`: a client-side deadline still leaves TiKV working on an abandoned request, so set it explicitly. Must be between 0 and 3 600 000. |
+| `requestSource` | `request_source` | `''` (unset) | Label TiKV records against the request. `RequestContextOptions::DEFAULT_REQUEST_SOURCE` (`'tikv-php'`) is provided for attribution but is **opt-in**: applying it by default would change the bytes of every request. |
+| `resourceGroupTag` | `resource_group_tag` | `''` (unset) | Tag read by the resource manager. |
+| `busyThresholdMs` | `busy_threshold_ms` | `0` (unset) | Server-side busy threshold in milliseconds. Must be between 0 and 3 600 000. |
+| `resourceGroupName` | `resource_control_context.resource_group_name` | `''` (unset) | Resource manager group name. |
+
+Every field defaults to its proto3 default and is written only when it differs
+from that default, so a client without `requestContext` sends exactly the same
+bytes as before. The values are validated when the object is constructed; an
+unknown isolation level or an out-of-range duration throws
+`InvalidArgumentException`.
+
+**Transaction-level override (TxnKV).** `TxnKvClient::begin()` accepts a
+`requestContext` option that replaces the client-level object for that
+transaction only. It must be a `RequestContextOptions` instance or `null`;
+`null` disables the client-level controls for the transaction. The
+transaction-level value wins over the client-level one (it is a replacement,
+not a field-level merge).
+
+```php
+$txn = $txnClient->begin([
+    'requestContext' => new RequestContextOptions(notFillCache: true),
+]);
+```
+
+The controls reach both clients' reads and writes: RawKV `RawGet`,
+`RawPut`, `RawDelete`, `RawBatchGet`, `RawBatchPut`, `RawBatchDelete`,
+`RawScan`, `RawDeleteRange`, `RawChecksum`, `RawCAS`, `RawGetKeyTTL`,
+`Ingest`; TxnKV `KvGet`, `KvBatchGet`, `KvScan`, pessimistic lock, prewrite,
+commit, heartbeat, rollback and the lock-resolution RPCs. `priority` is not
+part of this object: it keeps its own transaction option (see
+[Transaction Priority](#transaction-priority-txnkv)).
+
 ## Retry and Backoff
 
 ### Automatic Retry

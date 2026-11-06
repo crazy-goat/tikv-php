@@ -29,6 +29,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -64,6 +65,8 @@ final readonly class SstIngestor
          * messages and run out of memory mid-stream.
          */
         private int $maxIngestSize = 0,
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
     ) {
         if ($maxIngestSize < 0) {
             throw new InvalidArgumentException('maxIngestSize must be >= 0');
@@ -403,7 +406,10 @@ final readonly class SstIngestor
         SSTMeta $sstMeta,
     ): void {
         $ingestRequest = new IngestRequest();
-        $ingestRequest->setContext(RegionContextFactory::fromRegionInfo($region));
+        $ingestRequest->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+        ));
         $ingestRequest->setSst($sstMeta);
 
         /** @var IngestResponse $ingestResponse */

@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -65,6 +66,21 @@ final class TxnKvClient
      * the stale-read flag. Commits always target the leader.
      */
     public const OPT_REPLICA_READ = 'replicaRead';
+
+    /**
+     * options[] key for the optional `kvrpcpb.Context` control fields
+     * (issue #426, GAP-12): a
+     * {@see \CrazyGoat\TiKV\Client\Region\RequestContextOptions} instance
+     * carrying the isolation level, not-fill-cache flag, server-side
+     * max-execution duration, request source, resource group tag, busy
+     * threshold and resource group name applied to every request the
+     * transactions of this client send. Omitted or null (the default)
+     * applies none of them and leaves the serialized Context unchanged.
+     *
+     * A transaction may replace it through the `requestContext` option of
+     * {@see self::begin()}; the transaction-level value wins.
+     */
+    public const OPT_REQUEST_CONTEXT = 'requestContext';
 
     /**
      * options[] key for the GC safe-point cache refresh interval in
@@ -299,6 +315,7 @@ final class TxnKvClient
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
             storeCache: $bundle->storeCache,
+            requestContext: self::resolveRequestContext($options),
         );
     }
 
@@ -359,6 +376,13 @@ final class TxnKvClient
          * store cache to invalidate.
          */
         private readonly ?StoreCacheInterface $storeCache = null,
+        /**
+         * Optional Context control fields applied to every request of every
+         * transaction (issue #426). Null (the default) leaves the serialized
+         * Context byte-for-byte unchanged; begin() may replace it per
+         * transaction.
+         */
+        private readonly ?RequestContextOptions $requestContext = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -501,6 +525,7 @@ final class TxnKvClient
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     requestContext?: RequestContextOptions|null,
      * } $options
      *     `pessimistic` selects the transaction mode: true (the default)
      *     takes the physical lock inside set()/delete(), false defers it to
@@ -528,6 +553,10 @@ final class TxnKvClient
      *     {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
      *     from set()/delete() before any RPC is issued, and from
      *     get()/batchGet() before the fetched value is retained.
+     *     `requestContext` replaces the client-level Context control fields
+     *     (see {@see self::OPT_REQUEST_CONTEXT}) for this transaction only
+     *     (issue #426). Omit it to inherit the client-level value; pass null
+     *     to disable the controls for this transaction.
      */
     public function begin(array $options = []): Transaction
     {
@@ -535,6 +564,9 @@ final class TxnKvClient
 
         $pessimistic = (bool) ($options['pessimistic'] ?? true);
         $priority = (int) ($options['priority'] ?? 0);
+        $requestContext = array_key_exists('requestContext', $options)
+            ? $this->assertRequestContextOption($options['requestContext'])
+            : $this->requestContext;
         $enable1Pc = $this->resolveEnableFlag($options, self::OPT_ENABLE_1PC);
         $enableAsyncCommit = $this->resolveEnableFlag($options, self::OPT_ENABLE_ASYNC_COMMIT);
         $eagerPessimisticLocks = $this->resolveEagerPessimisticLocks($options);
@@ -598,6 +630,7 @@ final class TxnKvClient
             timeoutConfig: $this->timeoutConfig,
             logger: $this->logger,
             statusCache: $this->resolvedStatusCache,
+            requestContext: $requestContext,
         );
 
         $transaction = new Transaction(
@@ -632,6 +665,7 @@ final class TxnKvClient
             maxReadSetEntries: $maxReadSetEntries,
             maxReadSetTotalSize: $maxReadSetTotalSize,
             trackReadSet: $trackReadSet,
+            requestContext: $requestContext,
         );
 
         $this->pruneFinishedTransactions();
@@ -673,6 +707,7 @@ final class TxnKvClient
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     requestContext?: RequestContextOptions|null,
      * } $options
      */
     public function beginOptimistic(array $options = []): Transaction
@@ -713,6 +748,7 @@ final class TxnKvClient
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     requestContext?: RequestContextOptions|null,
      * } $options
      */
     public function beginPessimistic(array $options = []): Transaction
@@ -744,6 +780,7 @@ final class TxnKvClient
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     requestContext?: RequestContextOptions|null,
      * } $options
      */
     private function beginWithMode(array $options, bool $pessimistic, string $method): Transaction
@@ -929,6 +966,50 @@ final class TxnKvClient
         }
 
         return $policy;
+    }
+
+    /**
+     * Resolve options['requestContext'] (see OPT_REQUEST_CONTEXT) for
+     * create(): the optional Context control fields applied to every request
+     * (issue #426). Must be a RequestContextOptions instance when set;
+     * absent or null means "apply none".
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRequestContext(array $options): ?RequestContextOptions
+    {
+        if (!array_key_exists(self::OPT_REQUEST_CONTEXT, $options) || $options[self::OPT_REQUEST_CONTEXT] === null) {
+            return null;
+        }
+
+        $requestContext = $options[self::OPT_REQUEST_CONTEXT];
+        if (!$requestContext instanceof RequestContextOptions) {
+            throw new InvalidArgumentException(sprintf(
+                "options['requestContext'] must be a %s, %s given",
+                RequestContextOptions::class,
+                get_debug_type($requestContext),
+            ));
+        }
+
+        return $requestContext;
+    }
+
+    /**
+     * Validate a begin() `requestContext` option (issue #426): it must be a
+     * RequestContextOptions instance or null (null disables the client-level
+     * controls for this transaction).
+     */
+    private function assertRequestContextOption(mixed $requestContext): ?RequestContextOptions
+    {
+        if ($requestContext === null || $requestContext instanceof RequestContextOptions) {
+            return $requestContext;
+        }
+
+        throw new InvalidArgumentException(sprintf(
+            "begin() option 'requestContext' must be a %s or null, %s given",
+            RequestContextOptions::class,
+            get_debug_type($requestContext),
+        ));
     }
 
     /**
