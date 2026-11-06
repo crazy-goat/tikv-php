@@ -1231,6 +1231,41 @@ Cache lifetime tests: `TxnKvClientTest::testTransactionsShareOneResolvedStatusCa
 `LockResolverBatchTest::testCachedRollbackSkipsSecondaryCheckForAsyncCommitLock` pins the
 cache-hit path for async-commit locks.
 
+## An errored `CheckTxnStatus` response is not a status (#224)
+
+`CheckTxnStatusResponse` carries `region_error`, `error` (a plain `KeyError`,
+not a oneof) and the status fields (`lock_ttl`, `commit_version`, `action`).
+The status fields are only meaningful when neither error is set: an errored
+response leaves `commit_version = 0`, which `LockResolver::checkTxnStatus()`
+used to log and then return, so `resolveLock()` read it as "not committed" and
+sent `KvResolveLock` at commit ts 0 — a destructive rollback of a transaction
+whose outcome was never determined (TXN-19).
+
+The rule is: **only a successful response may drive the commit/rollback
+decision.** A region error already throws `RegionException` (the retry
+executor retries routing kinds), a gRPC failure already throws
+`GrpcException`, and a `KeyError` now throws `TxnRetryableException` with
+`BackoffType::TxnLock`. It is deliberately retryable rather than fatal: a
+status check can fail transiently and the next attempt may succeed, while the
+caller's retry budget bounds the loop. The message uses
+`KeyErrorDescriber::describe()` rather than `serializeToJsonString()`, so a raw
+lock key cannot leak into the exception text. Pinned by
+`LockResolverTest::testErroredCheckTxnStatusIsRetryableAndNeverRollsBack()`,
+`::testRegionErrorDuringCheckTxnStatusIsRetriedAndSuccessfulResponseDecides()`
+and `::testGenuineNotCommittedResponseStillRollsBack()`.
+
+The async-commit secondary check follows the same rule.
+`CheckSecondaryLocksResponse.error` is rethrown as a retryable
+`TxnRetryableException`, and a `RegionException` while grouping the
+secondaries propagates to the caller's executor. Before, an errored response
+left `locks` empty, which `checkSecondaryLocks()` read as "rolled back" and
+resolved at commit ts 0; a grouping failure returned `null` and fell through to
+the same TTL/rollback path. Both are destructive for an undetermined
+async-commit transaction. Pinned by
+`OnePhaseAsyncCommitTest::testErroredCheckSecondaryLocksIsRetryableAndResolvesNothing()`,
+`::testRegionErrorWhileGroupingSecondariesPropagates()` and
+`::testGenuineRolledBackSecondaryResolvesAtCommitTsZero()`.
+
 ## Atomic mode and plain writes use different TiKV paths (#399)
 
 `setAtomicForCAS(true)` makes `put()`, `delete()`, `batchPut()` and
