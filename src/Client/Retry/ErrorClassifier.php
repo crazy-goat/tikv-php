@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Retry;
 
+use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
@@ -38,6 +39,14 @@ final class ErrorClassifier
         // A per-pair KeyError is not a region error and must never be retried
         // as a region miss (issue #251, REG-20).
         if ($e instanceof KeyErrorException) {
+            return null;
+        }
+
+        // A CAS whose outcome is indeterminate must never be retried, even if
+        // its message happens to contain a retryable-looking fragment (the
+        // redacted key comes from a user-supplied redactor). The verdict is
+        // carried by the type, not by the message-text fallback below.
+        if ($e instanceof CasIndeterminateException) {
             return null;
         }
 

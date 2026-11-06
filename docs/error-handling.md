@@ -189,7 +189,7 @@ Verdict legend:
 | `TxnRetryableException` | Escapes only when the surrounding executor gives up; treat like other txn errors: **new transaction** unless the op is idempotent |
 | `RetryBudgetExhaustedException` | **Retry if idempotent** — the client already retried internally until its budget ran out (attempt cap or deadline); check `getPrevious()` for the root cause |
 | `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint). An `EpochNotMatch` that carries a usable `current_regions` payload refreshes the cache instead of forcing a PD lookup; an empty or unusable payload still invalidates. `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
-| `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff. On `compareAndSwap()`/`putIfAbsent()` it is raised only when the failure happened **before** the request was sent (e.g. PD unreachable during region resolution), so the swap definitively did not happen |
+| `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff. On `compareAndSwap()`/`putIfAbsent()` it is raised only when the failure happened **before the request was applied**: either it was never sent (e.g. PD unreachable during region resolution) or the server rejected it (`UNAUTHENTICATED`, `PERMISSION_DENIED`, …). The swap definitively did not happen |
 | `CasIndeterminateException` | **Do not retry blindly** — the CAS transport failure leaves the outcome unknown: the swap may already have been applied. Re-read the key and decide from what you find; never treat it as "not swapped" or "lock not acquired" |
 | `StoreNotFoundException` | **Do not retry blindly** — PD no longer knows the store backing the region. The retry executor treats it as a fatal routing error and invalidates the cached region when the missing store belongs to it (issue #627), so the next request re-resolves instead of serving the same stale entry until its TTL expires. The store still has to come back in PD; a short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
@@ -349,8 +349,11 @@ which preserves the original `GrpcException` as `getPrevious()`, so a
 deadline exceeded or a connection reset reaches the caller **unretried** and
 typed as an unknown outcome. Region errors (`NotLeader`, `EpochNotMatch`, …)
 are different: they are rejected before the write is proposed, so the client
-still retries them automatically. A transport failure **before** the request
-is sent (PD unreachable while resolving the region or store) is definitive
+still retries them automatically. The one exception is `UndeterminedResult`:
+it by definition reports an unknown outcome, yet is still classified as
+retryable today — a pre-existing gap (see `findings.md`), not changed here. A
+transport failure **before** the request is sent (PD unreachable while
+resolving the region or store) is definitive
 and stays a plain `GrpcException`; it must not be mistaken for an
 indeterminate swap. The same is true of an application-level gRPC rejection
 of the CAS request (`UNAUTHENTICATED`, `PERMISSION_DENIED`,
