@@ -1538,8 +1538,8 @@ Four consequences to keep:
    region error still returns a `CasResult`, and an exhausted retry budget still
    surfaces as `RetryBudgetExhaustedException` / `RegionException`, never as an
    indeterminate CAS. The `UndeterminedResult` kind is the documented exception:
-   it says the result is unknown but is still retried today — a pre-existing gap
-   recorded in `findings.md`, not changed by this issue.
+   it says the result is unknown but is still retried today — a known limitation
+   of the current classifier, not changed by this issue.
 4. **Application-level gRPC rejections stay definitive.** `UNAUTHENTICATED`,
    `PERMISSION_DENIED`, `INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED`, … mean the
    server refused the request before applying it, so they keep the plain
