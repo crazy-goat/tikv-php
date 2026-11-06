@@ -683,6 +683,18 @@ Notes:
   `BatchPartialFailureException::getRegionErrors()`; it is not thrown
   directly. `ingest()` does not use a `RetryExecutor` at all, so it has no
   retry budget to exhaust.
+- NotLeader ownership inside the lock resolver follows the same rule as
+  everywhere else: `LockResolver` threads `notLeaderOwnedByRetryExecutor`
+  from `resolveLock()` / `resolveLocks()` through every region-error check on
+  the lock-resolution path — `KvCheckTxnStatus`, `KvCheckSecondaryLocks`, the
+  batch `KvResolveLock` and the async-commit finalization
+  (`resolveAsyncCommitLocks()`). At executor-owned call sites (prewrite and
+  rollback after #213/#502, the `TxnReader` read retries) the flag is `true`,
+  so `RegionErrorHandler::check()` leaves the region cached and
+  `RetryExecutor::handleNotLeader()` owns the drop and the valid-hint leader
+  switch. The pessimistic-lock loop has no enclosing executor and passes
+  `false`, so `check()` self-invalidates with `'not_leader'` before throwing
+  (issue #568).
 
 See also:
 
