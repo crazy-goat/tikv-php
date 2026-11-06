@@ -15,11 +15,11 @@ use Throwable;
  *
  * The hot paths of the client build a log context before every `debug()`
  * call, and that context can be expensive: the region cache redacts the
- * key (a `substr` + `bin2hex` + `sprintf`) on every lookup, every miss and
- * every `put()` (issue #300). A logger that discards the record makes that
- * work pointless, so the client asks the logger **once**, at construction,
- * whether it handles the debug level, and builds the context only when the
- * answer is yes.
+ * key (a `hash_hmac` + `substr` + `sprintf`, plus the lazy salt on first
+ * use) on every lookup, every miss and every `put()` (issue #300). A logger
+ * that discards the record makes that work pointless, so the client asks the
+ * logger **once**, at construction, whether it handles the debug level, and
+ * builds the context only when the answer is yes.
  *
  * The answer is taken **once** and is not re-examined: a logger that is
  * reconfigured afterwards (a Monolog handler whose level is lowered to
