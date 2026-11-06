@@ -276,6 +276,9 @@ RegionException: EpochNotMatch
 
 **Solution:**
 - Client automatically retries
+- When TiKV supplies `current_regions`, the client refreshes the region cache
+  from that payload instead of asking PD for the region again; an empty or
+  unusable payload falls back to invalidate-and-resolve-through-PD
 - If persistent, check TiKV cluster health:
   ```bash
   # Check PD logs

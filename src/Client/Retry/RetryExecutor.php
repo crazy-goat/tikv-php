@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Retry;
 
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
@@ -15,6 +16,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 
@@ -159,6 +161,15 @@ final readonly class RetryExecutor
                         throw $e;
                     }
 
+                    // Issue #246 (REG-15): an EpochNotMatch usually carries
+                    // the regions that now cover the stale range in
+                    // `current_regions`. Refresh the cache from that payload
+                    // instead of dropping the entry and paying a PD
+                    // GetRegion on the next attempt. The payload path is
+                    // all-or-nothing: an empty, undecodable, leaderless,
+                    // older-epoch or non-covering payload falls through to
+                    // the ordinary invalidation below.
+                    //
                     // Issue #245 (REG-14): only a routing error means the
                     // cached region may be wrong. A non-routing retryable
                     // error (ServerIsBusy, DiskFull, IsWitness,
@@ -168,7 +179,10 @@ final readonly class RetryExecutor
                     // already degraded cluster. An unclassified error (a
                     // transport failure or a message-only classification)
                     // still invalidates conservatively.
-                    if (self::invalidatesRoutingOnRetry($e)) {
+                    if (
+                        !$this->refreshRegionCacheFromEpochNotMatch($e, $key)
+                        && self::invalidatesRoutingOnRetry($e)
+                    ) {
                         $cached = $this->regionCache->getByKey($key);
                         if ($cached instanceof RegionInfo) {
                             // The cache itself emits regionInvalidated() with
@@ -432,6 +446,77 @@ final readonly class RetryExecutor
         }
 
         return self::invalidatesRoutingKind($kind);
+    }
+
+    /**
+     * Replace the stale cached region with the regions TiKV returned in an
+     * EpochNotMatch payload (issue #246, REG-15).
+     *
+     * Returns true only when the whole payload was usable and at least one
+     * returned region contains the key; then the cache is updated and the
+     * caller must NOT invalidate the entry. Any other outcome returns false
+     * and leaves the ordinary invalidate-and-resolve-through-PD fallback in
+     * charge. The cache update itself is not an error-driven drop: `put()`
+     * removes the superseded overlapping entries silently, exactly as for a
+     * PD scan (issue #238), so no regionInvalidated() metric is emitted for
+     * a successful refresh. A fallback still uses
+     * 'retry_region_error:epoch_not_match'.
+     */
+    private function refreshRegionCacheFromEpochNotMatch(TiKvException $e, string $key): bool
+    {
+        if (!$e instanceof RegionException || $e->errorKind !== ErrorKind::EpochNotMatch) {
+            return false;
+        }
+
+        $payload = $e->epochNotMatch;
+        if (!$payload instanceof EpochNotMatch) {
+            return false;
+        }
+
+        // RegionErrorHandler::check() captures the entry before invalidating
+        // it at TxnKV call sites; RawKV checks run without a cache, so the
+        // entry is still there. Either way the leader store is needed to
+        // seed the new regions, because metapb.Region carries no leader.
+        $staleRegion = $e->cachedRegion ?? $this->regionCache->getByKey($key);
+        $regions = $this->regionResolver->regionsFromEpochNotMatch($payload, $staleRegion);
+        if ($regions === []) {
+            $this->logger->info('EpochNotMatch current_regions unusable; falling back to PD', [
+                'key' => KeyRedactor::redact($key),
+            ]);
+
+            return false;
+        }
+
+        $coveringRegion = null;
+        foreach ($regions as $region) {
+            if (KeyOrder::inRange($key, $region->startKey, $region->endKey)) {
+                $coveringRegion = $region;
+                break;
+            }
+        }
+
+        if (!$coveringRegion instanceof RegionInfo) {
+            $this->logger->info('EpochNotMatch current_regions do not cover key; falling back to PD', [
+                'key' => KeyRedactor::redact($key),
+            ]);
+
+            return false;
+        }
+
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
+
+        $this->logger->info('Region cache refreshed from EpochNotMatch current_regions', [
+            'key' => KeyRedactor::redact($key),
+            'regionId' => $coveringRegion->regionId,
+            'regionIds' => array_map(
+                static fn (RegionInfo $region): int => $region->regionId,
+                $regions,
+            ),
+        ]);
+
+        return true;
     }
 
     /**

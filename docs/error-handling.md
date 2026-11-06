@@ -121,7 +121,7 @@ contract changes (noted per row):
 | [`InvalidStateException`](../src/Client/Exception/InvalidStateException.php) | `TiKvException` | Client/transaction is in a state that cannot serve the call (e.g. CAS without atomic mode, transaction already committed) |
 | [`InvalidStoreAddressException`](../src/Client/Exception/InvalidStoreAddressException.php) | `TiKvException` | PD returned a store address that failed validation (not a bare `host:port`, reserved scheme, out-of-range port, or outside the allowed host policy) |
 | [`PdException`](../src/Client/Exception/PdException.php) | `TiKvException` | PD reported an application-level error in a `pdpb.ResponseHeader.error` — `NOT_BOOTSTRAPPED`, `ErrNotLeader`, `INVALID_VALUE`, … — which arrives with a gRPC `OK` status and an **empty payload**, so reading it as a success produced a silently wrong result (issue #234). Raised by the single choke point every PD response passes through, so it covers `getRegion()`, `scanRegions()`, `getStore()`, `getAllStores()`, `getKeyspaceId()`, `ping()`, both GC-safe-point methods and the `GetMembers` discovery path. Accessors: `getMethod()`, `getErrorType()` (raw `pdpb.ErrorType`), `getErrorTypeName()`, `getPdErrorMessage()`, `isNotLeader()`. A typed error with an **empty** message is still an error and renders as `unknown PD error (header error with empty message)` |
-| [`RegionException`](../src/Client/Exception/RegionException.php) | `TiKvException` | Region-level error reported by TiKV (NotLeader, EpochNotMatch, ServerIsBusy, …); carries `public readonly ?NotLeader $notLeader` and `?ErrorKind $errorKind` |
+| [`RegionException`](../src/Client/Exception/RegionException.php) | `TiKvException` | Region-level error reported by TiKV (NotLeader, EpochNotMatch, ServerIsBusy, …); carries `public readonly ?NotLeader $notLeader`, `?ErrorKind $errorKind`, the `?EpochNotMatch $epochNotMatch` payload and the `?RegionInfo $cachedRegion` entry that produced the error (used to seed the new regions' leader on the `current_regions` refresh path, issue #246) |
 | [`ScanLimitExceededException`](../src/Client/Exception/ScanLimitExceededException.php) | `TiKvException` | An unbounded scan (`limit: 0`) hit a row cap: the RawKV path collected more than `options['maxScanRows']` rows (default 100000, issue #191), the transactional path more than `Transaction::MAX_SCAN_LIMIT` rows (10240, issue #440); accessors: `getMaxRows()`, `getScannedRows()`. Thrown instead of silently truncating. On the RawKV path the cap is `options['maxScanRows']` (raise it, or switch to `scanIterator()`/`scanPrefixIterator()`); the transactional path has no option (its cap is `Transaction::MAX_SCAN_LIMIT`) and has to page the range explicitly — the iterators are a **raw** read and do not see the transaction's own writes |
 | [`StoreNotFoundException`](../src/Client/Exception/StoreNotFoundException.php) | `TiKvException` | The store backing a region leader is missing from PD; carries `public readonly int $storeId` |
 | [`RetryBudgetExhaustedException`](../src/Client/Retry/RetryBudgetExhaustedException.php) | `TiKvException` | The internal retry loop exhausted its attempt cap or wall-clock deadline; accessors: `attempts()`, `elapsedOrBackoffMs()`, `getPrevious()` (original error), `getRawKey()` (the un-redacted key, kept out of the message — see #269) |
@@ -172,7 +172,7 @@ Verdict legend:
 | `LockWaitTimeoutException` | **New transaction** — the pessimistic locks were not acquired, the transaction cannot proceed |
 | `TxnRetryableException` | Escapes only when the surrounding executor gives up; treat like other txn errors: **new transaction** unless the op is idempotent |
 | `RetryBudgetExhaustedException` | **Retry if idempotent** — the client already retried internally until its budget ran out (attempt cap or deadline); check `getPrevious()` for the root cause |
-| `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint). `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
+| `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint). An `EpochNotMatch` that carries a usable `current_regions` payload refreshes the cache instead of forcing a PD lookup; an empty or unusable payload still invalidates. `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
 | `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff |
 | `StoreNotFoundException` | **Do not retry blindly** — PD no longer knows the store backing the region. The retry executor treats it as a fatal routing error and invalidates the cached region when the missing store belongs to it (issue #627), so the next request re-resolves instead of serving the same stale entry until its TTL expires. The store still has to come back in PD; a short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
@@ -641,6 +641,20 @@ Notes:
   exception propagates, so the next request re-resolves instead of repeating
   the same misroute until the entry's TTL expires; the other fatal kinds do not
   drop it, because they say nothing about which region owns the key. (#233)
+- An `EpochNotMatch` normally carries the regions that now cover the stale
+  range. `RetryExecutor` maps them and updates the cache before the next
+  attempt, so a split or merge does not cost one PD `GetRegion` per client.
+  The payload is used only when every returned region maps cleanly, the old
+  leader store is still one of its peers, a same-ID region has a strictly
+  newer epoch, and at least one returned region contains the key; otherwise
+  the ordinary invalidate-and-resolve-through-PD fallback runs. A successful
+  refresh is a superseding `put()`, not an error-driven invalidation, so the
+  retry executor emits no `regionInvalidated()` metric for it. At TxnKV call
+  sites `RegionErrorHandler::check()` has already dropped the stale entry and
+  emitted `region_error:epoch_not_match` before the executor sees the
+  exception; its empty/unusable-payload fallback keeps
+  `retry_region_error:epoch_not_match` only where the stale entry is still
+  cached (e.g. RawKV). (#246)
 - A fanned-out batch or range operation (`batchGet()`, `batchPut()`,
   `batchDelete()`, `batchScan()`, `deleteRange()`, `deletePrefix()`,
   `checksum()`) reports a region's `RetryBudgetExhaustedException` inside
