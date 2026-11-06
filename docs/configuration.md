@@ -1370,6 +1370,76 @@ If a heartbeat fails, the operation throws the typed exception of
 The usual cause is a lock that is already gone. In that case, roll the
 transaction back.
 
+### A single prewrite or commit RPC can outlive the lock TTL
+
+The automatic keepalive has one inherent limit: it can only send a heartbeat
+at a point where control returns to PHP. Those points are
+
+1. at the start of `commit()` for a pessimistic transaction, before the
+   prewrite phase,
+2. after the primary region's prewrite has been acknowledged, and
+3. after the parallel fan-out of the secondary prewrites has completed.
+
+In the default two-phase path those are two separate checks. A multi-region
+async commit deliberately prewrites the primary **last** (the primary lock is
+the commit-decision barrier), so its primary prewrite follows the fan-out and
+the two points coincide: it checks once, after the primary prewrite, and not
+again when the fan-out returns.
+
+There is no heartbeat **inside** a `KvPrewrite` or `KvCommit` call: the gRPC
+call blocks in the extension and PHP has no timer that could run while it is
+in flight. Nor is there one between the individual secondary batches, because
+they are dispatched in parallel and the committer waits for the whole fan-out
+before checking the clock. If one RPC — or the gap between the last prewrite
+heartbeat and the primary commit, plus that commit RPC — takes longer than the
+lock TTL, the lock expires and a concurrent reader may resolve (roll back) the
+transaction. The later commit then fails with `TxnLockNotFound`. A
+single-region transaction **that fits in one request batch** (the default for
+small write sets) is the simplest case: it has exactly one prewrite RPC and
+therefore no between-RPC point at which a heartbeat could be sent. A larger
+single-region write set is split into a primary batch plus secondary batches
+in the same region and gets the same batch-boundary checks as a multi-region
+transaction, but no individual request can be heartbeated mid-flight.
+
+Four settings determine whether that can happen:
+
+| Setting | Effect |
+|---|---|
+| `optimisticLockTtlMs` / `pessimisticLockTtlMs` | The base lock lifetime. Optimistic locks use `min(optimisticLockTtlMs + 10 ms × mutations, 120000)`, where the mutation count is the **whole write set**, not one batch; pessimistic locks use `pessimisticLockTtlMs`. The value sent with the request is `min(uptime + base, 3600000)`, so a lock created at the start of prewrite expires roughly `base` milliseconds later (less only when the transaction has already run for more than `3600000 − base`). |
+| `writeTimeoutMs` (default `5000`) | The gRPC deadline of **each** `KvPrewrite` and `KvCommit` attempt. One attempt can occupy the wire for at most this long. With the defaults, an optimistic transaction with fewer than ~200 mutations has a base TTL below `writeTimeoutMs` (`3000 + 10 × mutations`), so a single slow prewrite can outlive it. |
+| Retry budget (`retryDeadlineMs`, default `30000`; `maxBackoffMs`, default `20000` sleep budget) | A region's prewrite may be attempted more than once. Each attempt gets its own `writeTimeoutMs`, and the retries share the `commit()` operation's wall-clock deadline, so one region can consume several timeout windows before it succeeds or fails. |
+| `batchDeadlineMs` (default `60000`) | The wall-clock deadline of the parallel secondary-prewrite fan-out (and of the secondary commit fan-out). It can exceed the lock TTL and does not itself extend any lock. |
+
+Guidance:
+
+- **Keep the per-RPC timeout below the lock TTL.** Set `writeTimeoutMs`
+  comfortably below the effective base TTL, ideally below half of it (the
+  point at which a heartbeat becomes due). For an optimistic transaction the
+  default TTL is small, so either raise `optimisticLockTtlMs` (for example to
+  `10000`, comfortably above the default `writeTimeoutMs` of `5000`) or lower
+  `writeTimeoutMs`. `pessimisticLockTtlMs` defaults to `30000`, which already
+  covers the default write timeout.
+- **Make each request small.** `maxTxnBatchSize` and `maxTxnBatchCount` split
+  a region's prewrite into smaller requests (see
+  [Transaction Size Limits and Request Batching](#transaction-size-limits-and-request-batching-txnkv)).
+  A smaller request finishes sooner and is less likely to outlive the TTL.
+  Batching does **not** create extra heartbeat points: the secondary batches
+  are sent in parallel and the heartbeat is checked only after all of them
+  have returned.
+- **Raise the TTL for a slow store or a large transaction.** The optimistic
+  base TTL can be raised to `120000` ms and heartbeats extend a lock up to one
+  hour (`MAX_TXN_TTL_MS`). Size it for the worst case of the whole prewrite
+  phase — store latency, any retry windows, and the fan-out — not for the
+  average request.
+- **Do not rely on a heartbeat to rescue a hung RPC.** `writeTimeoutMs` is the
+  only bound on one call; once the deadline fires, the attempt has already
+  consumed that much of the lock's lifetime.
+
+One-phase commit leaves no lock, and async commit carries the commit decision
+on the primary lock during prewrite, so 1PC has no lock to expire and async
+commit has no separate primary `KvCommit` RPC. Both still perform prewrites,
+so the per-RPC timeout guidance above applies to them too.
+
 ## Pessimistic Lock Wait Timeout (TxnKV)
 
 A pessimistic-lock request tells TiKV how long it may block on a contended
@@ -1463,6 +1533,14 @@ its decision on the batch that holds the primary key. A batch that fails before
 the commit point still fails the whole transaction; after the primary commit,
 secondary-batch failures are logged and the transaction stays committed,
 exactly as for whole secondary regions.
+
+Batching bounds each **request**, not the prewrite phase. The secondary
+batches of all regions are dispatched in parallel, and the prewrite heartbeat
+is checked only after the whole fan-out returns, so a smaller batch reduces
+the duration of one `KvPrewrite` but does not add a heartbeat opportunity
+between batches. If a single request can take longer than the lock TTL, lower
+`writeTimeoutMs` or raise the lock TTL as well — see
+[A single prewrite or commit RPC can outlive the lock TTL](#a-single-prewrite-or-commit-rpc-can-outlive-the-lock-ttl).
 
 ## Transaction Priority (TxnKV)
 
