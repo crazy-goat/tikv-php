@@ -121,6 +121,45 @@ final class TxnKvClient
     public const OPT_PESSIMISTIC_LOCK_TTL_MS = 'pessimisticLockTtlMs';
 
     /**
+     * begin() options[] key for the maximum number of entries in the
+     * transaction's write set (issue #430). 0 (default) = unlimited.
+     * Exceeding the limit throws
+     * {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
+     * from set()/delete() before any RPC is issued.
+     */
+    public const OPT_MAX_TXN_ENTRY_COUNT = 'maxTxnEntryCount';
+
+    /**
+     * begin() options[] key for the maximum bytes of one write-set entry,
+     * measured as key length plus value length (issue #430). 0 (default) =
+     * unlimited. A delete contributes its key length only.
+     */
+    public const OPT_MAX_TXN_ENTRY_SIZE = 'maxTxnEntrySize';
+
+    /**
+     * begin() options[] key for the maximum bytes of the whole write set,
+     * measured as the sum of every entry's key plus value length (issue
+     * #430). 0 (default) = unlimited.
+     */
+    public const OPT_MAX_TXN_TOTAL_SIZE = 'maxTxnTotalSize';
+
+    /**
+     * begin() options[] key for the maximum bytes of one prewrite/commit
+     * request per region (issue #430). Default:
+     * {@see TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE} (16384, client-go's
+     * `DefTxnCommitBatchSize`). Must be >= 1.
+     */
+    public const OPT_MAX_TXN_BATCH_SIZE = 'maxTxnBatchSize';
+
+    /**
+     * begin() options[] key for the maximum mutations/keys of one
+     * prewrite/commit request per region (issue #430). Default:
+     * {@see TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT} (512, RawKV's
+     * `MAX_BATCH_LIMIT`). Must be >= 1.
+     */
+    public const OPT_MAX_TXN_BATCH_COUNT = 'maxTxnBatchCount';
+
+    /**
      * options[] key for the maximum staleness (ms) of the low-resolution
      * TSO timestamp cache (issue #420, GAP-06). Used only by
      * staleness-tolerant consumers (lock resolution `current_ts`);
@@ -391,6 +430,11 @@ final class TxnKvClient
      *     lockWaitTimeMs?: int,
      *     optimisticLockTtlMs?: int,
      *     pessimisticLockTtlMs?: int,
+     *     maxTxnEntryCount?: int,
+     *     maxTxnEntrySize?: int,
+     *     maxTxnTotalSize?: int,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
      * } $options
      *     `pessimistic` selects the transaction mode: true (the default)
      *     takes the physical lock inside set()/delete(), false defers it to
@@ -407,6 +451,13 @@ final class TxnKvClient
      *     (default 30000) set the lock TTLs in milliseconds, each between 1 and
      *     120000 (issue #429). A pessimistic transaction extends its primary
      *     lock automatically once half of the TTL has elapsed.
+     *     `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` (each 0 =
+     *     unlimited) bound the transaction's write set (issue #430);
+     *     `maxTxnBatchSize` (default 16384 bytes) and `maxTxnBatchCount`
+     *     (default 512) split each region's prewrite mutations and commit keys
+     *     into multiple requests. Exceeding a write-set limit throws
+     *     {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
+     *     from set()/delete() before any RPC is issued.
      */
     public function begin(array $options = []): Transaction
     {
@@ -427,6 +478,21 @@ final class TxnKvClient
             $options,
             self::OPT_PESSIMISTIC_LOCK_TTL_MS,
             TwoPhaseCommitter::DEFAULT_PESSIMISTIC_LOCK_TTL_MS,
+        );
+        $maxTxnEntryCount = $this->resolveIntOption($options, self::OPT_MAX_TXN_ENTRY_COUNT, 0, 0);
+        $maxTxnEntrySize = $this->resolveIntOption($options, self::OPT_MAX_TXN_ENTRY_SIZE, 0, 0);
+        $maxTxnTotalSize = $this->resolveIntOption($options, self::OPT_MAX_TXN_TOTAL_SIZE, 0, 0);
+        $maxTxnBatchSize = $this->resolveIntOption(
+            $options,
+            self::OPT_MAX_TXN_BATCH_SIZE,
+            TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
+            1,
+        );
+        $maxTxnBatchCount = $this->resolveIntOption(
+            $options,
+            self::OPT_MAX_TXN_BATCH_COUNT,
+            TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+            1,
         );
 
         // Read the local clock BEFORE the start timestamp and the GC check
@@ -485,6 +551,11 @@ final class TxnKvClient
             pessimisticLockTtlMs: $pessimisticLockTtlMs,
             clock: $this->clock,
             startedAtMs: $startedAtMs,
+            maxTxnEntryCount: $maxTxnEntryCount,
+            maxTxnEntrySize: $maxTxnEntrySize,
+            maxTxnTotalSize: $maxTxnTotalSize,
+            maxTxnBatchSize: $maxTxnBatchSize,
+            maxTxnBatchCount: $maxTxnBatchCount,
         );
     }
 
@@ -513,6 +584,11 @@ final class TxnKvClient
      *     lockWaitTimeMs?: int,
      *     optimisticLockTtlMs?: int,
      *     pessimisticLockTtlMs?: int,
+     *     maxTxnEntryCount?: int,
+     *     maxTxnEntrySize?: int,
+     *     maxTxnTotalSize?: int,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
      * } $options
      */
     public function beginOptimistic(array $options = []): Transaction
@@ -545,6 +621,11 @@ final class TxnKvClient
      *     lockWaitTimeMs?: int,
      *     optimisticLockTtlMs?: int,
      *     pessimisticLockTtlMs?: int,
+     *     maxTxnEntryCount?: int,
+     *     maxTxnEntrySize?: int,
+     *     maxTxnTotalSize?: int,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
      * } $options
      */
     public function beginPessimistic(array $options = []): Transaction
@@ -568,6 +649,11 @@ final class TxnKvClient
      *     lockWaitTimeMs?: int,
      *     optimisticLockTtlMs?: int,
      *     pessimisticLockTtlMs?: int,
+     *     maxTxnEntryCount?: int,
+     *     maxTxnEntrySize?: int,
+     *     maxTxnTotalSize?: int,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
      * } $options
      */
     private function beginWithMode(array $options, bool $pessimistic, string $method): Transaction
@@ -690,6 +776,39 @@ final class TxnKvClient
                 "options['%s'] must be between 1 and %d",
                 $key,
                 TwoPhaseCommitter::MAX_LOCK_TTL_MS,
+            ));
+        }
+
+        return $value;
+    }
+
+    /**
+     * Resolve an integer begin() option, rejecting a non-int or a value
+     * below $minimum. The transaction size and batching options use this
+     * (issue #430); the per-option minimum is 0 for the opt-in limits
+     * (0 = unlimited) and 1 for the batch bounds.
+     *
+     * @param array<string, mixed> $options
+     */
+    private function resolveIntOption(array $options, string $key, int $default, int $minimum): int
+    {
+        if (!array_key_exists($key, $options)) {
+            return $default;
+        }
+
+        $value = $options[$key];
+        if (!is_int($value)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be an int, %s given",
+                $key,
+                get_debug_type($value),
+            ));
+        }
+        if ($value < $minimum) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be >= %d",
+                $key,
+                $minimum,
             ));
         }
 

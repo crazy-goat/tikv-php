@@ -3867,7 +3867,7 @@ class TransactionTest extends TestCase
 
         $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('refusing to commit an arbitrary region as primary');
-        $method->invoke($committer, ['k1'], $state, $retryExecutor, static fn (): ?BackoffType => null);
+        $method->invoke($committer, ['k1'], 'other', $state, $retryExecutor, static fn (): ?BackoffType => null);
     }
 
     public function testRollbackAfterCommitThrows(): void
