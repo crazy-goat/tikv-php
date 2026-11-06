@@ -100,7 +100,7 @@ server) after enabling the extension.
 The library is **pre-1.0**. It follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), but before `1.0.0`
 a breaking change bumps the **minor** version — so a `0.x` release may break
-your code, and `0.10.0 → 0.11.0` is not a safe upgrade on its own.
+your code, and `0.11.0 → 0.12.0` is not a safe upgrade on its own.
 
 [`CHANGELOG.md`](CHANGELOG.md) marks every breaking change of the public API
 below with a **BREAKING** prefix and a migration note. A change that breaks a
@@ -109,23 +109,23 @@ migration note and needs no version bump of its own.
 
 ### Which version to require
 
-The current release is **v0.10.0**. Require the exact version, or allow patch
+The current release is **v0.11.0**. Require the exact version, or allow patch
 releases inside the current minor line only:
 
 ```json
 {
     "require": {
-        "crazy-goat/tikv-client": "~0.10.0"
+        "crazy-goat/tikv-client": "~0.11.0"
     }
 }
 ```
 
-`~0.10.0` (equivalently `^0.10.0` or `0.10.*`) resolves to `>=0.10.0 <0.11.0`, so
-it never pulls `0.11.0` — and therefore never pulls a breaking change. Use
-`"0.10.0"` instead when you want a reproducible build.
+`~0.11.0` (equivalently `^0.11.0` or `0.11.*`) resolves to `>=0.11.0 <0.12.0`, so
+it never pulls `0.12.0` — and therefore never pulls a breaking change. Use
+`"0.11.0"` instead when you want a reproducible build.
 
 Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
-`~0.10` all resolve to a range that includes `0.11.0` and every later release.
+`~0.11` all resolve to a range that includes `0.12.0` and every later release.
 
 The versions above follow the releases: every one of them is updated in the
 same pull request as the changelog section of the release, because the guard
@@ -1199,6 +1199,13 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache`
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` when less than half of the lock TTL remains, with `optimisticLockTtlMs` / `pessimisticLockTtlMs`
 - ✅ **Transaction size limits and request batching** — write-set limits with `TransactionTooLargeException`, `getWriteSetSize()` / `getWriteSetCount()`, and prewrite/commit splitting by `maxTxnBatchSize` / `maxTxnBatchCount`
+- ✅ **Read-set limits and streaming SST ingest** — opt-in `trackReadSet` with `maxReadSetEntries` / `maxReadSetTotalSize`, `maxIngestSize`, and a generator-based `RawWrite` stream that no longer triple-buffers the payload
+- ✅ **Region-cache refresh, preload and cache-first scans** — `refreshRegionCache()`, `preloadRegions()` and `regionCacheRefreshMs`, with scan paths that serve cached regions and query PD only for the gaps
+- ✅ **The remaining `kvrpcpb.Context` control fields** — `RequestContextOptions` (isolation level, not-fill-cache, max execution duration, request source, resource group tag/name, busy threshold)
+- ✅ **Resource control and resource groups** — `resourceGroup` / `resourceGroupTag` attribution on every request, with per-transaction overrides
+- ✅ **Typed CAS outcome** — `CasIndeterminateException` for a compare-and-swap whose outcome cannot be determined, never retried
+- ✅ **Cluster identity verification** — `options['expectedClusterId']` pins the PD cluster ID on the PD and TSO paths
+- ✅ **Store-cache invalidation and operation-scoped retry budget** — the cached store is dropped on `StoreNotMatch` and transport failures, and one retry budget covers a whole logical operation
 
 ### Planned
 
@@ -1212,8 +1219,6 @@ the issue is still open.
 
 - ⬜ **The remaining gRPC channel parameters** — compression, the HTTP/2 initial window size and `keepalive_permit_without_calls` are still hard-coded (the message sizes and the keepalive times are configurable already) ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
-- ✅ **The remaining `kvrpcpb.Context` control fields** — isolation level, not-fill-cache, max execution duration, request source and resource group ([#426](https://github.com/crazy-goat/tikv-php/issues/426))
-- ⬜ **Background region-cache refresh and region preloading** ([#425](https://github.com/crazy-goat/tikv-php/issues/425))
 - ⬜ **Store health checking and failover to healthy replicas** ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ⬜ **`RawBatchScan` RPC for multi-range scans** — `batchScan()` is a client-side loop today ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
