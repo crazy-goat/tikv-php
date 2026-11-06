@@ -10,13 +10,16 @@ Issue #569 describes `LockResolver` capping a lock-TTL `usleep()` at
 `TxnRetryableException` and the caller's `RetryExecutor` owns the backoff.
 The remaining overshoot is the lock-resolution RPC time (`lockResolveTimeoutMs`
 defaults to 5 s and the TSO fetch to 3 s), not a sleep. The seam is
-`RetryContext`: `RetryExecutor::execute()` configures it with the deadline and
-operation start time, `CheckedGrpcFuture::fromRetryableDispatch()` forwards it,
-and `TwoPhaseCommitter` passes its live remaining value into
+`RetryBudget`: `RetryExecutor::beginOperation()` returns an executor whose
+`execute()` calls share one budget, and `RetryExecutor::currentBudget()` exposes
+that same object. `RetryBudget::remainingDeadlineMs()` computes the live value
+at call time, and `TwoPhaseCommitter` passes it into
 `LockResolver::resolveLock()`. Do not reintroduce a sleep in `LockResolver`:
-it would break the #206 resolve-then-retry contract. The context computes the
-remaining budget at call time, so time spent inside the current attempt's RPC
-is already deducted; a snapshot taken before the attempt would overstate it.
+it would break the #206 resolve-then-retry contract. The budget is the single
+source of truth for the deadline; do not add a second context object next to
+it. The live value is computed at call time, so time spent inside the current
+attempt's RPC is already deducted; a snapshot taken before the attempt would
+overstate it.
 
 ## RetryExecutor unit tests that need zero-sleep retries: use DataIsNotReady or an explicit classifier
 
@@ -53,6 +56,21 @@ Conversely a wall-clock `elapsedMs` lower bound must be provable from the
 sleeps alone (budget exhaustion implies > 50 ms of sleeps), not from
 scheduling overhead. The #241 tests in `RetryExecutorTest` are the reference
 implementation of this sizing.
+
+## The retry budget is per logical operation, not per execute() call
+
+Since issue #223 a client's fan-out entry points wrap their `RetryExecutor`
+in `beginOperation()`, so every `execute()` call for one scan, batch,
+transactional read, commit, rollback or range operation charges the same
+`maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline. A standalone
+`RetryExecutor` still resets the budget on every `execute()` call (issue
+#271), and `beginOperation()` on the same executor starts a new operation.
+Consequence for tests: a multi-region `RawKvScanner`/`RawKvRangeOps`/
+`TxnReader` operation shares one budget across regions (a later region gets
+no fresh budget after an earlier one spent it), while two calls to
+`execute()` on a bare executor each get a full budget. The attempt cap stays
+per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
+on ordinary one-retry-per-region traffic.
 
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
@@ -1259,18 +1277,20 @@ retryable because the outcome is indeterminate; the idempotency split is
 REG-08's job, not the classifier's.
 
 
-## Jittered backoff makes "exact retry count" budget tests flaky — assert ranges with a shared-budget lower bound
+## Jittered backoff makes "exact retry count" budget tests flaky — assert the range that distinguishes the budget semantics
 
 When all `BackoffType`s became jittered (issue #242, equal jitter `[expo/2, expo]`), unit
 tests that asserted an **exact** retry/call count against a `maxBackoffMs` budget broke:
 randomly halved sleeps can squeeze one extra attempt into the same budget
-(`tests/Unit/RawKv/RetryBudgetSharedAcrossRegionsTest.php` went from always 6 calls to
-6–8). Fix pattern: assert the invariant the test actually cares about — the *lower* bound
-that distinguishes per-region from shared budgets (`>= 6`) plus a derived upper bound
-(`<= 8`) — not the exact count. Anything comparing budget-exhaustion attempt counts must
-now tolerate ±1 attempt per jittered exponential step. Also: `1 << $attempt` instead of
-`2 ** $attempt` keeps the exponent math int-typed so Rector's `RecastingRemovalRector`
-doesn't strip a needed `(int)` cast before `intdiv()`.
+(`tests/Unit/RawKv/RetryBudgetSharedAcrossRegionsTest.php` used to assert always 6 calls,
+then 6–8 under per-region budgets; since issue #223 the same file pins the shared budget
+at 4–5 calls and the per-region alternative at 6–8). Fix pattern: assert the invariant the
+test actually cares about — the bound that distinguishes the two semantics (`<= 5` for the
+shared budget, `>= 6` for per-region) plus a derived counter-bound — not the exact count.
+Anything comparing budget-exhaustion attempt counts must now tolerate ±1 attempt per
+jittered exponential step. Also: `1 << $attempt` instead of `2 ** $attempt` keeps the
+exponent math int-typed so Rector's `RecastingRemovalRector` doesn't strip a needed `(int)`
+cast before `intdiv()`.
 
 ## Budget carry-over detection becomes probabilistic under jittered backoff
 

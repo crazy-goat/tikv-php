@@ -17,7 +17,6 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
-use CrazyGoat\TiKV\Client\Retry\RetryContext;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -82,21 +81,23 @@ class RetryExecutorTest extends TestCase
     }
 
     /**
-     * Issue #569: the context exposes the live remaining budget, so a nested
-     * call made later in the attempt sees the time the attempt has already
-     * spent (a snapshot taken before the attempt would overstate it).
+     * Issue #569: the operation budget exposes the live remaining deadline,
+     * so a nested call made later in the attempt sees the time the attempt
+     * has already spent (a snapshot taken before the attempt would overstate
+     * it).
      */
-    public function testRetryContextExposesTheLiveRemainingDeadline(): void
+    public function testCurrentBudgetExposesTheLiveRemainingDeadline(): void
     {
-        $context = new RetryContext();
-        $executor = $this->executorWithDeadline(5000);
+        $executor = $this->executorWithDeadline(5000)->beginOperation();
+        $budget = $executor->currentBudget();
+        self::assertNotNull($budget);
 
         $observed = $executor->execute(
             'key',
-            function () use ($context): int {
-                $before = $context->remainingDeadlineMs();
+            function () use ($budget): int {
+                $before = $budget->remainingDeadlineMs();
                 usleep(20_000);
-                $after = $context->remainingDeadlineMs();
+                $after = $budget->remainingDeadlineMs();
 
                 self::assertGreaterThan(0, $before);
                 self::assertLessThanOrEqual(5000, $before);
@@ -104,8 +105,6 @@ class RetryExecutorTest extends TestCase
 
                 return $after;
             },
-            null,
-            $context,
         );
 
         $this->assertGreaterThan(0, $observed);
@@ -115,19 +114,27 @@ class RetryExecutorTest extends TestCase
      * Issue #569: `0` is the "no deadline" sentinel, so a disabled deadline
      * keeps the nested call's historical behaviour.
      */
-    public function testRetryContextReportsZeroWhenTheDeadlineIsDisabled(): void
+    public function testCurrentBudgetReportsZeroWhenTheDeadlineIsDisabled(): void
     {
-        $context = new RetryContext();
-        $executor = $this->executorWithDeadline(0);
+        $executor = $this->executorWithDeadline(0)->beginOperation();
+        $budget = $executor->currentBudget();
+        self::assertNotNull($budget);
 
         $observed = $executor->execute(
             'key',
-            static fn(): int => $context->remainingDeadlineMs(),
-            null,
-            $context,
+            static fn(): int => $budget->remainingDeadlineMs(),
         );
 
         $this->assertSame(0, $observed);
+    }
+
+    /**
+     * A standalone executor starts a fresh budget per execute() call, so it
+     * has no operation-scoped budget to read (issue #223, #569).
+     */
+    public function testStandaloneExecutorHasNoCurrentBudget(): void
+    {
+        $this->assertNull($this->executor->currentBudget());
     }
 
     public function testExecuteRaftEntryTooLargeThrowsImmediately(): void

@@ -744,7 +744,7 @@ Two decisions from #260 that should not be "simplified" away:
    the failure modes are: a hung metadata plane takes every region lookup and
    every transaction begin down **simultaneously** — one blackholed PD, the
    whole process pool — whereas a slow store is a per-region problem the
-   `RetryExecutor` already handles against a per-region budget. A shared
+   `RetryExecutor` already handles against an operation-scoped retry budget. A shared
    field would force one value that is simultaneously too tight for a large
    scan and too loose for a TSO fetch. The values are threaded at the call
    site, not in `callWithClusterIdRetry()`'s signature: one helper, ten call
@@ -1231,6 +1231,41 @@ Cache lifetime tests: `TxnKvClientTest::testTransactionsShareOneResolvedStatusCa
 `LockResolverBatchTest::testCachedRollbackSkipsSecondaryCheckForAsyncCommitLock` pins the
 cache-hit path for async-commit locks.
 
+## An errored `CheckTxnStatus` response is not a status (#224)
+
+`CheckTxnStatusResponse` carries `region_error`, `error` (a plain `KeyError`,
+not a oneof) and the status fields (`lock_ttl`, `commit_version`, `action`).
+The status fields are only meaningful when neither error is set: an errored
+response leaves `commit_version = 0`, which `LockResolver::checkTxnStatus()`
+used to log and then return, so `resolveLock()` read it as "not committed" and
+sent `KvResolveLock` at commit ts 0 — a destructive rollback of a transaction
+whose outcome was never determined (TXN-19).
+
+The rule is: **only a successful response may drive the commit/rollback
+decision.** A region error already throws `RegionException` (the retry
+executor retries routing kinds), a gRPC failure already throws
+`GrpcException`, and a `KeyError` now throws `TxnRetryableException` with
+`BackoffType::TxnLock`. It is deliberately retryable rather than fatal: a
+status check can fail transiently and the next attempt may succeed, while the
+caller's retry budget bounds the loop. The message uses
+`KeyErrorDescriber::describe()` rather than `serializeToJsonString()`, so a raw
+lock key cannot leak into the exception text. Pinned by
+`LockResolverTest::testErroredCheckTxnStatusIsRetryableAndNeverRollsBack()`,
+`::testRegionErrorDuringCheckTxnStatusIsRetriedAndSuccessfulResponseDecides()`
+and `::testGenuineNotCommittedResponseStillRollsBack()`.
+
+The async-commit secondary check follows the same rule.
+`CheckSecondaryLocksResponse.error` is rethrown as a retryable
+`TxnRetryableException`, and a `RegionException` while grouping the
+secondaries propagates to the caller's executor. Before, an errored response
+left `locks` empty, which `checkSecondaryLocks()` read as "rolled back" and
+resolved at commit ts 0; a grouping failure returned `null` and fell through to
+the same TTL/rollback path. Both are destructive for an undetermined
+async-commit transaction. Pinned by
+`OnePhaseAsyncCommitTest::testErroredCheckSecondaryLocksIsRetryableAndResolvesNothing()`,
+`::testRegionErrorWhileGroupingSecondariesPropagates()` and
+`::testGenuineRolledBackSecondaryResolvesAtCommitTsZero()`.
+
 ## Atomic mode and plain writes use different TiKV paths (#399)
 
 `setAtomicForCAS(true)` makes `put()`, `delete()`, `batchPut()` and
@@ -1393,3 +1428,47 @@ Two different failure modes share one issue, and they get two different defaults
    async primary prewrite can therefore exceed the budget, and a single item larger than the
    limit still forms its own batch so the server rejects it instead of the client silently
    dropping it.
+
+## Rollback KeyErrors fail closed; only `txn_not_found` / `txn_lock_not_found` are success (#559)
+
+`TwoPhaseCommitter::handleRollbackError()` is shared by `batchRollback()` and
+`pessimisticRollbackAll()`, so both rollback RPCs (`KvBatchRollback` and
+`KVPessimisticRollback`) get the same mapping. It ends with an unconditional
+`TiKvException` carrying the variant name from the shared `KeyErrorDescriber`,
+mirroring the prewrite fail-closed fix (#214): an unhandled variant must never
+let `rollback()` clear the write set and report `RolledBack` while the server
+did not confirm the rollback. Before #559 the handler had only `locked`,
+`retryable` and `abort` branches and every other variant fell out of the
+method, so the retry executor saw a successful closure.
+
+Two variants are deliberately *not* errors:
+
+- `txn_not_found`: there is no lock and no commit record for the transaction,
+  so there is nothing to clean up.
+- `txn_lock_not_found`: the lock is already gone (another resolver rolled it
+  back, or the prewrite never happened), which is exactly the state a rollback
+  is trying to reach.
+
+TiKV's own rollback path returns success when the lock is missing (`cleanup()`
+collapses an existing rollback record and returns `Ok`), so both variants are
+defensive on this path — they are normally returned by `CheckTxnStatus` and
+`Commit`. client-go is stricter (`actionCleanup::handleSingleBatch()` treats
+every `BatchRollback` `KeyError` as a failure); this client keeps the two
+"already gone" variants as success because they cannot leave a lock behind,
+and throws for everything else. The transaction stays `Active` (rollback
+started, writes and commit blocked) after a thrown variant, so the caller can
+retry `rollback()`; the regression tests pin both the success and the
+fail-closed paths in `TransactionTest`.
+
+`KeyError` is a flat message, not a oneof envelope: TiKV co-sets the
+compatibility `retryable` string with `conflict` (all supported releases) and
+with `txn_lock_not_found` (newer releases). The precedence is therefore:
+`locked`, `abort`, the two "already gone" success variants, `conflict`, then
+`retryable`. `abort` sits before the success/conflict/retryable branches so a
+fatal abort cannot be swallowed. A structured `conflict` maps to
+`TransactionConflictException` — the same mapping as prewrite and pessimistic
+lock — and is not retried even when `retryable` is co-set; only a bare
+`retryable` string is retried. This precedence was review point 1: the
+original #559 branch checked `retryable` first, so a real `txn_lock_not_found`
+payload (which newer TiKV co-tags) threw a retryable exception instead of
+succeeding, and a real `conflict` payload was retried instead of failing.

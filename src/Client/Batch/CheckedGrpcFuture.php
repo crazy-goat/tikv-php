@@ -7,7 +7,6 @@ namespace CrazyGoat\TiKV\Client\Batch;
 use Closure;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
-use CrazyGoat\TiKV\Client\Retry\RetryContext;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Google\Protobuf\Internal\Message;
 
@@ -123,17 +122,12 @@ final readonly class CheckedGrpcFuture
      *        the executor (issue #291): the TxnKv prewrite/commit paths rely
      *        on a caller-provided classifier for TxnRetryableException —
      *        without it the default classification treats them as fatal.
-     * @param RetryContext|null $context Optional per-invocation retry context
-     *        forwarded to the executor. The dispatch closure and the executor
-     *        share it, so the operation can read the remaining wall-clock
-     *        budget while it runs (issue #569).
      */
     public static function fromRetryableDispatch(
         callable $dispatch,
         RetryExecutor $retryExecutor,
         string $key,
         ?callable $classifier = null,
-        ?RetryContext $context = null,
     ): self {
         $first = null;
         $eagerError = null;
@@ -173,7 +167,7 @@ final readonly class CheckedGrpcFuture
         return new self(
             inner: $firstInner,
             hasInnerFuture: $firstInner instanceof GrpcFuture,
-            waiter: static fn(): mixed => $retryExecutor->execute($key, $operation, $classifier, $context),
+            waiter: static fn(): mixed => $retryExecutor->execute($key, $operation, $classifier),
         );
     }
 

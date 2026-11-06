@@ -124,6 +124,38 @@ final class PrewriteLockResolveDeadlineTest extends TestCase
     }
 
     /**
+     * The prewrite RPC itself is capped by the operation's remaining retry
+     * deadline (issue #569): the configured write timeout is an upper bound,
+     * not an independent budget.
+     */
+    public function testPrewriteRpcTimeoutIsCappedByTheRemainingRetryDeadline(): void
+    {
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 0.0,
+            responder: fn(string $method): Message => match ($method) {
+                'KvPrewrite' => new PrewriteResponse(),
+                'KvCommit' => new CommitResponse(),
+                default => throw new \RuntimeException("unexpected method {$method}"),
+            },
+        );
+
+        $txn = $this->createTransaction($grpc, retryDeadlineMs: 1000);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $prewrites = array_values(array_filter(
+            $grpc->callTimeouts,
+            static fn (array $call): bool => $call['method'] === 'KvPrewrite',
+        ));
+        self::assertNotEmpty($prewrites);
+        foreach ($prewrites as $call) {
+            self::assertNotNull($call['timeoutMs']);
+            self::assertGreaterThan(0, $call['timeoutMs']);
+            self::assertLessThanOrEqual(1000, $call['timeoutMs']);
+        }
+    }
+
+    /**
      * A lock conflict is resolved (the owner committed) and the prewrite is
      * retried successfully — the resolve-then-retry contract is unchanged.
      */

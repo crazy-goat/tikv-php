@@ -51,6 +51,9 @@ class PessimisticLockWaitTimeoutTest extends TestCase
     /** @var list<string> */
     private array $methods = [];
 
+    /** @var list<array{method: string, timeoutMs: ?int}> */
+    private array $callTimeouts = [];
+
     protected function setUp(): void
     {
         $this->testRegion = new RegionInfo(
@@ -158,8 +161,11 @@ class PessimisticLockWaitTimeoutTest extends TestCase
                 string $service,
                 string $method,
                 ?\Google\Protobuf\Internal\Message $request = null,
+                ?string $responseClass = null,
+                ?int $timeoutMs = null,
             ) use ($lockResponse): object {
                 $this->methods[] = $method;
+                $this->callTimeouts[] = ['method' => $method, 'timeoutMs' => $timeoutMs];
                 if ($method === 'KvPessimisticLock' && $request instanceof PessimisticLockRequest) {
                     $this->lockRequests[] = $request;
                 }
@@ -228,6 +234,34 @@ class PessimisticLockWaitTimeoutTest extends TestCase
         }
 
         $this->assertSame([250, 50], $this->capturedWaitTimeouts());
+    }
+
+    public function testLockResolutionRpcTimeoutIsCappedByTheRemainingLockWaitBudget(): void
+    {
+        $this->alwaysConflicting();
+
+        $txn = $this->createTransaction([
+            'lockWaitTimeMs' => 1000,
+            'maxBackoffMs' => 250,
+        ]);
+
+        try {
+            $txn->set('key', 'value');
+        } catch (LockWaitTimeoutException) {
+            // The local lock-wait budget ran out; the calls below are what
+            // the assertions describe.
+        }
+
+        $lockCalls = array_values(array_filter(
+            $this->callTimeouts,
+            static fn (array $call): bool => in_array($call['method'], ['KvCheckTxnStatus', 'KvResolveLock'], true),
+        ));
+        self::assertNotEmpty($lockCalls);
+        foreach ($lockCalls as $call) {
+            self::assertNotNull($call['timeoutMs']);
+            self::assertGreaterThan(0, $call['timeoutMs']);
+            self::assertLessThanOrEqual(250, $call['timeoutMs']);
+        }
     }
 
     public function testLockBudgetExhaustionRaisesLockWaitTimeoutInsteadOfPrewriting(): void

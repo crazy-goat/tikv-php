@@ -43,7 +43,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
-use CrazyGoat\TiKV\Client\Retry\RetryContext;
+use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
@@ -318,6 +318,11 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): void {
+        // One commit() call is one logical operation: the prewrite and commit
+        // phases, and every region, share one retry budget. Reads that ran
+        // earlier in the transaction must not shorten it (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         $primary = $state->getPessimisticPrimaryKey() ?? $state->getPrimaryKey();
 
         if ($this->pessimistic) {
@@ -701,6 +706,11 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): void {
+        // One rollback() call is one logical operation: pessimistic rollback
+        // and the batch rollback, and every region, share one retry budget
+        // (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         // A transaction that reached the commit phase is committed in TiKV
         // and must never be rolled back (issue #215, TXN-10). The guard is
         // on the status, not on commitTs: commitTs is already set when the
@@ -949,10 +959,10 @@ final readonly class TwoPhaseCommitter
      *
      * @param Mutation[] $mutations
      * @param string[] $secondaries
-     * @param RetryContext|null $retryContext Retry budget view of the enclosing
-     *        prewrite retry loop, if any. Its remaining wall-clock budget bounds
-     *        lock resolution triggered by a `KeyError.locked` response
-     *        (issue #569).
+     * @param RetryBudget|null $budget Retry budget of the enclosing prewrite
+     *        loop, if any. Its live remaining deadline bounds both the
+     *        `KvPrewrite` RPC and the lock resolution triggered by a
+     *        `KeyError.locked` response (issue #569).
      */
     private function prewriteForRegionAsync(
         RegionInfo $region,
@@ -963,7 +973,7 @@ final readonly class TwoPhaseCommitter
         bool $useOnePc = false,
         bool $useAsyncCommit = false,
         array $secondaries = [],
-        ?RetryContext $retryContext = null,
+        ?RetryBudget $budget = null,
     ): CheckedGrpcFuture {
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
         $request = $this->buildPrewriteRequest(
@@ -989,10 +999,10 @@ final readonly class TwoPhaseCommitter
             'KvPrewrite',
             $request,
             PrewriteResponse::class,
-            $this->timeoutMs('write'),
+            $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
         );
 
-        return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $retryContext): array {
+        return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $budget): array {
             /** @var PrewriteResponse $response */
             $response = $future->wait();
             // The prewrite runs under RetryExecutor via
@@ -1012,10 +1022,7 @@ final readonly class TwoPhaseCommitter
 
             $errors = $response->getErrors();
             if (count($errors) > 0) {
-                $this->handlePrewriteErrors(
-                    $errors,
-                    $retryContext?->remainingDeadlineMs() ?? 0,
-                );
+                $this->handlePrewriteErrors($errors, $budget);
             }
 
             return [
@@ -1046,10 +1053,10 @@ final readonly class TwoPhaseCommitter
         callable $classifier,
     ): CheckedGrpcFuture {
         $firstKey = $group['firstKey'];
-        // Shared with the executor: it is refreshed before every attempt, so
-        // a `KeyError.locked` response can bound lock resolution by the
-        // prewrite's own remaining retry deadline (issue #569).
-        $retryContext = new RetryContext();
+        // The executor returned by beginOperation() owns the operation's
+        // budget; the prewrite's lock conflict reads the same object's live
+        // remaining deadline (issue #569).
+        $budget = $retryExecutor->currentBudget();
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
@@ -1061,7 +1068,7 @@ final readonly class TwoPhaseCommitter
                 $useOnePc,
                 $useAsyncCommit,
                 $secondaries,
-                $retryContext,
+                $budget,
             ): CheckedGrpcFuture {
                 $region = $this->regionResolver->getRegionInfo($firstKey);
 
@@ -1074,13 +1081,12 @@ final readonly class TwoPhaseCommitter
                     $useOnePc,
                     $useAsyncCommit,
                     $secondaries,
-                    $retryContext,
+                    $budget,
                 );
             },
             $retryExecutor,
             $firstKey,
             $classifier,
-            $retryContext,
         );
     }
 
@@ -1121,12 +1127,11 @@ final readonly class TwoPhaseCommitter
 
     /**
      * @param iterable<KeyError> $errors
-     * @param int $remainingDeadlineMs Remaining wall-clock budget of the
-     *        enclosing prewrite retry loop (0 = no deadline). It bounds the
-     *        lock resolution triggered by a `KeyError.locked` response so a
-     *        lock TTL wait cannot overshoot the retry deadline (issue #569).
+     * @param RetryBudget|null $budget Retry budget of the enclosing prewrite
+     *        loop. Its live remaining deadline bounds the lock resolution
+     *        triggered by a `KeyError.locked` response (issue #569).
      */
-    private function handlePrewriteErrors(iterable $errors, int $remainingDeadlineMs = 0): void
+    private function handlePrewriteErrors(iterable $errors, ?RetryBudget $budget = null): void
     {
         foreach ($errors as $keyError) {
             $deadlock = $keyError->getDeadlock();
@@ -1138,7 +1143,11 @@ final readonly class TwoPhaseCommitter
             if ($locked !== null) {
                 $rawPrimary = $locked->getPrimaryLock();
                 $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                $this->lockResolver->resolveLock($lockPrimary, $locked, $remainingDeadlineMs);
+                $this->lockResolver->resolveLock(
+                    $lockPrimary,
+                    $locked,
+                    $budget?->remainingDeadlineMs() ?? 0,
+                );
                 throw new TxnRetryableException(
                     'Lock conflict during prewrite, resolved - retry',
                     BackoffType::TxnLock,
@@ -1661,10 +1670,10 @@ final readonly class TwoPhaseCommitter
     ): CheckedGrpcFuture {
         // See prewriteWithRetry(): the rollback's lock-conflict path must
         // respect the same wall-clock deadline as the retry loop (issue #569).
-        $retryContext = new RetryContext();
+        $budget = $retryExecutor->currentBudget();
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys, $retryContext): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, $budget): CheckedGrpcFuture {
                 // Resolve the region on every attempt so cache
                 // invalidation and leader switching performed by the
                 // retry executor take effect (issue #502): a stale
@@ -1706,10 +1715,10 @@ final readonly class TwoPhaseCommitter
                     'KvBatchRollback',
                     $request,
                     BatchRollbackResponse::class,
-                    $this->timeoutMs('write'),
+                    $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
                 );
 
-                return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $retryContext) {
+                return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $budget) {
                     /** @var BatchRollbackResponse $response */
                     $response = $future->wait();
                     RegionErrorHandler::check(
@@ -1721,10 +1730,7 @@ final readonly class TwoPhaseCommitter
 
                     $error = $response->getError();
                     if ($error !== null) {
-                        $this->handleRollbackError(
-                            $error,
-                            $retryContext->remainingDeadlineMs(),
-                        );
+                        $this->handleRollbackError($error, $budget);
                     }
 
                     return $response;
@@ -1733,11 +1739,31 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
-            $retryContext,
         );
     }
 
-    private function handleRollbackError(KeyError $error, int $remainingDeadlineMs = 0): void
+    /**
+     * Translate a KeyError returned by a rollback RPC into an exception, or
+     * an intentional success when the lock is already gone.
+     *
+     * `txn_not_found` and `txn_lock_not_found` are the only variants that
+     * mean there is nothing left to clean up: the transaction (or its lock)
+     * was never written, or another resolver already rolled it back. TiKV's
+     * own rollback path returns success when the lock is missing (it
+     * collapses an existing rollback record and returns `Ok`), so these two
+     * variants are defensive; they are normally returned by
+     * `CheckTxnStatus`/`Commit`.
+     *
+     * Every other variant means the server did not confirm the rollback and
+     * must fail closed (issue #559): falling through used to let
+     * `rollback()` clear the write set and report `RolledBack` while the
+     * locks stayed in TiKV until their TTL expired.
+     *
+     * @param RetryBudget|null $budget Retry budget of the enclosing rollback
+     *        loop. Its live remaining deadline bounds the lock resolution
+     *        triggered by a `locked` KeyError (issue #569).
+     */
+    private function handleRollbackError(KeyError $error, ?RetryBudget $budget = null): void
     {
         $locked = $error->getLocked();
         if ($locked !== null) {
@@ -1745,11 +1771,42 @@ final readonly class TwoPhaseCommitter
             $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
             // Active locks propagate a retryable exception; after they expire,
             // retry rollback so the rollback RPC can be attempted again.
-            $this->lockResolver->resolveLock($lockPrimary, $locked, $remainingDeadlineMs);
+            $this->lockResolver->resolveLock(
+                $lockPrimary,
+                $locked,
+                $budget?->remainingDeadlineMs() ?? 0,
+            );
             throw new TxnRetryableException(
                 'Lock encountered during rollback, resolved - retry',
                 BackoffType::TxnLock,
             );
+        }
+
+        // `abort` is the one compatibility string that must never be
+        // swallowed by a structured variant: the transaction is known to
+        // have failed for good, so retrying the rollback cannot help.
+        $abort = $error->getAbort();
+        if ($abort !== '') {
+            throw new TransactionConflictException(
+                'Abort during rollback: ' . $abort,
+            );
+        }
+
+        // The lock (or the whole transaction) is already gone: there is
+        // nothing left to roll back, so this is an intentional success.
+        // Checked before the compatibility `retryable` string because TiKV
+        // co-sets `retryable` with `txn_lock_not_found` (newer releases);
+        // the structured variant is the more precise signal.
+        if ($error->getTxnNotFound() !== null || $error->getTxnLockNotFound() !== null) {
+            return;
+        }
+
+        // A structured conflict is a definite failure, not a transient lock
+        // wait. TiKV co-sets `retryable` with `conflict`, so this branch must
+        // precede the compatibility string (same mapping as prewrite and
+        // pessimistic lock).
+        if ($error->getConflict() !== null) {
+            throw new TransactionConflictException('Write conflict during rollback');
         }
 
         $retryable = $error->getRetryable();
@@ -1760,12 +1817,9 @@ final readonly class TwoPhaseCommitter
             );
         }
 
-        $abort = $error->getAbort();
-        if ($abort !== '') {
-            throw new TransactionConflictException(
-                'Abort during rollback: ' . $abort,
-            );
-        }
+        throw new TiKvException(
+            'Rollback failed: ' . KeyErrorDescriber::describe($error),
+        );
     }
 
     // ---------------------------------------------------------------
@@ -2149,11 +2203,15 @@ final readonly class TwoPhaseCommitter
                                         $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
                                         // This per-region lock loop performs bounded retries;
                                         // NotLeader handling remains local. A live lock is not
-                                        // resolved; retry the request within this loop.
+                                        // resolved; retry the request within this loop. The
+                                        // remaining lock-wait budget also caps the resolver's
+                                        // own RPCs, so lock resolution cannot outlive the loop
+                                        // (issue #569).
                                         try {
                                             $this->lockResolver->resolveLock(
                                                 $lockPrimary,
                                                 $locked,
+                                                max(1, $this->maxBackoffMs - $elapsedMs),
                                                 notLeaderOwnedByRetryExecutor: false,
                                             );
                                         } catch (TxnRetryableException $e) {
@@ -2461,10 +2519,10 @@ final readonly class TwoPhaseCommitter
     ): CheckedGrpcFuture {
         // See prewriteWithRetry(): the rollback's lock-conflict path must
         // respect the same wall-clock deadline as the retry loop (issue #569).
-        $retryContext = new RetryContext();
+        $budget = $retryExecutor->currentBudget();
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys, $forUpdateTs, $retryContext): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, $forUpdateTs, $budget): CheckedGrpcFuture {
                 // Resolve the region on every attempt so cache
                 // invalidation and leader switching performed by the
                 // retry executor take effect (issue #502) — see
@@ -2496,10 +2554,10 @@ final readonly class TwoPhaseCommitter
                     'KVPessimisticRollback',
                     $request,
                     PessimisticRollbackResponse::class,
-                    $this->timeoutMs('write'),
+                    $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
                 );
 
-                return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $retryContext) {
+                return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $budget) {
                     /** @var PessimisticRollbackResponse $response */
                     $response = $future->wait();
                     RegionErrorHandler::check(
@@ -2511,10 +2569,7 @@ final readonly class TwoPhaseCommitter
 
                     $errors = $response->getErrors();
                     foreach ($errors as $keyError) {
-                        $this->handleRollbackError(
-                            $keyError,
-                            $retryContext->remainingDeadlineMs(),
-                        );
+                        $this->handleRollbackError($keyError, $budget);
                     }
 
                     return $response;
@@ -2523,7 +2578,6 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
-            $retryContext,
         );
     }
 
@@ -2663,5 +2717,30 @@ final readonly class TwoPhaseCommitter
             'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
             default => null,
         };
+    }
+
+    /**
+     * Per-RPC deadline capped by the operation's live remaining retry budget
+     * (issue #569).
+     *
+     * The configured timeout is the upper bound: an in-flight prewrite or
+     * rollback must not outlive the retry deadline the executor is enforcing
+     * around it. A null configured timeout keeps the gRPC-layer default; a
+     * disabled or absent budget leaves the configured value unchanged. The
+     * result is at least 1 ms because 0 means "no deadline" to the gRPC
+     * layer, which is the unbounded behaviour this guard exists to prevent.
+     */
+    private function timeoutMsWithinBudget(?int $configuredMs, ?RetryBudget $budget): ?int
+    {
+        if ($configuredMs === null) {
+            return null;
+        }
+
+        $remainingMs = $budget?->remainingDeadlineMs() ?? 0;
+        if ($remainingMs <= 0) {
+            return $configuredMs;
+        }
+
+        return max(1, min($configuredMs, $remainingMs));
     }
 }

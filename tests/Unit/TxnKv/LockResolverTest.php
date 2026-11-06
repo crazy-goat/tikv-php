@@ -6,9 +6,11 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\Errorpb\RegionNotFound;
 use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
@@ -22,6 +24,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -110,10 +113,14 @@ class LockResolverTest extends TestCase
         int $lockTtl = 0,
         int $action = Action::NoAction,
         ?Error $regionError = null,
+        ?KeyError $keyError = null,
     ): CheckTxnStatusResponse {
         $response = new CheckTxnStatusResponse();
         if ($regionError instanceof \CrazyGoat\Proto\Errorpb\Error) {
             $response->setRegionError($regionError);
+        }
+        if ($keyError instanceof KeyError) {
+            $response->setError($keyError);
         }
         $response->setCommitVersion($commitVersion);
         $response->setLockTtl($lockTtl);
@@ -403,6 +410,96 @@ class LockResolverTest extends TestCase
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+    }
+
+    // ========================================================================
+    // checkTxnStatus() — an errored response is not a status (issue #224)
+    // ========================================================================
+
+    public function testErroredCheckTxnStatusIsRetryableAndNeverRollsBack(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $keyError = new KeyError();
+        $keyError->setRetryable('status check failed');
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(keyError: $keyError),
+        );
+
+        $resolver = $this->createResolver();
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected an errored CheckTxnStatus to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+            $this->assertStringContainsString(
+                'CheckTxnStatus failed: retryable: status check failed',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(['KvCheckTxnStatus'], $this->callSequence);
+        $this->assertSame([], $this->resolveLockRequests, 'an errored status check must never drive a rollback');
+    }
+
+    public function testRegionErrorDuringCheckTxnStatusIsRetriedAndSuccessfulResponseDecides(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $regionNotFound = new RegionNotFound();
+        $regionNotFound->setRegionId(self::REGION_ID);
+        $regionError = new Error();
+        $regionError->setMessage('region not found');
+        $regionError->setRegionNotFound($regionNotFound);
+
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(regionError: $regionError),
+            $this->makeCheckTxnStatusResponse(commitVersion: 42),
+        );
+
+        $resolver = $this->createResolver();
+        $executor = new RetryExecutor(
+            maxBackoffMs: 1000,
+            serverBusyBudgetMs: 1000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: $this->logger,
+            maxAttempts: 5,
+            deadlineMs: 0,
+        );
+
+        $executor->execute(self::TEST_KEY, function () use ($resolver): void {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+        });
+
+        $this->assertSame(
+            ['KvCheckTxnStatus', 'KvCheckTxnStatus', 'KvResolveLock'],
+            $this->callSequence,
+            'the region error must be retried, then the successful response decides',
+        );
+        $this->assertCount(1, $this->resolveLockRequests);
+        $this->assertSame(42, (int) $this->resolveLockRequests[0]->getCommitVersion());
+    }
+
+    public function testGenuineNotCommittedResponseStillRollsBack(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(action: Action::LockNotExistRollback),
+        );
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvResolveLock'], $this->callSequence);
+        $this->assertCount(1, $this->resolveLockRequests);
+        $this->assertSame(0, (int) $this->resolveLockRequests[0]->getCommitVersion());
     }
 
     // ========================================================================
