@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `RetryExecutor` now invalidates the cached region only when a retryable error says the routing information is stale — `EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized` and `NotLeader` without a usable hint. Non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, `StaleCommand`, `DataIsNotReady`, `ReadIndexNotReady`, `ProposalInMergingMode`, `MaxTimestampNotSynced`, `MismatchPeerId`, `BucketVersionNotMatch`, `UndeterminedResult`) are retried with the cached region intact, so the retry executor no longer forces a PD `GetRegion` on every attempt against a busy leader. An unclassified retryable error (a transport failure or a message-classified exception) still invalidates conservatively. The `regionInvalidated()` reason now names the triggering kind for classified routing errors — `retry_region_error:epoch_not_match`, `retry_region_error:region_not_found`, … — and stays `retry_region_error` when the kind is unknown. (#245)
+
 ## [v0.10.0] - 2026-11-06
 
 ### Added

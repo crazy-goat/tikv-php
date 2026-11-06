@@ -1139,8 +1139,10 @@ retry/region-error semantics) happens when:
   (`RawCompareAndSwap`, `RawGetKeyTTL`, `RawChecksum`, `KvGC`, `KvImport`,
   and every other unary RPC outside the map above);
 - the multiplexed response carries a region error — those entries are
-  re-dispatched on the unary path, whose retry executor invalidates the
-  region cache and re-resolves on every attempt;
+  re-dispatched on the unary path, whose retry executor re-resolves on every
+  attempt and invalidates the region cache only when the error is a routing
+  error (`EpochNotMatch`, `RegionNotFound`, `StoreNotMatch`, …), not for
+  `ServerIsBusy`-style store overload;
 - the stream layer fails (peer closed the stream, drain deadline expired).
 
 Properties and limitations of the current implementation:
@@ -1560,9 +1562,11 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 ```
 
 **Cache behavior**:
-- Cache entries expire automatically on region errors
+- Cache entries are invalidated on routing errors
 - `NotLeader` errors update the cache with new leader info
 - `EpochNotMatch` errors invalidate affected regions
+- `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` keep the
+  cached region — the request reached the right region, so the retry reuses it
 
 ### Store Cache
 
@@ -1825,15 +1829,16 @@ The library emits the following counter tags:
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
 | `regionCacheHit()`             | `'region_resolution'`      | Region was found in the cache                     |
 | `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
-| `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader region error (`RegionErrorHandler`), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on other retryable errors, a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. Invalidating an ID that is not cached emits nothing. |
+| `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader region error (`RegionErrorHandler`), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. The retry executor keeps the cached region for non-routing retryable errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emits nothing for them; `RegionErrorHandler::check()` is a separate drop path. Invalidating an ID that is not cached emits nothing. |
 
 For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
 
 Reasons are mutually exclusive per drop; the current source emits
-`'region_error'`, `'not_leader'`, `'retry_region_error'`,
-`'fatal_region_error'`, and `'lock_resolve'`
-when those paths actually remove a region. A NotLeader response whose hinted
-peer is still valid only switches the cached leader and emits nothing.
+`'region_error'`, `'not_leader'`, `'retry_region_error:<kind>'`,
+`'retry_region_error'` (unclassified retryable error), `'fatal_region_error'`,
+and `'lock_resolve'` when those paths actually remove a region. A NotLeader
+response whose hinted peer is still valid only switches the cached leader and
+emits nothing, and a non-routing retryable error keeps the cached region.
 At executor-owned call sites, NotLeader drops are owned exclusively by the
 retry loop's leader handling: `RegionErrorHandler::check()` leaves the region
 cached so it can switch to a valid hint. Call sites without a surrounding

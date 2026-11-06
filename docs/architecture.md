@@ -422,6 +422,9 @@ heap records.
 - **EpochNotMatch**: Invalidate specific region
 - **NotLeader**: Update leader info or invalidate
 - **RegionNotFound**: Invalidate and retry
+- **ServerIsBusy / DiskFull / IsWitness / RecoveryInProgress**: Keep the
+  cached region — the request reached the right region, so only the retry
+  backoff applies (issue #245)
 
 ### 7. LockResolver
 

@@ -411,8 +411,9 @@ The remaining gap was the missing `wait_timeout` and the missing knob.
 
 ## Retry closures must re-resolve the region inside the loop — scans resolve on the sub-range start, reverse scans on the sub-range end
 
-`RetryExecutor` invalidates the region cache and switches leader hints on
-`NotLeader`/`EpochNotMatch`, but those updates only take effect if the
+`RetryExecutor` invalidates the region cache on routing errors
+(`NotLeader`/`EpochNotMatch`/`RegionNotFound`/`StoreNotMatch`/…) and switches
+leader hints on `NotLeader`, but those updates only take effect if the
 retried closure asks `RegionResolver::getRegionInfo()` again on every
 attempt. Scan closures (issue #267, GRPC-08) used to capture the
 `RegionInfo` resolved before the loop, so every retry re-sent the same
@@ -456,6 +457,20 @@ scan fix, the retry does not re-clip or re-group: after a split the
 re-resolved region may not cover the whole key group and the server
 keeps erroring until the budget is exhausted (documented limitation,
 same as the #500 lock path).
+
+## `RegionErrorHandler::check()` drops the region independently of `RetryExecutor`'s kind gate
+
+Issue #245 narrowed the retry executor's pre-retry invalidation to routing
+kinds, but `RegionErrorHandler::check()` is a separate drop path: when a
+TxnKV call site passes its `$cache` and `$regionId`, `check()` calls
+`invalidate()` for every non-NotLeader region error **before** it throws the
+`RegionException`, so the executor never sees a cached region for
+`ServerIsBusy`/`DiskFull`/`IsWitness`/`RecoveryInProgress` there. Those paths
+still invalidate and emit `'region_error'`, not `'retry_region_error:<kind>'`.
+RawKV call sites call `check($response)` without a cache, so they are the
+paths where the #245 gate is effective. Gating `check()` needs the typed kind
+too, so build the `RegionException` first (or read the oneof before the
+throw); do not assume the executor owns every drop.
 
 ## PHPStan `ternary.alwaysFalse` fires for by-ref bool flags mutated in a sibling closure — sequence mocks instead
 

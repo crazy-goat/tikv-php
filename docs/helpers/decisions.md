@@ -328,14 +328,14 @@ for a `RegionException` carrying a *routing* `ErrorKind`, so the non-routing
 kinds (`RaftEntryTooLarge`, `FlashbackInProgress`, `FlashbackNotPrepared`, …)
 and any non-`RegionException` fatal error leave the cache alone — those say the
 request reached the right region and the region refused it, so dropping the
-entry would buy a re-resolve and nothing else. And its `match` has **no**
+entry would buy a re-resolve and nothing else. And the shared `match` has **no**
 `default` arm: PHPStan reports `match.unhandled` at level 9, so a new
 `ErrorKind` cannot be added without deciding here.
 
 Both gates were measured, not assumed (a scratch copy of the tree with
 `case ScratchSentinel = 'scratch_sentinel';` added to `ErrorKind`, then
 deleted). `match.unhandled` fires in exactly three places — `RetryExecutor.php`
-(`invalidatesRoutingOnFatal()`), `ErrorClassifier.php` (`classifyByKind()`) and
+(`invalidatesRoutingKind()`), `ErrorClassifier.php` (`classifyByKind()`) and
 `ErrorClassifierTest.php` (`errorClassForKind()`) — i.e. **every `match` over
 `ErrorKind`**, in production and in tests alike. The routing table in
 `RetryExecutorFatalInvalidationTest` is a hand-written array literal, so
@@ -356,20 +356,23 @@ across 11 tests in `LockResolverTest`, `RawKvScannerTest`, `TxnReaderTest` and
 asserting `method_exists(Error::class, 'has' . PascalCase($kind->value))` for
 every case would turn that scatter into a legible failure.
 
-The retryable path is deliberately untouched: it still invalidates for every
-retryable error, and #245 (REG-14 — a separate open milestone issue with its
-own acceptance criteria) is what will route it through this same predicate. Do
-not "finish" that narrowing here; the predicate is public and static precisely
-so that PR has a seam to reuse instead of a third copy of the list.
+The retryable path now uses the same table (issue #245, REG-14):
+`RetryExecutor` gates its pre-retry drop on `invalidatesRoutingOnRetry()`, which
+calls `invalidatesRoutingKind()` for a typed kind and invalidates
+conservatively when the error carries none (a `GrpcException` transport failure
+or a message-classified exception). `ServerIsBusy`, `DiskFull`, `IsWitness`
+and `RecoveryInProgress` retry without touching the cache; before #245 every
+retryable error dropped the entry and forced a PD `GetRegion` per attempt. The
+fatal and retryable paths share the one `match`; do not add a third copy of the
+list under either name.
 
-That seam is a compatibility commitment, not a convenience: `RetryExecutor` is
-a documented user-constructible collaborator (`docs/configuration.md`), so
-`invalidatesRoutingOnFatal()`'s name and signature are semver-visible. #245 may
-still prefer to move the decision into `ErrorClassifier` — it needs the
-*kind*, not the exception — and such a relocation stays compatible with the
-commitment, because what callers are promised is the routing/non-routing table,
-not the class it lives in. Do not add a third copy of the list under either
-name.
+The kind-level predicate is a compatibility commitment, not a convenience:
+`RetryExecutor` is a documented user-constructible collaborator
+(`docs/configuration.md`), so `invalidatesRoutingOnFatal()`'s name and
+signature are semver-visible. Moving the table into `ErrorClassifier` — it
+needs the *kind*, not the exception — stays compatible with the commitment,
+because what callers are promised is the routing/non-routing table, not the
+class it lives in.
 
 ## A class of bug gets a seam, a rule and a fixture — not three site patches (issue #180)
 
@@ -711,9 +714,12 @@ retried forever"), and `PdClient` has already spent the one rotation that can
 help before the exception escapes. The only text matches that can reclassify it
 are PD prose naming `RegionNotFound` / `NotLeader`, and retrying *those* is
 defensible (a PD-side region miss is a routing miss). Adding an explicit
-`PdException` arm would move that decision into a list #245 is about to
-narrow, so it is recorded here instead: if #245 narrows the retryable path,
-this is the place to decide whether a PD-level region miss stays retryable.
+`PdException` arm would move that decision into the routing list, so it is
+recorded here instead: #245 narrowed the retryable path's invalidation by
+typed kind, but a `PdException` carries no `ErrorKind`, so it still falls
+through to the message fallback and, when retried, invalidates conservatively.
+A PD-level region miss therefore stays retryable (and cache-dropping), which
+is the decision recorded here.
 
 ## Every gRPC call carries a finite deadline, and PD/TSO/lock-resolution time out separately from the store RPCs (issue #260)
 

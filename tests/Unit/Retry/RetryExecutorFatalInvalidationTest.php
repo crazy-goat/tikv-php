@@ -443,8 +443,7 @@ class RetryExecutorFatalInvalidationTest extends TestCase
     }
 
     // ========================================================================
-    // The retryable path is unchanged (issue #245 is the one that will narrow
-    // it, and it must land on this same predicate)
+    // The retryable path (issue #245 narrows it through the same kind table)
     // ========================================================================
 
     /**
@@ -461,10 +460,10 @@ class RetryExecutorFatalInvalidationTest extends TestCase
             }, 'not_leader'],
             'EpochNotMatch' => [static function (Error $error): void {
                 $error->setEpochNotMatch(new EpochNotMatch());
-            }, 'retry_region_error'],
+            }, 'retry_region_error:epoch_not_match'],
             'RegionNotFound' => [static function (Error $error): void {
                 $error->setRegionNotFound(new RegionNotFound());
-            }, 'retry_region_error'],
+            }, 'retry_region_error:region_not_found'],
         ];
     }
 
@@ -575,6 +574,35 @@ class RetryExecutorFatalInvalidationTest extends TestCase
             $covered,
             'every ErrorKind case needs an explicit invalidatesRoutingOnFatal() decision (issue #233)',
         );
+    }
+
+    /**
+     * The retryable path reads the same routing/non-routing table (issue
+     * #245). The only difference from the fatal path is the default: an
+     * unclassified retryable error invalidates conservatively, because it may
+     * be a routing error.
+     */
+    #[DataProvider('provideRoutingDecisionByKind')]
+    public function testInvalidatesRoutingOnRetryPerErrorKind(ErrorKind $kind, bool $expected): void
+    {
+        $exception = new RegionException(
+            operation: 'KvGet',
+            message: 'region error from TiKV',
+            errorKind: $kind,
+        );
+
+        $this->assertSame($expected, RetryExecutor::invalidatesRoutingOnRetry($exception));
+    }
+
+    public function testInvalidatesRoutingOnRetryTreatsUnclassifiedErrorsConservatively(): void
+    {
+        $this->assertTrue(
+            RetryExecutor::invalidatesRoutingOnRetry(
+                new RegionException(operation: 'KvGet', message: 'region error from TiKV'),
+            ),
+        );
+        $this->assertTrue(RetryExecutor::invalidatesRoutingOnRetry(new TiKvException('EpochNotMatch')));
+        $this->assertTrue(RetryExecutor::invalidatesRoutingOnRetry(new GrpcException('connection reset', 14)));
     }
 
     /**

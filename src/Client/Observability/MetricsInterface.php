@@ -85,8 +85,19 @@ interface MetricsInterface
      *                           self-invalidates with the same reason
      *                           (pessimistic lock, primary-region commit, and
      *                           lock-resolution paths).
-     * - 'retry_region_error': RetryExecutor invalidated before scheduling the
-     *                           next attempt on a retryable error
+     * - 'retry_region_error:<kind>': RetryExecutor invalidated before
+     *                           scheduling the next attempt on a retryable
+     *                           ROUTING error; <kind> is the triggering
+     *                           ErrorKind value, e.g.
+     *                           'retry_region_error:epoch_not_match'. A
+     *                           non-routing retryable error (ServerIsBusy,
+     *                           DiskFull, IsWitness, RecoveryInProgress, …)
+     *                           is retried with the cached region intact
+     *                           (issue #245)
+     * - 'retry_region_error': the same pre-retry invalidation when the error
+     *                           carries no typed ErrorKind (a transport
+     *                           failure or a message-classified exception), so
+     *                           the kind is unknown
      * - 'fatal_region_error': RetryExecutor invalidated a routing error that
      *                           is fatal (KeyNotInRegion) or a
      *                           StoreNotFoundException for one of the
