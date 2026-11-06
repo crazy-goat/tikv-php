@@ -1522,13 +1522,24 @@ since issue #241):
 | Bound | Default | Description |
 |-------|---------|-------------|
 | `maxAttempts` | `30` | Maximum number of times the operation is invoked before the executor gives up. |
-| `deadlineMs` | `30000` (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`; `0` disables) | Wall-clock deadline from the start of the call. Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget); the executor terminates when it is reached, regardless of `sleepMs`. |
+| `deadlineMs` | `30000` (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`; `0` disables) | Wall-clock deadline from the start of the operation. Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget); the executor terminates when it is reached, regardless of `sleepMs`. |
 
 When either bound is reached the executor throws
 `RetryBudgetExhaustedException` (extends `TiKvException`). This exception
 exposes `attempts()` and `elapsedOrBackoffMs()` for diagnostics, and
 `getRawKey()` for the un-redacted key (the key is redacted in the message —
 see issue #269).
+
+The time budgets (`maxBackoffMs`, `serverBusyBudgetMs` and `deadlineMs`) are
+scoped to **one logical operation** (issue #223, TXN-18):
+`RetryExecutor::beginOperation()` returns an executor whose `execute()`
+calls share one budget, and the client's fan-out operations (`scan()`,
+`batchGet()`, `commit()`, `deleteRange()`, `checksum()`, …) use one for all
+their regions and pages. A later operation starts from zero, so a read-heavy
+transaction cannot starve its commit, while a single operation's fan-out is
+bounded by one budget instead of one per region. `maxAttempts` stays per
+retry loop (one region/page), so a wide fan-out does not exhaust it on
+ordinary one-retry-per-region traffic.
 
 ### Custom Retry (Advanced)
 
@@ -1572,6 +1583,12 @@ $result = $executor->execute(
     },
 );
 ```
+
+For a user-level fan-out that must share one budget, call
+`$executor = $executor->beginOperation()` once and pass the returned
+executor to every `execute()` call of that logical operation; call
+`beginOperation()` again for the next operation. A standalone executor keeps
+the per-call reset described above.
 
 Note that `maxAttempts` (default 30) and `deadlineMs` (default 30000,
 `0` disables) are constructor parameters of `RetryExecutor` and are **not**
@@ -1679,7 +1696,7 @@ By default all timeouts are set to sensible values (5s for reads/writes, 10s for
 
 `batchDeadlineMs` is finite by default (`TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, 60000 ms). When it is above `0`, it must not be less than any per-call timeout that a batch fan-out uses: `writeTimeoutMs`, `batchReadTimeoutMs`, `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs`, `checksumTimeoutMs` and `ingestTimeoutMs` (`readTimeoutMs` is not in the list: only point reads use it). If it is less, the `TimeoutConfig` constructor throws an `InvalidArgumentException` that names both fields. One wait is not interrupted by the deadline, so a deadline that is less than one call cannot be honoured. Such a setting has no meaning.
 
-The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs the whole retry loop of one region (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus one region's full retry loop. For scans the deadline applies per region batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
+The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs that region's share of the operation's retry budget; all regions of a batch share one `RetryExecutor` budget (issue #223), so `retryDeadlineMs` bounds the fan-out as a whole (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus the operation's remaining retry deadline. For scans the batch deadline applies per region batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
 
 Every key of the table above is configurable under its own name — the mapping is
 derived from `TimeoutConfig`'s constructor, so a field that is added to the

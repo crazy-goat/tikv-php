@@ -317,6 +317,11 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): void {
+        // One commit() call is one logical operation: the prewrite and commit
+        // phases, and every region, share one retry budget. Reads that ran
+        // earlier in the transaction must not shorten it (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         $primary = $state->getPessimisticPrimaryKey() ?? $state->getPrimaryKey();
 
         if ($this->pessimistic) {
@@ -700,6 +705,11 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): void {
+        // One rollback() call is one logical operation: pessimistic rollback
+        // and the batch rollback, and every region, share one retry budget
+        // (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         // A transaction that reached the commit phase is committed in TiKV
         // and must never be rolled back (issue #215, TXN-10). The guard is
         // on the status, not on commitTs: commitTs is already set when the

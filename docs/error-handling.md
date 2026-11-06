@@ -454,8 +454,8 @@ cannot report success having deleted nothing.)
 the operations that can throw them directly. On the default unary path, the
 fanned-out batch and range operations (`batchGet()`, `batchPut()`,
 `batchDelete()`, `batchScan()`, `deleteRange()`, `deletePrefix()` and
-`checksum()`) report a per-region failure — including a region's exhausted
-retry budget or a missing store — inside
+`checksum()`) report a per-region failure — including the operation's
+exhausted retry budget or a missing store — inside
 `BatchPartialFailureException::getRegionErrors()` instead of throwing the
 wrapped type. With `options['batchCommands']` enabled, the multiplexed entry
 setup resolves store addresses before that wrapper, so
@@ -487,9 +487,9 @@ there at all.
 | `scanPrefix(string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchDeadlineExceededException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Delegates to `scan()`; same `limit: 0` pagination + guard semantics |
 | `reverseScan(...)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Limit validated; `limit: 0` pages internally (descending bound moves down each page) and is guarded by `options['maxScanRows']` |
 | `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved. A per-range or per-region `RegionException`, `GrpcException`, retry-budget failure or missing store is wrapped in `BatchPartialFailureException::getRegionErrors()` |
-| `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole. A region's retry-budget/store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
+| `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole. A retry-budget or store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
 | `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics. The pre-fan-out PD region enumeration can throw the base `TiKvException` |
-| `checksum(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Concurrent per-region checksums; idempotent. A region's retry-budget/store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
+| `checksum(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Concurrent per-region checksums; idempotent. A retry-budget or store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
 | `ingest(array, ?int $ttl = null)` | `ClientClosedException`, `InvalidArgumentException`, `GrpcException`, `RegionException`, `InvalidStoreAddressException`, `StoreNotFoundException`, `BatchDeadlineExceededException`, `TiKvException` | SST import path; store mode switches fan out concurrently. `ingest()` has no `RetryExecutor`, so a missing store escapes directly and `RetryBudgetExhaustedException` is not thrown |
 | `getClusterId(): ?int` | — | Returns `null` when unknown; no exceptions documented |
 | `healthCheck(): ?int` | `ClientClosedException`, `HealthCheckException` | Wraps any PD failure into `HealthCheckException` |
@@ -625,6 +625,14 @@ block:
 
 Notes:
 
+- The time budgets are scoped to **one logical operation**, not to one
+  region or one `RetryExecutor::execute()` call (issue #223, TXN-18).
+  `RetryExecutor::beginOperation()` returns an executor whose calls share
+  one `maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline, and the
+  client's fan-out entry points use one for all their regions and pages.
+  A later operation starts from zero, so a read-heavy transaction cannot
+  starve its commit, while a single operation's fan-out is bounded by one
+  budget. The attempt cap stays per retry loop (one region/page).
 - A budget value of `0` does **not** disable the cumulative-backoff or
   ServerBusy budgets — it exhausts on the first charge. Only
   `retryDeadlineMs=0` disables its budget (restoring the pre-#294 unbounded

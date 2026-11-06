@@ -39,6 +39,21 @@ sleeps alone (budget exhaustion implies > 50 ms of sleeps), not from
 scheduling overhead. The #241 tests in `RetryExecutorTest` are the reference
 implementation of this sizing.
 
+## The retry budget is per logical operation, not per execute() call
+
+Since issue #223 a client's fan-out entry points wrap their `RetryExecutor`
+in `beginOperation()`, so every `execute()` call for one scan, batch,
+transactional read, commit, rollback or range operation charges the same
+`maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline. A standalone
+`RetryExecutor` still resets the budget on every `execute()` call (issue
+#271), and `beginOperation()` on the same executor starts a new operation.
+Consequence for tests: a multi-region `RawKvScanner`/`RawKvRangeOps`/
+`TxnReader` operation shares one budget across regions (a later region gets
+no fresh budget after an earlier one spent it), while two calls to
+`execute()` on a bare executor each get a full budget. The attempt cap stays
+per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
+on ordinary one-retry-per-region traffic.
+
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
 A test like `try { $executor->execute($k, fn () => throw …); $this->fail(...); } catch (TiKvException) {}`
