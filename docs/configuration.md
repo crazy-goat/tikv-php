@@ -1528,6 +1528,20 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > Example: `retryDeadlineMs => 1000` with a gRPC call that runs 5 s ⇒ real
 > occupancy ≈ 6 s (the deadline is enforced when that RPC returns).
 
+> **Lock resolution (TxnKV):** a `KeyError.locked` conflict during prewrite,
+> rollback or a transactional read is resolved inside the retry loop, so its
+> `KvCheckTxnStatus` (and the PD TSO fetch it performs),
+> `KvCheckSecondaryLocks` and `KvResolveLock` calls are capped by the
+> operation's **remaining** retry deadline. The resolver converts that
+> remaining budget into one absolute deadline at its entry, so the nested
+> RPCs share the same live budget and none is given a deadline beyond the
+> operation's `retryDeadlineMs`. A live lock is still reported as a retryable
+> error (the executor owns the backoff) and the resolver never sleeps for the
+> lock TTL; the executor's own deadline check raises
+> `RetryBudgetExhaustedException` when the budget is spent. With
+> `retryDeadlineMs => 0` the configured `lockResolveTimeoutMs` / `tsoTimeoutMs`
+> apply unchanged.
+
 > **Worker occupancy note:** `serverBusyBudgetMs` is effectively a
 > worker-occupancy setting — it caps how long ONE operation may block a PHP
 > process in `usleep()` while TiKV reports `ServerIsBusy`. The default of
@@ -1755,7 +1769,10 @@ per-region problem the retry executor already handles. `pdTimeoutMs` covers
 `GetRegion` / `ScanRegions` / `GetStore` / `GetAllStores` / `GetMembers` /
 `LoadKeyspace` and the GC safe-point RPCs; `tsoTimeoutMs` covers every `Tso` RPC
 (so also the timestamp `checkTxnStatus()` fetches); `lockResolveTimeoutMs` covers
-`KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`.
+`KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`. When lock
+resolution runs inside a retry loop, both the TSO and the lock-resolution
+deadline are further capped by that loop's remaining `retryDeadlineMs`; the
+configured value is the upper bound, not an independent budget.
 
 Every gRPC call carries a deadline. `GrpcClientInterface::call()`'s `$timeoutMs`
 argument of `null` means the library default (30 s); a non-positive value is a
