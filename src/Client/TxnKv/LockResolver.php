@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
@@ -53,7 +54,8 @@ final readonly class LockResolver
     /**
      * Resolve a lock by checking the transaction's status and either
      * committing it (if committed elsewhere), rolling it back after expiry,
-     * or throwing a retryable exception while the lock is still alive.
+     * or throwing a retryable exception while the lock is still alive or the
+     * status check itself failed (a failed check is not a status, issue #224).
      *
      * @param string $primaryLock The primary key of the transaction (from LockInfo::getPrimaryLock()).
      *                            If the lock has no primary info (e.g. pessimistic), pass the locked key itself.
@@ -328,10 +330,21 @@ final readonly class LockResolver
 
         $error = $response->getError();
         if ($error !== null) {
-            $this->logger->warning('CheckTxnStatus returned error', [
+            // A failed status check is not a status: the remaining fields are
+            // zero, and reading commit_version = 0 as "not committed" would
+            // drive a rollback of a transaction whose outcome is unknown
+            // (issue #224, TXN-19). Retry through the caller's executor; only
+            // a successful response may decide commit vs rollback.
+            $detail = KeyErrorDescriber::describe($error);
+            $this->logger->warning('CheckTxnStatus returned error, retrying', [
                 'primaryKey' => KeyRedactor::redact($primaryKey),
                 'lockTs' => $lockTs,
+                'error' => $detail,
             ]);
+            throw new TxnRetryableException(
+                'CheckTxnStatus failed: ' . $detail,
+                BackoffType::TxnLock,
+            );
         }
 
         $action = $response->getAction();

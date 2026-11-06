@@ -1231,6 +1231,34 @@ Cache lifetime tests: `TxnKvClientTest::testTransactionsShareOneResolvedStatusCa
 `LockResolverBatchTest::testCachedRollbackSkipsSecondaryCheckForAsyncCommitLock` pins the
 cache-hit path for async-commit locks.
 
+## An errored `CheckTxnStatus` response is not a status (#224)
+
+`CheckTxnStatusResponse` carries `region_error`, `error` (a plain `KeyError`,
+not a oneof) and the status fields (`lock_ttl`, `commit_version`, `action`).
+The status fields are only meaningful when neither error is set: an errored
+response leaves `commit_version = 0`, which `LockResolver::checkTxnStatus()`
+used to log and then return, so `resolveLock()` read it as "not committed" and
+sent `KvResolveLock` at commit ts 0 — a destructive rollback of a transaction
+whose outcome was never determined (TXN-19).
+
+The rule is: **only a successful response may drive the commit/rollback
+decision.** A region error already throws `RegionException` (the retry
+executor retries routing kinds), a gRPC failure already throws
+`GrpcException`, and a `KeyError` now throws `TxnRetryableException` with
+`BackoffType::TxnLock`. It is deliberately retryable rather than fatal: a
+status check can fail transiently and the next attempt may succeed, while the
+caller's retry budget bounds the loop. The message uses
+`KeyErrorDescriber::describe()` rather than `serializeToJsonString()`, so a raw
+lock key cannot leak into the exception text. Pinned by
+`LockResolverTest::testErroredCheckTxnStatusIsRetryableAndNeverRollsBack()`,
+`::testRegionErrorDuringCheckTxnStatusIsRetriedAndSuccessfulResponseDecides()`
+and `::testGenuineNotCommittedResponseStillRollsBack()`.
+
+Known follow-up: `CheckSecondaryLocksResponse.error` is still ignored by the
+async-commit recovery path, which can read a missing `locks` list as "rolled
+back" for the same reason. That RPC is outside this issue's `CheckTxnStatus`
+scope and needs its own fix.
+
 ## Atomic mode and plain writes use different TiKV paths (#399)
 
 `setAtomicForCAS(true)` makes `put()`, `delete()`, `batchPut()` and
