@@ -148,7 +148,7 @@ that keeps existing, correct code working.
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
 | `TxnKv\TransactionStatus` | the enum returned by `Transaction::getStatus()` |
 | `Exception\*` | `TiKvException` and every subclass, plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
-| `TxnKv\Exception\*` | the six transaction exceptions: `DeadlockException`, `LockWaitTimeoutException`, `TransactionConflictException`, `TxnAbortedByGcException`, `TxnRetryableException`, `UndeterminedCommitException` |
+| `TxnKv\Exception\*` | the seven transaction exceptions: `DeadlockException`, `LockWaitTimeoutException`, `TransactionConflictException`, `TransactionTooLargeException`, `TxnAbortedByGcException`, `TxnRetryableException`, `UndeterminedCommitException` |
 | `Retry\RetryBudgetExhaustedException` | thrown when the internal retry budget is exhausted |
 | `Retry\ErrorKind` | the enum behind `RegionException::$errorKind` — the typed variant of a region error |
 | `Observability\MetricsInterface` | the metrics backend you implement and pass as `options['metrics']` |
@@ -521,6 +521,7 @@ Retrying a transaction means starting a **new** one. A conflict leaves the old
 | `TransactionConflictException` | discard, **new transaction** |
 | `DeadlockException` | discard, **new transaction** |
 | `LockWaitTimeoutException` | discard, **new transaction** |
+| `TransactionTooLargeException` | the rejected write was not buffered and no RPC was sent; commit the smaller write set or begin a **new transaction** with larger `maxTxn*` limits |
 | `TxnRetryableException` | escapes only when the internal retry budget ran out — **new transaction** |
 | `TxnAbortedByGcException` | the `startTs` is behind the cluster's GC safe point. **New transaction**; for reads that must outlive `gc_life_time`, call `TxnKvClient::holdGcSafePoint()` first |
 | `UndeterminedCommitException` | outcome unknown — do **not** roll back, resolve out of band |

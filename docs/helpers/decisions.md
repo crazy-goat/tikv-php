@@ -1353,3 +1353,32 @@ the missing part.
    partial failure: an early return would report a failed cleanup as a success, `rollback()`
    would mark the state `RolledBack` and close it, and nobody would retry.
 8. Not covered: the experimental BatchCommands multiplex path is bounded per call only.
+
+## Transaction size limits are opt-in, request batching is on by default (#430)
+
+Two different failure modes share one issue, and they get two different defaults.
+
+1. **Write-set limits are opt-in (`0` = unlimited).** client-go's `SetEntrySizeLimit` is opt-in
+   too, and any non-zero default would break existing applications whose transactions are larger
+   than the chosen value. The limits are checked in `TransactionState` (entry count, entry bytes,
+   total bytes), incrementally, and overwriting a key subtracts the entry it replaces.
+   `Transaction::set()`/`delete()` call `assertWriteAllowed()` before the eager pessimistic lock,
+   so a rejected write sends no RPC.
+2. **Batching is always on.** The defaults (16 KiB and 512 items per region) match client-go's
+   `DefTxnCommitBatchSize` and RawKV's `MAX_BATCH_LIMIT`; both are far above the normal
+   transaction, so a small transaction still sends one prewrite and one commit per region. The
+   splitter is `RawKvSplitter::splitIntoBatches()`, the same generic helper the RawKV batch paths
+   use.
+3. **A batch is a group, not a special case inside the RPC loop.** Splitting before the
+   primary/secondary grouping lets the existing retry, fan-out, KeyError and region-error
+   machinery apply unchanged. The batch that carries the primary key is still prewritten last for
+   async commit and committed first in 2PC; the other batches of the primary's region are ordinary
+   secondary commits after the commit point.
+4. **1PC stays single-batch.** A 1PC prewrite commits its keys inside the prewrite. Splitting a 1PC
+   transaction into several prewrites would commit a prefix and then fail, so `$onePc` requires
+   exactly one batch, not merely one region. Async commit is safe across batches because only the
+   primary batch carries `use_async_commit` and the secondaries list, and it is prewritten last.
+5. **Size function:** a prewrite mutation is key length + value length, a commit key is key
+   length. Request framing is deliberately excluded, matching the payload TiKV's
+   `RaftEntryTooLarge` guard measures; a single item larger than the limit still forms its own
+   batch so the server rejects it instead of the client silently dropping it.

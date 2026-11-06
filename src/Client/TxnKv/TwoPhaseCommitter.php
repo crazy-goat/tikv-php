@@ -35,6 +35,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -179,6 +180,19 @@ final readonly class TwoPhaseCommitter
      */
     private const ASYNC_COMMIT_MAX_COMMIT_TS_GAP = 15000;
 
+    /**
+     * Default maximum bytes of one prewrite/commit request per region (issue
+     * #430). Mirrors client-go's `DefTxnCommitBatchSize` and client-java's
+     * `txnCommitBatchSize` (16 KiB).
+     */
+    public const DEFAULT_TXN_BATCH_SIZE = 16384;
+
+    /**
+     * Default maximum number of mutations/keys of one prewrite/commit request
+     * per region (issue #430). Mirrors RawKV's `MAX_BATCH_LIMIT` (512).
+     */
+    public const DEFAULT_TXN_BATCH_COUNT = 512;
+
     public function __construct(
         private int $startTs,
         private bool $pessimistic,
@@ -211,6 +225,10 @@ final readonly class TwoPhaseCommitter
         private int $optimisticLockTtlMs = self::DEFAULT_OPTIMISTIC_LOCK_TTL_MS,
         /** Pessimistic lock TTL in milliseconds (issue #429). */
         private int $pessimisticLockTtlMs = self::DEFAULT_PESSIMISTIC_LOCK_TTL_MS,
+        /** Maximum bytes of one prewrite/commit request per region (issue #430). */
+        private int $maxTxnBatchSize = self::DEFAULT_TXN_BATCH_SIZE,
+        /** Maximum mutations/keys of one prewrite/commit request per region (issue #430). */
+        private int $maxTxnBatchCount = self::DEFAULT_TXN_BATCH_COUNT,
     ) {
     }
 
@@ -321,7 +339,12 @@ final readonly class TwoPhaseCommitter
         $lockTtlMs = $this->ttlWithUptimeMs($state, $baseLockTtlMs);
         $prewriteStartedAtMs = $this->nowMs();
         $primaryLockWritten = false;
-        $keysByRegion = $this->groupMutationsByRegion($mutations);
+        // Split every region's mutations into request-sized batches (issue
+        // #430). Each batch becomes its own group, so the existing per-region
+        // retry, fan-out and KeyError handling apply unchanged; the batch
+        // count also keeps 1PC single-batch only (a partially applied 1PC
+        // transaction must never be produced).
+        $keysByRegion = $this->splitMutationGroups($this->groupMutationsByRegion($mutations));
         $groupedMutationCount = 0;
         foreach ($keysByRegion as $regionData) {
             $groupedMutationCount += count($regionData['mutations']);
@@ -376,10 +399,12 @@ final readonly class TwoPhaseCommitter
         }
 
         /**
-         * Split the region groups into the primary region's group and the
+         * Split the request groups into the primary key's group and the
          * secondary groups, preserving $keysByRegion order (grouping
          * follows mutation order, so in the optimistic path the primary's
-         * region comes first — see the TXN-13 FAQ note).
+         * region comes first — see the TXN-13 FAQ note). A group is a
+         * size-bounded batch within one region (issue #430), so the primary
+         * group is the batch that carries the primary key.
          *
          * @var array{region: RegionInfo, mutations: Mutation[], isPrimary: bool, firstKey: string}|null $primaryGroup
          */
@@ -898,7 +923,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Issue (eagerly send) one region's prewrite without waiting for the
+     * Issue (eagerly send) one batch's prewrite without waiting for the
      * response (issue #291): the returned future's wait phase resolves the
      * response, runs the region-error check and the KeyError handling.
      *
@@ -990,7 +1015,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Wrap one region group's prewrite in the retry executor, keeping the
+     * Wrap one batch's prewrite in the retry executor, keeping the
      * first attempt eagerly dispatched (client-side fan-out — see
      * CheckedGrpcFuture::fromRetryableDispatch) while retries run in the
      * wait phase with fresh region resolution.
@@ -1189,7 +1214,8 @@ final readonly class TwoPhaseCommitter
             return;
         }
 
-        $keysByRegion = $this->groupStringsByRegion($keys);
+        // Split each region's keys into request-sized batches (issue #430).
+        $keysByRegion = $this->splitKeyGroups($this->groupStringsByRegion($keys));
 
         if ($keysByRegion === []) {
             throw new InvalidStateException(
@@ -1199,22 +1225,24 @@ final readonly class TwoPhaseCommitter
 
         $primary = $state->getPrimaryKey();
 
-        // Resolve the primary's region so we can commit it first.
-        $primaryRegionId = null;
-        foreach ($keysByRegion as $regionId => $regionData) {
-            if (in_array($primary, $regionData['keys'], true)) {
-                $primaryRegionId = $regionId;
+        // Resolve the batch that carries the primary key so we can commit it
+        // first. A region may need more than one commit request now, so the
+        // primary is identified by its batch, not by its region.
+        $primaryBatchIndex = null;
+        foreach ($keysByRegion as $index => $batch) {
+            if (in_array($primary, $batch['keys'], true)) {
+                $primaryBatchIndex = $index;
                 break;
             }
         }
 
         // Fail closed (issue #326): reaching this point without finding the
-        // primary key in any resolved region group means the primary was
+        // primary key in any resolved key group means the primary was
         // dropped or the caller passed a key list without it. Committing an
-        // arbitrary region first "as if" it were the primary would break the
+        // arbitrary batch first "as if" it were the primary would break the
         // primary-first invariant above; throw instead of silently promoting
-        // a random region to primary.
-        if ($primaryRegionId === null) {
+        // a random batch to primary.
+        if ($primaryBatchIndex === null) {
             throw new InvalidStateException(sprintf(
                 'Primary key %s was not found in any resolved region group;'
                 . ' refusing to commit an arbitrary region as primary',
@@ -1225,11 +1253,11 @@ final readonly class TwoPhaseCommitter
         // Commit the primary first. Failures here are fatal: do not retry.
         // No RetryExecutor wraps this call, so commitForRegion must handle
         // NotLeader drops itself (issue #474 review round 3).
-        $primaryRegionData = $keysByRegion[$primaryRegionId];
+        $primaryBatch = $keysByRegion[$primaryBatchIndex];
         try {
             $this->commitForRegionAsync(
-                $primaryRegionData['region'],
-                $primaryRegionData['keys'],
+                $primaryBatch['region'],
+                $primaryBatch['keys'],
                 $state,
                 notLeaderOwnedByRetryExecutor: false,
             )->waitForExecutor();
@@ -1243,7 +1271,7 @@ final readonly class TwoPhaseCommitter
             $state->setStatus(TransactionStatus::Undetermined);
             $state->close();
             $this->logger->error('Primary commit outcome undetermined (transport failure)', [
-                'regionId' => $primaryRegionData['region']->regionId,
+                'regionId' => $primaryBatch['region']->regionId,
                 'error' => $e->getMessage(),
             ]);
             throw new UndeterminedCommitException(
@@ -1259,32 +1287,33 @@ final readonly class TwoPhaseCommitter
         // trigger a rollback of a committed transaction.
         $state->setStatus(TransactionStatus::Committed);
 
-        // Remove the primary region from outstanding work; commit remaining
-        // secondary regions in parallel (issue #291): every region's first
-        // attempt is dispatched before any wait begins, so their
-        // server-side latencies overlap. The primary's commit has already
-        // been acknowledged above, which is the protocol's ordering
+        // Remove the primary batch from outstanding work; commit the
+        // remaining batches — including other batches of the primary's
+        // region, which are secondary commits — in parallel (issue #291):
+        // every batch's first attempt is dispatched before any wait begins,
+        // so their server-side latencies overlap. The primary's commit has
+        // already been acknowledged above, which is the protocol's ordering
         // requirement.
-        unset($keysByRegion[$primaryRegionId]);
+        unset($keysByRegion[$primaryBatchIndex]);
 
         if ($keysByRegion === []) {
             return;
         }
 
         $regionCalls = [];
-        foreach ($keysByRegion as $regionId => $regionData) {
-            $region = $regionData['region'];
-            $regionKeys = $regionData['keys'];
+        foreach ($keysByRegion as $batch) {
+            $region = $batch['region'];
+            $regionKeys = $batch['keys'];
             $firstKey = $regionKeys[0] ?? '';
 
-            $regionCalls[$regionId] = fn(): CheckedGrpcFuture => $this->secondaryCommitSwallowing(
+            $regionCalls[] = fn(): CheckedGrpcFuture => $this->secondaryCommitSwallowing(
                 $region,
                 $regionKeys,
                 $firstKey,
                 $state,
                 $retryExecutor,
                 $classifier,
-                $regionId,
+                $region->regionId,
             );
         }
 
@@ -1308,7 +1337,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * One secondary region's commit for the #291 fan-out: the dispatch
+     * One secondary batch's commit for the #291 fan-out: the dispatch
      * phase runs the (eagerly-sent) retryable future's constructor; the
      * WAIT phase — this method's returned future — swallows and logs the
      * region's failure.
@@ -1358,7 +1387,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Wrap one region's commit in the retry executor for the secondary
+     * Wrap one batch's commit in the retry executor for the secondary
      * fan-out (issue #291), keeping the first attempt eagerly dispatched
      * (client-side fan-out — see CheckedGrpcFuture::fromRetryableDispatch)
      * while retries run in the wait phase.
@@ -1382,7 +1411,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Issue (eagerly send) one region's commit without waiting for the
+     * Issue (eagerly send) one batch's commit without waiting for the
      * response; the returned future's wait phase runs the region-error
      * check and the KeyError handling.
      *
@@ -2507,12 +2536,76 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
+     * Split each region's mutations into size- and count-bounded request
+     * batches (issue #430).
+     *
+     * The size of a mutation is its key length plus its value length — the
+     * payload the server carries — so the split tracks the wire cost that can
+     * trigger `RaftEntryTooLarge` without adding request-framing noise. A
+     * single mutation larger than the limit still forms a batch of its own
+     * (the splitter never drops items), which lets the server's own limit
+     * reject it rather than silently truncating the transaction.
+     *
+     * @param array<int, array{region: RegionInfo, mutations: Mutation[]}> $keysByRegion
+     * @return list<array{region: RegionInfo, mutations: Mutation[]}>
+     */
+    private function splitMutationGroups(array $keysByRegion): array
+    {
+        $batches = [];
+        foreach ($keysByRegion as $regionData) {
+            $regionBatches = RawKvSplitter::splitIntoBatches(
+                $regionData['mutations'],
+                $this->maxTxnBatchCount,
+                $this->maxTxnBatchSize,
+                static fn(Mutation $mutation): int => strlen($mutation->getKey()) + strlen($mutation->getValue()),
+            );
+            foreach ($regionBatches as $mutations) {
+                $batches[] = [
+                    'region' => $regionData['region'],
+                    'mutations' => $mutations,
+                ];
+            }
+        }
+
+        return $batches;
+    }
+
+    /**
      * @param string[] $keys
      * @return array<int, array{region: RegionInfo, keys: string[]}>
      */
     private function groupStringsByRegion(array $keys): array
     {
         return RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
+    }
+
+    /**
+     * Split each region's commit keys into size- and count-bounded request
+     * batches (issue #430). A commit request carries only keys, so the size
+     * of a key is its length.
+     *
+     * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
+     * @return list<array{region: RegionInfo, keys: string[]}>
+     */
+    private function splitKeyGroups(array $keysByRegion): array
+    {
+        $batches = [];
+        foreach ($keysByRegion as $regionData) {
+            $regionBatches = RawKvSplitter::splitIntoBatches(
+                $regionData['keys'],
+                $this->maxTxnBatchCount,
+                $this->maxTxnBatchSize,
+                static fn(string $key): int => strlen($key),
+            );
+            foreach ($regionBatches as $keys) {
+                $batches[] = [
+                    'region' => $regionData['region'],
+                    'keys' => $keys,
+                ];
+            }
+        }
+
+        return $batches;
     }
 
     // ---------------------------------------------------------------

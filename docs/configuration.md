@@ -1303,6 +1303,59 @@ sleeps, not the time the lock RPCs themselves take. Lower the value to keep a
 PHP worker slot free; raise it to let TiKV park the request instead of
 answering early and having the client send it again.
 
+## Transaction Size Limits and Request Batching (TxnKV)
+
+A transaction buffers its write set in the PHP worker until `commit()`, so a
+runaway write set can exhaust `memory_limit` and leave locks behind; and one
+region with many mutations produces a single prewrite/commit request that TiKV
+can reject with `RaftEntryTooLarge`. Both are configurable per transaction on
+`begin()` (issue #430):
+
+```php
+$txn = $client->begin([
+    'maxTxnEntryCount' => 10000,   // entries, 0 = unlimited (default)
+    'maxTxnEntrySize'  => 1048576, // key+value bytes, 0 = unlimited
+    'maxTxnTotalSize'  => 4194304, // whole write set, 0 = unlimited
+    'maxTxnBatchSize'  => 16384,   // bytes per prewrite/commit request
+    'maxTxnBatchCount' => 512,     // mutations/keys per request
+]);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `maxTxnEntryCount` | `0` (unlimited) | Maximum number of write-set entries. |
+| `maxTxnEntrySize` | `0` (unlimited) | Maximum bytes of one entry, measured as key length plus value length. A delete contributes the key length only. |
+| `maxTxnTotalSize` | `0` (unlimited) | Maximum bytes of the whole write set: the sum of every entry's key plus value length. |
+| `maxTxnBatchSize` | `16384` | Maximum bytes of one prewrite/commit request per region. A prewrite mutation is sized as key plus value length; a commit key as its length. Matches client-go's `DefTxnCommitBatchSize`. |
+| `maxTxnBatchCount` | `512` | Maximum mutations (prewrite) or keys (commit) of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
+
+The three size limits are **opt-in** (`0` = unlimited) because there is no
+single correct value for every application; set them for untrusted or
+unbounded workloads. Exceeding one throws
+`TransactionTooLargeException` from `set()`/`delete()` **before** the write is
+buffered and before any RPC — in a pessimistic transaction that means before
+the eager lock request, so a rejected write leaves no server-side lock. The
+exception names the limit (`getLimitName()`), the configured value
+(`getLimit()`) and the value the write would have produced (`getActual()`).
+Overwriting an existing key accounts for the entry it replaces, so a replace
+does not consume additional budget.
+
+`Transaction::getWriteSetSize()` returns the current write-set bytes and
+`Transaction::getWriteSetCount()` its entry count, so a transaction can be
+logged or exported as a metric without walking `getWriteSet()`.
+
+Batching is always on. `TwoPhaseCommitter` splits each region's prewrite
+mutations and commit keys with `RawKvSplitter::splitIntoBatches()` into
+requests bounded by both `maxTxnBatchSize` and `maxTxnBatchCount`. The primary
+key's batch is still committed first; the remaining batches — including other
+batches of the primary's region — are secondary commits and are fanned out in
+parallel. One-phase commit remains limited to a single batch (a transaction
+split across several 1PC prewrites would be partially committed), and async
+commit carries its decision on the batch that holds the primary key. A batch
+that fails before the commit point still fails the whole transaction; after
+the primary commit, secondary-batch failures are logged and the transaction
+stays committed, exactly as for whole secondary regions.
+
 ## Transaction Priority (TxnKV)
 
 `TxnKvClient::begin()` accepts a `priority` option. It maps onto TiKV's
