@@ -3,6 +3,28 @@
 Frequently asked questions and recurring pitfalls in crazy-goat/tikv-php.
 Ordered roughly by how often they bite.
 
+## A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep
+
+Issue #569 describes `LockResolver` capping a lock-TTL `usleep()` at
+`maxBackoffMs`, but #206 removed that sleep: a live lock now raises
+`TxnRetryableException` and the caller's `RetryExecutor` owns the backoff.
+The remaining overshoot is the lock-resolution RPC time (`lockResolveTimeoutMs`
+defaults to 5 s and the TSO fetch to 3 s), not a sleep. The seam is
+`RetryBudget`: `RetryExecutor::beginOperation()` returns an executor whose
+`execute()` calls share one budget, and `RetryExecutor::currentBudget()` exposes
+that same object. `RetryBudget::remainingDeadlineMs()` computes the live value
+at call time, and `TwoPhaseCommitter` / `TxnReader` pass it into
+`LockResolver::resolveLock()` / `resolveLocks()`. `LockResolver` converts that
+value once into an absolute deadline and recomputes the live remaining time
+before every nested RPC, so the TSO fetch, `CheckTxnStatus`,
+`CheckSecondaryLocks` and `ResolveLock` share one budget instead of each
+starting from the full snapshot. Do not reintroduce a sleep in `LockResolver`:
+it would break the #206 resolve-then-retry contract. The budget is the single
+source of truth for the deadline; do not add a second context object next to
+it. The live value is computed at call time, so time spent inside the current
+attempt's RPC is already deducted; a snapshot taken before the attempt would
+overstate it.
+
 ## RetryExecutor unit tests that need zero-sleep retries: use DataIsNotReady or an explicit classifier
 
 Since issue #241 (REG-10) `EpochNotMatch` classifies as `BackoffType::EpochNotMatch`
@@ -450,14 +472,16 @@ keeps a stale upper bound receives a partial success — re-clip or guard
 explicitly. The same stale-capture bug in `RawKvRangeOps`
 (deleteRange/checksum) was fixed by #190: resolution now happens inside the
 retry closure and the `scanRegions()` result is pre-populated into the
-region cache (so the first attempt is a cache hit). Remaining limitation:
-because of the #295 fan-out the retry closure only observes dispatch-phase
-failures; response-borne region errors surface at wait time as
-`BatchPartialFailureException`. Unlike `RawKvBatch` — whose response-borne
-region errors are now retried in the wait phase by #183 — this
-`RawKvRangeOps` wait-time path is still **unfixed** and remains an open gap;
-#236/#189 covered the batch wrappers, not `RawKvRangeOps`. A region that shrank
-after enumeration (a split) is also guarded by
+region cache (so the first attempt is a cache hit). Because of the #295
+fan-out the original retry closure only observed dispatch-phase failures:
+response-borne region errors surfaced at wait time as
+`BatchPartialFailureException`. Issue #566 closed that gap by moving
+`deleteRange`/`checksum` onto `CheckedGrpcFuture::fromRetryableDispatch()`
+(the #183 pattern used by the batch wrappers): the first attempt is still
+dispatched eagerly, while the wait phase runs the whole dispatch+await cycle
+under the retry executor, so a `NotLeader`/`EpochNotMatch`/… carried in the
+response is retried and the region is re-resolved on every attempt. A region
+that shrank after enumeration (a split) is also guarded by
 `RawKvRangeOps::assertRegionCoversRange()`: `deleteRange` fails closed, and
 `checksum` refuses a partial result — its data read is silently clamped by
 the region snapshot, so a truncated checksum would otherwise be XOR-merged
@@ -1897,26 +1921,35 @@ The regression tests live in `TransactionTest` and use the shared
 asserts `['KvPessimisticLock']`, i.e. no `KvPrewrite`/`KvCommit`); there is
 also a first-variant-wins test for multi-error responses.
 
-## Range-op retries only see dispatch-phase failures — make both callAsync attempts throw in the regression test
+## Range-op retries: dispatch-phase re-resolve (#190) and response-borne retry (#566)
 
 `RawKvRangeOps::deleteRange()/checksum()` fan their per-region sends out
-through `callAsync()` and return an un-waited `CheckedGrpcFuture`; the wait
-happens later inside `BatchAsyncExecutor`, outside `RetryExecutor::execute()`.
-So moving `getRegionInfo($startKey)` inside the retry closure (#190) only
-helps for errors raised during *dispatch* (`callAsync()` itself or
-store-address resolution) — a region error carried on the response surfaces
-at wait time and is not retried per region at all (the documented fan-out
-trade-off). Proving the re-resolve in a pure-PHP `Unit` test therefore does
-**not** need a successful second future: let the first `callAsync()` throw a
-retryable `TiKvException('StaleCommand')` and the second throw a
-deliberately non-retryable one (`ErrorClassifier` leaves it unclassified, so
-the loop stops and the original exception propagates). Record the target
-address of each attempt and assert the pair — e.g.
-`['tikv1:20160', 'tikv2:20160']` — with `regionCache->getByKey()` stubbed
+through `callAsync()`. Since #190 the retry closure re-resolves
+`getRegionInfo($startKey)` on every attempt, which covers errors raised during
+*dispatch* (`callAsync()` itself or store-address resolution): the first
+`callAsync()` throws a retryable `TiKvException('StaleCommand')`, the retry
+re-resolves and sends to the new leader, and the test records the target
+address of each attempt — e.g. `['tikv1:20160', 'tikv2:20160']` — with
+`regionCache->getByKey()` stubbed
 `willReturnOnConsecutiveCalls($stale, $stale, null)` so the retry models the
 invalidation lookup before going to PD. No `\Grpc\Call` / resolved-future
 machinery is required, so the test stays in the `Unit` suite under `php -n`.
-The same harness covers the fail-closed shrink guard: let the
+
+Before #566 that dispatch-phase harness was the whole story: the wait happened
+later inside `BatchAsyncExecutor`, outside `RetryExecutor::execute()`, so a
+region error carried on the response surfaced at wait time and was not retried
+per region at all (the documented #295 fan-out trade-off). Issue #566 moved
+both wrappers onto `CheckedGrpcFuture::fromRetryableDispatch()` (the #183
+pattern): the first attempt is still dispatched eagerly, so the #295 fan-out is
+unchanged, while the wait phase runs the whole dispatch+await cycle under the
+operation-scoped retry executor (`beginOperation()`, #223) and re-resolves the
+region on every attempt. Response-borne coverage now lives in
+`RawKvRangeOpsRetryTest`
+(`testDeleteRangeRetriesResponseBorneNotLeaderAndSucceeds`,
+`testChecksumRetriesResponseBorneEpochNotMatchAndSucceeds`); the
+dispatch-phase harness above still covers #190.
+
+The same dispatch-phase harness covers the fail-closed shrink guard: let the
 post-invalidation `getRegion` return a smaller region (end key `k` for the
 request `a..z`); `assertRegionCoversRange()` fires before the second send, so
 expect exactly **one** `callAsync` and a `TiKvException` whose message

@@ -349,9 +349,29 @@ final readonly class RetryExecutor
         );
     }
 
+    /**
+     * Budget shared by the execute() calls of the current logical operation,
+     * or null for a standalone executor (whose execute() calls each start a
+     * fresh budget).
+     *
+     * A caller that needs the live remaining deadline while an operation runs
+     * — lock resolution is the first user (issue #569) — must use an executor
+     * returned by {@see self::beginOperation()} and read
+     * {@see RetryBudget::remainingDeadlineMs()} from this budget. The object
+     * is the same one execute() charges, so there is no second source of
+     * truth for the deadline.
+     */
+    public function currentBudget(): ?RetryBudget
+    {
+        return $this->budget;
+    }
+
     private function newBudget(): RetryBudget
     {
-        return new RetryBudget($this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0);
+        return new RetryBudget(
+            $this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0,
+            $this->deadlineMs,
+        );
     }
 
     /**
