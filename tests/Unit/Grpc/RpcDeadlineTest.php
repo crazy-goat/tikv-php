@@ -207,7 +207,7 @@ class RpcDeadlineTest extends TestCase
             }
 
             return $this->tsoResponse();
-        });
+        }, null);
 
         $oracle->getTimestamp();
 
@@ -504,7 +504,7 @@ class RpcDeadlineTest extends TestCase
     /**
      * @param (\Closure(string): Message)|null $respond
      */
-    private function timestampOracle(?\Closure $respond = null): TimestampOracle
+    private function timestampOracle(?\Closure $respond = null, ?int $clusterId = 1): TimestampOracle
     {
         $respond ??= function (string $method): Message {
             self::assertSame('Tso', $method);
@@ -515,7 +515,7 @@ class RpcDeadlineTest extends TestCase
         return new TimestampOracle(
             $this->recordingGrpc($respond),
             'pd:2379',
-            static fn (): int => 1,
+            static fn (): ?int => $clusterId,
             static function (int $clusterId): void {
             },
             new NullLogger(),

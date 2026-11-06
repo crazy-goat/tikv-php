@@ -96,6 +96,14 @@ $options = [
     // 1 disables pooling (one Tso RPC per call). Must be >= 1 and <= 1000.
     // See "Timestamp Batching and Pooling" below.
     'tsoPoolSize' => 64,
+    // Expected PD cluster ID (issue #308, SEC-05). When set, every PD/TSO
+    // response must carry a cluster ID equal to this value; a mismatch or a
+    // missing cluster-ID header throws TiKvException before any data-path
+    // request. Independently of this option, an established cluster ID can
+    // never be overwritten by a value parsed out of an error string. Default:
+    // unset = learn and adopt the first ID PD reports. Must be a positive int.
+    // See "Cluster Identity Verification" below.
+    'expectedClusterId' => 123456789,
     // Replica read preference (issue #421): an instance of
     // ReplicaReadPolicy controlling which peer serves read requests.
     // Default: leader-only (unchanged behaviour). See "Replica Reads".
@@ -194,6 +202,58 @@ an empty result: `scanRegions()` can no longer answer `[]` for a failed
 really was deleted. A leader URL PD advertises that is not one of the
 configured endpoints is ignored, so a rogue or rewritten PD member list cannot
 redirect traffic.
+
+### Cluster Identity Verification (issue #308, SEC-05)
+
+By default the client learns its cluster ID from the first PD response header
+and adopts it: whatever cluster answers the configured endpoint becomes the
+cluster the client talks to. That is convenient for a first connection, but it
+also means a DNS-poisoned, stale or on-path PD — or simply a staging
+configuration pointed at production — is indistinguishable from the intended
+cluster, and it becomes the authority for region routing and store addresses.
+
+Set `options['expectedClusterId']` to pin the cluster identity:
+
+```php
+$client = RawKvClient::create(
+    ['127.0.0.1:2379'],
+    options: ['expectedClusterId' => 7123456789012345678],
+);
+```
+
+The value is the ID PD reports (`getClusterId()` / `healthCheck()`), for
+example from `pd-ctl cluster` or a trusted client. When it is set:
+
+- every PD response must carry a cluster ID equal to it; a different ID
+  throws `TiKvException` (`Cluster ID mismatch: expected X, server reported
+  Y`) before the response reaches the caller and before any data-path request
+  is issued, and a response with no cluster-ID header at all throws
+  `TiKvException` (`Cluster ID missing: expected X, response carried none`) —
+  a server cannot bypass the check by omitting the header;
+- a cluster ID parsed out of a `mismatch cluster id, need X but got Y` gRPC
+  error string is validated the same way before the retry that adopts it, so a
+  server cannot steer the client onto an ID of its choosing;
+- `TimestampOracle` applies the same checks to TSO response headers and TSO
+  cluster-id mismatch errors, so the timestamp path cannot be redirected
+  either.
+
+Independently of the option, once a cluster ID has been established, an
+error string naming a different ID is rejected instead of silently
+overwriting it. That no-overwrite rule is unconditional: it also applies when
+`expectedClusterId` is unset, because the issue requires it.
+
+An absent or explicitly `null` option keeps the historical initial
+learn-and-adopt behaviour: the first cluster ID PD reports is adopted.
+Existing deployments that relied on an error string replacing an already
+established ID do change — intentionally. The option must be a positive
+integer; any other type, `0` or a negative value throws
+`InvalidArgumentException` at client creation. The value must fit in a PHP
+`int`: PD cluster IDs are `uint64`, and the protobuf runtime clamps a decoded
+value above `PHP_INT_MAX` to `PHP_INT_MAX`, so a cluster whose ID exceeds
+that bound cannot be pinned through this option. This is a partial control on
+its own: it detects a wrong cluster but does not authenticate the server —
+genuine server authentication comes from TLS (`allowInsecure: false` plus a
+verified CA, see the TLS section below).
 
 ### Timestamp Batching and Pooling (issues #420, #292)
 
@@ -1825,6 +1885,8 @@ readiness/liveness checks, etc.:
 try {
     $clusterId = $client->healthCheck();   // int|null
     // $clusterId is non-null when PD responded with a cluster-id header.
+    // With options['expectedClusterId'] set, a response without a cluster-id
+    // header is an error (wrapped in HealthCheckException), not null.
 } catch (\CrazyGoat\TiKV\Client\Exception\HealthCheckException $e) {
     // PD was unreachable, returned a non-OK gRPC status, or answered with a
     // PD-level error in the response header (issue #234). The underlying

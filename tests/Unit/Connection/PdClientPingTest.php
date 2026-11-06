@@ -9,6 +9,7 @@ use CrazyGoat\Proto\Pdpb\ResponseHeader;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use PHPUnit\Framework\TestCase;
 
@@ -40,6 +41,63 @@ class PdClientPingTest extends TestCase
 
         $this->assertSame(7777, $clusterId);
         $this->assertSame(7777, $client->getClusterId());
+    }
+
+    public function testPingAcceptsMatchingExpectedClusterId(): void
+    {
+        $header = new ResponseHeader();
+        $header->setClusterId(12345);
+
+        $response = new GetMembersResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with('pd:2379', 'pdpb.PD', 'GetMembers')
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+
+        $this->assertSame(12345, $client->ping());
+    }
+
+    public function testPingRejectsMismatchingExpectedClusterId(): void
+    {
+        $header = new ResponseHeader();
+        $header->setClusterId(999);
+
+        $response = new GetMembersResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with('pd:2379', 'pdpb.PD', 'GetMembers')
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Cluster ID mismatch: expected 12345, server reported 999');
+        $client->ping();
+    }
+
+    public function testPingRejectsHeaderlessResponseWhenExpectedClusterIdIsSet(): void
+    {
+        $response = new GetMembersResponse();
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with('pd:2379', 'pdpb.PD', 'GetMembers')
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Cluster ID missing: expected 12345, response carried none');
+        $client->ping();
     }
 
     public function testPingReturnsNullWhenResponseHasNoHeader(): void
