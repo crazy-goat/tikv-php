@@ -458,19 +458,21 @@ re-resolved region may not cover the whole key group and the server
 keeps erroring until the budget is exhausted (documented limitation,
 same as the #500 lock path).
 
-## `RegionErrorHandler::check()` drops the region independently of `RetryExecutor`'s kind gate
+## `RegionErrorHandler::check()` uses the same routing table but its own metric prefix
 
-Issue #245 narrowed the retry executor's pre-retry invalidation to routing
-kinds, but `RegionErrorHandler::check()` is a separate drop path: when a
-TxnKV call site passes its `$cache` and `$regionId`, `check()` calls
-`invalidate()` for every non-NotLeader region error **before** it throws the
-`RegionException`, so the executor never sees a cached region for
-`ServerIsBusy`/`DiskFull`/`IsWitness`/`RecoveryInProgress` there. Those paths
-still invalidate and emit `'region_error'`, not `'retry_region_error:<kind>'`.
-RawKV call sites call `check($response)` without a cache, so they are the
-paths where the #245 gate is effective. Gating `check()` needs the typed kind
-too, so build the `RegionException` first (or read the oneof before the
-throw); do not assume the executor owns every drop.
+`RegionErrorHandler::check()` is a second drop path beside the retry
+executor: TxnKV call sites pass their `$cache` and `$regionId`, so `check()`
+invalidates before the `RegionException` reaches `RetryExecutor`. Since
+issue #245 both paths gate the drop on the same
+`RetryExecutor::invalidatesRoutingKind()` table, so
+`ServerIsBusy`/`DiskFull`/`IsWitness`/`RecoveryInProgress` keep the cached
+entry there too. `check()` builds the `RegionException` first because the
+typed `ErrorKind` lives on it. The handler keeps its own reason prefix —
+`region_error:<kind>`, and plain `region_error` for an unclassified error —
+rather than `retry_region_error:<kind>`: the latter means "RetryExecutor
+dropped the entry before scheduling another attempt", while `check()` may run
+outside any retry executor. Do not collapse the two labels, and do not
+assume the executor owns every drop.
 
 ## PHPStan `ternary.alwaysFalse` fires for by-ref bool flags mutated in a sibling closure — sequence mocks instead
 

@@ -139,7 +139,8 @@ class RegionErrorHandlerTest extends TestCase
     // regionInvalidated() metric itself. At executor-owned call sites
     // (default) NotLeader oneofs are left cached for
     // RetryExecutor::handleNotLeader() — its drops alone; every other
-    // region error invalidates here as 'region_error'. Un-owned sites pass
+    // routing region error invalidates here as 'region_error:<kind>' and an
+    // unclassified one as 'region_error' (issue #245). Un-owned sites pass
     // notLeaderOwnedByRetryExecutor: false so a NotLeader error still
     // self-invalidates ('not_leader') instead of stranding a stale entry.
     // ========================================================================
@@ -192,7 +193,7 @@ class RegionErrorHandlerTest extends TestCase
         }
     }
 
-    public function testRegionErrorInvalidatesWithPlainRegionErrorReasonOtherwise(): void
+    public function testRegionErrorInvalidatesWithKindTaggedReasonOtherwise(): void
     {
         $error = new Error();
         $error->setMessage('epoch not match');
@@ -204,7 +205,7 @@ class RegionErrorHandlerTest extends TestCase
         $cache = $this->createMock(RegionCacheInterface::class);
         $cache->expects($this->once())
             ->method('invalidate')
-            ->with(7, 'region_error');
+            ->with(7, 'region_error:epoch_not_match');
 
         try {
             RegionErrorHandler::check($response, $cache, 7);
@@ -231,7 +232,7 @@ class RegionErrorHandlerTest extends TestCase
         $cache = $this->createMock(RegionCacheInterface::class);
         $cache->expects($this->once())
             ->method('invalidate')
-            ->with(42, 'region_error')
+            ->with(42, 'region_error:epoch_not_match')
             ->willReturnCallback(static function () use (&$invalidatedBeforeThrow): void {
                 $invalidatedBeforeThrow = true;
             });

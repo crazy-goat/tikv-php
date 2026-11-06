@@ -383,10 +383,10 @@ class RetryExecutorFatalInvalidationTest extends TestCase
     /**
      * The composed call-site shape: TxnReader / LockResolver / TwoPhaseCommitter
      * pass the cache to RegionErrorHandler::check(), which drops the region and
-     * emits regionInvalidated('region_error') itself before throwing. The
-     * executor's fatal path must then find nothing to do, so the single drop
-     * is counted exactly once (issue #474's single-emission rule) and under
-     * check()'s reason, not the executor's.
+     * emits regionInvalidated('region_error:<kind>') itself before throwing.
+     * The executor's fatal path must then find nothing to do, so the single
+     * drop is counted exactly once (issue #474's single-emission rule) and
+     * under check()'s reason, not the executor's.
      *
      * Pinned because the guarantee is indirect: the new code looks the region
      * up BY KEY, not by the $regionId that served the request, so it finds
@@ -432,7 +432,7 @@ class RetryExecutorFatalInvalidationTest extends TestCase
         );
         $this->assertSame(
             1,
-            $this->metrics->getInvalidations('region_error'),
+            $this->metrics->getInvalidations('region_error:key_not_in_region'),
             'check() owns this drop and counts it once',
         );
         $this->assertSame(

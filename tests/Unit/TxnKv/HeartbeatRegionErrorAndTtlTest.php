@@ -266,10 +266,10 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
 
     /**
      * AC-2, non-NotLeader variant. RegionErrorHandler::check() owns this
-     * drop and invalidates with reason 'region_error'; the RegionException
-     * then flows to the RetryExecutor, whose classifier maps RegionNotFound
-     * to RegionMiss backoff (2 ms base, 500 ms cap — fast), and the
-     * executor's pre-retry invalidation is GATED on a cached entry: check()
+     * drop and invalidates with reason 'region_error:region_not_found'; the
+     * RegionException then flows to the RetryExecutor, whose classifier maps
+     * RegionNotFound to RegionMiss backoff (2 ms base, 500 ms cap — fast), and
+     * the executor's pre-retry invalidation is GATED on a cached entry: check()
      * already removed region 1, so getByKey() misses and no
      * 'retry_region_error' emission occurs. The second attempt re-resolves
      * from PD and succeeds.
@@ -288,7 +288,7 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
         self::assertSame('KvTxnHeartBeat', $this->rpcCalls[0]['method']);
         self::assertSame('KvTxnHeartBeat', $this->rpcCalls[1]['method']);
 
-        self::assertSame(1, $this->metrics->getInvalidations('region_error'));
+        self::assertSame(1, $this->metrics->getInvalidations('region_error:region_not_found'));
         self::assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
         self::assertSame(0, $this->metrics->getInvalidations('not_leader'));
     }

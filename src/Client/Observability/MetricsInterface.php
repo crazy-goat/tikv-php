@@ -71,9 +71,18 @@ interface MetricsInterface
      * single emission point for every drop path; invalidating an ID that is
      * not cached emits nothing. $reason names the caller:
      *
-     * - 'region_error':       a top-level region error other than NotLeader
-     *                           (EpochNotMatch etc.) was handled via
-     *                           RegionErrorHandler::check()
+     * - 'region_error:<kind>': a top-level ROUTING region error other than
+     *                           NotLeader (EpochNotMatch, RegionNotFound,
+     *                           KeyNotInRegion, StoreNotMatch,
+     *                           RegionNotInitialized) was handled via
+     *                           RegionErrorHandler::check(); <kind> is the
+     *                           triggering ErrorKind value, e.g.
+     *                           'region_error:epoch_not_match'. Non-routing
+     *                           region errors (ServerIsBusy, DiskFull,
+     *                           IsWitness, RecoveryInProgress, …) keep the
+     *                           cached entry and emit nothing (issue #245)
+     * - 'region_error':       the same handler drop when the region error
+     *                           carries no typed ErrorKind (unknown error)
      * - 'not_leader':         a NotLeader response forced an invalidation in
      *                           RetryExecutor::handleNotLeader() (hint peer
      *                           unknown or no hint) at executor-owned call

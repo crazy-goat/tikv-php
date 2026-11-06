@@ -364,7 +364,10 @@ or a message-classified exception). `ServerIsBusy`, `DiskFull`, `IsWitness`
 and `RecoveryInProgress` retry without touching the cache; before #245 every
 retryable error dropped the entry and forced a PD `GetRegion` per attempt. The
 fatal and retryable paths share the one `match`; do not add a third copy of the
-list under either name.
+list under either name. `RegionErrorHandler::check()` uses the same table too:
+it builds the `RegionException` first and gates its own drop on
+`invalidatesRoutingKind()`, keeping the handler-specific `region_error:<kind>`
+reason because it is a separate drop path, not the pre-retry executor path.
 
 The kind-level predicate is a compatibility commitment, not a convenience:
 `RetryExecutor` is a documented user-constructible collaborator
