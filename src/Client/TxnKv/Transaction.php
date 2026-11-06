@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -173,6 +174,26 @@ final class Transaction
          */
         private readonly int $maxTxnBatchCount = TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
         /**
+         * Maximum number of read-set entries; 0 = unlimited (issue #297).
+         */
+        private readonly int $maxReadSetEntries = 0,
+        /**
+         * Maximum bytes of the whole read set; 0 = unlimited (issue #297).
+         */
+        private readonly int $maxReadSetTotalSize = 0,
+        /**
+         * Whether get()/batchGet() retain their values in the read set
+         * (issue #297). Off by default: nothing in the commit path consumes
+         * it, so keeping it on the hot read path would grow without bound.
+         */
+        private readonly bool $trackReadSet = false,
+        /**
+         * Optional Context control fields applied to this transaction's
+         * requests (issue #426). Null (the default) applies none and leaves
+         * the serialized Context unchanged.
+         */
+        private readonly ?RequestContextOptions $requestContext = null,
+        /**
          * Resource-control metadata carried on every request of this
          * transaction (issue #427): the client-wide default with the
          * begin() overrides applied. An empty instance leaves both
@@ -191,6 +212,8 @@ final class Transaction
                 'maxTxnEntryCount' => $this->maxTxnEntryCount,
                 'maxTxnEntrySize' => $this->maxTxnEntrySize,
                 'maxTxnTotalSize' => $this->maxTxnTotalSize,
+                'maxReadSetEntries' => $this->maxReadSetEntries,
+                'maxReadSetTotalSize' => $this->maxReadSetTotalSize,
             ] as $name => $limit
         ) {
             if ($limit < 0) {
@@ -231,6 +254,9 @@ final class Transaction
             maxTxnEntryCount: $this->maxTxnEntryCount,
             maxTxnEntrySize: $this->maxTxnEntrySize,
             maxTxnTotalSize: $this->maxTxnTotalSize,
+            maxReadSetEntries: $this->maxReadSetEntries,
+            maxReadSetTotalSize: $this->maxReadSetTotalSize,
+            trackReadSet: $this->trackReadSet,
         );
 
         $this->reader = new TxnReader(
@@ -244,6 +270,7 @@ final class Transaction
             replicaReadPolicy: $this->replicaReadPolicy,
             logger: $this->logger,
             priority: $this->priority,
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
 
@@ -267,6 +294,7 @@ final class Transaction
             pessimisticLockTtlMs: $this->pessimisticLockTtlMs,
             maxTxnBatchSize: $this->maxTxnBatchSize,
             maxTxnBatchCount: $this->maxTxnBatchCount,
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
     }
@@ -326,6 +354,9 @@ final class Transaction
      * The read set has the same shape as the write set and the same coercion
      * (issue #261; see {@see getWriteSet()}).
      *
+     * Empty unless the transaction was created with `trackReadSet: true`;
+     * only `get()` and `batchGet()` populate it — `scan()` does not.
+     *
      * @return array<array-key, ?string>
      */
     public function getReadSet(): array
@@ -352,6 +383,39 @@ final class Transaction
     public function getWriteSetCount(): int
     {
         return $this->state->getWriteSetCount();
+    }
+
+    /**
+     * Bytes currently held by the read set (issue #297).
+     *
+     * Every entry contributes its key length plus its value length; a
+     * not-found read contributes the key length only. The value is maintained
+     * incrementally, so it can be logged or exported as a metric on every
+     * read without re-walking the read set.
+     */
+    public function getReadSetSize(): int
+    {
+        return $this->state->getReadSetSize();
+    }
+
+    /**
+     * Number of entries currently held by the read set (issue #297).
+     */
+    public function getReadSetCount(): int
+    {
+        return $this->state->getReadSetCount();
+    }
+
+    /**
+     * Drop every tracked read and reset the read-set accounting (issue #297).
+     *
+     * Useful in a long-lived transaction built with `trackReadSet: true`:
+     * the transaction does not need its read set at commit, so a worker can
+     * release it after a batch of reads. A no-op when tracking is disabled.
+     */
+    public function clearReadSet(): void
+    {
+        $this->state->clearReadSet();
     }
 
     // ---------------------------------------------------------------

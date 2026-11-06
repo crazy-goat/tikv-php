@@ -9,6 +9,7 @@ use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsMultiplexer;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
@@ -17,9 +18,11 @@ use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
+use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
+use CrazyGoat\TiKV\Client\Exception\IngestTooLargeException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
@@ -37,6 +40,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -175,6 +179,18 @@ final class RawKvClient
     public const OPT_REPLICA_READ = 'replicaRead';
 
     /**
+     * options[] key for the optional `kvrpcpb.Context` control fields
+     * (issue #426, GAP-12): a
+     * {@see \CrazyGoat\TiKV\Client\Region\RequestContextOptions} instance
+     * carrying the isolation level, not-fill-cache flag, server-side
+     * max-execution duration, request source, resource group tag, busy
+     * threshold and resource group name applied to every request this
+     * client sends. Omitted or null (the default) applies none of them and
+     * leaves the serialized Context unchanged.
+     */
+    public const OPT_REQUEST_CONTEXT = 'requestContext';
+
+    /**
      * options[] key for the maximum number of rows an unbounded scan
      * (`limit: 0`) may return before throwing
      * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
@@ -220,6 +236,16 @@ final class RawKvClient
      * the field is not sent. Must be a non-empty string.
      */
     public const OPT_RESOURCE_GROUP_TAG = ResourceControl::OPTION_RESOURCE_GROUP_TAG;
+
+    /**
+     * options[] key for the maximum payload bytes (keys plus values) of one
+     * `ingest()` call (issue #297). `0` (the default) means unlimited.
+     * Exceeding the limit throws
+     * {@see \CrazyGoat\TiKV\Client\Exception\IngestTooLargeException} before
+     * the cluster is switched into import mode and before any RPC is issued,
+     * so the caller can split the payload into smaller batches.
+     */
+    public const OPT_MAX_INGEST_SIZE = 'maxIngestSize';
 
     /** Default bound on in-flight requests for fanned-out batch and range operations. */
     public const DEFAULT_MAX_CONCURRENCY = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY;
@@ -296,6 +322,9 @@ final class RawKvClient
             batchCommands: self::resolveBatchCommands($options),
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            maxIngestSize: self::resolveMaxIngestSize($options),
+            storeCache: $bundle->storeCache,
+            requestContext: self::resolveRequestContext($options),
             resourceControl: self::resolveResourceControl($options),
         );
     }
@@ -357,6 +386,24 @@ final class RawKvClient
          */
         private readonly ?CodecInterface $codec = null,
         /**
+         * Maximum payload bytes of one ingest() call; 0 = unlimited
+         * (issue #297).
+         */
+        private readonly int $maxIngestSize = 0,
+        /**
+         * Store-address cache the retry executor drops when a StoreNotMatch
+         * or a transport failure proves the cached address wrong (issue
+         * #247). Null for a hand-built client: the resolver then has no
+         * store cache to invalidate.
+         */
+        private readonly ?StoreCacheInterface $storeCache = null,
+        /**
+         * Optional Context control fields applied to every request
+         * (issue #426). Null (the default) leaves the serialized Context
+         * byte-for-byte unchanged.
+         */
+        private readonly ?RequestContextOptions $requestContext = null,
+        /**
          * Resource-control metadata applied to every request this client
          * builds (issue #427). An empty instance (the default) leaves both
          * resource-control fields unset and keeps the request bytes
@@ -372,6 +419,9 @@ final class RawKvClient
         }
         if ($maxScanRows < 1) {
             throw new InvalidArgumentException('maxScanRows must be >= 1');
+        }
+        if ($maxIngestSize < 0) {
+            throw new InvalidArgumentException('maxIngestSize must be >= 0');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->maxConcurrency = $maxConcurrency;
@@ -394,6 +444,7 @@ final class RawKvClient
             $this->pdEndpoints,
             $this->allowedStorePorts,
             $this->epochNotMatchCodec(),
+            $this->storeCache,
         );
         $this->crud = $crud ?? new RawKvCrud(
             $grpc,
@@ -402,6 +453,7 @@ final class RawKvClient
             $this->logger,
             $this->slowLogConfig,
             $this->replicaReadPolicy,
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
         $this->atomic = $atomic ?? new RawKvAtomic(
@@ -410,6 +462,7 @@ final class RawKvClient
             $timeoutConfig,
             $this->logger,
             $this->slowLogConfig,
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
         $this->batch = $batch ?? new RawKvBatch(
@@ -426,6 +479,7 @@ final class RawKvClient
             $batchCommands ? new BatchCommandsMultiplexer(
                 GrpcBatchCommandsTransport::forClient($grpc),
             ) : null,
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
         $this->scanner = $scanner ?? new RawKvScanner(
@@ -443,6 +497,7 @@ final class RawKvClient
             $this->replicaReadPolicy,
             $maxScanRows,
             metrics: $metrics,
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
@@ -458,6 +513,7 @@ final class RawKvClient
             $this->retryDeadlineMs,
             $this->maxConcurrency,
             metrics: $metrics,
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
         $this->ingestor = new SstIngestor(
@@ -467,6 +523,8 @@ final class RawKvClient
             $timeoutConfig,
             $this->logger,
             $this->maxConcurrency,
+            $this->maxIngestSize,
+            $this->requestContext,
             $this->resourceControl,
         );
     }
@@ -697,6 +755,33 @@ final class RawKvClient
     }
 
     /**
+     * Resolve options['maxIngestSize'] (see OPT_MAX_INGEST_SIZE) for
+     * create(): the opt-in payload bound of one ingest() call (issue #297).
+     * 0 means unlimited; a negative value is rejected.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveMaxIngestSize(array $options): int
+    {
+        if (!array_key_exists(self::OPT_MAX_INGEST_SIZE, $options)) {
+            return 0;
+        }
+
+        $maxIngestSize = $options[self::OPT_MAX_INGEST_SIZE];
+        if (!is_int($maxIngestSize)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['maxIngestSize'] must be an int, %s given",
+                get_debug_type($maxIngestSize),
+            ));
+        }
+        if ($maxIngestSize < 0) {
+            throw new InvalidArgumentException("options['maxIngestSize'] must be >= 0");
+        }
+
+        return $maxIngestSize;
+    }
+
+    /**
      * Resolve options['replicaRead'] (see OPT_REPLICA_READ) for create():
      * the read preference applied to reads (issue #421). Must be a
      * ReplicaReadPolicy instance when set.
@@ -719,6 +804,32 @@ final class RawKvClient
         }
 
         return $policy;
+    }
+
+    /**
+     * Resolve options['requestContext'] (see OPT_REQUEST_CONTEXT) for
+     * create(): the optional Context control fields applied to every
+     * request (issue #426). Must be a RequestContextOptions instance when
+     * set; absent or null means "apply none".
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRequestContext(array $options): ?RequestContextOptions
+    {
+        if (!array_key_exists(self::OPT_REQUEST_CONTEXT, $options) || $options[self::OPT_REQUEST_CONTEXT] === null) {
+            return null;
+        }
+
+        $requestContext = $options[self::OPT_REQUEST_CONTEXT];
+        if (!$requestContext instanceof RequestContextOptions) {
+            throw new InvalidArgumentException(sprintf(
+                "options['requestContext'] must be a %s, %s given",
+                RequestContextOptions::class,
+                get_debug_type($requestContext),
+            ));
+        }
+
+        return $requestContext;
     }
 
     /**
@@ -746,6 +857,7 @@ final class RawKvClient
             $this->pdEndpoints,
             $this->allowedStorePorts,
             $this->epochNotMatchCodec(),
+            $this->storeCache,
         );
 
         return new RetryExecutor(
@@ -860,17 +972,26 @@ final class RawKvClient
      * (transport error), the outcome is indeterminate — the swap may have
      * succeeded even though this call throws. Transport-level gRPC errors
      * (e.g. DEADLINE_EXCEEDED, UNAVAILABLE) are therefore NOT retried and
-     * propagate to the caller, which should re-read the key to determine
-     * the actual outcome (issue #239). Region errors (NotLeader,
-     * EpochNotMatch, …) are rejected before the write is proposed and are
-     * still retried automatically.
+     * propagate as CasIndeterminateException, which preserves the original
+     * GrpcException as `getPrevious()`; re-read the key to determine the
+     * actual outcome (issue #239). Region errors (NotLeader, EpochNotMatch,
+     * …) are rejected before the write is proposed and are still retried
+     * automatically. A transport failure while resolving the region or store
+     * (PD unreachable), or an application-level rejection of the request
+     * itself, happens before the swap is applied, so it stays a plain
+     * GrpcException and means the swap definitively did not happen.
      *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
      * @throws InvalidStateException
      * @throws RegionException
-     * @throws GrpcException NOT retried — transport errors leave the result
-     *                       indeterminate for this non-idempotent operation
+     * @throws CasIndeterminateException NOT retried — the transport failure
+     *         leaves the swap outcome indeterminate (the write may have been
+     *         applied); the original GrpcException is preserved as `previous`
+     * @throws GrpcException Only when the failure happened before the CAS
+     *         request was applied (e.g. PD unreachable during region lookup,
+     *         or an application-level rejection such as UNAUTHENTICATED);
+     *         the swap definitively did not happen
      * @throws TiKvException When a region lookup fails closed (for example PD
      *         returned no region for the key)
      * @throws StoreNotFoundException When PD no longer knows the store that
@@ -903,10 +1024,12 @@ final class RawKvClient
      * Put a value only if the key does not already exist (via CAS).
      *
      * NOT IDEMPOTENT — see compareAndSwap() for the indeterminate-outcome
-     * contract: a thrown GrpcException means the outcome is unknown (the
-     * write may have been applied); re-read the key to decide. Distributed
-     * lock users must treat a throw as indeterminate, never as
-     * "not acquired" (issue #239).
+     * contract: a thrown CasIndeterminateException means the outcome is
+     * unknown (the write may have been applied); re-read the key to decide.
+     * Distributed lock users must treat it as indeterminate, never as
+     * "not acquired" (issue #239). A plain GrpcException on this method
+     * means the request was never sent or was rejected before it was applied,
+     * so the lock was definitively not acquired.
      *
      * @return null|string Null if the key did not exist and the value was stored; the
      *              existing value otherwise
@@ -915,8 +1038,13 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws InvalidStateException
      * @throws RegionException
-     * @throws GrpcException NOT retried — transport errors leave the result
-     *                       indeterminate for this non-idempotent operation
+     * @throws CasIndeterminateException NOT retried — the transport failure
+     *         leaves the swap outcome indeterminate (the value may have been
+     *         stored); the original GrpcException is preserved as `previous`
+     * @throws GrpcException Only when the failure happened before the CAS
+     *         request was applied (e.g. PD unreachable during region lookup,
+     *         or an application-level rejection such as UNAUTHENTICATED);
+     *         the value definitively was not stored
      * @throws TiKvException When a region lookup fails closed (for example PD
      *         returned no region for the key)
      * @throws StoreNotFoundException When PD no longer knows the store that
@@ -1420,6 +1548,8 @@ final class RawKvClient
      * @throws ClientClosedException
      * @throws InvalidArgumentException When a key is empty or a key/value
      *         exceeds the configured size limit
+     * @throws IngestTooLargeException When the payload exceeds
+     *         `options['maxIngestSize']`, before any RPC is issued (issue #297)
      * @throws GrpcException
      * @throws RegionException
      * @throws InvalidStoreAddressException When PD returns a store address

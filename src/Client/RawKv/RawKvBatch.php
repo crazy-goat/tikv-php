@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
@@ -64,6 +65,8 @@ final readonly class RawKvBatch
          * unary path. Null (the default) keeps the pure unary fan-out.
          */
         private ?BatchCommandsMultiplexer $batchCommands = null,
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
     ) {
@@ -330,6 +333,7 @@ final readonly class RawKvBatch
         RegionInfo $region,
         array $keys,
         string $columnFamily = '',
+        int &$targetStoreId = 0,
     ): GrpcFuture {
         // Replica-read policy applies to batchGet only; batchPut/batchDelete
         // are writes and always target the leader (issue #421).
@@ -337,8 +341,10 @@ final readonly class RawKvBatch
             $region,
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
+        $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
         $request = new RawBatchGetRequest();
@@ -374,7 +380,11 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, resourceControl: $this->resourceControl));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -412,7 +422,11 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, resourceControl: $this->resourceControl));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setKeys($keys);
         if ($forCas) {
             $request->setForCas(true);
@@ -551,6 +565,7 @@ final readonly class RawKvBatch
             $region,
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
+            requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
 
@@ -579,7 +594,11 @@ final readonly class RawKvBatch
         string $columnFamily,
     ): BatchCommandsEntry {
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, resourceControl: $this->resourceControl));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -609,7 +628,11 @@ final readonly class RawKvBatch
         string $columnFamily,
     ): BatchCommandsEntry {
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, resourceControl: $this->resourceControl));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setKeys($keys);
         if ($forCas) {
             $request->setForCas(true);
@@ -644,12 +667,14 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $key = $keys[0] ?? '';
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
                 $keys,
                 $key,
                 $columnFamily,
+                &$targetStoreId,
             ): CheckedGrpcFuture {
                 $fresh = $this->resolveRegion($key);
 
@@ -663,9 +688,15 @@ final readonly class RawKvBatch
                 }
 
                 if ($allInRegion) {
-                    $inner = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
+                    $inner = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily, $targetStoreId);
                     return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_read', $key);
                 }
+
+                // Multi-region recovery has several targets; a single
+                // target cannot describe the failed attempt, so leave it
+                // unknown and let the executor fall back to the cached
+                // leader.
+                $targetStoreId = 0;
 
                 // Multi-region path (rare error-recovery case after a split/merge):
                 // dispatch every sub-region's send up-front, then merge their
@@ -720,6 +751,9 @@ final readonly class RawKvBatch
             },
             $retryExecutor,
             $key,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 

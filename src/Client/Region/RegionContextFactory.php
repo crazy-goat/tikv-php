@@ -7,6 +7,8 @@ namespace CrazyGoat\TiKV\Client\Region;
 use Closure;
 use CrazyGoat\Proto\Kvrpcpb\CommandPri;
 use CrazyGoat\Proto\Kvrpcpb\Context;
+use CrazyGoat\Proto\Kvrpcpb\IsolationLevel;
+use CrazyGoat\Proto\Kvrpcpb\ResourceControlContext;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
@@ -51,9 +53,15 @@ final class RegionContextFactory
      *     (issue #336). Normal (0) is the proto3 default and is therefore
      *     not serialized — a request that never had a priority keeps its
      *     original wire bytes.
+     * @param RequestContextOptions|null $requestContext Optional control
+     *     fields (isolation level, not-fill-cache, max execution duration,
+     *     request source, resource group) applied on top of the routing
+     *     Context (issue #426). Null applies none of them.
      * @param ResourceControl|null $resourceControl Resource-control metadata
      *     (issue #427): the resource group and the resource-group tag. Null
-     *     (the default) writes neither field.
+     *     (the default) writes neither field. Applied before
+     *     $requestContext, so a non-default field of the latter wins when
+     *     both name the same Context field.
      */
     public static function resolveTarget(
         RegionInfo $region,
@@ -62,11 +70,21 @@ final class RegionContextFactory
         ?int $excludedStoreId = null,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?RequestContextOptions $requestContext = null,
         ?ResourceControl $resourceControl = null,
     ): ReplicaReadTarget {
         $leader = self::leaderPeer($region);
         $leaderTarget = new ReplicaReadTarget(
-            self::buildContext($region, $leader, false, $policy->staleRead, $codec, $priority, $resourceControl),
+            self::buildContext(
+                $region,
+                $leader,
+                false,
+                $policy->staleRead,
+                $codec,
+                $priority,
+                $requestContext,
+                $resourceControl,
+            ),
             $region->leaderStoreId,
         );
 
@@ -111,6 +129,7 @@ final class RegionContextFactory
                 $policy->staleRead,
                 $codec,
                 $priority,
+                $requestContext,
                 $resourceControl,
             ),
             $peerInfo->storeId,
@@ -124,13 +143,17 @@ final class RegionContextFactory
      *     (issue #336). Normal (0) is the proto3 default and is not
      *     serialized, so a request without a priority keeps its original
      *     wire bytes.
+     * @param RequestContextOptions|null $requestContext Optional control
+     *     fields applied on top of the routing Context (issue #426).
      * @param ResourceControl|null $resourceControl Resource-control metadata
-     *     (issue #427); null writes neither resource-control field.
+     *     (issue #427); null writes neither resource-control field. Applied
+     *     before $requestContext, so the latter wins on overlapping fields.
      */
     public static function fromRegionInfo(
         RegionInfo $region,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?RequestContextOptions $requestContext = null,
         ?ResourceControl $resourceControl = null,
     ): Context {
         $epoch = new RegionEpoch();
@@ -148,6 +171,7 @@ final class RegionContextFactory
         $ctx->setPriority($priority);
         $resourceControl?->apply($ctx);
         self::applyCodec($ctx, $codec);
+        self::applyRequestContext($ctx, $requestContext);
 
         return $ctx;
     }
@@ -159,6 +183,7 @@ final class RegionContextFactory
         bool $staleRead,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?RequestContextOptions $requestContext = null,
         ?ResourceControl $resourceControl = null,
     ): Context {
         $epoch = new RegionEpoch();
@@ -174,8 +199,46 @@ final class RegionContextFactory
         $ctx->setPriority($priority);
         $resourceControl?->apply($ctx);
         self::applyCodec($ctx, $codec);
+        self::applyRequestContext($ctx, $requestContext);
 
         return $ctx;
+    }
+
+    /**
+     * Copy the optional control fields onto the Context (issue #426).
+     *
+     * Each field is written only when it differs from its proto3 default, so
+     * an unset option leaves the serialized Context byte-for-byte unchanged.
+     */
+    private static function applyRequestContext(Context $context, ?RequestContextOptions $options): void
+    {
+        if (!$options instanceof RequestContextOptions) {
+            return;
+        }
+
+        if ($options->isolationLevel !== IsolationLevel::SI) {
+            $context->setIsolationLevel($options->isolationLevel);
+        }
+        if ($options->notFillCache) {
+            $context->setNotFillCache(true);
+        }
+        if ($options->maxExecutionDurationMs > 0) {
+            $context->setMaxExecutionDurationMs($options->maxExecutionDurationMs);
+        }
+        if ($options->requestSource !== '') {
+            $context->setRequestSource($options->requestSource);
+        }
+        if ($options->resourceGroupTag !== '') {
+            $context->setResourceGroupTag($options->resourceGroupTag);
+        }
+        if ($options->busyThresholdMs > 0) {
+            $context->setBusyThresholdMs($options->busyThresholdMs);
+        }
+        if ($options->resourceGroupName !== '') {
+            $resourceControlContext = new ResourceControlContext();
+            $resourceControlContext->setResourceGroupName($options->resourceGroupName);
+            $context->setResourceControlContext($resourceControlContext);
+        }
     }
 
     private static function applyCodec(Context $context, ?CodecInterface $codec): void

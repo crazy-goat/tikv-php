@@ -13,11 +13,14 @@ use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use CrazyGoat\TiKV\Tests\Unit\Support\RecordingLogger;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -240,6 +243,62 @@ class TxnKvClientCloseTransactionTest extends TestCase
 
         $this->assertSame(TransactionStatus::RolledBack, $transaction->getStatus());
         $this->assertContains('KvBatchRollback', $this->rpcMethods);
+    }
+
+    /**
+     * @return iterable<string, array{\Closure(Transaction): void}>
+     */
+    public static function postCloseOperationProvider(): iterable
+    {
+        yield 'commit' => [static function (Transaction $txn): void {
+            $txn->commit();
+        }];
+        yield 'rollback' => [static function (Transaction $txn): void {
+            $txn->rollback();
+        }];
+        yield 'set' => [static function (Transaction $txn): void {
+            $txn->set('key2', 'value2');
+        }];
+        yield 'delete' => [static function (Transaction $txn): void {
+            $txn->delete('key1');
+        }];
+        yield 'get' => [static function (Transaction $txn): void {
+            $txn->get('key1');
+        }];
+        yield 'batchGet' => [static function (Transaction $txn): void {
+            $txn->batchGet(['key1']);
+        }];
+        yield 'scan' => [static function (Transaction $txn): void {
+            $txn->scan('a', 'z');
+        }];
+        yield 'heartbeat' => [static function (Transaction $txn): void {
+            $txn->heartbeat();
+        }];
+    }
+
+    /**
+     * A transaction the client rolled back during close() is terminal: using
+     * it afterwards is a lifecycle error, not a second RPC (issue #342).
+     *
+     * @param \Closure(Transaction): void $operation
+     */
+    #[DataProvider('postCloseOperationProvider')]
+    public function testTransactionCannotBeUsedAfterClientClose(\Closure $operation): void
+    {
+        $this->stubRpcResponses();
+        $this->grpc->method('close');
+
+        $client = $this->createClient();
+        $transaction = $client->beginOptimistic();
+        $transaction->set('key1', 'value1');
+
+        $client->close();
+
+        $this->assertSame(TransactionStatus::RolledBack, $transaction->getStatus());
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('Transaction is not active');
+        $operation($transaction);
     }
 
     private function createClient(bool $ownsGrpcClient = true, int $maxBackoffMs = 20000): TxnKvClient
