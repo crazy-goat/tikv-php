@@ -22,6 +22,7 @@ use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
+use CrazyGoat\TiKV\Client\Exception\IngestTooLargeException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
@@ -205,6 +206,16 @@ final class RawKvClient
      */
     public const OPT_BATCH_COMMANDS = 'batchCommands';
 
+    /**
+     * options[] key for the maximum payload bytes (keys plus values) of one
+     * `ingest()` call (issue #297). `0` (the default) means unlimited.
+     * Exceeding the limit throws
+     * {@see \CrazyGoat\TiKV\Client\Exception\IngestTooLargeException} before
+     * the cluster is switched into import mode and before any RPC is issued,
+     * so the caller can split the payload into smaller batches.
+     */
+    public const OPT_MAX_INGEST_SIZE = 'maxIngestSize';
+
     /** Default bound on in-flight requests for fanned-out batch and range operations. */
     public const DEFAULT_MAX_CONCURRENCY = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY;
 
@@ -280,6 +291,7 @@ final class RawKvClient
             batchCommands: self::resolveBatchCommands($options),
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            maxIngestSize: self::resolveMaxIngestSize($options),
             storeCache: $bundle->storeCache,
         );
     }
@@ -341,6 +353,11 @@ final class RawKvClient
          */
         private readonly ?CodecInterface $codec = null,
         /**
+         * Maximum payload bytes of one ingest() call; 0 = unlimited
+         * (issue #297).
+         */
+        private readonly int $maxIngestSize = 0,
+        /**
          * Store-address cache the retry executor drops when a StoreNotMatch
          * or a transport failure proves the cached address wrong (issue
          * #247). Null for a hand-built client: the resolver then has no
@@ -356,6 +373,9 @@ final class RawKvClient
         }
         if ($maxScanRows < 1) {
             throw new InvalidArgumentException('maxScanRows must be >= 1');
+        }
+        if ($maxIngestSize < 0) {
+            throw new InvalidArgumentException('maxIngestSize must be >= 0');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->maxConcurrency = $maxConcurrency;
@@ -447,6 +467,7 @@ final class RawKvClient
             $timeoutConfig,
             $this->logger,
             $this->maxConcurrency,
+            $this->maxIngestSize,
         );
     }
 
@@ -660,6 +681,33 @@ final class RawKvClient
         }
 
         return $maxScanRows;
+    }
+
+    /**
+     * Resolve options['maxIngestSize'] (see OPT_MAX_INGEST_SIZE) for
+     * create(): the opt-in payload bound of one ingest() call (issue #297).
+     * 0 means unlimited; a negative value is rejected.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveMaxIngestSize(array $options): int
+    {
+        if (!array_key_exists(self::OPT_MAX_INGEST_SIZE, $options)) {
+            return 0;
+        }
+
+        $maxIngestSize = $options[self::OPT_MAX_INGEST_SIZE];
+        if (!is_int($maxIngestSize)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['maxIngestSize'] must be an int, %s given",
+                get_debug_type($maxIngestSize),
+            ));
+        }
+        if ($maxIngestSize < 0) {
+            throw new InvalidArgumentException("options['maxIngestSize'] must be >= 0");
+        }
+
+        return $maxIngestSize;
     }
 
     /**
@@ -1403,6 +1451,8 @@ final class RawKvClient
      * @throws ClientClosedException
      * @throws InvalidArgumentException When a key is empty or a key/value
      *         exceeds the configured size limit
+     * @throws IngestTooLargeException When the payload exceeds
+     *         `options['maxIngestSize']`, before any RPC is issued (issue #297)
      * @throws GrpcException
      * @throws RegionException
      * @throws InvalidStoreAddressException When PD returns a store address

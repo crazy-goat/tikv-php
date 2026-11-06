@@ -171,6 +171,20 @@ final class Transaction
          * (issue #430); defaults to RawKV's `MAX_BATCH_LIMIT`.
          */
         private readonly int $maxTxnBatchCount = TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+        /**
+         * Maximum number of read-set entries; 0 = unlimited (issue #297).
+         */
+        private readonly int $maxReadSetEntries = 0,
+        /**
+         * Maximum bytes of the whole read set; 0 = unlimited (issue #297).
+         */
+        private readonly int $maxReadSetTotalSize = 0,
+        /**
+         * Whether get()/batchGet() retain their values in the read set
+         * (issue #297). Off by default: nothing in the commit path consumes
+         * it, so keeping it on the hot read path would grow without bound.
+         */
+        private readonly bool $trackReadSet = false,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -183,6 +197,8 @@ final class Transaction
                 'maxTxnEntryCount' => $this->maxTxnEntryCount,
                 'maxTxnEntrySize' => $this->maxTxnEntrySize,
                 'maxTxnTotalSize' => $this->maxTxnTotalSize,
+                'maxReadSetEntries' => $this->maxReadSetEntries,
+                'maxReadSetTotalSize' => $this->maxReadSetTotalSize,
             ] as $name => $limit
         ) {
             if ($limit < 0) {
@@ -223,6 +239,9 @@ final class Transaction
             maxTxnEntryCount: $this->maxTxnEntryCount,
             maxTxnEntrySize: $this->maxTxnEntrySize,
             maxTxnTotalSize: $this->maxTxnTotalSize,
+            maxReadSetEntries: $this->maxReadSetEntries,
+            maxReadSetTotalSize: $this->maxReadSetTotalSize,
+            trackReadSet: $this->trackReadSet,
         );
 
         $this->reader = new TxnReader(
@@ -316,6 +335,9 @@ final class Transaction
      * The read set has the same shape as the write set and the same coercion
      * (issue #261; see {@see getWriteSet()}).
      *
+     * Empty unless the transaction was created with `trackReadSet: true`;
+     * only `get()` and `batchGet()` populate it — `scan()` does not.
+     *
      * @return array<array-key, ?string>
      */
     public function getReadSet(): array
@@ -342,6 +364,39 @@ final class Transaction
     public function getWriteSetCount(): int
     {
         return $this->state->getWriteSetCount();
+    }
+
+    /**
+     * Bytes currently held by the read set (issue #297).
+     *
+     * Every entry contributes its key length plus its value length; a
+     * not-found read contributes the key length only. The value is maintained
+     * incrementally, so it can be logged or exported as a metric on every
+     * read without re-walking the read set.
+     */
+    public function getReadSetSize(): int
+    {
+        return $this->state->getReadSetSize();
+    }
+
+    /**
+     * Number of entries currently held by the read set (issue #297).
+     */
+    public function getReadSetCount(): int
+    {
+        return $this->state->getReadSetCount();
+    }
+
+    /**
+     * Drop every tracked read and reset the read-set accounting (issue #297).
+     *
+     * Useful in a long-lived transaction built with `trackReadSet: true`:
+     * the transaction does not need its read set at commit, so a worker can
+     * release it after a batch of reads. A no-op when tracking is disabled.
+     */
+    public function clearReadSet(): void
+    {
+        $this->state->clearReadSet();
     }
 
     // ---------------------------------------------------------------

@@ -64,6 +64,13 @@ $options = [
     // scanIterator()/scanPrefixIterator() are unaffected. Default: 100000.
     // Must be >= 1.
     'maxScanRows' => 100000,
+    // Payload cap for one RawKvClient::ingest() call (issue #297): the sum of
+    // every key and value length, in bytes. 0 (default) = unlimited.
+    // Exceeding it throws IngestTooLargeException before the cluster is
+    // switched into import mode and before any RPC, so the caller can split
+    // the batch. Unlike maxScanRows this is a whole-payload guard, not a
+    // page-granular one.
+    'maxIngestSize' => 0,
     // GC safe-point validation at TxnKvClient::begin() (issue #422): when
     // true (default), a fresh start timestamp below the cluster's GC safe
     // point throws TxnAbortedByGcException immediately instead of failing
@@ -1496,6 +1503,9 @@ $txn = $client->begin([
     'maxTxnEntryCount' => 10000,   // entries, 0 = unlimited (default)
     'maxTxnEntrySize'  => 1048576, // key+value bytes, 0 = unlimited
     'maxTxnTotalSize'  => 4194304, // whole write set, 0 = unlimited
+    'trackReadSet'     => true,    // opt in to the read set (default false)
+    'maxReadSetEntries' => 100000, // read-set entries, 0 = unlimited
+    'maxReadSetTotalSize' => 8388608, // whole read set, 0 = unlimited
     'maxTxnBatchSize'  => 16384,   // bytes per prewrite/commit request
     'maxTxnBatchCount' => 512,     // mutations/keys per request
 ]);
@@ -1506,23 +1516,46 @@ $txn = $client->begin([
 | `maxTxnEntryCount` | `0` (unlimited) | Maximum number of write-set entries. |
 | `maxTxnEntrySize` | `0` (unlimited) | Maximum bytes of one entry, measured as key length plus value length. A delete contributes the key length only. |
 | `maxTxnTotalSize` | `0` (unlimited) | Maximum bytes of the whole write set: the sum of every entry's key plus value length. |
+| `trackReadSet` | `false` | Opt in to the read set populated by `get()`/`batchGet()`. Disabled by default because nothing in the commit path consumes it. Must be a bool. |
+| `maxReadSetEntries` | `0` (unlimited) | Maximum number of tracked read-set entries. Has no effect unless `trackReadSet` is true. |
+| `maxReadSetTotalSize` | `0` (unlimited) | Maximum bytes of the whole tracked read set: key length plus value length per entry. A not-found read contributes the key length only. Has no effect unless `trackReadSet` is true. |
 | `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite, pessimistic-lock or commit request per region: key plus value length for a prewrite mutation, key length for a pessimistic-lock mutation or a commit key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
 | `maxTxnBatchCount` | `512` | Maximum payload items — mutations (prewrite or pessimistic lock) or keys (commit) — of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
 
-The three size limits are **opt-in** (`0` = unlimited) because there is no
-single correct value for every application; set them for untrusted or
-unbounded workloads. Exceeding one throws
-`TransactionTooLargeException` from `set()`/`delete()` **before** the write is
-buffered and before any RPC — in a pessimistic transaction that means before
-the eager lock request, so a rejected write leaves no server-side lock. The
-exception names the limit (`getLimitName()`), the configured value
-(`getLimit()`) and the value the write would have produced (`getActual()`).
-Overwriting an existing key accounts for the entry it replaces, so a replace
-does not consume additional budget.
+The size limits are **opt-in** (`0` = unlimited) because there is no single
+correct value for every application; set them for untrusted or unbounded
+workloads. Exceeding one throws `TransactionTooLargeException`. A write is
+rejected from `set()`/`delete()` **before** it is buffered and before any RPC —
+in a pessimistic transaction that means before the eager lock request, so a
+rejected write leaves no server-side lock. A read is rejected from
+`get()`/`batchGet()` before the fetched value is retained in the read set; the
+RPC has already happened by then, because the value's size is only known after
+the response arrives. The bound applies to what the transaction **retains**,
+not to the peak of one call: a single `get()` response or a whole `KvBatchGet`
+response is received in full before the check runs, so the peak of one read can
+exceed `maxReadSetTotalSize` even though the value is not added to the map. The exception names the limit
+(`getLimitName()`), the configured value (`getLimit()`) and the value the
+operation would have produced (`getActual()`). Overwriting (or re-reading) an
+existing key accounts for the entry it replaces, so a replace does not consume
+additional budget.
 
-`Transaction::getWriteSetSize()` returns the current write-set bytes and
-`Transaction::getWriteSetCount()` its entry count, so a transaction can be
-logged or exported as a metric without walking `getWriteSet()`.
+`Transaction::getWriteSetSize()` / `getWriteSetCount()` and
+`Transaction::getReadSetSize()` / `getReadSetCount()` return the current bytes
+and entry counts, so a transaction can be logged or exported as a metric
+without walking `getWriteSet()` / `getReadSet()`.
+
+Read-set tracking is **off by default**, so a transaction that only reads does
+not retain the read **values**. Memory can still grow slightly: a pessimistic
+transaction records one read timestamp per distinct key read
+(`readTsByKey`) until that key is written or the transaction ends.
+`get()` and `batchGet()` populate the read-set map only when
+`trackReadSet` is true; `scan()` never populates it, so a scan-heavy
+transaction is not covered by the read-set limits at all (scans are bounded by
+`Transaction::MAX_SCAN_LIMIT` instead). For a long-lived worker that opts in and
+performs many large reads, set `maxReadSetEntries` and/or
+`maxReadSetTotalSize`, or call `Transaction::clearReadSet()` after a batch of
+reads, instead of allowing the transaction to grow until `memory_limit` is
+exhausted.
 
 Batching is always on. `TwoPhaseCommitter` splits each region's prewrite
 mutations, pessimistic-lock keys and commit keys with

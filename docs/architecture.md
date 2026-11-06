@@ -148,7 +148,7 @@ final class RawKvClient
     the lock TTL or raise the TTL (see [A single prewrite or commit RPC can outlive the lock TTL](configuration.md#a-single-prewrite-or-commit-rpc-can-outlive-the-lock-ttl))
 
 **Key Design Patterns**:
-- **Unit of Work**: Transaction tracks write set and read set
+- **Unit of Work**: Transaction tracks the write set, the pessimistic per-key read timestamps, and an optional read set (`trackReadSet`)
 - **Two-Phase Commit**: Prewrite → Commit protocol
 - **Factory Pattern**: `TxnKvClient::begin()`, `beginOptimistic()` and `beginPessimistic()` create Transaction instances
 - **Strategy Pattern**: Optimistic vs pessimistic mode selection
@@ -242,6 +242,27 @@ is retried; every other `KeyError` (including an empty payload) throws the
 base `TiKvException`, so the write set is not cleared and the transaction is
 not reported `RolledBack`; it stays active-but-unwritable so the caller (or
 the destructor) can retry the cleanup (issue #559).
+
+**Memory bounds**: the write set grows in the PHP worker for the whole
+transaction and is opt-in bounded on `begin()` (`0` = unlimited) by
+`maxTxnEntryCount` / `maxTxnEntrySize` / `maxTxnTotalSize`. Exceeding a limit
+throws `TransactionTooLargeException` before the write is buffered. The
+prewrite and commit requests are independently split per region by
+`maxTxnBatchSize` and `maxTxnBatchCount` (issue #430).
+
+Read-set tracking is **off by default** (`trackReadSet`): only `get()` and
+`batchGet()` would populate it, `scan()` never does, and nothing in the
+commit path consumes it. Opting in enables the public `getReadSet()` map and
+the `maxReadSetEntries` / `maxReadSetTotalSize` bounds; an oversized read is
+rejected before the fetched value is retained, but the RPC has already
+returned, and a whole `KvBatchGet` response is materialised before the check.
+A long-lived tracked transaction can call `Transaction::clearReadSet()`.
+`RawKvClient::ingest()`
+streams its SST payload instead of buffering a second full copy: it copies
+only the keys, groups them by region, and builds each `import_sstpb.Pair`
+chunk on demand from a generator consumed by the gRPC transport. Its opt-in
+`maxIngestSize` cap bounds the caller's payload before the cluster enters
+import mode and before any RPC (issue #297).
 
 ### 3. TimestampOracle
 
