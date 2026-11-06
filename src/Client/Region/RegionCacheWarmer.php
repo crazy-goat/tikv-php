@@ -134,8 +134,10 @@ final class RegionCacheWarmer
      * and keeps its cached value; the call does not throw.
      *
      * Returns the number of distinct regions the cache holds after the tick
-     * that PD confirmed: a merge of two entries into one region counts once,
-     * and a leaderless PD answer (which `put()` refuses to cache) counts zero.
+     * that PD confirmed. The accumulated IDs are reconciled with the cache
+     * once the slice is done, so a merge or split answered on a later call
+     * within the tick counts once, and a leaderless PD answer (which `put()`
+     * refuses to cache) counts zero.
      */
     public function refresh(bool $force = false): int
     {
@@ -180,7 +182,7 @@ final class RegionCacheWarmer
                     'error' => $e->getMessage(),
                 ]);
 
-                return count($confirmed);
+                break;
             }
 
             if (!KeyOrder::inRange($region->startKey, $fresh->startKey, $fresh->endKey)) {
@@ -203,11 +205,16 @@ final class RegionCacheWarmer
             }
         }
 
-        if ($confirmed !== []) {
-            $this->logger->debug('Refreshed cached regions', ['refreshed' => count($confirmed)]);
+        // Reconcile with the cache *after* the whole slice: a merge or split
+        // answered on a later call removes an ID confirmed earlier, so counting
+        // as answers arrive would overstate what is stored.
+        $refreshed = $this->countStillCached($confirmed);
+
+        if ($refreshed > 0) {
+            $this->logger->debug('Refreshed cached regions', ['refreshed' => $refreshed]);
         }
 
-        return count($confirmed);
+        return $refreshed;
     }
 
     /**
@@ -245,7 +252,27 @@ final class RegionCacheWarmer
             $stored += $this->preloadRange($startKey, $endKey);
         }
 
-        return count($stored);
+        // Reconcile with the cache *after* every range: a later range whose
+        // answer is a merge or split removes regions an earlier range stored,
+        // so counting as answers arrive would overstate what is cached.
+        return $this->countStillCached($stored);
+    }
+
+    /**
+     * Count the accumulated region IDs that the cache still holds.
+     *
+     * @param array<int, true> $regionIds
+     */
+    private function countStillCached(array $regionIds): int
+    {
+        $stillCached = [];
+        foreach (array_keys($regionIds) as $regionId) {
+            if ($this->regionCache->getById($regionId) instanceof RegionInfo) {
+                $stillCached[$regionId] = true;
+            }
+        }
+
+        return count($stillCached);
     }
 
     /**

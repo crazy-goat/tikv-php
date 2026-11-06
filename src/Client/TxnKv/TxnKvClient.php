@@ -1068,11 +1068,19 @@ final class TxnKvClient
      * background threads, so a long-lived worker calls this from its own tick.
      * A non-forced call performs at most one refresh per
      * `options['regionCacheRefreshMs']` (default 0, i.e. disabled) and returns
-     * 0 when the interval has not elapsed; `$force = true` performs a one-off
-     * refresh regardless. PD failures are logged and the cached entry is kept,
-     * so this method never throws. No-op after `close()`.
+     * 0 when the interval has not elapsed; `$force = true` bypasses that
+     * interval only, not the per-tick bound.
      *
-     * @return int number of cache entries PD confirmed
+     * One call re-resolves at most
+     * `RegionCacheWarmer::DEFAULT_MAX_REGIONS_PER_REFRESH` (128) cached
+     * regions, round-robin across calls, so successive ticks walk the whole
+     * cache instead of refreshing it in one unbounded burst. The first PD
+     * failure aborts the tick, is logged and keeps the cached entries, so this
+     * method never throws. No-op after `close()`.
+     *
+     * @return int number of distinct regions the cache still holds after the
+     *         tick (a merge or split arriving later in the tick counts once,
+     *         a leaderless answer counts zero)
      */
     public function refreshRegionCache(bool $force = false): int
     {

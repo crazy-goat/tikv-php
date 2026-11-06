@@ -1566,17 +1566,25 @@ final class RawKvClient
      * PHP has no background threads, so nothing runs on its own: a long-lived
      * worker calls this from its own tick. A non-forced call performs at most
      * one refresh per `options['regionCacheRefreshMs']` (default 0, i.e.
-     * disabled) and returns 0 when the interval has not elapsed. Pass
-     * `$force = true` for a one-off refresh regardless of the interval.
+     * disabled) and returns 0 when the interval has not elapsed.
+     * `$force = true` bypasses that interval only; it does not remove the
+     * per-tick bound below.
      *
-     * Every cached region is re-resolved through a PD `GetRegion` on its own
-     * start key: a newer epoch or leader updates the entry in place, a split or
-     * merge supersedes it (the replacement is stored and the stale entry is
-     * dropped silently), and an answer that no longer covers the entry's start
-     * key drops it. A PD failure is logged at warning level and keeps the
-     * cached entry, so this method never throws. No-op after `close()`.
+     * One call re-resolves at most
+     * `RegionCacheWarmer::DEFAULT_MAX_REGIONS_PER_REFRESH` (128) cached
+     * regions through a PD `GetRegion` on each region's start key,
+     * round-robin: successive calls continue where the previous one stopped,
+     * so the whole cache is refreshed over several ticks rather than in one
+     * unbounded burst. Within that slice a newer epoch or leader updates the
+     * entry in place, a split or merge supersedes it (the replacement is
+     * stored and the stale entry is dropped silently), and an answer that no
+     * longer covers the entry's start key drops it. The first PD failure
+     * aborts the tick, is logged at warning level and keeps the cached
+     * entries, so this method never throws. No-op after `close()`.
      *
-     * @return int number of cache entries PD confirmed
+     * @return int number of distinct regions the cache still holds after the
+     *         tick (a merge or split arriving later in the tick counts once,
+     *         a leaderless answer counts zero)
      */
     public function refreshRegionCache(bool $force = false): int
     {

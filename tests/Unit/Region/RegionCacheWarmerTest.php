@@ -385,4 +385,83 @@ class RegionCacheWarmerTest extends TestCase
         $this->assertSame(1, $this->warmer()->preload([['100', '200'], ['150', '250']]));
         $this->assertSame(1, $this->cache->count());
     }
+
+    public function testPreloadReconcilesAMergeArrivingOnALaterRange(): void
+    {
+        // The first range stores [100,200); the second answer is the merged
+        // [100,300), which supersedes it. Counting as answers arrive would
+        // report 2 while the cache holds 1.
+        $this->pdClient->method('scanRegions')->willReturnCallback(
+            fn (string $startKey): array => $startKey === '100'
+                ? [$this->region(1, '100', '200')]
+                : [$this->region(9, '100', '300')],
+        );
+
+        $this->assertSame(1, $this->warmer()->preload([['100', '200'], ['150', '250']]));
+        $this->assertSame(1, $this->cache->count());
+        $this->assertNull($this->cache->getById(1));
+        $this->assertNotNull($this->cache->getById(9));
+    }
+
+    public function testPreloadReconcilesASplitArrivingOnALaterRange(): void
+    {
+        // The first range stores [100,300); the second answer splits it into
+        // [100,200) and [200,300), so the original entry is superseded.
+        $this->pdClient->method('scanRegions')->willReturnCallback(
+            fn (string $startKey): array => $startKey === '100'
+                ? [$this->region(1, '100', '300')]
+                : [$this->region(2, '100', '200'), $this->region(3, '200', '300')],
+        );
+
+        $this->assertSame(2, $this->warmer()->preload([['100', '300'], ['150', '250']]));
+        $this->assertSame(2, $this->cache->count());
+        $this->assertNull($this->cache->getById(1));
+        $this->assertNotNull($this->cache->getById(2));
+        $this->assertNotNull($this->cache->getById(3));
+    }
+
+    public function testRefreshReconcilesAMergeArrivingOnALaterCall(): void
+    {
+        // The first call confirms [100,200); the second returns the merged
+        // [100,300), which supersedes both cached entries. Counting as calls
+        // arrive would report 2 while the cache holds 1.
+        $this->cache->put($this->region(1, '100', '200'));
+        $this->cache->put($this->region(2, '200', '300'));
+
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            fn (string $key): RegionInfo => $key === '100'
+                ? $this->region(1, '100', '200')
+                : $this->region(9, '100', '300'),
+        );
+
+        $this->assertSame(1, $this->warmer()->refresh(true));
+        $this->assertSame(1, $this->cache->count());
+        $this->assertNull($this->cache->getById(1));
+        $this->assertNull($this->cache->getById(2));
+        $this->assertNotNull($this->cache->getById(9));
+    }
+
+    public function testRefreshReconciliationRunsAfterAnAbort(): void
+    {
+        // An abort after a merge was stored must still report the cache as it
+        // stands, not the IDs accumulated before the failure.
+        $this->cache->put($this->region(1, '100', '200'));
+        $this->cache->put($this->region(2, '200', '300'));
+
+        $calls = 0;
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            function (string $key) use (&$calls): RegionInfo {
+                $calls++;
+                if ($calls === 2) {
+                    throw new TiKvException('PD unavailable');
+                }
+
+                return $this->region(9, '100', '300');
+            },
+        );
+
+        $this->assertSame(1, $this->warmer()->refresh(true));
+        $this->assertSame(1, $this->cache->count());
+        $this->assertNotNull($this->cache->getById(9));
+    }
 }
