@@ -217,12 +217,13 @@ $client->close();
 
 ```php
 // Range scan [startKey, endKey). limit: 0 (the default) returns the whole
-// range: the client pages internally and buffers every row, guarded by
-// options['maxScanRows'] (default 100000).
+// range: the client pages internally at MAX_SCAN_LIMIT (10240) rows per RPC
+// and buffers every row, guarded by options['maxScanRows'] (default 100000).
 $results = $client->scan('start', 'end', limit: 100);
 // Returns: [['key' => 'k1', 'value' => 'v1'], ['key' => 'k2', 'value' => 'v2'], ...]
 
-// Prefix scanning (limit: 0 returns all matching keys, buffered)
+// Prefix scanning: same semantics — limit: 0 pages at 10240 rows per RPC and
+// buffers the whole result up to options['maxScanRows'].
 $results = $client->scanPrefix('user:');
 
 // Lazy scan iterators — constant memory, auto-paginating (page of
@@ -822,7 +823,11 @@ try {
         }
     }
     
-    // Scan all users with the lazy iterator (constant memory)
+    // Scan all users with the lazy iterator (constant memory). A plain
+    // scanPrefix('user:') pages internally at MAX_SCAN_LIMIT (10240) rows per
+    // RPC but buffers the whole result, and throws ScanLimitExceededException
+    // once it exceeds options['maxScanRows'] (default 100000). The iterator
+    // buffers only one page and has no total cap.
     $userCount = 0;
     foreach ($client->scanPrefixIterator('user:') as $_) {
         $userCount++;
@@ -927,7 +932,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `metrics` | A `MetricsInterface` backend for the RPC, retry and region-cache counters |
 | `retryDeadlineMs` | Wall-clock bound on one retry loop |
 | `maxConcurrency` | Maximum number of in-flight requests in the batch and range fan-outs |
-| `maxScanRows` | Row cap for an unbounded (`limit: 0`) scan |
+| `maxScanRows` | Row cap for an unbounded (`limit: 0`) scan; exceeding it throws `ScanLimitExceededException` |
 | `replicaRead` | A `ReplicaReadPolicy` object — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` ([Replica Reads](docs/configuration.md#replica-reads)) |
 | `batchCommands` | RawKV experimental RPC multiplexing over the `BatchCommands` stream |
 | `apiVersion` / `keyspace` | API V2 with a named keyspace |
@@ -1169,7 +1174,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Batch Async Execution**
 - ✅ **Retry with Exponential Backoff**
 - ✅ **Per-key TTL in BatchPut**
-- ✅ **Scan limit enforcement** — MAX 10240 rows per RPC; `limit: 0` returns the whole range, bounded by `options['maxScanRows']`; a negative limit throws `InvalidArgumentException` before any RPC
+- ✅ **Scan limit enforcement** — MAX 10240 rows per RPC; `limit: 0` returns the whole range or throws `ScanLimitExceededException` past `options['maxScanRows']`; a negative limit throws `InvalidArgumentException` before any RPC
 - ✅ **Batch auto-splitting by size/count**
 - ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache`
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` when less than half of the lock TTL remains, with `optimisticLockTtlMs` / `pessimisticLockTtlMs`
