@@ -33,6 +33,24 @@ interface RegionCacheInterface
     public function getById(int $regionId): ?RegionInfo;
 
     /**
+     * Return the contiguous run of cached regions starting at the region that
+     * contains $startKey and advancing by end key until the first gap, the
+     * end of the range, or an unbounded region.
+     *
+     * Unlike {@see self::getRegionsInRange()}, a partial answer is *not*
+     * discarded: the returned list is what the cache can serve locally, and
+     * the consumer scans only the remainder from PD (issue #425). An empty
+     * array means the cache does not hold the region containing $startKey.
+     *
+     * As with {@see self::getRegionsInRange()}, an empty $endKey means
+     * +infinity and an expired entry is dropped by the lookup rather than
+     * reported.
+     *
+     * @return list<RegionInfo> regions in ascending startKey order
+     */
+    public function getCachedChain(string $startKey, string $endKey): array;
+
+    /**
      * Return the contiguous chain of cached regions covering the half-open
      * key range [startKey, endKey), in ascending startKey order.
      *

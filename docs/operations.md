@@ -1187,15 +1187,22 @@ persistent table keeps the channel warm until the process ends or the
 per-target persist bound drops the entry.
 
 The same tick can keep the region cache fresh. `refreshRegionCache()` re-queries
-PD for the cached regions at most once per `options['regionCacheRefreshMs']`
-(default `0`, i.e. disabled — refreshing is opt-in), so a split or leader
-transfer is learned before a user request has to fail and retry for it. Call
+PD for a bounded slice of the cached regions at most once per
+`options['regionCacheRefreshMs']` (default `0`, i.e. the non-forced refresh is
+disabled — refreshing is opt-in), so a split or leader transfer is learned
+before a user request has to fail and retry for it. Call
 `preloadRegions([['start', 'end'], ...])` once at boot to resolve the keys a
 long-running worker will touch without serving a read. Both are no-ops after
 `close()`, never throw on a PD failure (the failure is logged and the old entry
 is kept), and start no timer of their own. See
 [Region Cache Refresh and Preload](configuration.md#region-cache-refresh-and-preload)
-for the cost and the interval guidance.
+for the cost, the per-tick bound and the interval guidance.
+
+Scans use the same warm cache without extra configuration: RawKV scans and
+TxnKV `Transaction::scan()` read contiguous cached regions locally and ask PD
+only for the uncovered gaps, so a scan-heavy worker does not put PD on the
+path of every request once the cache is warm
+([Scan-path Region Cache Use](configuration.md#scan-path-region-cache-use)).
 
 ### PHP-FPM and other per-request runtimes
 

@@ -8,6 +8,7 @@ use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -21,8 +22,9 @@ use Psr\Log\NullLogger;
  * {@see self::preload()}. Both entry points are bounded and idempotent:
  *
  * - `refresh()` re-queries PD for the regions the cache already holds, at most
- *   once per `$refreshIntervalMs` (0 disables the interval check and makes a
- *   non-forced call a no-op);
+ *   once per `$refreshIntervalMs` and at most `$maxRegionsPerRefresh` entries
+ *   per tick (0 disables the non-forced refresh entirely, making a plain
+ *   `refresh()` a no-op);
  * - `preload()` resolves the regions of the given half-open ranges through one
  *   paginated `ScanRegions` sequence per range and stores them.
  *
@@ -63,6 +65,15 @@ final class RegionCacheWarmer
     public const DEFAULT_REFRESH_INTERVAL_MS = 0;
 
     /**
+     * Maximum number of cached regions refreshed in one tick. A tick costs
+     * one PD `GetRegion` per region, so the bound keeps a large warm cache
+     * from turning one worker tick into thousands of sequential round trips.
+     * Successive ticks continue where the previous one stopped (round-robin),
+     * so every entry is eventually refreshed.
+     */
+    public const DEFAULT_MAX_REGIONS_PER_REFRESH = 128;
+
+    /**
      * Regions requested per PD `ScanRegions` call while preloading. The value
      * mirrors `RegionResolver::SCAN_PAGE_SIZE`: a page in the tens of
      * kilobytes, continued until the range is covered.
@@ -78,13 +89,19 @@ final class RegionCacheWarmer
 
     private int $lastRefreshAtMs = 0;
 
+    /** Round-robin position into the next tick's refreshed slice. */
+    private int $refreshOffset = 0;
+
     /**
      * @param int $refreshIntervalMs Minimum time between two non-forced
-     *     refreshes, in milliseconds. 0 (the default) disables the throttle
-     *     and turns a non-forced `refresh()` into a no-op — the feature is
-     *     opt-in. A forced refresh ignores both. Must be >= 0.
-     * @param (Closure(): int)|null $clockMs Wall clock in milliseconds
-     *     (test seam); null uses `microtime(true)`.
+     *     refreshes, in milliseconds. 0 (the default) disables the non-forced
+     *     refresh and turns a plain `refresh()` into a no-op — the feature is
+     *     opt-in. A forced refresh ignores the interval. Must be >= 0.
+     * @param (Closure(): int)|null $clockMs Monotonic clock in milliseconds
+     *     (test seam); null uses `hrtime(true)`. Only differences are read, so
+     *     the origin is irrelevant.
+     * @param int $maxRegionsPerRefresh Upper bound on the cache entries one
+     *     tick refreshes (round-robin across ticks). Must be >= 1.
      */
     public function __construct(
         private readonly PdClientInterface $pdClient,
@@ -92,23 +109,33 @@ final class RegionCacheWarmer
         private readonly LoggerInterface $logger = new NullLogger(),
         private readonly int $refreshIntervalMs = self::DEFAULT_REFRESH_INTERVAL_MS,
         private readonly ?Closure $clockMs = null,
+        private readonly int $maxRegionsPerRefresh = self::DEFAULT_MAX_REGIONS_PER_REFRESH,
     ) {
         if ($refreshIntervalMs < 0) {
             throw new InvalidArgumentException('refreshIntervalMs must be >= 0');
         }
+        if ($maxRegionsPerRefresh < 1) {
+            throw new InvalidArgumentException('maxRegionsPerRefresh must be >= 1');
+        }
     }
 
     /**
-     * Refresh every cached region from PD.
+     * Refresh a bounded slice of the cached regions from PD.
      *
      * A non-forced call is a no-op when the refresh interval is disabled (0)
      * or when less than `$refreshIntervalMs` has elapsed since the last
      * refresh; a forced call always performs the round. The first call after
-     * construction always refreshes.
+     * construction always refreshes. At most `$maxRegionsPerRefresh` entries
+     * are visited per call, round-robin, so a large cache costs bounded work
+     * per tick and is still fully refreshed over several ticks.
      *
-     * Returns the number of cache entries PD confirmed (a superseded entry
-     * counts once, through its replacement). PD failures are logged and the
-     * affected entries are left untouched, so the call never throws.
+     * The first PD failure aborts the tick — every remaining entry would only
+     * repeat the failure (one `getRegion()` already walks all PD endpoints) —
+     * and keeps its cached value; the call does not throw.
+     *
+     * Returns the number of distinct regions the cache holds after the tick
+     * that PD confirmed: a merge of two entries into one region counts once,
+     * and a leaderless PD answer (which `put()` refuses to cache) counts zero.
      */
     public function refresh(bool $force = false): int
     {
@@ -124,9 +151,21 @@ final class RegionCacheWarmer
         }
 
         $this->lastRefreshAtMs = $nowMs;
-        $refreshed = 0;
 
-        foreach ($this->regionCache->getCachedRegions() as $region) {
+        $entries = array_values($this->regionCache->getCachedRegions());
+        $total = count($entries);
+        if ($total === 0) {
+            return 0;
+        }
+
+        $count = min($this->maxRegionsPerRefresh, $total);
+        $start = $this->refreshOffset % $total;
+        $this->refreshOffset = ($start + $count) % $total;
+
+        /** @var array<int, true> $confirmed region IDs the cache still holds */
+        $confirmed = [];
+
+        foreach (array_slice($entries, $start, $count) as $region) {
             if ($region->leaderStoreId === 0) {
                 // Not cacheable (issues #576, #627); a PD answer would not be
                 // stored either.
@@ -136,11 +175,12 @@ final class RegionCacheWarmer
             try {
                 $fresh = $this->pdClient->getRegion($region->startKey);
             } catch (\Throwable $e) {
-                $this->logger->warning('Region cache refresh failed; keeping the cached entry', [
+                $this->logger->warning('Region cache refresh aborted; keeping the cached entries', [
                     'regionId' => $region->regionId,
                     'error' => $e->getMessage(),
                 ]);
-                continue;
+
+                return count($confirmed);
             }
 
             if (!KeyOrder::inRange($region->startKey, $fresh->startKey, $fresh->endKey)) {
@@ -154,14 +194,20 @@ final class RegionCacheWarmer
             // A different ID means a split or merge superseded the entry;
             // put() removes the overlapping stale entry silently (#238).
             $this->regionCache->put($fresh);
-            $refreshed++;
+            if ($this->regionCache->getById($fresh->regionId) instanceof RegionInfo) {
+                $confirmed[$fresh->regionId] = true;
+            } else {
+                $this->logger->debug('Refreshed region not cached (no leader)', [
+                    'regionId' => $fresh->regionId,
+                ]);
+            }
         }
 
-        if ($refreshed > 0) {
-            $this->logger->debug('Refreshed cached regions', ['refreshed' => $refreshed]);
+        if ($confirmed !== []) {
+            $this->logger->debug('Refreshed cached regions', ['refreshed' => count($confirmed)]);
         }
 
-        return $refreshed;
+        return count($confirmed);
     }
 
     /**
@@ -173,10 +219,12 @@ final class RegionCacheWarmer
      * The method pages `ScanRegions` until the range is covered, bounded by
      * {@see self::MAX_PRELOAD_PAGES}.
      *
-     * Returns the total number of regions stored. A PD failure is logged at
-     * warning level and only abandons the range it happened in — the cache
-     * keeps whatever it already held, and the remaining ranges are still
-     * attempted.
+     * Returns the number of distinct regions the cache actually holds after
+     * the call: a region returned by two overlapping ranges counts once, and
+     * a leaderless PD answer (which `put()` refuses to cache) counts zero. A
+     * PD failure is logged at warning level and only abandons the range it
+     * happened in — the cache keeps whatever it already held, and the
+     * remaining ranges are still attempted.
      *
      * @param array<array-key, mixed> $ranges list of `[startKey, endKey]` pairs
      *
@@ -186,7 +234,8 @@ final class RegionCacheWarmer
     public function preload(array $ranges): int
     {
         $normalized = $this->normalizeRanges($ranges);
-        $stored = 0;
+        /** @var array<int, true> $stored region IDs actually cached */
+        $stored = [];
 
         foreach ($normalized as [$startKey, $endKey]) {
             if ($endKey !== '' && KeyOrder::eq($startKey, $endKey)) {
@@ -196,15 +245,19 @@ final class RegionCacheWarmer
             $stored += $this->preloadRange($startKey, $endKey);
         }
 
-        return $stored;
+        return count($stored);
     }
 
     /**
-     * Page through one range and store every region PD returns.
+     * Page through one range and store every cacheable region PD returns.
+     *
+     * @return array<int, true> region IDs the cache holds (keyed for dedupe
+     *     across overlapping ranges)
      */
-    private function preloadRange(string $startKey, string $endKey): int
+    private function preloadRange(string $startKey, string $endKey): array
     {
-        $stored = 0;
+        /** @var array<int, true> $stored */
+        $stored = [];
         $cursor = $startKey;
 
         for ($page = 0; $page < self::MAX_PRELOAD_PAGES; $page++) {
@@ -223,8 +276,17 @@ final class RegionCacheWarmer
             }
 
             foreach ($batch as $region) {
+                if ($region->leaderStoreId === 0) {
+                    // put() refuses a leaderless region (issues #576, #627);
+                    // count only what the cache actually holds.
+                    $this->logger->debug('Preloaded region not cached (no leader)', [
+                        'regionId' => $region->regionId,
+                    ]);
+                    continue;
+                }
+
                 $this->regionCache->put($region);
-                $stored++;
+                $stored[$region->regionId] = true;
             }
 
             $lastEndKey = $batch[count($batch) - 1]->endKey;
@@ -280,6 +342,8 @@ final class RegionCacheWarmer
             return ($this->clockMs)();
         }
 
-        return (int) (microtime(true) * 1000);
+        // A monotonic clock: only the difference between two readings is
+        // used, so an NTP step cannot delay (or replay) a refresh tick.
+        return intdiv(hrtime(true), 1_000_000);
     }
 }

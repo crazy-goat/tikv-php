@@ -458,12 +458,14 @@ no loop. A long-running worker calls `refreshRegionCache()` from its own tick
 (the `reapIdleChannels()` pattern), throttled by
 `options['regionCacheRefreshMs']` (default `0`, disabled), or warms the cache
 at boot with `preloadRegions([['start', 'end'], ...])`. Refresh re-queries PD
-on each cached region's start key and folds the answer back through `put()`;
-a stale epoch is updated, a split or merge supersedes the entry silently, and
-an answer that does not cover the start key drops it. A PD failure is logged
-and the cached entry is kept; neither method throws on a PD failure, and both
-are no-ops after `close()`. Scan-path range resolution is a separate concern
-and is not part of this mechanism.
+for a bounded slice of the cached regions (128 per tick, round-robin) on each
+region's start key and folds the answer back through `put()`; a stale epoch is
+updated, a split or merge supersedes the entry silently, and an answer that
+does not cover the start key drops it. The first PD failure aborts the tick
+and the cached entries are kept; neither method throws on a PD failure, and
+both are no-ops after `close()`. Scan-path range resolution is a separate
+mechanism (`RegionScanSource`, see the Scan Operation flow), not part of the
+refresh tick.
 
 ### 7. LockResolver
 
@@ -723,9 +725,9 @@ invalidation / leader switching and backoff. The batch wrappers use it since
           │
           ▼
 ┌─────────────────────┐
-│  scanRegions()      │  Get all regions in range
-│   • Query PD        │
-│   • Returns [R1,R2] │
+│  RegionScanSource   │  Cache first, PD only for gaps
+│   • Cached run      │  (RawKV: 'scan' metrics,
+│   • Gap → PD scan   │   TxnKV: 'txn_scan' metrics)
 └─────────┬───────────┘
           │
           ▼
@@ -755,6 +757,13 @@ invalidation / leader switching and backoff. The batch wrappers use it since
 │  (preserve order)   │
 └─────────────────────┘
 ```
+
+Both scanners enumerate regions through `RegionScanSource` (issue #425): a
+contiguous cached run is served without PD, and at the first gap one bounded
+`ScanRegions` call starts at the gap's key and its answer is cached. This is
+the same source for RawKV and TxnKV, so the two paths cannot drift apart, and
+it emits the scan-path `regionCacheHit()` / `regionCacheMiss()` counters
+(`scan` and `txn_scan`).
 
 An unbounded (`limit: 0`) `scan()` / `scanPrefix()` / `reverseScan()`
 executes the per-region sub-scans concurrently, in windows of at most

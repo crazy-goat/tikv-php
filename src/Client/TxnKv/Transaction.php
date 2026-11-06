@@ -236,6 +236,7 @@ final class Transaction
             replicaReadPolicy: $this->replicaReadPolicy,
             logger: $this->logger,
             priority: $this->priority,
+            metrics: $this->metrics,
         );
 
         $this->committer = new TwoPhaseCommitter(

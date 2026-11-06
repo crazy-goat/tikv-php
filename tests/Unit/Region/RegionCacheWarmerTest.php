@@ -290,4 +290,99 @@ class RegionCacheWarmerTest extends TestCase
         $this->assertSame(1, $this->cache->count());
         $this->assertSame(2, $this->cache->getById(1)?->epochVersion);
     }
+
+    public function testRefreshIsBoundedPerTickAndContinuesOnTheNextTick(): void
+    {
+        $this->cache->put($this->region(1, '100', '200'));
+        $this->cache->put($this->region(2, '200', '300'));
+        $this->cache->put($this->region(3, '300', '400'));
+
+        $this->pdClient->expects($this->exactly(3))
+            ->method('getRegion')
+            ->willReturnCallback(fn (string $key): RegionInfo => match ($key) {
+                '100' => $this->region(1, '100', '200', epochVersion: 2),
+                '200' => $this->region(2, '200', '300', epochVersion: 2),
+                '300' => $this->region(3, '300', '400', epochVersion: 2),
+                default => throw new \LogicException('unexpected key ' . $key),
+            });
+
+        $warmer = new RegionCacheWarmer(
+            $this->pdClient,
+            $this->cache,
+            new NullLogger(),
+            clockMs: fn (): int => $this->nowMs,
+            maxRegionsPerRefresh: 2,
+        );
+
+        // Two entries per tick; the third is picked up by the next tick.
+        $this->assertSame(2, $warmer->refresh(true));
+        $this->assertSame(1, $warmer->refresh(true));
+        $this->assertSame(2, $this->cache->getById(1)?->epochVersion);
+        $this->assertSame(2, $this->cache->getById(2)?->epochVersion);
+        $this->assertSame(2, $this->cache->getById(3)?->epochVersion);
+    }
+
+    public function testRefreshAbortsTheTickAfterTheFirstPdFailure(): void
+    {
+        $first = $this->region(1, '100', '200', epochVersion: 3);
+        $this->cache->put($first);
+        $this->cache->put($this->region(2, '200', '300', epochVersion: 3));
+        $this->cache->put($this->region(3, '300', '400', epochVersion: 3));
+
+        $this->pdClient->expects($this->once())
+            ->method('getRegion')
+            ->willThrowException(new TiKvException('PD unavailable'));
+
+        $logger = new TestLogger();
+        $warmer = new RegionCacheWarmer($this->pdClient, $this->cache, $logger);
+
+        $this->assertSame(0, $warmer->refresh(true));
+        $this->assertCount(3, $this->cache->getCachedRegions());
+        $this->assertSame(3, $this->cache->getById(1)?->epochVersion);
+        $this->assertCount(1, $logger->records('warning'));
+    }
+
+    public function testRefreshCountsAMergeOnce(): void
+    {
+        $this->cache->put($this->region(1, '100', '200'));
+        $this->cache->put($this->region(2, '200', '300'));
+
+        $merged = $this->region(9, '100', '300');
+        $this->pdClient->method('getRegion')->willReturn($merged);
+
+        $this->assertSame(1, $this->warmer()->refresh(true));
+        $this->assertSame(1, $this->cache->count());
+        $this->assertSame($merged, $this->cache->getById(9));
+    }
+
+    public function testRefreshDoesNotCountALeaderlessAnswer(): void
+    {
+        $this->cache->put($this->region(1, '100', '200'));
+
+        $leaderless = $this->region(1, '100', '200', epochVersion: 2, leaderStoreId: 0);
+        $this->pdClient->method('getRegion')->willReturn($leaderless);
+
+        $this->assertSame(0, $this->warmer()->refresh(true));
+        $this->assertSame(0, $this->cache->count());
+    }
+
+    public function testPreloadCountsOnlyCacheableRegions(): void
+    {
+        $valid = $this->region(1, '100', '200');
+        $leaderless = $this->region(2, '200', '300', leaderStoreId: 0);
+        $this->pdClient->method('scanRegions')->willReturn([$valid, $leaderless]);
+
+        $this->assertSame(1, $this->warmer()->preload([['100', '300']]));
+        $this->assertSame(1, $this->cache->count());
+        $this->assertNull($this->cache->getById(2));
+    }
+
+    public function testPreloadCountsAnOverlappingRangeOnce(): void
+    {
+        $region = $this->region(1, '100', '300');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+
+        $this->assertSame(1, $this->warmer()->preload([['100', '200'], ['150', '250']]));
+        $this->assertSame(1, $this->cache->count());
+    }
 }
