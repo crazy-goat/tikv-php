@@ -148,6 +148,18 @@ class RawKvScannerTest extends TestCase
         return null;
     }
 
+    /**
+     * Pin that a rejected argument never reaches the wire: neither PD nor a
+     * store may be asked for anything (issue #310).
+     */
+    private function expectNoRpc(): void
+    {
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->expects($this->never())->method('getStore');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+    }
+
     // ========================================================================
     // scan() – multi-region correctness
     // ========================================================================
@@ -655,6 +667,7 @@ class RawKvScannerTest extends TestCase
     #[DataProvider('negativeLimitProvider')]
     public function testNegativeScanLimitThrows(int $limit): void
     {
+        $this->expectNoRpc();
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit must be 0 or greater');
 
@@ -671,6 +684,7 @@ class RawKvScannerTest extends TestCase
 
     public function testReverseScanNegativeLimitThrows(): void
     {
+        $this->expectNoRpc();
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit must be 0 or greater');
 
@@ -679,6 +693,7 @@ class RawKvScannerTest extends TestCase
 
     public function testScanPrefixNegativeLimitThrows(): void
     {
+        $this->expectNoRpc();
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit must be 0 or greater');
 
@@ -784,6 +799,36 @@ class RawKvScannerTest extends TestCase
         $this->assertCount(1, $capturedRequests);
         $this->assertInstanceOf(RawScanRequest::class, $capturedRequests[0]);
         $this->assertSame(RawKvScanner::MAX_SCAN_LIMIT, $capturedRequests[0]->getLimit());
+    }
+
+    /**
+     * `limit: 0` means "the whole range" and pages internally since issue
+     * #191, but every page must still carry the MAX_SCAN_LIMIT row budget on
+     * the wire. A zero or negative wire limit is what makes a RawScan
+     * unbounded (issue #310).
+     */
+    public function testScanLimitZeroSendsMaxScanLimitAsThePerPageBudget(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        /** @var list<RawScanRequest> $requests */
+        $requests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (string $address, string $service, string $method, Message $request) use (&$requests): Message {
+                /** @var RawScanRequest $request */
+                $requests[] = $request;
+
+                return new RawScanResponse();
+            },
+        );
+
+        $this->assertSame([], $this->scanner->scan('a', 'z', 0, false));
+        $this->assertCount(1, $requests);
+        $this->assertSame(RawKvScanner::MAX_SCAN_LIMIT, $requests[0]->getLimit());
     }
 
     // ========================================================================

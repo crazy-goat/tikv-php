@@ -53,8 +53,9 @@ $options = [
     // Row cap for an unbounded scan (scan()/scanPrefix()/reverseScan() with
     // limit: 0, issue #191). limit: 0 returns the whole range by paging
     // internally (up to RawKvClient::MAX_SCAN_LIMIT = 10240 rows per RPC), so
-    // the whole result is buffered in one PHP array. The guard is evaluated
-    // once per fetched page (after that page is buffered), so it is
+    // the whole result is buffered in one PHP array. A negative limit is
+    // rejected with InvalidArgumentException before any RPC. The guard is
+    // evaluated once per fetched page (after that page is buffered), so it is
     // page-granular rather than a strict per-row memory bound: when it is
     // smaller than the page size a whole page is read before the throw, and
     // ScanLimitExceededException's getScannedRows() can exceed getMaxRows().
