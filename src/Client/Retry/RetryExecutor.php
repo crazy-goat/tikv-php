@@ -52,6 +52,12 @@ final readonly class RetryExecutor
         private int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS,
         private int $deadlineMs = self::DEFAULT_RETRY_DEADLINE_MS,
         private MetricsInterface $metrics = new NoOpMetrics(),
+        /**
+         * Budget shared by every execute() call on this instance, or null for
+         * a standalone executor whose calls each start a fresh budget. Only
+         * {@see self::beginOperation()} sets it; see {@see RetryBudget}.
+         */
+        private ?RetryBudget $budget = null,
     ) {
         if ($maxAttempts < 1) {
             throw new \InvalidArgumentException('maxAttempts must be >= 1');
@@ -69,15 +75,18 @@ final readonly class RetryExecutor
      */
     public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
     {
-        // Per-invocation retry state lives in locals, not instance fields:
+        // Retry budget lives in a RetryBudget object, not in instance fields:
         // a single executor is reused across many operations, and
-        // maxBackoffMs/serverBusyBudgetMs are documented as per-operation
-        // limits, so every call must start with a full budget. Keeping them
-        // local also makes execute() reentrant (issue #271).
-        $totalBackoffMs = 0;
-        $serverBusyBackoffMs = 0;
+        // maxBackoffMs/serverBusyBudgetMs/deadlineMs are documented as
+        // per-operation limits, so every operation must start with a full
+        // budget. A standalone executor (budget === null) starts a fresh one
+        // per call, preserving issue #271's per-execute() reset; an executor
+        // returned by beginOperation() shares one budget across every call of
+        // one logical operation's fan-out (issue #223). Keeping the state in
+        // an object also makes execute() reentrant.
+        $budget = $this->budget ?? $this->newBudget();
         $attempt = 0;
-        $startTimeMs = $this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0;
+        $startTimeMs = $budget->startTimeMs();
         $lastError = null;
 
         while (true) {
@@ -93,7 +102,7 @@ final readonly class RetryExecutor
                     'key' => KeyRedactor::redact($key),
                     'attempt' => $attempt,
                     'maxAttempts' => $this->maxAttempts,
-                    'totalBackoffMs' => $totalBackoffMs,
+                    'totalBackoffMs' => $budget->totalBackoffMs(),
                 ]);
                 throw new RetryBudgetExhaustedException(
                     sprintf(
@@ -102,7 +111,7 @@ final readonly class RetryExecutor
                         KeyRedactor::redact($key),
                     ),
                     $attempt,
-                    $totalBackoffMs,
+                    $budget->totalBackoffMs(),
                     $lastError,
                     rawKey: $key,
                 );
@@ -197,7 +206,7 @@ final readonly class RetryExecutor
                 $sleepMs = $backoffType->sleepMs($attemptBeforeInspection);
 
                 if ($backoffType === BackoffType::ServerBusy) {
-                    $serverBusyBackoffMs += $sleepMs;
+                    $serverBusyBackoffMs = $budget->addServerBusy($sleepMs);
                     if ($serverBusyBackoffMs > $this->serverBusyBudgetMs) {
                         $this->logger->error('ServerBusy budget exhausted', [
                             'key' => KeyRedactor::redact($key),
@@ -208,7 +217,7 @@ final readonly class RetryExecutor
                         throw $e;
                     }
                 } else {
-                    $totalBackoffMs += $sleepMs;
+                    $totalBackoffMs = $budget->addBackoff($sleepMs);
                     if ($totalBackoffMs > $this->maxBackoffMs) {
                         $this->logger->error('Retry budget exhausted', [
                             'key' => KeyRedactor::redact($key),
@@ -225,7 +234,7 @@ final readonly class RetryExecutor
                     'attempt' => $attemptBeforeInspection,
                     'backoffType' => $backoffType->name,
                     'sleepMs' => $sleepMs,
-                    'totalBackoffMs' => $totalBackoffMs,
+                    'totalBackoffMs' => $budget->totalBackoffMs(),
                 ]);
 
                 $this->metrics->retryAttempted($backoffType->name);
@@ -247,6 +256,43 @@ final readonly class RetryExecutor
                 $attempt++;
             }
         }
+    }
+
+    /**
+     * Start one logical operation and return an executor whose execute()
+     * calls all charge the same retry budget (issue #223, TXN-18).
+     *
+     * The client's fan-out operations call this once at their public entry
+     * point and pass the returned executor down: every region and page of one
+     * `scan()`, `batchGet()`, `commit()` (and so on) therefore shares one
+     * `maxBackoffMs`, one `serverBusyBudgetMs` and one wall-clock deadline,
+     * instead of getting a fresh budget per region. A later operation calls
+     * beginOperation() again (or uses a standalone executor) and starts from
+     * zero, so it cannot inherit the earlier operation's attempts or elapsed
+     * time.
+     *
+     * Calling this on an executor that already has a budget deliberately
+     * starts a NEW budget: each call marks a new logical operation.
+     */
+    public function beginOperation(): self
+    {
+        return new self(
+            $this->maxBackoffMs,
+            $this->serverBusyBudgetMs,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            $this->logger,
+            $this->maxAttempts,
+            $this->deadlineMs,
+            $this->metrics,
+            $this->newBudget(),
+        );
+    }
+
+    private function newBudget(): RetryBudget
+    {
+        return new RetryBudget($this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0);
     }
 
     /**

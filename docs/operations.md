@@ -105,7 +105,7 @@ if ($client->get('lock:resource') !== null) {
 > **Batch operations are not atomic.** Keys are grouped by region and each
 > region's keys are split further into sub-batches (at most 512 keys or 16 KB
 > per RPC), then all sub-batches are dispatched concurrently. If any
-> sub-batch fails — after the client's own per-sub-batch retry budget is
+> sub-batch fails — after the operation's shared retry budget is
 > exhausted — the client throws
 > [`BatchPartialFailureException`](error-handling.md): an **unknown subset**
 > of the batch has already been applied. Do not assume the exception means
@@ -1078,7 +1078,7 @@ The client enforces these limits. The constants are public on `RawKvClient`.
 | Bytes per batch RPC | 16384 bytes (16 KiB) | `MAX_BATCH_GET_SIZE`, `MAX_BATCH_PUT_SIZE`, `MAX_BATCH_DELETE_SIZE` | Automatic split. No error |
 | Batch fan-out deadline | 60000 ms | `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS` | Client, `batchDeadlineMs`. Throws `BatchDeadlineExceededException`. `0` disables it |
 
-The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs the whole retry loop of one region (up to 30000 ms, plus one per-call timeout). The worst case is `batchDeadlineMs` plus one region's full retry loop. The experimental BatchCommands transport does not use the batch deadline.
+The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs that region's share of the operation's retry budget; all regions of a batch share one `RetryExecutor` budget (issue #223), so `retryDeadlineMs` bounds the fan-out as a whole (up to 30000 ms, plus one per-call timeout). The worst case is `batchDeadlineMs` plus the operation's remaining retry deadline. The experimental BatchCommands transport does not use the batch deadline.
 
 `InvalidArgumentException` is `CrazyGoat\TiKV\Client\Exception\InvalidArgumentException`.
 Its message names the size and the method, for example `Value size (5242880) exceeds maximum allowed size (4194304) in put`.

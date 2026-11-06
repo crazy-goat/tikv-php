@@ -75,7 +75,9 @@ final readonly class RawKvRangeOps
             return;
         }
 
-        $executor = $this->createRetryExecutor();
+        // One range operation is one logical operation: every region shares
+        // one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         foreach ($regions as $region) {
             $this->regionCache->put($region);
@@ -121,7 +123,9 @@ final readonly class RawKvRangeOps
     {
         RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'checksum');
 
-        $executor = $this->createRetryExecutor();
+        // One range operation is one logical operation: every region shares
+        // one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         foreach ($regions as $region) {
             $this->regionCache->put($region);

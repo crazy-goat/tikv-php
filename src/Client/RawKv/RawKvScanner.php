@@ -28,6 +28,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
@@ -113,17 +114,23 @@ final readonly class RawKvScanner
      * @return array<array{key: string, value: ?string}>
      *
      * @throws InvalidArgumentException When the range is reversed
+     * @throws RetryBudgetExhaustedException When the shared retry budget is
+     *         exhausted
+     * @throws TiKvException When a region lookup fails closed or the scan RPC
+     *         fails
      */
     public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
     {
         RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'scan');
         $limit = $this->validateScanLimit($limit);
 
-        if ($limit === 0) {
-            return $this->scanUnbounded($startKey, $endKey, $keyOnly, $columnFamily);
-        }
+        // One logical scan shares one retry budget across its pages and
+        // regions; a later scan() call starts a fresh one (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
 
-        $executor = $this->createRetryExecutor();
+        if ($limit === 0) {
+            return $this->scanUnbounded($executor, $startKey, $endKey, $keyOnly, $columnFamily);
+        }
 
         return $this->scanRangeSequentially($executor, $startKey, $endKey, $limit, $keyOnly, $columnFamily);
     }
@@ -137,13 +144,17 @@ final readonly class RawKvScanner
      *
      * @return array<array{key: string, value: ?string}>
      */
-    private function scanUnbounded(string $startKey, string $endKey, bool $keyOnly, string $columnFamily): array
-    {
+    private function scanUnbounded(
+        RetryExecutor $executor,
+        string $startKey,
+        string $endKey,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
         $results = [];
         $cursor = $startKey;
 
         while (true) {
-            $executor = $this->createRetryExecutor();
             $page = $this->scanPage($executor, $cursor, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
 
             if ($page === []) {
@@ -392,11 +403,16 @@ final readonly class RawKvScanner
             return [];
         }
 
+        // One logical reverse scan shares one retry budget across its pages
+        // and regions; a later reverseScan() call starts a fresh one
+        // (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
+
         if ($limit === 0) {
-            return $this->reverseScanUnbounded($startKey, $endKey, $keyOnly, $columnFamily);
+            return $this->reverseScanUnbounded($executor, $startKey, $endKey, $keyOnly, $columnFamily);
         }
 
-        return $this->reverseScanPage($startKey, $endKey, $limit, $keyOnly, $columnFamily);
+        return $this->reverseScanPage($executor, $startKey, $endKey, $limit, $keyOnly, $columnFamily);
     }
 
     /**
@@ -406,13 +422,18 @@ final readonly class RawKvScanner
      *
      * @return array<array{key: string, value: ?string}>
      */
-    private function reverseScanUnbounded(string $startKey, string $endKey, bool $keyOnly, string $columnFamily): array
-    {
+    private function reverseScanUnbounded(
+        RetryExecutor $executor,
+        string $startKey,
+        string $endKey,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
         $results = [];
         $upper = $startKey;
 
         while (true) {
-            $page = $this->reverseScanPage($upper, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
+            $page = $this->reverseScanPage($executor, $upper, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
 
             if ($page === []) {
                 break;
@@ -460,6 +481,7 @@ final readonly class RawKvScanner
      * @return array<array{key: string, value: ?string}>
      */
     private function reverseScanPage(
+        RetryExecutor $executor,
         string $startKey,
         string $endKey,
         int $limit,
@@ -467,8 +489,6 @@ final readonly class RawKvScanner
         string $columnFamily,
     ): array {
         assert($limit > 0, 'reverseScanPage() requires a positive page budget; use reverseScanUnbounded() for limit 0');
-
-        $executor = $this->createRetryExecutor();
 
         $regions = array_reverse(
             $this->resolveScanRegions($endKey, $startKey, RegionScanBatch::MAX_REGIONS),
@@ -832,7 +852,9 @@ final readonly class RawKvScanner
             ));
         }
 
-        $executor = $this->createRetryExecutor();
+        // One batchScan() call is one logical operation: every range and
+        // region shares one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $clipper = new RegionRangeClipper();
 
         $calls = [];
