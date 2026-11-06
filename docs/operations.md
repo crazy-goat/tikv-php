@@ -619,7 +619,7 @@ $client->deleteRange('log:2023-01-01', 'log:2024-01-01');
 $client->deleteRange('data:user:123:', 'data:user:123;');
 ```
 
-**Warning:** This operation is not atomic across regions. If it fails partway through, some keys may be deleted and others not. The same partial-failure rules as the [batch operations](#partial-failure-and-recovery) apply: `deleteRange` also throws `BatchPartialFailureException`, and because deletes are idempotent the whole range operation may simply be re-issued.
+**Warning:** This operation is not atomic across regions. If it fails partway through, some keys may be deleted and others not. The same partial-failure rules as the [batch operations](#partial-failure-and-recovery) apply: `deleteRange` also throws `BatchPartialFailureException`, and because deletes are idempotent the whole range operation may simply be re-issued. Retryable region errors carried in a region's response (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, …) are retried per region before the operation gives up, so a leader transfer or region split does not by itself fail the call.
 
 ### Delete Prefix
 
@@ -1007,6 +1007,11 @@ if ($before->checksum === $after->checksum &&
 - Data migration verification
 - Backup integrity checks
 - Data consistency validation
+
+Retryable region errors carried in a per-region response are retried per
+sub-range with backoff and region-cache invalidation (issue #566). Only a
+fatal region error or an exhausted retry budget aborts the call — as a
+`BatchPartialFailureException`, never as a partial checksum.
 
 ## Error Handling
 

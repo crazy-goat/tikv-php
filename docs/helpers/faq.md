@@ -435,14 +435,16 @@ keeps a stale upper bound receives a partial success — re-clip or guard
 explicitly. The same stale-capture bug in `RawKvRangeOps`
 (deleteRange/checksum) was fixed by #190: resolution now happens inside the
 retry closure and the `scanRegions()` result is pre-populated into the
-region cache (so the first attempt is a cache hit). Remaining limitation:
-because of the #295 fan-out the retry closure only observes dispatch-phase
-failures; response-borne region errors surface at wait time as
-`BatchPartialFailureException`. Unlike `RawKvBatch` — whose response-borne
-region errors are now retried in the wait phase by #183 — this
-`RawKvRangeOps` wait-time path is still **unfixed** and remains an open gap;
-#236/#189 covered the batch wrappers, not `RawKvRangeOps`. A region that shrank
-after enumeration (a split) is also guarded by
+region cache (so the first attempt is a cache hit). Because of the #295
+fan-out the original retry closure only observed dispatch-phase failures:
+response-borne region errors surfaced at wait time as
+`BatchPartialFailureException`. Issue #566 closed that gap by moving
+`deleteRange`/`checksum` onto `CheckedGrpcFuture::fromRetryableDispatch()`
+(the #183 pattern used by the batch wrappers): the first attempt is still
+dispatched eagerly, while the wait phase runs the whole dispatch+await cycle
+under the retry executor, so a `NotLeader`/`EpochNotMatch`/… carried in the
+response is retried and the region is re-resolved on every attempt. A region
+that shrank after enumeration (a split) is also guarded by
 `RawKvRangeOps::assertRegionCoversRange()`: `deleteRange` fails closed, and
 `checksum` refuses a partial result — its data read is silently clamped by
 the region snapshot, so a truncated checksum would otherwise be XOR-merged

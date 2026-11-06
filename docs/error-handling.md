@@ -282,7 +282,7 @@ only the timing it produces differs.
 | `RawKvClient::scan()`, `RawKvClient::scanPrefix()`, `RawKvClient::reverseScan()`, `RawKvClient::batchScan()` | Yes | Yes | Read-only. The rows are the same set the first call returned unless the data changed in between |
 | `RawKvClient::scanIterator()`, `RawKvClient::scanPrefixIterator()` | Yes | Yes | Read-only, but **lazy**: the failure surfaces from the iteration, not from the factory call. A new iterator starts again at the beginning of the range. Exception: the cursor-progress `TiKvException` (#312) is not transient, so do not loop on it |
 | `ScanIterator::current()`, `ScanIterator::key()`, `ScanIterator::next()`, `ScanIterator::valid()`, `ScanIterator::rewind()` | Yes | Yes | Read-only. `next()` and `valid()` issue the scan RPCs, so an ambiguous failure surfaces from the iteration, not from the factory call — repeat the iteration from the beginning of the range (`rewind()` restarts the same iterator at the range's first key). After `RawKvClient::close()`, a page fetch throws `ClientClosedException` before issuing an RPC |
-| `RawKvClient::checksum()` | Yes | Yes | Read-only. The merged CRC64-XOR covers the whole range because a failed region aborts the call with a `BatchPartialFailureException` instead of returning a partial result |
+| `RawKvClient::checksum()` | Yes | Yes | Read-only. Retryable region errors carried in a per-region response are retried per sub-range first; a fatal region error or an exhausted retry budget aborts the call with a `BatchPartialFailureException` instead of returning a partial result, so the merged CRC64-XOR covers the whole range |
 | `RawKvClient::put()` | Yes | Yes | The same key/value is written again, so the final value is the same. With a TTL the **TTL restarts on every attempt** — the TTL travels as a relative number of seconds and TiKV computes the expiry when it applies the write — so a retry extends the key's lifetime. In atomic mode the write also carries `for_cas` and takes TiKV's atomic path, but it stays an unconditional overwrite of the same value |
 | `RawKvClient::delete()` | Yes | Yes | Deleting an already-deleted key is not an error |
 | `RawKvClient::batchPut()` | Yes | Yes | The same key/value pairs converge, and the TTL restarts on every attempt as for `put()`. A `BatchPartialFailureException` leaves an **unknown subset** written — re-run the whole batch |
@@ -457,7 +457,10 @@ fanned-out batch and range operations (`batchGet()`, `batchPut()`,
 `checksum()`) report a per-region failure — including a region's exhausted
 retry budget or a missing store — inside
 `BatchPartialFailureException::getRegionErrors()` instead of throwing the
-wrapped type. With `options['batchCommands']` enabled, the multiplexed entry
+wrapped type. A retryable region error carried in a range response is retried
+per sub-range in the wait phase before it can reach that wrapper (issue #566),
+so only a fatal region error or an exhausted budget is reported there. With
+`options['batchCommands']` enabled, the multiplexed entry
 setup resolves store addresses before that wrapper, so
 `StoreNotFoundException` can escape `batchGet()`, `batchPut()` and
 `batchDelete()` directly, and `batchGet()` can also let a per-pair
@@ -647,6 +650,11 @@ Notes:
   `BatchPartialFailureException::getRegionErrors()`; it is not thrown
   directly. `ingest()` does not use a `RetryExecutor` at all, so it has no
   retry budget to exhaust.
+- A region error carried in a range response is not the end of the operation:
+  `deleteRange()` and `checksum()` run each sub-range's dispatch+await cycle
+  under the retry executor (issue #566), so `NotLeader`, `EpochNotMatch`,
+  `ServerIsBusy` and friends are retried with the budgets above before a
+  `BatchPartialFailureException` can report them.
 
 See also:
 
