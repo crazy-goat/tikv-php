@@ -8,7 +8,8 @@ namespace CrazyGoat\TiKV\Tests\Unit\Support;
  * A redactor that counts how often it was asked to redact a key.
  *
  * `KeyRedactor::setRedactor()` installs a process-global redactor, so the
- * tests that use this one restore the default in their `tearDown()`.
+ * tests that use this one restore the static state in `setUp()`/`tearDown()`
+ * through `KeyRedactorState`.
  */
 final class SpyRedactor
 {

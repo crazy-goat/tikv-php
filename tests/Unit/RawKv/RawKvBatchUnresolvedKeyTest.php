@@ -13,6 +13,7 @@ use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -86,12 +87,12 @@ final class RawKvBatchUnresolvedKeyTest extends TestCase
 
     /**
      * Issue #244 redacts keys in fail-closed messages (KeyRedactor
-     * convention): the unresolvable key is identified by its hex form plus
-     * byte length, never the raw bytes.
+     * convention): the unresolvable key is identified by its truncated keyed
+     * hash plus byte length, never the raw bytes.
      */
     private function expectedRedactedKeyFragment(string $key): string
     {
-        return '"' . bin2hex($key) . '" (' . strlen($key) . ' bytes)';
+        return KeyRedactor::redact($key);
     }
 
     private function region(int $id, string $startKey, string $endKey): RegionInfo
