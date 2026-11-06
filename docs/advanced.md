@@ -777,62 +777,49 @@ echo $metrics->getRetries('NotLeader');                 // retries tagged with t
 
 ### Health Checks
 
+Use the purpose-built `healthCheck()` instead of probing with a write and a
+delete. It issues one PD `GetMembers` RPC, touches no user data, and does not
+depend on any region being available:
+
 ```php
-class TiKvHealthChecker
-{
-    private RawKvClient $client;
-    private string $healthKey;
-    
-    public function __construct(RawKvClient $client)
-    {
-        $this->client = $client;
-        $this->healthKey = 'health:check:' . uniqid();
-    }
-    
-    public function check(): array
-    {
-        $start = microtime(true);
-        $checks = [
-            'write' => false,
-            'read' => false,
-            'delete' => false,
-            'latency_ms' => 0,
-        ];
-        
-        try {
-            // Test write
-            $this->client->put($this->healthKey, 'ok');
-            $checks['write'] = true;
-            
-            // Test read
-            $value = $this->client->get($this->healthKey);
-            $checks['read'] = $value === 'ok';
-            
-            // Test delete
-            $this->client->delete($this->healthKey);
-            $value = $this->client->get($this->healthKey);
-            $checks['delete'] = $value === null;
-            
-            $checks['latency_ms'] = (microtime(true) - $start) * 1000;
-            $checks['healthy'] = $checks['write'] && $checks['read'] && $checks['delete'];
-        } catch (Exception $e) {
-            $checks['error'] = $e->getMessage();
-            $checks['healthy'] = false;
-        }
-        
-        return $checks;
-    }
-}
+use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 
-// Usage in monitoring endpoint
-$health = new TiKvHealthChecker($client);
-$status = $health->check();
-
-if (!$status['healthy']) {
-    // Alert on-call, log to monitoring system
-    error_log("TiKV health check failed: " . json_encode($status));
+try {
+    $clusterId = $client->healthCheck();   // ?int; null = PD answered without a cluster ID
+} catch (ClientClosedException $e) {
+    // close() was called; the probe did not run
+} catch (HealthCheckException $e) {
+    // PD unreachable or rejected GetMembers; $e->getPrevious() is the cause
 }
 ```
+
+`healthCheck()` proves that the client is open and that PD answers. It does
+**not** exercise the TiKV write path: it never resolves a region, reads or
+writes a key, so a cluster whose stores are down or whose write path is degraded
+can still pass. If a readiness probe has to cover reads too, pair the PD probe
+with one shallow read of a key your deployment maintains:
+
+```php
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+
+try {
+    $client->healthCheck();                            // PD is reachable
+    $healthy = $client->get('health:canary') !== null; // region + store are reachable
+} catch (TiKvException $e) {
+    $healthy = false;
+}
+```
+
+The read exercises region resolution and the read path; it still does not prove
+that writes work. Do not use a synthetic write/delete as a probe: at probe
+frequency it adds continuous write traffic to the cluster, and it fails whenever
+the write path is degraded even though the cluster is reachable. Monitor the
+write path through your application's own traffic and the counters exposed by
+`getMetrics()`.
+
+See [Operations → Cluster and lifecycle](operations.md#cluster-and-lifecycle)
+for the signatures, return values and exceptions.
 
 ## Security
 
