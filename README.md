@@ -901,7 +901,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 
 ### Observability
 - ✅ **Metrics** — `options['metrics']` injects a `MetricsInterface` backend (`InMemoryMetrics` ships with the library for tests and benchmarks); `getMetrics()` returns the backend in use
-- ✅ **Health check** — `healthCheck()` probes PD with a lightweight `GetMembers` RPC and returns the cluster ID
+- ✅ **Health check** — `healthCheck()` probes PD with a lightweight `GetMembers` RPC and returns the cluster ID (with `options['expectedClusterId']` set, a response without a cluster-ID header is an error)
 - ✅ **Cluster ID** — `getClusterId()` returns the cluster ID learned from PD
 - ✅ **Slow log** — `options['slowLog']` logs the RawKV operations that are slower than their per-operation threshold
 - ✅ **PSR-3 Logging** — Structured logging with any PSR-3 logger
@@ -935,6 +935,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `maxChannels` / `idleTtlMs` | The channel pool — how many gRPC channels the transport keeps open and after how long an unused one is evicted ([Channel Pool](docs/configuration.md#channel-pool-maxchannels-idlettlms)) |
 | `grpcClient` | A transport the application built — the client uses it as it is and never closes it ([Sharing One Transport](docs/configuration.md#sharing-one-transport-between-clients)) |
 | `tsoPoolSize` / `lowResTimestampMaxStalenessMs` | TSO batching and the low-resolution timestamp cache of the TxnKV timestamp oracle |
+| `expectedClusterId` | The PD cluster ID every PD/TSO response must report when set — a mismatch or a missing cluster-ID header throws instead of adopting the server's value ([Cluster Identity Verification](docs/configuration.md#cluster-identity-verification-issue-308-sec-05)) |
 | `allowedStoreHosts` / `storeHostPolicy` / `allowedStorePorts` | Which store addresses the client is allowed to talk to |
 | `gcSafePointValidation` / `gcSafePointRefreshMs` | TxnKV GC safe-point validation and its refresh interval |
 
