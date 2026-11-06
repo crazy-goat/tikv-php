@@ -1513,3 +1513,35 @@ lock — and is not retried even when `retryable` is co-set; only a bare
 original #559 branch checked `retryable` first, so a real `txn_lock_not_found`
 payload (which newer TiKV co-tags) threw a retryable exception instead of
 succeeding, and a real `conflict` payload was retried instead of failing.
+
+## A CAS transport failure is indeterminate only after the request is sent (issue #537)
+
+`CasIndeterminateException` is thrown at the `RawCompareAndSwap` call site, not
+from the retry classifier. That placement is the decision: the same
+`GrpcException` type can come from region or store resolution (PD unreachable)
+*before* the request is sent, and that failure is definitive — no swap was
+attempted. Wrapping every `GrpcException` the retry executor sees would make a
+definitive failure look indeterminate, which is exactly what a lock caller must
+not be told.
+
+Four consequences to keep:
+
+1. **The classifier still rethrows a bare `GrpcException`.** That path is now
+   only reachable for pre-write failures; it preserves the "not retried"
+   behaviour of #239 and keeps the definitive failure typed as it was.
+2. **The typed exception carries the original as `previous`.** It extends
+   `TiKvException`, not `GrpcException` (`GrpcException` is `final`), so
+   `getGrpcStatusCode()` is the accessor for the status code; callers that need
+   the original object still get it from `getPrevious()`.
+3. **Region errors are unchanged.** `NotLeader`, `EpochNotMatch`, … are rejected
+   before the write is proposed and stay retryable; a retried-and-succeeded
+   region error still returns a `CasResult`, and an exhausted retry budget still
+   surfaces as `RetryBudgetExhaustedException` / `RegionException`, never as an
+   indeterminate CAS.
+4. **Application-level gRPC rejections stay definitive.** `UNAUTHENTICATED`,
+   `PERMISSION_DENIED`, `INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED`, … mean the
+   server refused the request before applying it, so they keep the plain
+   `GrpcException`; only statuses that can arrive after the server received the
+   request (`DEADLINE_EXCEEDED`, `UNAVAILABLE`, `ABORTED`, `INTERNAL`,
+   `UNKNOWN`, `CANCELLED`, `DATA_LOSS`, unrecognised codes) become
+   indeterminate.

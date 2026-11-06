@@ -28,6 +28,7 @@ use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
+use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
@@ -2624,9 +2625,57 @@ class RawKvClientTest extends TestCase
         // A CAS is not idempotent: a transport error means the outcome is
         // indeterminate (the write may have been applied server-side), so it
         // must propagate to the caller instead of being retried (issue #239).
+        // The typed exception keeps the transport failure as `previous`.
         $this->grpc->expects($this->once())
             ->method('call')
             ->willThrowException(new GrpcException('Deadline Exceeded', 4));
+
+        try {
+            $this->client->compareAndSwap('key', 'old', 'new');
+            self::fail('Expected CasIndeterminateException');
+        } catch (CasIndeterminateException $e) {
+            $previous = $e->getPrevious();
+            self::assertInstanceOf(GrpcException::class, $previous);
+            self::assertSame(4, $previous->grpcStatusCode);
+            self::assertSame(4, $e->getGrpcStatusCode());
+            self::assertStringContainsString('indeterminate', $e->getMessage());
+        }
+    }
+
+    public function testCompareAndSwapDefinitiveTransportFailureBeforeTheWriteStaysGrpcException(): void
+    {
+        $this->client->setAtomicForCAS(true);
+
+        // A PD transport failure while resolving the region happens before
+        // the CAS request is sent: no swap was attempted, so this must not be
+        // reported as an indeterminate CAS outcome.
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')
+            ->willThrowException(new GrpcException('connection refused', 14));
+
+        $this->grpc->expects($this->never())->method('call');
+
+        $this->expectException(GrpcException::class);
+
+        $this->client->compareAndSwap('key', 'old', 'new');
+    }
+
+    public function testCompareAndSwapApplicationLevelRejectionStaysGrpcException(): void
+    {
+        $this->client->setAtomicForCAS(true);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // UNAUTHENTICATED / PERMISSION_DENIED / INVALID_ARGUMENT and friends
+        // reject the request before it is applied: the swap definitively did
+        // not happen, so this must not look like an indeterminate outcome.
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willThrowException(new GrpcException('Unauthenticated', 16));
 
         $this->expectException(GrpcException::class);
 
@@ -2711,6 +2760,29 @@ class RawKvClientTest extends TestCase
         $this->grpc->method('call')->willReturn($response);
 
         $this->assertSame('existing', $this->client->putIfAbsent('key', 'value'));
+    }
+
+    public function testPutIfAbsentPropagatesCasIndeterminateException(): void
+    {
+        $this->client->setAtomicForCAS(true);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $previous = new GrpcException('Unavailable', 14);
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willThrowException($previous);
+
+        try {
+            $this->client->putIfAbsent('lock:resource', 'owner-1');
+            self::fail('Expected CasIndeterminateException');
+        } catch (CasIndeterminateException $e) {
+            self::assertSame($previous, $e->getPrevious());
+            self::assertSame(14, $e->getGrpcStatusCode());
+        }
     }
 
     // ========================================================================

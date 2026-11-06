@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
+use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
@@ -815,17 +816,26 @@ final class RawKvClient
      * (transport error), the outcome is indeterminate — the swap may have
      * succeeded even though this call throws. Transport-level gRPC errors
      * (e.g. DEADLINE_EXCEEDED, UNAVAILABLE) are therefore NOT retried and
-     * propagate to the caller, which should re-read the key to determine
-     * the actual outcome (issue #239). Region errors (NotLeader,
-     * EpochNotMatch, …) are rejected before the write is proposed and are
-     * still retried automatically.
+     * propagate as CasIndeterminateException, which preserves the original
+     * GrpcException as `getPrevious()`; re-read the key to determine the
+     * actual outcome (issue #239). Region errors (NotLeader, EpochNotMatch,
+     * …) are rejected before the write is proposed and are still retried
+     * automatically. A transport failure while resolving the region or store
+     * (PD unreachable), or an application-level rejection of the request
+     * itself, happens before the swap is applied, so it stays a plain
+     * GrpcException and means the swap definitively did not happen.
      *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
      * @throws InvalidStateException
      * @throws RegionException
-     * @throws GrpcException NOT retried — transport errors leave the result
-     *                       indeterminate for this non-idempotent operation
+     * @throws CasIndeterminateException NOT retried — the transport failure
+     *         leaves the swap outcome indeterminate (the write may have been
+     *         applied); the original GrpcException is preserved as `previous`
+     * @throws GrpcException Only when the failure happened before the CAS
+     *         request was applied (e.g. PD unreachable during region lookup,
+     *         or an application-level rejection such as UNAUTHENTICATED);
+     *         the swap definitively did not happen
      * @throws TiKvException When a region lookup fails closed (for example PD
      *         returned no region for the key)
      * @throws StoreNotFoundException When PD no longer knows the store that
@@ -858,10 +868,12 @@ final class RawKvClient
      * Put a value only if the key does not already exist (via CAS).
      *
      * NOT IDEMPOTENT — see compareAndSwap() for the indeterminate-outcome
-     * contract: a thrown GrpcException means the outcome is unknown (the
-     * write may have been applied); re-read the key to decide. Distributed
-     * lock users must treat a throw as indeterminate, never as
-     * "not acquired" (issue #239).
+     * contract: a thrown CasIndeterminateException means the outcome is
+     * unknown (the write may have been applied); re-read the key to decide.
+     * Distributed lock users must treat it as indeterminate, never as
+     * "not acquired" (issue #239). A plain GrpcException on this method
+     * means the request was never sent or was rejected before it was applied,
+     * so the lock was definitively not acquired.
      *
      * @return null|string Null if the key did not exist and the value was stored; the
      *              existing value otherwise
@@ -870,8 +882,13 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws InvalidStateException
      * @throws RegionException
-     * @throws GrpcException NOT retried — transport errors leave the result
-     *                       indeterminate for this non-idempotent operation
+     * @throws CasIndeterminateException NOT retried — the transport failure
+     *         leaves the swap outcome indeterminate (the value may have been
+     *         stored); the original GrpcException is preserved as `previous`
+     * @throws GrpcException Only when the failure happened before the CAS
+     *         request was applied (e.g. PD unreachable during region lookup,
+     *         or an application-level rejection such as UNAUTHENTICATED);
+     *         the value definitively was not stored
      * @throws TiKvException When a region lookup fails closed (for example PD
      *         returned no region for the key)
      * @throws StoreNotFoundException When PD no longer knows the store that

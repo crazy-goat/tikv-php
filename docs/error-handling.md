@@ -32,6 +32,7 @@ extends `\InvalidArgumentException` directly — it is **not** a
     ├── BatchCommandsStreamException                src/Client/Exception/  (internal; does not escape RawKvClient)
     ├── BatchDeadlineExceededException              src/Client/Exception/
     ├── BatchPartialFailureException                src/Client/Exception/
+    ├── CasIndeterminateException                   src/Client/Exception/
     ├── ClientClosedException                       src/Client/Exception/
     ├── GrpcException                               src/Client/Exception/
     ├── HealthCheckException                        src/Client/Exception/
@@ -56,13 +57,13 @@ extends `\InvalidArgumentException` directly — it is **not** a
 └── InvalidArgumentException                        src/Client/Exception/
 ```
 
-All twenty-two `TiKvException` subclasses are `final`; `TiKvException`
+All twenty-three `TiKvException` subclasses are `final`; `TiKvException`
 itself is the only non-final class in the tree (it is the intended base for
 any custom project-wide exception work).
 
 > The client never throws a raw `\Exception`, `\RuntimeException` or
 > `\InvalidArgumentException` as an operation failure: everything that can
-> reach your code from a TiKV operation is one of the twenty classes above.
+> reach your code from a TiKV operation is one of the twenty-one classes above.
 > The two bootstrap/environment errors described next are the deliberate
 > exceptions.
 
@@ -126,6 +127,7 @@ the commit/rollback decision (issue #224, TXN-19).
 | [`BatchCommandsStreamException`](../src/Client/Exception/BatchCommandsStreamException.php) | `TiKvException` | Internal BatchCommands stream failure (peer half-close, malformed message, drain deadline). `RawKvBatch::tryMultiplex()` catches it and falls back to the unary path, so it does not escape `RawKvClient`; a direct caller of `BatchCommandsMultiplexer` can still see it |
 | [`BatchDeadlineExceededException`](../src/Client/Exception/BatchDeadlineExceededException.php) | `TiKvException` | A batch operation exceeded its wall-clock deadline; accessors: `getDeadlineMs()`, `getElapsedMs()`, `getContext()` |
 | [`BatchPartialFailureException`](../src/Client/Exception/BatchPartialFailureException.php) | `TiKvException` | A fanned-out batch operation failed on some regions; accessors: `getRegionErrors()`, `getTotalRegions()` |
+| [`CasIndeterminateException`](../src/Client/Exception/CasIndeterminateException.php) | `TiKvException` | A `compareAndSwap()` / `putIfAbsent()` transport failure left the swap outcome unknown (the write may have been applied). The original `GrpcException` is preserved as `getPrevious()`; `getGrpcStatusCode()` exposes its status code. Re-read the key to determine the outcome — do not retry blindly |
 | [`ClientClosedException`](../src/Client/Exception/ClientClosedException.php) | `TiKvException` | The operation was attempted after `$client->close()` |
 | [`GrpcException`](../src/Client/Exception/GrpcException.php) | `TiKvException` | gRPC transport/status error; carries `public readonly int $grpcStatusCode` |
 | [`KeyErrorException`](../src/Client/Exception/KeyErrorException.php) | `TiKvException` | A per-pair `KeyError` reported on a response where key errors are not handled by the caller (e.g. a per-pair error on a raw scan); previously reported as `RegionException` and retried as a region miss |
@@ -187,7 +189,8 @@ Verdict legend:
 | `TxnRetryableException` | Escapes only when the surrounding executor gives up; treat like other txn errors: **new transaction** unless the op is idempotent |
 | `RetryBudgetExhaustedException` | **Retry if idempotent** — the client already retried internally until its budget ran out (attempt cap or deadline); check `getPrevious()` for the root cause |
 | `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint). An `EpochNotMatch` that carries a usable `current_regions` payload refreshes the cache instead of forcing a PD lookup; an empty or unusable payload still invalidates. `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
-| `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff |
+| `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff. On `compareAndSwap()`/`putIfAbsent()` it is raised only when the failure happened **before** the request was sent (e.g. PD unreachable during region resolution), so the swap definitively did not happen |
+| `CasIndeterminateException` | **Do not retry blindly** — the CAS transport failure leaves the outcome unknown: the swap may already have been applied. Re-read the key and decide from what you find; never treat it as "not swapped" or "lock not acquired" |
 | `StoreNotFoundException` | **Do not retry blindly** — PD no longer knows the store backing the region. The retry executor treats it as a fatal routing error and invalidates the cached region when the missing store belongs to it (issue #627), so the next request re-resolves instead of serving the same stale entry until its TTL expires. The store still has to come back in PD; a short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
 | `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()['pendingRegions']` for the regions without a result. The deadline is finite by default (`batchDeadlineMs`, 60000 ms). `Transaction::commit()` never throws it after the commit point (see below) |
@@ -235,8 +238,10 @@ try {
 For RawKV there is no transaction boundary: `put()`/`delete()` are naturally
 idempotent (same value rewritten), but `compareAndSwap()`,
 `putIfAbsent()` and counter-style read-modify-write patterns are **not** —
-after any exception their precondition is unknown, so re-read before
-re-applying. The per-operation verdicts are in
+after an ambiguous exception their precondition is unknown, so re-read before
+re-applying. A transport failure on the CAS request itself raises
+`CasIndeterminateException`; a plain `GrpcException` there means the request
+was never sent. The per-operation verdicts are in
 [Idempotency and Retry Safety](#idempotency-and-retry-safety).
 
 ## Idempotency and Retry Safety
@@ -338,11 +343,21 @@ only the timing it produces differs.
 `compareAndSwap()` — and `putIfAbsent()`, which is the same call with
 `previous_not_exist = true` — is the one RawKV write that is **not**
 idempotent, and the client does not retry it on transport errors on purpose
-(#239). `RawKvAtomic::compareAndSwap()` installs a classifier that rethrows
-every `GrpcException` from inside the retry executor, so a deadline exceeded
-or a connection reset reaches the caller **unretried**. Region errors
-(`NotLeader`, `EpochNotMatch`, …) are different: they are rejected before
-the write is proposed, so the client still retries them automatically.
+(#239). A transport failure on the `RawCompareAndSwap` RPC is wrapped in
+[`CasIndeterminateException`](../src/Client/Exception/CasIndeterminateException.php),
+which preserves the original `GrpcException` as `getPrevious()`, so a
+deadline exceeded or a connection reset reaches the caller **unretried** and
+typed as an unknown outcome. Region errors (`NotLeader`, `EpochNotMatch`, …)
+are different: they are rejected before the write is proposed, so the client
+still retries them automatically. A transport failure **before** the request
+is sent (PD unreachable while resolving the region or store) is definitive
+and stays a plain `GrpcException`; it must not be mistaken for an
+indeterminate swap. The same is true of an application-level gRPC rejection
+of the CAS request (`UNAUTHENTICATED`, `PERMISSION_DENIED`,
+`INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED`, `UNIMPLEMENTED`, …): the server
+refused it, so no swap happened. Ambiguous outcomes — `DEADLINE_EXCEEDED`,
+`UNAVAILABLE`, `ABORTED`, `INTERNAL`, `UNKNOWN`, `CANCELLED`, `DATA_LOSS` and
+unrecognised codes — become `CasIndeterminateException`.
 
 The failure mode is the reason. The server may have applied the swap and lost
 the response; the client cannot tell, so it does not retry and leaves the
@@ -489,8 +504,8 @@ there at all.
 | `put(string, string, int $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Same validation as `get()` plus value size |
 | `delete(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Idempotent at the TiKV level |
 | `getKeyTTL(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Returns `null` when the key has no TTL |
-| `compareAndSwap(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | `InvalidStateException` with `CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))` when atomic mode is off |
-| `putIfAbsent(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Delegates to `compareAndSwap()`; requires atomic mode (`setAtomicForCAS(true)`), same `InvalidStateException` message |
+| `compareAndSwap(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `CasIndeterminateException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | `InvalidStateException` with `CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))` when atomic mode is off. `CasIndeterminateException` means the swap may have been applied; a `GrpcException` here means the request was never sent, so the swap definitively did not happen |
+| `putIfAbsent(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `CasIndeterminateException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Delegates to `compareAndSwap()`; requires atomic mode (`setAtomicForCAS(true)`), same `InvalidStateException` message. `CasIndeterminateException` means the value may have been stored |
 | `batchGet(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `KeyErrorException`, `StoreNotFoundException`, `TiKvException` | Empty input returns `[]` without RPC. A region's `RetryBudgetExhaustedException` is reported inside `BatchPartialFailureException::getRegionErrors()`. `KeyErrorException` and `StoreNotFoundException` escape directly only with `options['batchCommands']` enabled. `TiKvException` is the fail-closed unresolved-region error before any send |
 | `batchPut(array, int\|array $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `StoreNotFoundException`, `TiKvException` | Per-key validation happens before any send. On the default unary path, retry-budget and missing-store failures are wrapped as for `batchGet()`; with `options['batchCommands']`, a missing store can escape directly. `TiKvException` is the fail-closed unresolved-region error before any send |
 | `batchDelete(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `StoreNotFoundException`, `TiKvException` | Per-key validation happens before any send. On the default unary path, retry-budget and missing-store failures are wrapped as for `batchGet()`; with `options['batchCommands']`, a missing store can escape directly. `TiKvException` is the fail-closed unresolved-region error before any send |

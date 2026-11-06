@@ -311,6 +311,15 @@ $remaining = $client->getKeyTTL('session');          // seconds remaining, or nu
 > CAS, use a separate client instance for it. Use the same mode for every
 > writer of the same keys. See [Atomic Mode](docs/operations.md#atomic-mode-setatomicforcas--isatomicforcas).
 
+A transport failure on the CAS request itself (`DEADLINE_EXCEEDED`,
+`UNAVAILABLE`, a connection reset) leaves the outcome **indeterminate** and
+throws `CasIndeterminateException`, with the original `GrpcException` as
+`getPrevious()`. It is never retried, because repeating a CAS can turn a
+successful first attempt into a false "not swapped". Re-read the key to decide;
+a plain `GrpcException` on `compareAndSwap()`/`putIfAbsent()` means the request
+was never sent or the server rejected it before applying it, so the swap
+definitively did not happen.
+
 ```php
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
 
