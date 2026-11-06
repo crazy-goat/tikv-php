@@ -458,9 +458,14 @@ if ($page !== []) {
 #### Parallel Scanning
 
 ```php
+// Bounded parallel sample: batchScan() returns at most $limitPerRange rows
+// from each range, so this is not a complete export. For a complete read,
+// iterate each range with scanIterator() (or raise the limit and page on the
+// last key you received).
 function parallelScan(
     RawKvClient $client,
     string $prefix,
+    int $limitPerRange = 10000,
     int $workers = 4
 ): array {
     // Divide key space into ranges
@@ -479,7 +484,7 @@ function parallelScan(
     // Scan ranges in parallel (using batchScan).
     // The ranges are fanned out concurrently, capped by
     // options['maxConcurrency'] (default 16, must be >= 1).
-    $results = $client->batchScan($ranges, eachLimit: 10000);
+    $results = $client->batchScan($ranges, eachLimit: $limitPerRange);
     
     // Merge results
     return array_merge(...$results);
