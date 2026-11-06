@@ -952,6 +952,229 @@ class TransactionTest extends TestCase
     }
 
     // ========================================================================
+    // Lifecycle — a terminal transaction cannot be used again
+    // ========================================================================
+
+    /**
+     * Every public operation of a terminal transaction, as a closure so the
+     * same provider drives the post-commit and post-rollback cases.
+     *
+     * @return iterable<string, array{\Closure(Transaction): void}>
+     */
+    public static function postTerminalOperationProvider(): iterable
+    {
+        yield 'commit' => [static function (Transaction $txn): void {
+            $txn->commit();
+        }];
+        yield 'rollback' => [static function (Transaction $txn): void {
+            $txn->rollback();
+        }];
+        yield 'set' => [static function (Transaction $txn): void {
+            $txn->set('k', 'v');
+        }];
+        yield 'delete' => [static function (Transaction $txn): void {
+            $txn->delete('k');
+        }];
+        yield 'get' => [static function (Transaction $txn): void {
+            $txn->get('k');
+        }];
+        yield 'batchGet' => [static function (Transaction $txn): void {
+            $txn->batchGet(['k']);
+        }];
+        yield 'scan' => [static function (Transaction $txn): void {
+            $txn->scan('a', 'z');
+        }];
+        yield 'heartbeat' => [static function (Transaction $txn): void {
+            $txn->heartbeat();
+        }];
+    }
+
+    /**
+     * @param \Closure(Transaction): void $operation
+     */
+    #[DataProvider('postTerminalOperationProvider')]
+    public function testOperationsAfterCommitThrowInvalidState(\Closure $operation): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('Transaction is not active');
+        $operation($txn);
+    }
+
+    /**
+     * @param \Closure(Transaction): void $operation
+     */
+    #[DataProvider('postTerminalOperationProvider')]
+    public function testOperationsAfterRollbackThrowInvalidState(\Closure $operation): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('Transaction is not active');
+        $operation($txn);
+    }
+
+    public function testDoubleCommitThrowsAndIssuesNoSecondCommitRpc(): void
+    {
+        $methods = [];
+        $this->stubCommitRpcResponses($methods);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $commitTs = $txn->getCommitTs();
+        $this->assertNotNull($commitTs);
+        $this->assertSame(['KvPrewrite', 'KvCommit'], $methods);
+
+        try {
+            $txn->commit();
+            $this->fail('A second commit() must throw InvalidStateException');
+        } catch (InvalidStateException $e) {
+            $this->assertSame('Transaction is not active', $e->getMessage());
+        }
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame($commitTs, $txn->getCommitTs());
+        $this->assertSame(1, count(array_keys($methods, 'KvCommit', true)));
+    }
+
+    public function testRollbackAfterCommitThrowsAndIssuesNoRollbackRpc(): void
+    {
+        $methods = [];
+        $this->stubCommitRpcResponses($methods);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        try {
+            $txn->rollback();
+            $this->fail('rollback() after a successful commit() must throw');
+        } catch (InvalidStateException $e) {
+            $this->assertSame('Transaction is not active', $e->getMessage());
+        }
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(['KvPrewrite', 'KvCommit'], $methods);
+    }
+
+    public function testDoubleRollbackThrowsAndIssuesNoSecondRollbackRpc(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods): object {
+                $methods[] = $method;
+
+                return match ($method) {
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->rollback();
+
+        $this->assertSame(['KvBatchRollback'], $methods);
+
+        try {
+            $txn->rollback();
+            $this->fail('A second rollback() must throw InvalidStateException');
+        } catch (InvalidStateException $e) {
+            $this->assertSame('Transaction is not active', $e->getMessage());
+        }
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame(['KvBatchRollback'], $methods);
+    }
+
+    public function testInspectionGettersRemainUsableAfterCommit(): void
+    {
+        $methods = [];
+        $this->stubCommitRpcResponses($methods);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        // Read-only inspection is the one thing a terminal transaction still
+        // supports: callers read the final status before dropping it.
+        $this->assertSame('test-txn-1', $txn->getTxnId());
+        $this->assertSame(1000, $txn->getStartTs());
+        $this->assertNotNull($txn->getCommitTs());
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertFalse($txn->isPessimistic());
+        $this->assertSame(['k1' => 'v1'], $txn->getWriteSet());
+        $this->assertSame(1, $txn->getWriteSetCount());
+        $this->assertSame(4, $txn->getWriteSetSize());
+    }
+
+    public function testInspectionGettersRemainUsableAfterRollback(): void
+    {
+        $this->setUpRollbackRegionMocking();
+        $this->grpc->method('call')->willReturnCallback(
+            static fn (string $addr, string $svc, string $method): object => match ($method) {
+                'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->rollback();
+
+        $this->assertSame('test-txn-1', $txn->getTxnId());
+        $this->assertSame(1000, $txn->getStartTs());
+        $this->assertNull($txn->getCommitTs());
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertFalse($txn->isPessimistic());
+        $this->assertSame([], $txn->getWriteSet());
+        $this->assertSame(0, $txn->getWriteSetCount());
+        $this->assertSame(0, $txn->getWriteSetSize());
+    }
+
+    /**
+     * Stub the two RPCs of a one-region optimistic commit and record the
+     * RPC methods that reached the transport in $methods.
+     *
+     * @param list<string> $methods
+     */
+    private function stubCommitRpcResponses(array &$methods): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods): object {
+                $methods[] = $method;
+
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+    }
+
+    // ========================================================================
     // scan() — limit=0 handling
     // ========================================================================
 

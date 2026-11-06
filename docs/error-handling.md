@@ -188,12 +188,12 @@ Verdict legend:
 | `LockWaitTimeoutException` | **New transaction** — the pessimistic locks were not acquired, the transaction cannot proceed |
 | `TxnRetryableException` | Escapes only when the surrounding executor gives up; treat like other txn errors: **new transaction** unless the op is idempotent |
 | `RetryBudgetExhaustedException` | **Retry if idempotent** — the client already retried internally until its budget ran out (attempt cap or deadline); check `getPrevious()` for the root cause |
-| `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint). An `EpochNotMatch` that carries a usable `current_regions` payload refreshes the cache instead of forcing a PD lookup; an empty or unusable payload still invalidates. `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
-| `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff. On `compareAndSwap()`/`putIfAbsent()` it is raised only when the failure happened **before the request was applied**: either it was never sent (e.g. PD unreachable during region resolution) or the server rejected it (`UNAUTHENTICATED`, `PERMISSION_DENIED`, …). The swap definitively did not happen |
+| `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint). An `EpochNotMatch` that carries a usable `current_regions` payload refreshes the cache instead of forcing a PD lookup; an empty or unusable payload still invalidates. A `StoreNotMatch` also drops the store address it names, so the next attempt re-resolves it through PD instead of reusing a stale address (issue #247). `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
+| `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff. A retryable transport failure also drops the address of the store it could not reach, so a rescheduled store is re-resolved from PD on the next attempt instead of being retried on its old address (issue #247). On `compareAndSwap()`/`putIfAbsent()` it is raised only when the failure happened **before the request was applied**: either it was never sent (e.g. PD unreachable during region resolution) or the server rejected it (`UNAUTHENTICATED`, `PERMISSION_DENIED`, …). The swap definitively did not happen |
 | `CasIndeterminateException` | **Do not retry blindly** — the CAS transport failure leaves the outcome unknown: the swap may already have been applied. Re-read the key and decide from what you find; never treat it as "not swapped" or "lock not acquired" |
 | `StoreNotFoundException` | **Do not retry blindly** — PD no longer knows the store backing the region. The retry executor treats it as a fatal routing error and invalidates the cached region when the missing store belongs to it (issue #627), so the next request re-resolves instead of serving the same stale entry until its TTL expires. The store still has to come back in PD; a short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
-| `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()['pendingRegions']` for the regions without a result. The deadline is finite by default (`batchDeadlineMs`, 60000 ms). `Transaction::commit()` never throws it after the commit point (see below) |
+| `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; `getContext()['pendingRegions']` lists the fan-out slots without a result (internal sub-batch or segment indices, not TiKV region IDs or user keys). A batch that finishes inside the deadline is unaffected; the deadline is finite by default (`batchDeadlineMs`, 60000 ms) and `0` disables it. `Transaction::commit()` never throws it after the commit point (see below) |
 
 ### Transaction::commit() and double-apply
 
@@ -302,7 +302,7 @@ only the timing it produces differs.
 | `RawKvClient::scan()`, `RawKvClient::scanPrefix()`, `RawKvClient::reverseScan()`, `RawKvClient::batchScan()` | Yes | Yes | Read-only. The rows are the same set the first call returned unless the data changed in between |
 | `RawKvClient::scanIterator()`, `RawKvClient::scanPrefixIterator()` | Yes | Yes | Read-only, but **lazy**: the failure surfaces from the iteration, not from the factory call. A new iterator starts again at the beginning of the range. Exception: the cursor-progress `TiKvException` (#312) is not transient, so do not loop on it |
 | `ScanIterator::current()`, `ScanIterator::key()`, `ScanIterator::next()`, `ScanIterator::valid()`, `ScanIterator::rewind()` | Yes | Yes | Read-only. `next()` and `valid()` issue the scan RPCs, so an ambiguous failure surfaces from the iteration, not from the factory call — repeat the iteration from the beginning of the range (`rewind()` restarts the same iterator at the range's first key). After `RawKvClient::close()`, a page fetch throws `ClientClosedException` before issuing an RPC |
-| `RawKvClient::checksum()` | Yes | Yes | Read-only. The merged CRC64-XOR covers the whole range because a failed region aborts the call with a `BatchPartialFailureException` instead of returning a partial result |
+| `RawKvClient::checksum()` | Yes | Yes | Read-only. Retryable region errors carried in a per-region response are retried per sub-range first; a fatal region error or an exhausted retry budget aborts the call with a `BatchPartialFailureException` instead of returning a partial result, so the merged CRC64-XOR covers the whole range |
 | `RawKvClient::put()` | Yes | Yes | The same key/value is written again, so the final value is the same. With a TTL the **TTL restarts on every attempt** — the TTL travels as a relative number of seconds and TiKV computes the expiry when it applies the write — so a retry extends the key's lifetime. In atomic mode the write also carries `for_cas` and takes TiKV's atomic path, but it stays an unconditional overwrite of the same value |
 | `RawKvClient::delete()` | Yes | Yes | Deleting an already-deleted key is not an error |
 | `RawKvClient::batchPut()` | Yes | Yes | The same key/value pairs converge, and the TTL restarts on every attempt as for `put()`. A `BatchPartialFailureException` leaves an **unknown subset** written — re-run the whole batch |
@@ -490,7 +490,10 @@ fanned-out batch and range operations (`batchGet()`, `batchPut()`,
 `checksum()`) report a per-region failure — including the operation's
 exhausted retry budget or a missing store — inside
 `BatchPartialFailureException::getRegionErrors()` instead of throwing the
-wrapped type. With `options['batchCommands']` enabled, the multiplexed entry
+wrapped type. A retryable region error carried in a range response is retried
+per sub-range in the wait phase before it can reach that wrapper (issue #566),
+so only a fatal region error or an exhausted budget is reported there. With
+`options['batchCommands']` enabled, the multiplexed entry
 setup resolves store addresses before that wrapper, so
 `StoreNotFoundException` can escape `batchGet()`, `batchPut()` and
 `batchDelete()` directly, and `batchGet()` can also let a per-pair
@@ -673,6 +676,17 @@ Notes:
 - Deadline checks run *before* each attempt; worst-case worker occupancy is
   therefore approximately the deadline plus one more in-flight attempt
   (bounded by the gRPC timeout).
+- Lock resolution inside a retry loop (a `KeyError.locked` during prewrite,
+  rollback or a transactional read) shares the same remaining deadline: its
+  `CheckTxnStatus` (and the TSO fetch it performs), `CheckSecondaryLocks` and
+  `ResolveLock` RPCs are capped by it. The resolver converts the remaining
+  budget into one absolute deadline at its entry, so the nested RPCs share
+  the same live budget and none is given a deadline beyond the operation's
+  `retryDeadlineMs`. A live lock is still reported as retryable (the executor
+  owns the backoff) and the resolver never sleeps for the lock TTL; the
+  executor's deadline check raises `RetryBudgetExhaustedException` when the
+  budget is spent. With `retryDeadlineMs=0` the configured
+  `lockResolveTimeoutMs`/`tsoTimeoutMs` apply unchanged.
 - `ErrorClassifier` decides which errors are retryable: NotLeader /
   EpochNotMatch / ServerIsBusy / StaleCommand / RegionNotFound and friends
   retry with typed backoff curves, while `RaftEntryTooLarge`,
@@ -696,12 +710,38 @@ Notes:
   exception; its empty/unusable-payload fallback keeps
   `retry_region_error:epoch_not_match` only where the stale entry is still
   cached (e.g. RawKV). (#246)
+- A `StoreNotMatch` region error, and a retryable transport failure against a
+  store, drop that store's address from the store cache as well as the cached
+  region. The next attempt therefore asks PD for a fresh `GetStore`; without
+  the drop a rescheduled TiKV pod kept its old address in the cache for the
+  rest of its TTL (up to 660 s with the defaults) and every retry reopened a
+  channel to the dead endpoint. Non-routing errors such as `ServerIsBusy`
+  keep the address, exactly as they keep the region (issue #245). The
+  invalidation is logged with reason `store_not_match` or `transport_error`.
+  (#247)
 - A fanned-out batch or range operation (`batchGet()`, `batchPut()`,
   `batchDelete()`, `batchScan()`, `deleteRange()`, `deletePrefix()`,
   `checksum()`) reports a region's `RetryBudgetExhaustedException` inside
   `BatchPartialFailureException::getRegionErrors()`; it is not thrown
   directly. `ingest()` does not use a `RetryExecutor` at all, so it has no
   retry budget to exhaust.
+- A region error carried in a range response is not the end of the operation:
+  `deleteRange()` and `checksum()` run each sub-range's dispatch+await cycle
+  under the retry executor (issue #566), so `NotLeader`, `EpochNotMatch`,
+  `ServerIsBusy` and friends are retried with the budgets above before a
+  `BatchPartialFailureException` can report them.
+- NotLeader ownership inside the lock resolver follows the same rule as
+  everywhere else: `LockResolver` threads `notLeaderOwnedByRetryExecutor`
+  from `resolveLock()` / `resolveLocks()` through every region-error check on
+  the lock-resolution path — `KvCheckTxnStatus`, `KvCheckSecondaryLocks`, the
+  batch `KvResolveLock` and the async-commit finalization
+  (`resolveAsyncCommitLocks()`). At executor-owned call sites (prewrite and
+  rollback after #213/#502, the `TxnReader` read retries) the flag is `true`,
+  so `RegionErrorHandler::check()` leaves the region cached and
+  `RetryExecutor::handleNotLeader()` owns the drop and the valid-hint leader
+  switch. The pessimistic-lock loop has no enclosing executor and passes
+  `false`, so `check()` self-invalidates with `'not_leader'` before throwing
+  (issue #568).
 
 See also:
 

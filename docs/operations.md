@@ -540,6 +540,14 @@ scan (`limit > 0`) returns at most `limit` rows, so a result whose count
 equals the limit may be truncated. There is no reverse iterator — for a large
 reverse range raise the guard deliberately or page the range in the caller.
 
+An unbounded reverse scan whose page spans several regions issues the
+per-region reads **concurrently**, in windows of at most
+`options['maxConcurrency']` regions (default 16), and concatenates them in
+descending key order — the same fan-out as an unbounded forward scan. A
+region or transport error, or a region that split after enumeration, falls
+back to the sequential retrying path. A bounded reverse scan
+(`limit > 0`) stays sequential.
+
 **Example:**
 
 ```php
@@ -645,7 +653,7 @@ $client->deleteRange('log:2023-01-01', 'log:2024-01-01');
 $client->deleteRange('data:user:123:', 'data:user:123;');
 ```
 
-**Warning:** This operation is not atomic across regions. If it fails partway through, some keys may be deleted and others not. The same partial-failure rules as the [batch operations](#partial-failure-and-recovery) apply: `deleteRange` also throws `BatchPartialFailureException`, and because deletes are idempotent the whole range operation may simply be re-issued.
+**Warning:** This operation is not atomic across regions. If it fails partway through, some keys may be deleted and others not. The same partial-failure rules as the [batch operations](#partial-failure-and-recovery) apply: `deleteRange` also throws `BatchPartialFailureException`, and because deletes are idempotent the whole range operation may simply be re-issued. Retryable region errors carried in a region's response (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, …) are retried per region before the operation gives up: a leader transfer, or a split whose fresh region still covers the sub-range, is retried transparently; a split that leaves the fresh region smaller than the sub-range still fails closed (via `assertRegionCoversRange()`, reported as a `BatchPartialFailureException`).
 
 ### Delete Prefix
 
@@ -1052,6 +1060,11 @@ if ($before->checksum === $after->checksum &&
 - Data migration verification
 - Backup integrity checks
 - Data consistency validation
+
+Retryable region errors carried in a per-region response are retried per
+sub-range with backoff and region-cache invalidation (issue #566). Only a
+fatal region error or an exhausted retry budget aborts the call — as a
+`BatchPartialFailureException`, never as a partial checksum.
 
 ## Error Handling
 

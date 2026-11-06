@@ -46,9 +46,10 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::INFO));
 // Client options
 $options = [
     // Concurrency cap for operations that fan out per-region/per-store RPCs
-    // (batchScan, deleteRange/deletePrefix/checksum, SST store-mode
-    // switches): at most this many units (ranges, regions or stores) are in
-    // flight at once. Default: 16. Must be >= 1.
+    // (an unbounded scan()/scanPrefix()/reverseScan() page, batchScan,
+    // deleteRange/deletePrefix/checksum, SST store-mode switches): at most
+    // this many units (ranges, regions or stores) are in flight at once.
+    // Default: 16. Must be >= 1.
     'maxConcurrency' => 16,
     // Row cap for an unbounded scan (scan()/scanPrefix()/reverseScan() with
     // limit: 0, issue #191). limit: 0 returns the whole range by paging
@@ -538,7 +539,11 @@ the same underlying channel and the same TCP connection (see below).
 
 Sharing the transport shares the **channels** only. Every client keeps its own
 region cache and its own store-address cache, so the two clients do not warm
-each other's caches.
+each other's caches. Store addresses are cached for 600 s plus up to 60 s of
+jitter; a `StoreNotMatch` region error or a retryable transport failure against
+a store evicts that store's entry early, so a TiKV pod that was rescheduled to
+a new address is found again on the next attempt instead of after the TTL
+(issue #247).
 
 `options['metrics']` is a **client-side** option and is always applied: it
 backs the client-side counters (region cache, retries). The transport's own
@@ -730,12 +735,18 @@ $tlsConfig = $builder->build();
 $grpc = new GrpcClient($logger, $tlsConfig);
 // The store cache is the fourth argument of PdClient. It is mandatory: when
 // you omit it, PdClient creates a default StoreCache. Pass your own to set
-// the TTL, the size or the logger.
+// the TTL, the size or the logger. A StoreNotMatch region error or a
+// transport failure against a store drops that store's entry, so the next
+// request re-resolves the address through PD (issue #247).
 $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
 // The client closes the transport it was given in close() — pass
 // ownsGrpcClient: false to keep the ownership with the application.
-$client = new RawKvClient($pdClient, $grpc);
+// Pass the same storeCache, or a StoreNotMatch / transport failure cannot
+// drop the stale address: the client's resolver has no cache to invalidate
+// while PdClient keeps serving that entry. Omitting storeCache disables
+// early invalidation.
+$client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 ```
 
 > **Note:** the manual path above is for the rare case where the client has
@@ -1369,6 +1380,76 @@ If a heartbeat fails, the operation throws the typed exception of
 The usual cause is a lock that is already gone. In that case, roll the
 transaction back.
 
+### A single prewrite or commit RPC can outlive the lock TTL
+
+The automatic keepalive has one inherent limit: it can only send a heartbeat
+at a point where control returns to PHP. Those points are
+
+1. at the start of `commit()` for a pessimistic transaction, before the
+   prewrite phase,
+2. after the primary region's prewrite has been acknowledged, and
+3. after the parallel fan-out of the secondary prewrites has completed.
+
+In the default two-phase path those are two separate checks. A multi-region
+async commit deliberately prewrites the primary **last** (the primary lock is
+the commit-decision barrier), so its primary prewrite follows the fan-out and
+the two points coincide: it checks once, after the primary prewrite, and not
+again when the fan-out returns.
+
+There is no heartbeat **inside** a `KvPrewrite` or `KvCommit` call: the gRPC
+call blocks in the extension and PHP has no timer that could run while it is
+in flight. Nor is there one between the individual secondary batches, because
+they are dispatched in parallel and the committer waits for the whole fan-out
+before checking the clock. If one RPC — or the gap between the last prewrite
+heartbeat and the primary commit, plus that commit RPC — takes longer than the
+lock TTL, the lock expires and a concurrent reader may resolve (roll back) the
+transaction. The later commit then fails with `TxnLockNotFound`. A
+single-region transaction **that fits in one request batch** (the default for
+small write sets) is the simplest case: it has exactly one prewrite RPC and
+therefore no between-RPC point at which a heartbeat could be sent. A larger
+single-region write set is split into a primary batch plus secondary batches
+in the same region and gets the same batch-boundary checks as a multi-region
+transaction, but no individual request can be heartbeated mid-flight.
+
+Four settings determine whether that can happen:
+
+| Setting | Effect |
+|---|---|
+| `optimisticLockTtlMs` / `pessimisticLockTtlMs` | The base lock lifetime. Optimistic locks use `min(optimisticLockTtlMs + 10 ms × mutations, 120000)`, where the mutation count is the **whole write set**, not one batch; pessimistic locks use `pessimisticLockTtlMs`. The value sent with the request is `min(uptime + base, 3600000)`, so a lock created at the start of prewrite expires roughly `base` milliseconds later (less only when the transaction has already run for more than `3600000 − base`). |
+| `writeTimeoutMs` (default `5000`) | The gRPC deadline of **each** `KvPrewrite` and `KvCommit` attempt. One attempt can occupy the wire for at most this long. With the defaults, an optimistic transaction with fewer than ~200 mutations has a base TTL below `writeTimeoutMs` (`3000 + 10 × mutations`), so a single slow prewrite can outlive it. |
+| Retry budget (`retryDeadlineMs`, default `30000`; `maxBackoffMs`, default `20000` sleep budget) | A region's prewrite may be attempted more than once. Each attempt gets its own `writeTimeoutMs`, and the retries share the `commit()` operation's wall-clock deadline, so one region can consume several timeout windows before it succeeds or fails. |
+| `batchDeadlineMs` (default `60000`) | The wall-clock deadline of the parallel secondary-prewrite fan-out (and of the secondary commit fan-out). It can exceed the lock TTL and does not itself extend any lock. |
+
+Guidance:
+
+- **Keep the per-RPC timeout below the lock TTL.** Set `writeTimeoutMs`
+  comfortably below the effective base TTL, ideally below half of it (the
+  point at which a heartbeat becomes due). For an optimistic transaction the
+  default TTL is small, so either raise `optimisticLockTtlMs` (for example to
+  `10000`, comfortably above the default `writeTimeoutMs` of `5000`) or lower
+  `writeTimeoutMs`. `pessimisticLockTtlMs` defaults to `30000`, which already
+  covers the default write timeout.
+- **Make each request small.** `maxTxnBatchSize` and `maxTxnBatchCount` split
+  a region's prewrite into smaller requests (see
+  [Transaction Size Limits and Request Batching](#transaction-size-limits-and-request-batching-txnkv)).
+  A smaller request finishes sooner and is less likely to outlive the TTL.
+  Batching does **not** create extra heartbeat points: the secondary batches
+  are sent in parallel and the heartbeat is checked only after all of them
+  have returned.
+- **Raise the TTL for a slow store or a large transaction.** The optimistic
+  base TTL can be raised to `120000` ms and heartbeats extend a lock up to one
+  hour (`MAX_TXN_TTL_MS`). Size it for the worst case of the whole prewrite
+  phase — store latency, any retry windows, and the fan-out — not for the
+  average request.
+- **Do not rely on a heartbeat to rescue a hung RPC.** `writeTimeoutMs` is the
+  only bound on one call; once the deadline fires, the attempt has already
+  consumed that much of the lock's lifetime.
+
+One-phase commit leaves no lock, and async commit carries the commit decision
+on the primary lock during prewrite, so 1PC has no lock to expire and async
+commit has no separate primary `KvCommit` RPC. Both still perform prewrites,
+so the per-RPC timeout guidance above applies to them too.
+
 ## Pessimistic Lock Wait Timeout (TxnKV)
 
 A pessimistic-lock request tells TiKV how long it may block on a contended
@@ -1425,8 +1506,8 @@ $txn = $client->begin([
 | `maxTxnEntryCount` | `0` (unlimited) | Maximum number of write-set entries. |
 | `maxTxnEntrySize` | `0` (unlimited) | Maximum bytes of one entry, measured as key length plus value length. A delete contributes the key length only. |
 | `maxTxnTotalSize` | `0` (unlimited) | Maximum bytes of the whole write set: the sum of every entry's key plus value length. |
-| `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite/commit request per region: key plus value length for a prewrite mutation, key length for a commit key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
-| `maxTxnBatchCount` | `512` | Maximum payload items — mutations (prewrite) or keys (commit) — of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
+| `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite, pessimistic-lock or commit request per region: key plus value length for a prewrite mutation, key length for a pessimistic-lock mutation or a commit key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
+| `maxTxnBatchCount` | `512` | Maximum payload items — mutations (prewrite or pessimistic lock) or keys (commit) — of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
 
 The three size limits are **opt-in** (`0` = unlimited) because there is no
 single correct value for every application; set them for untrusted or
@@ -1444,21 +1525,32 @@ does not consume additional budget.
 logged or exported as a metric without walking `getWriteSet()`.
 
 Batching is always on. `TwoPhaseCommitter` splits each region's prewrite
-mutations and commit keys with `RawKvSplitter::splitIntoBatches()` into
-requests bounded by both `maxTxnBatchSize` and `maxTxnBatchCount` **in payload
-terms**: key plus value bytes for a prewrite mutation, key bytes for a commit
-key, and item count. The bound does not cover request framing, `Context`,
-`primary_lock` or the async `secondaries` list, so an async primary prewrite
-can exceed `maxTxnBatchSize`; a single mutation larger than the budget still
-forms its own batch. The primary key's batch is still committed first; the
-remaining batches — including other batches of the primary's region — are
-secondary commits and are fanned out in parallel. One-phase commit remains
-limited to a single batch (a transaction split across several 1PC prewrites
-would be partially committed), and async commit carries its decision on the
-batch that holds the primary key. A batch that fails before the commit point
-still fails the whole transaction; after the primary commit, secondary-batch
-failures are logged and the transaction stays committed, exactly as for whole
-secondary regions.
+mutations, pessimistic-lock keys and commit keys with
+`RawKvSplitter::splitIntoBatches()` into requests bounded by both
+`maxTxnBatchSize` and `maxTxnBatchCount` **in payload terms**: key plus value
+bytes for a prewrite mutation, key bytes for a pessimistic-lock mutation or a
+commit key, and item count. The bound does not cover request framing,
+`Context`, `primary_lock` or the async `secondaries` list, so an async primary
+prewrite can exceed `maxTxnBatchSize`; a single mutation larger than the budget
+still forms its own batch. The primary key's batch is still committed first;
+the remaining batches — including other batches of the primary's region — are
+secondary commits and are fanned out in parallel. Pessimistic-lock requests
+use the same split, and `is_first_lock` is set only on the batch whose
+mutations contain the primary key, not on the first region batch (issue #225).
+One-phase commit remains limited to a single batch (a transaction split across
+several 1PC prewrites would be partially committed), and async commit carries
+its decision on the batch that holds the primary key. A batch that fails before
+the commit point still fails the whole transaction; after the primary commit,
+secondary-batch failures are logged and the transaction stays committed,
+exactly as for whole secondary regions.
+
+Batching bounds each **request**, not the prewrite phase. The secondary
+batches of all regions are dispatched in parallel, and the prewrite heartbeat
+is checked only after the whole fan-out returns, so a smaller batch reduces
+the duration of one `KvPrewrite` but does not add a heartbeat opportunity
+between batches. If a single request can take longer than the lock TTL, lower
+`writeTimeoutMs` or raise the lock TTL as well — see
+[A single prewrite or commit RPC can outlive the lock TTL](#a-single-prewrite-or-commit-rpc-can-outlive-the-lock-ttl).
 
 ## Transaction Priority (TxnKV)
 
@@ -1524,6 +1616,20 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > sleeping cannot overshoot it — but an in-flight RPC cannot be interrupted.
 > Example: `retryDeadlineMs => 1000` with a gRPC call that runs 5 s ⇒ real
 > occupancy ≈ 6 s (the deadline is enforced when that RPC returns).
+
+> **Lock resolution (TxnKV):** a `KeyError.locked` conflict during prewrite,
+> rollback or a transactional read is resolved inside the retry loop, so its
+> `KvCheckTxnStatus` (and the PD TSO fetch it performs),
+> `KvCheckSecondaryLocks` and `KvResolveLock` calls are capped by the
+> operation's **remaining** retry deadline. The resolver converts that
+> remaining budget into one absolute deadline at its entry, so the nested
+> RPCs share the same live budget and none is given a deadline beyond the
+> operation's `retryDeadlineMs`. A live lock is still reported as a retryable
+> error (the executor owns the backoff) and the resolver never sleeps for the
+> lock TTL; the executor's own deadline check raises
+> `RetryBudgetExhaustedException` when the budget is spent. With
+> `retryDeadlineMs => 0` the configured `lockResolveTimeoutMs` / `tsoTimeoutMs`
+> apply unchanged.
 
 > **Worker occupancy note:** `serverBusyBudgetMs` is effectively a
 > worker-occupancy setting — it caps how long ONE operation may block a PHP
@@ -1752,7 +1858,10 @@ per-region problem the retry executor already handles. `pdTimeoutMs` covers
 `GetRegion` / `ScanRegions` / `GetStore` / `GetAllStores` / `GetMembers` /
 `LoadKeyspace` and the GC safe-point RPCs; `tsoTimeoutMs` covers every `Tso` RPC
 (so also the timestamp `checkTxnStatus()` fetches); `lockResolveTimeoutMs` covers
-`KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`.
+`KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`. When lock
+resolution runs inside a retry loop, both the TSO and the lock-resolution
+deadline are further capped by that loop's remaining `retryDeadlineMs`; the
+configured value is the upper bound, not an independent budget.
 
 Every gRPC call carries a deadline. `GrpcClientInterface::call()`'s `$timeoutMs`
 argument of `null` means the library default (30 s); a non-positive value is a
@@ -1767,7 +1876,7 @@ By default all timeouts are set to sensible values (5s for reads/writes, 10s for
 
 `batchDeadlineMs` is finite by default (`TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, 60000 ms). When it is above `0`, it must not be less than any per-call timeout that a batch fan-out uses: `writeTimeoutMs`, `batchReadTimeoutMs`, `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs`, `checksumTimeoutMs` and `ingestTimeoutMs` (`readTimeoutMs` is not in the list: only point reads use it). If it is less, the `TimeoutConfig` constructor throws an `InvalidArgumentException` that names both fields. One wait is not interrupted by the deadline, so a deadline that is less than one call cannot be honoured. Such a setting has no meaning.
 
-The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs that region's share of the operation's retry budget; all regions of a batch share one `RetryExecutor` budget (issue #223), so `retryDeadlineMs` bounds the fan-out as a whole (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus the operation's remaining retry deadline. For scans the batch deadline applies per region batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
+A batch that answers within a positive `batchDeadlineMs` is unaffected: the deadline is a ceiling, not a minimum. The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs that region's share of the operation's retry budget; all regions of a batch share one `RetryExecutor` budget (issue #223), so `retryDeadlineMs` bounds the fan-out as a whole (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus the operation's remaining retry deadline. For scans the batch deadline applies per region batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
 
 Every key of the table above is configurable under its own name — the mapping is
 derived from `TimeoutConfig`'s constructor, so a field that is added to the
@@ -1965,7 +2074,9 @@ At executor-owned call sites, NotLeader drops are owned exclusively by the
 retry loop's leader handling: `RegionErrorHandler::check()` leaves the region
 cached so it can switch to a valid hint. Call sites without a surrounding
 retry executor pass `notLeaderOwnedByRetryExecutor: false` and self-invalidate
-with the same `'not_leader'` reason.
+with the same `'not_leader'` reason. `LockResolver` takes the flag from its
+caller and threads it through every region-error check it performs, including
+the async-commit finalization (`resolveAsyncCommitLocks()`, issue #568).
 
 `InMemoryMetrics` ships the same counters in-process, suitable for tests
 and benchmarks — see `getRpcStarted()`, `getRpcSucceeded()`, `getRetries()`,

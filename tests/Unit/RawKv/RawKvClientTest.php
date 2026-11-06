@@ -1531,14 +1531,14 @@ class RawKvClientTest extends TestCase
 
         $requests = [];
         $this->grpc->expects($this->exactly(2))
-            ->method('call')
+            ->method('callAsync')
             ->willReturnCallback(
                 function (
                     string $address,
                     string $service,
                     string $method,
                     Message $request,
-                ) use (&$requests): RawScanResponse {
+                ) use (&$requests): GrpcFuture {
                     $this->assertInstanceOf(RawScanRequest::class, $request);
                     $requests[] = $request;
 
@@ -1555,9 +1555,14 @@ class RawKvClientTest extends TestCase
                         $response->setKvs([$pair]);
                     }
 
-                    return $response;
+                    // Unbounded reverse scans fan out through callAsync();
+                    // return a concrete future instead of letting PHPUnit
+                    // double the final GrpcFuture class.
+                    return GrpcFuture::fromWaiter(static fn(): Message => $response);
                 },
             );
+
+        $this->grpc->expects($this->never())->method('call');
 
         $result = $this->client->reverseScan('z', '');
 

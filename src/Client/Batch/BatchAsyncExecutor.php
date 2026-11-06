@@ -61,10 +61,16 @@ final readonly class BatchAsyncExecutor
      * reported via {@see BatchPartialFailureException} after all calls have
      * been observed.
      *
-     * @param array<int, callable(): mixed> $regionCalls regionId => callable
+     * @param array<int, callable(): mixed> $regionCalls fan-out slot => callable
      *                                                   returning GrpcFuture,
      *                                                   CheckedGrpcFuture, or
-     *                                                   a direct value
+     *                                                   a direct value. The key
+     *                                                   is an internal slot index
+     *                                                   (a sub-batch/segment
+     *                                                   ordinal), not a TiKV
+     *                                                   region ID; it is what
+     *                                                   the exception context
+     *                                                   reports.
      * @param int                            $deadlineMs Wall-clock deadline in
      *                                                   milliseconds for
      *                                                   dispatch+wait; 0
@@ -204,10 +210,16 @@ final readonly class BatchAsyncExecutor
      * {@see BatchPartialFailureException}; later windows are never
      * dispatched.
      *
-     * @param array<int, callable(): mixed> $regionCalls regionId => callable
+     * @param array<int, callable(): mixed> $regionCalls fan-out slot => callable
      *                                                   returning GrpcFuture,
      *                                                   CheckedGrpcFuture, or
-     *                                                   a direct value
+     *                                                   a direct value. The key
+     *                                                   is an internal slot index
+     *                                                   (a sub-batch/segment
+     *                                                   ordinal), not a TiKV
+     *                                                   region ID; it is what
+     *                                                   the exception context
+     *                                                   reports.
      * @param int                           $maxConcurrency maximum number of
      *                                                      in-flight requests;
      *                                                      must be >= 1
@@ -215,7 +227,7 @@ final readonly class BatchAsyncExecutor
      *                                                      for dispatch+wait
      *                                                      across ALL windows;
      *                                                      0 disables it
-     * @return array<int, mixed> results keyed by the original regionId
+     * @return array<int, mixed> results keyed by the original fan-out slot
      * @throws BatchPartialFailureException   If any region fails
      * @throws BatchDeadlineExceededException If $deadlineMs > 0 and dispatch+wait exceeds it
      * @throws \InvalidArgumentException      If $maxConcurrency < 1
@@ -333,7 +345,7 @@ final readonly class BatchAsyncExecutor
      * underlying gRPC layer because cancellation may be invoked during
      * shutdown and must never propagate.
      *
-     * @param array<int, mixed> $futures regionId => value (GrpcFuture, CheckedGrpcFuture, or
+     * @param array<int, mixed> $futures fan-out slot => value (GrpcFuture, CheckedGrpcFuture, or
      *                                              direct)
      */
     private function cancelAll(array $futures): void
