@@ -23,9 +23,9 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
-- `Transaction::batchGet()` now passes the transaction's retry executor and error classifier explicitly to `TxnReader::batchGet()` instead of relying on the reader's constructor-injected fallback. Every per-region `KvBatchGet` dispatch+wait cycle uses the same retry policy as `get()` and `scan()`: `NotLeader`, `EpochNotMatch` and `ServerIsBusy` region errors invalidate or switch the cached region, re-resolve it and retry the read, while a fatal error (for example `KeyNotInRegion`) is rethrown after one attempt. The client-side fan-out of the per-region reads (issue #291) and the per-pair lock resolution (issue #210) are unchanged. (#222)
+- `Transaction::batchGet()` now passes its retry executor and error classifier explicitly to `TxnReader::batchGet()` instead of relying on the reader's constructor-injected fallback, and the redundant executor/classifier/backoff/metrics constructor parameters are gone. The per-region `KvBatchGet` dispatch+wait cycle already ran under `RetryExecutor::execute()` via `CheckedGrpcFuture::fromRetryableDispatch()` since #210/#291; this makes the wiring explicit without changing the retry policy, the #291 fan-out or the #210 lock resolution. Removing the reader's bound `$this->classifyError(...)` closure also breaks a `Transaction` → `TxnReader` → `Closure` → `Transaction` reference cycle, so an abandoned transaction's destructor rollback now runs when its last reference goes out of scope instead of at the next garbage-collection cycle. (#222)
 
 ## [v0.10.0] - 2026-11-06
 
