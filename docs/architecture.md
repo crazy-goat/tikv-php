@@ -422,6 +422,7 @@ and limitations: `docs/configuration.md` → "Batch Commands Multiplexing".
 - Track region epochs
 - Handle leader changes
 - Invalidate on errors
+- Support opt-in refresh and preload (`RegionCacheWarmer`, issue #425)
 
 **Cache Structure**:
 ```php
@@ -449,6 +450,20 @@ heap records.
 - **ServerIsBusy / DiskFull / IsWitness / RecoveryInProgress**: Keep the
   cached region — the request reached the right region, so only the retry
   backoff applies (issue #245)
+
+**Opt-in refresh and preload (issue #425)**:
+
+PHP has no background threads, so `RegionCacheWarmer` owns no timer and starts
+no loop. A long-running worker calls `refreshRegionCache()` from its own tick
+(the `reapIdleChannels()` pattern), throttled by
+`options['regionCacheRefreshMs']` (default `0`, disabled), or warms the cache
+at boot with `preloadRegions([['start', 'end'], ...])`. Refresh re-queries PD
+on each cached region's start key and folds the answer back through `put()`;
+a stale epoch is updated, a split or merge supersedes the entry silently, and
+an answer that does not cover the start key drops it. A PD failure is logged
+and the cached entry is kept; neither method throws on a PD failure, and both
+are no-ops after `close()`. Scan-path range resolution is a separate concern
+and is not part of this mechanism.
 
 ### 7. LockResolver
 
@@ -797,6 +812,12 @@ the sequential retrying path.
 - Refresh on EpochNotMatch from its `current_regions` payload; invalidate
   when the payload is absent or unusable
 - Update on NotLeader hint
+- Offer an opt-in tick (`refreshRegionCache()`) and an explicit boot-time
+  preload (`preloadRegions()`) for long-lived workers (issue #425)
+
+**Trade-off**: refresh costs one PD `GetRegion` per cached region, which is
+why it is opt-in and throttled by `regionCacheRefreshMs` rather than running
+by default.
 
 ### 4. Automatic Retries
 

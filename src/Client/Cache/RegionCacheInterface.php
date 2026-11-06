@@ -51,6 +51,28 @@ interface RegionCacheInterface
     public function getRegionsInRange(string $startKey, string $endKey): array;
 
     /**
+     * Snapshot of every region the cache currently holds, keyed by region ID.
+     *
+     * This is the enumeration seam used by the region-cache refresher
+     * (issue #425): a tick re-queries PD for each cached region and folds the
+     * answers back through {@see self::put()}. Two details are part of the
+     * contract:
+     *
+     * - the answer is a *snapshot*; later cache mutations do not affect it;
+     * - an entry whose TTL has already elapsed but which no lookup has dropped
+     *   yet is included, because a refresh is exactly what can revive it.
+     *   A refresh that only saw live entries could not warm a cache that sat
+     *   idle for longer than the TTL.
+     *
+     * The returned regions are leader-aware, exactly like
+     * {@see self::getById()}: a `switchLeader()` applied since the entry was
+     * stored is reflected in `leaderStoreId` / `leaderPeerId`.
+     *
+     * @return array<int, RegionInfo> regionId => region
+     */
+    public function getCachedRegions(): array;
+
+    /**
      * Store a region in the cache.
      *
      * Implementations must not cache a region without a known leader

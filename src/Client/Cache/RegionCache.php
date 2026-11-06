@@ -212,6 +212,26 @@ class RegionCache implements RegionCacheInterface
     }
 
     /**
+     * Snapshot of every held entry, keyed by region ID (issue #425).
+     *
+     * Deliberately does not touch LRU recency or drop expired entries: the
+     * refresher is the component that decides whether an entry is still
+     * usable, and including an expired entry is what makes a tick able to
+     * revive a cache that sat idle past its TTL.
+     *
+     * @return array<int, RegionInfo>
+     */
+    public function getCachedRegions(): array
+    {
+        $regions = [];
+        foreach ($this->entriesById as $regionId => $entry) {
+            $regions[$regionId] = $this->resolveRegionInfo($entry);
+        }
+
+        return $regions;
+    }
+
+    /**
      * A region without a known leader (`leaderStoreId === 0`, see
      * {@see \CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper}) is not cached
      * (issue #576). PD reports one during a transient window such as a PD

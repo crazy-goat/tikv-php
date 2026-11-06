@@ -24,6 +24,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Region\RegionCacheWarmer;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
@@ -70,6 +71,19 @@ final class TxnKvClient
      * milliseconds (issue #422). Default 30000 (30s). Must be >= 1.
      */
     public const OPT_GC_SAFE_POINT_REFRESH_MS = 'gcSafePointRefreshMs';
+
+    /**
+     * options[] key for the region-cache refresh interval in milliseconds
+     * (issue #425). A long-running worker calls
+     * {@see TxnKvClient::refreshRegionCache()} from its own tick; the method
+     * performs at most one refresh per interval. 0 (the default) disables the
+     * throttled refresh entirely, so nothing changes for an application that
+     * does not opt in; a forced refresh still works. Must be >= 0.
+     */
+    public const OPT_REGION_CACHE_REFRESH_MS = 'regionCacheRefreshMs';
+
+    /** Default region-cache refresh interval: disabled (issue #425). */
+    public const DEFAULT_REGION_CACHE_REFRESH_MS = RegionCacheWarmer::DEFAULT_REFRESH_INTERVAL_MS;
 
     /**
      * begin() options[] key for one-phase commit (issue #419): a
@@ -198,6 +212,9 @@ final class TxnKvClient
     private bool $closed = false;
     private readonly RegionResolver $regionResolver;
 
+    /** Opt-in region-cache refresh and preload (#425). */
+    private readonly RegionCacheWarmer $regionCacheWarmer;
+
     /**
      * Transactions begun by this client that have not been closed yet,
      * tracked weakly so tracking does not extend their lifetime. close()
@@ -271,6 +288,7 @@ final class TxnKvClient
             metrics: $bundle->metrics,
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            regionCacheRefreshMs: self::resolveRegionCacheRefreshMs($options),
         );
     }
 
@@ -324,7 +342,22 @@ final class TxnKvClient
          * again would fail or corrupt the cached range.
          */
         private readonly ?CodecInterface $codec = new CodecV1(Mode::Txn),
+        /**
+         * Minimum interval between two non-forced
+         * {@see self::refreshRegionCache()} calls, in milliseconds (issue
+         * #425). 0 (the default) disables the throttled refresh; see
+         * {@see self::OPT_REGION_CACHE_REFRESH_MS}.
+         */
+        int $regionCacheRefreshMs = self::DEFAULT_REGION_CACHE_REFRESH_MS,
+        /**
+         * Pre-built warmer (test seam). When null, the client builds one from
+         * its PD client, region cache and logger.
+         */
+        ?RegionCacheWarmer $regionCacheWarmer = null,
     ) {
+        if ($regionCacheRefreshMs < 0) {
+            throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
+        }
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
@@ -356,6 +389,8 @@ final class TxnKvClient
                 $this->allowedStorePorts,
                 $payloadCodec,
             );
+        $this->regionCacheWarmer = $regionCacheWarmer
+            ?? new RegionCacheWarmer($this->pdClient, $this->regionCache, $this->logger, $regionCacheRefreshMs);
     }
 
     /**
@@ -430,6 +465,34 @@ final class TxnKvClient
         }
         if ($refreshMs < 1) {
             throw new InvalidArgumentException("options['gcSafePointRefreshMs'] must be >= 1");
+        }
+
+        return $refreshMs;
+    }
+
+    /**
+     * Resolve options['regionCacheRefreshMs'] (see
+     * OPT_REGION_CACHE_REFRESH_MS) for create(): the minimum interval between
+     * two non-forced region-cache refreshes (issue #425). 0 disables it.
+     * Must be >= 0.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRegionCacheRefreshMs(array $options): int
+    {
+        if (!array_key_exists(self::OPT_REGION_CACHE_REFRESH_MS, $options)) {
+            return self::DEFAULT_REGION_CACHE_REFRESH_MS;
+        }
+
+        $refreshMs = $options[self::OPT_REGION_CACHE_REFRESH_MS];
+        if (!is_int($refreshMs)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['regionCacheRefreshMs'] must be an int (milliseconds), %s given",
+                get_debug_type($refreshMs),
+            ));
+        }
+        if ($refreshMs < 0) {
+            throw new InvalidArgumentException("options['regionCacheRefreshMs'] must be >= 0");
         }
 
         return $refreshMs;
@@ -996,6 +1059,52 @@ final class TxnKvClient
         }
 
         $this->grpc->reapIdleChannels();
+    }
+
+    /**
+     * Refresh the cached regions from PD (issue #425).
+     *
+     * Same contract as {@see RawKvClient::refreshRegionCache()}: PHP has no
+     * background threads, so a long-lived worker calls this from its own tick.
+     * A non-forced call performs at most one refresh per
+     * `options['regionCacheRefreshMs']` (default 0, i.e. disabled) and returns
+     * 0 when the interval has not elapsed; `$force = true` performs a one-off
+     * refresh regardless. PD failures are logged and the cached entry is kept,
+     * so this method never throws. No-op after `close()`.
+     *
+     * @return int number of cache entries PD confirmed
+     */
+    public function refreshRegionCache(bool $force = false): int
+    {
+        if ($this->closed) {
+            return 0;
+        }
+
+        return $this->regionCacheWarmer->refresh($force);
+    }
+
+    /**
+     * Resolve and cache the regions of the given ranges without serving a
+     * user read (issue #425).
+     *
+     * Same contract as {@see RawKvClient::preloadRegions()}: each range is a
+     * `[startKey, endKey]` pair of half-open bounds, where an empty `endKey`
+     * means +infinity. A PD failure is logged and never thrown; the existing
+     * cache is left untouched. No-op after `close()`.
+     *
+     * @param array<array-key, mixed> $ranges list of `[startKey, endKey]` pairs
+     * @return int number of regions cached
+     *
+     * @throws InvalidArgumentException when a range is not a pair of strings or
+     *         is reversed (`startKey` sorts after a non-empty `endKey`)
+     */
+    public function preloadRegions(array $ranges): int
+    {
+        if ($this->closed) {
+            return 0;
+        }
+
+        return $this->regionCacheWarmer->preload($ranges);
     }
 
     /**

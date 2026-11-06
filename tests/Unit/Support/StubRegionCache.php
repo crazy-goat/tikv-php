@@ -140,6 +140,14 @@ final class StubRegionCache implements RegionCacheInterface
         }
     }
 
+    /**
+     * @return array<int, RegionInfo>
+     */
+    public function getCachedRegions(): array
+    {
+        return $this->regions;
+    }
+
     public function put(RegionInfo $region): void
     {
         $this->putCalls++;

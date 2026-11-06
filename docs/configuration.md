@@ -113,6 +113,15 @@ $options = [
     // fan-outs (issue #418). Must be a boolean, default false. See
     // "Batch Commands Multiplexing" below.
     'batchCommands' => false,
+    // Minimum interval between two non-forced refreshRegionCache() calls, in
+    // milliseconds (issue #425). The method is the PHP-process-model
+    // replacement for client-go's background runner: a long-running worker
+    // calls it from its own tick and it re-queries PD for the cached regions
+    // at most once per interval. 0 (the default) disables the throttled
+    // refresh, so an application that does not opt in pays no extra PD
+    // traffic; a forced refresh still works. Must be >= 0. See "Region Cache
+    // Refresh and Preload" below.
+    'regionCacheRefreshMs' => 60000,
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
         'clientCertFile' => '/path/to/client.crt',
@@ -1704,6 +1713,52 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 - `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` keep the
   cached region — the request reached the right region, so the retry reuses it
 
+### Region Cache Refresh and Preload
+
+PHP has no background threads, so the client starts no timer and no loop. Two
+explicit methods cover the two use cases a long-lived worker has (issue #425):
+
+```php
+$client = RawKvClient::create(
+    ['127.0.0.1:2379'],
+    options: ['regionCacheRefreshMs' => 60000],
+);
+
+// At worker boot: resolve and cache the regions a job will touch, without
+// serving a user read. Each pair is a half-open [startKey, endKey) range; ''
+// as the end key means +infinity.
+$client->preloadRegions([['user:1000', 'user:2000'], ['job:', 'job;']]);
+
+// From the worker's own tick (the same place reapIdleChannels() is called):
+$refreshed = $client->refreshRegionCache();
+```
+
+`refreshRegionCache(bool $force = false)` re-queries PD for every cached
+region through `GetRegion` on that region's start key:
+
+- a newer epoch or leader updates the entry in place and refreshes its TTL;
+- a split or merge that produced another region ID stores the replacement and
+  drops the superseded entry silently (a superseding update, not an
+  error-driven invalidation — no `regionInvalidated()` metric);
+- a PD answer that does not cover the entry's start key drops the entry, so
+  the next request resolves it again.
+
+A non-forced call performs at most one refresh per `regionCacheRefreshMs`
+and returns `0` when the interval has not elapsed. The default is `0`
+(disabled), so refreshing is opt-in; `60000` (one minute) is a reasonable
+tick interval, and the first call after client creation always refreshes.
+`$force = true` performs a one-off refresh regardless of the interval.
+`preloadRegions()` works independently of the option.
+
+Both methods are bounded and non-throwing on a PD failure: the failure is
+logged at warning level and the affected cache entries are kept as they were.
+A malformed or reversed range is a programmer error and throws
+`InvalidArgumentException` before any RPC. Both are no-ops after `close()`.
+
+Refresh cost is one PD round trip per cached region per tick, so size
+`regionCacheRefreshMs` against the cache size. A short interval on a worker
+with a large warm cache sends more PD traffic than the cache saves.
+
 ### Store Cache
 
 Store addresses are also cached:
@@ -1970,7 +2025,7 @@ The library emits the following counter tags:
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
 | `regionCacheHit()`             | `'region_resolution'`      | Region was found in the cache                     |
 | `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
-| `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
+| `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'`, `'refresh'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), post-resolve cleanup in `LockResolver`, or a `refreshRegionCache()` tick that found PD no longer maps the entry's start key to its cached range (a refresh that supersedes the entry with a newer answer is a `put()` and emits nothing). Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
 
 For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
 

@@ -1186,6 +1186,17 @@ a handle if it needs one. Dropping a handle is not a reconnect: ext-grpc's
 persistent table keeps the channel warm until the process ends or the
 per-target persist bound drops the entry.
 
+The same tick can keep the region cache fresh. `refreshRegionCache()` re-queries
+PD for the cached regions at most once per `options['regionCacheRefreshMs']`
+(default `0`, i.e. disabled — refreshing is opt-in), so a split or leader
+transfer is learned before a user request has to fail and retry for it. Call
+`preloadRegions([['start', 'end'], ...])` once at boot to resolve the keys a
+long-running worker will touch without serving a read. Both are no-ops after
+`close()`, never throw on a PD failure (the failure is logged and the old entry
+is kept), and start no timer of their own. See
+[Region Cache Refresh and Preload](configuration.md#region-cache-refresh-and-preload)
+for the cost and the interval guidance.
+
 ### PHP-FPM and other per-request runtimes
 
 A client created per request starts with a **cold region cache**, so the
@@ -1252,8 +1263,9 @@ application closes the transport it supplied (see
 
 After `close()`, the client's own operations that talk to the cluster throw
 `ClientClosedException`. The lifecycle methods and client-local getters and
-setters remain callable: `close()`, `reapIdleChannels()`, `getMetrics()`,
-`setAtomicForCAS()` / `isAtomicForCAS()`, `setColumnFamily()` /
+setters remain callable: `close()`, `reapIdleChannels()`,
+`refreshRegionCache()` / `preloadRegions()` (both no-ops after close),
+`getMetrics()`, `setAtomicForCAS()` / `isAtomicForCAS()`, `setColumnFamily()` /
 `getColumnFamily()` and `getClusterId()` (which returns `null` after close
 because the PD client resets the cached cluster ID). A `Transaction` obtained
 before `close()` holds the transport and the PD client directly and does not
