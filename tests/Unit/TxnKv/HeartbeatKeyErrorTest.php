@@ -31,6 +31,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -194,10 +195,10 @@ final class HeartbeatKeyErrorTest extends TestCase
         self::assertInstanceOf(RetryBudgetExhaustedException::class, $e);
         self::assertInstanceOf(TxnRetryableException::class, $e->getPrevious());
         self::assertSame(BackoffType::TxnLock, $e->getPrevious()->backoffType);
-        // 'key1' is short, so KeyRedactor hex-encodes it: 6b657931. The
-        // redacted value already carries its own quotes ("6b657931" (4 bytes)).
-        self::assertStringStartsWith('Heartbeat failed: locked key "', $e->getPrevious()->getMessage());
-        self::assertStringContainsString('6b657931', $e->getPrevious()->getMessage());
+        // 'key1' is redacted with the keyed hash, so the message carries the
+        // token (the process salt makes the digest unpredictable here).
+        self::assertStringStartsWith('Heartbeat failed: locked key #', $e->getPrevious()->getMessage());
+        self::assertStringContainsString(KeyRedactor::redact('key1'), $e->getPrevious()->getMessage());
         // The own-primary-lock invariant: heartbeat resolves nothing — the
         // only RPC the client ever sends here is the heartbeat itself.
         self::assertSame(['KvTxnHeartBeat'], array_unique($calls));

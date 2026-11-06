@@ -860,30 +860,49 @@ The client writes these levels:
 Region cache hits and misses are **not** INFO records. A logger at the `INFO` level does not show them.
 
 Keys in the log details are redacted — see
-[Log Redaction](#log-redaction) for the exact format.
+[Log Redaction](#log-redaction) for the format.
 
 ### Log Redaction
 
 The client never writes a raw key it holds into the log context: every key
 it formats for a log line or an exception message passes through
-[`KeyRedactor`](../src/Client/Util/KeyRedactor.php), which replaces it with
-the first `min(8, length)` bytes as lowercase hex plus the total length of
-the key:
+[`KeyRedactor`](../src/Client/Util/KeyRedactor.php), which replaces it with a
+truncated keyed hash and the total length of the key:
 
 | Key | Logged as |
 |---|---|
-| `key_a` (5 bytes) | `"6b65795f61" (5 bytes)` |
-| `user:session` (12 bytes) | `"757365723a736573... (12 bytes)` |
+| `key_a` (5 bytes) | `#3c469e9d6c5875d3 (5 bytes)` |
+| `user:session` (12 bytes) | `#60303ae22b998861 (12 bytes)` |
 | empty key | `"" (0 bytes)` |
 
-That is the exact output of the code, not a paraphrase of it. A key of 8
-bytes or fewer is hex-encoded in full and quoted on both sides; a longer key
-is quoted only at the front, and its 16-character hex prefix is followed by
-`...` **without a closing quote**. The byte count is the length of the whole
-key, not of the prefix. The shape is pinned by the unit tests — do not
-"repair" the missing quote when you copy these strings, and do not quote the
-redacted value a second time in a message template (pass it to an unquoted
-`%s`; see [`helpers/faq.md`](helpers/faq.md)).
+The digest is the first 16 hex characters (64 bits) of
+`hash_hmac('sha256', $key, $salt)`. The salt is 32 random bytes generated on
+first use, so the same key produces the same token for the lifetime of the
+process — log correlation still works — while two processes (or two restarts)
+produce different tokens. The digest is one-way: unlike the old hex prefix it
+cannot be decoded back into the key, including for keys of 8 bytes or fewer.
+The byte count is the length of the whole key. The examples above show the
+shape only: the actual digest depends on the process salt, so do not copy
+them as literal values.
+
+Configure a fixed salt when tokens must be comparable across processes or
+restarts. Use a high-entropy secret, for example 32 random bytes encoded as
+hex:
+
+```php
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+
+KeyRedactor::setSalt(getenv('TIKV_LOG_REDACTION_SALT') ?: null);
+```
+
+`setSalt(null)` restores the default (a fresh random salt per process); an empty
+string is rejected. Call it before the first redaction: `setSalt()` throws
+`LogicException` once a key has been redacted, because changing the salt
+afterwards would break the in-process correlation the token exists for.
+
+The redacted form is not quoted: pass it to an unquoted `%s` in a message
+template (the empty-key form still carries its own quotes; see
+[`helpers/faq.md`](helpers/faq.md)).
 
 **Values are never logged at all** — not redacted, not truncated. The client
 puts no value into any log context or exception message, so there is nothing
@@ -935,18 +954,17 @@ it out of a message — `RetryBudgetExhaustedException::getRawKey()` and
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 
 KeyRedactor::setRedactor(
-    fn (string $key): string => 'sha256:' . substr(hash('sha256', $key), 0, 16)
+    fn (string $key): string => 'hmac:' . substr(hash_hmac('sha256', $key, $secret), 0, 16)
 );
 ```
 
 The callable receives the raw key and returns the string that is logged in
-its place. Install a hash when an 8-byte prefix is still sensitive in your
-key scheme — the prefix alone can leak a tenant identifier. Pass `null` to
-restore the default:
-
-```php
-KeyRedactor::setRedactor(null);
-```
+its place. Install it once, before the first client is created and before the
+first key is redacted. The setter is one-shot: it throws `LogicException`
+after the first `redact()` call, so a debug helper or a dependency cannot
+silently replace the redactor once the client is running. There is no way to
+restore the default in a running process; configure the redactor at
+bootstrap.
 
 > **The redactor is process-global.** `KeyRedactor::setRedactor()` is a
 > static method and the custom callable is held in a static property, so it
@@ -1031,7 +1049,7 @@ When an operation takes longer than its threshold, the client emits a PSR-3
 | Context field  | Meaning                                                                                                                                                     |
 |----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `operation`    | The operation type: `read`, `write`, `batch_read`, `batch_write`, `scan`, `delete_range` or `checksum`.                                                      |
-| `key`          | The redacted key (`KeyRedactor::redact()`) — the first 8 bytes in hex plus the total length, with an ellipsis after the hex when the key is longer than 8 bytes, e.g. `"7573657231" (5 bytes)` for a short key and `"757365725f656d61... (28 bytes)` for a longer one. It is the key the operation is anchored on: the key itself for a single-key read or write, the **first key of the batch** for a batch operation, and the key the range starts at for a scan or range operation (the exclusive upper bound for a reverse scan, the start of the per-region sub-range when the range spans regions). |
+| `key`          | The redacted key (`KeyRedactor::redact()`) — a truncated keyed hash plus the total length, e.g. `#3c469e9d6c5875d3 (5 bytes)`; the digest depends on the process salt. It is the key the operation is anchored on: the key itself for a single-key read or write, the **first key of the batch** for a batch operation, and the key the range starts at for a scan or range operation (the exclusive upper bound for a reverse scan, the start of the per-region sub-range when the range spans regions). |
 | `duration_ms`  | The measured duration in milliseconds, rounded to two decimals.                                                                                               |
 | `threshold_ms` | The threshold that was exceeded, in milliseconds.                                                                                                            |
 
@@ -1039,7 +1057,7 @@ An emitted line therefore looks like this (the prefix depends on the logger's
 formatter):
 
 ```
-WARNING  Slow TiKV operation  {"operation":"scan","key":"\"7573657231\" (5 bytes)","duration_ms":1420.5,"threshold_ms":1000}
+WARNING  Slow TiKV operation  {"operation":"scan","key":"#3c469e9d6c5875d3 (5 bytes)","duration_ms":1420.5,"threshold_ms":1000}
 ```
 
 The duration is measured around the RPC: for the batch fan-outs it covers the
@@ -1576,8 +1594,8 @@ Store addresses are also cached:
 Monitor cache performance via logs. The region cache writes these records (PSR-3 message and context):
 
 ```
-DEBUG  Region cache hit    {"key":"\"7573657231\" (5 bytes)","regionId":123}
-DEBUG  Region cache miss   {"key":"\"7573657231\" (5 bytes)"}
+DEBUG  Region cache hit    {"key":"#3c469e9d6c5875d3 (5 bytes)","regionId":123}
+DEBUG  Region cache miss   {"key":"#3c469e9d6c5875d3 (5 bytes)"}
 INFO   Region invalidated  {"regionId":123}
 ```
 

@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -87,7 +88,7 @@ class UnresolvedRegionFailsClosedTest extends TestCase
     private function expectRejectionOfUnresolvableKeyZ(): void
     {
         $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('"' . bin2hex('z') . '" (1 bytes); refusing to silently drop');
+        $this->expectExceptionMessage(KeyRedactor::redact('z') . '; refusing to silently drop');
     }
 
     /**
@@ -207,7 +208,7 @@ class UnresolvedRegionFailsClosedTest extends TestCase
             'commit() must not return normally with an unroutable key in the write set',
         );
         self::assertStringContainsString(
-            '"' . bin2hex('z') . '" (1 bytes); refusing to silently drop',
+            KeyRedactor::redact('z') . '; refusing to silently drop',
             $threw->getMessage(),
             'the failure must name the key that could not be routed, not just report a count mismatch',
         );
@@ -245,7 +246,7 @@ class UnresolvedRegionFailsClosedTest extends TestCase
             'set() must not return normally for a key that cannot be locked',
         );
         self::assertStringContainsString(
-            '"' . bin2hex('z') . '" (1 bytes); refusing to silently drop',
+            KeyRedactor::redact('z') . '; refusing to silently drop',
             $threw->getMessage(),
         );
         self::assertNotSame(TransactionStatus::Committed, $txn->getStatus());

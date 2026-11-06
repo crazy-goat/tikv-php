@@ -440,9 +440,11 @@ TiKvException: PD GetRegion returned no region for key
 TiKvException: TSO request failed: gRPC error: ...
 TiKvException: TSO response missing timestamp
 TransactionConflictException: Heartbeat failed: retryable: ...
-TxnRetryableException: Heartbeat failed: locked key "6b657931..."
+TxnRetryableException: Heartbeat failed: locked key #a3f5c8e1d4b79026 (4 bytes)
 TiKvException: Heartbeat failed: TxnNotFound
 ```
+(the `#…` token is the keyed-hash redaction of the primary key; the 16 hex
+characters depend on the process salt, so the exact value differs per process)
 
 **What it means:** Failures raised directly as the base class instead of a
 subclass: PD answered a region lookup with no region (fail-closed routing),
@@ -792,13 +794,15 @@ touched; re-probe after an interval rather than tight-looping.
 
 **Error:**
 ```
-RetryBudgetExhaustedException: Retry attempt cap (30) exhausted for key "757365725f656d61... (28 bytes)
-RetryBudgetExhaustedException: Retry deadline (30000 ms) exhausted for key "757365725f656d61... (28 bytes)
+RetryBudgetExhaustedException: Retry attempt cap (30) exhausted for key #7d0f4a2c9e816b35 (28 bytes)
+RetryBudgetExhaustedException: Retry deadline (30000 ms) exhausted for key #7d0f4a2c9e816b35 (28 bytes)
 ```
 (the two messages come from the same class; since issue #269 the key is
-redacted by `KeyRedactor` — a short hex prefix plus the byte length, so the
-example above is literal in shape — and never shown verbatim. Use
-`RetryBudgetExhaustedException::getRawKey()` if your code needs the raw key.)
+redacted by `KeyRedactor` — a truncated keyed hash plus the byte length, so
+the example above is literal in shape; the 16 hex characters depend on the
+process salt and differ between processes — and the key is never shown
+verbatim. Use `RetryBudgetExhaustedException::getRawKey()` if your code needs
+the raw key.)
 
 **What it means:** The internal retry loop gave up: either the attempt cap
 (30 by default) or the wall-clock deadline (30000 ms by default,
