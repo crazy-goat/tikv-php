@@ -1424,3 +1424,16 @@ and throws for everything else. The transaction stays `Active` (rollback
 started, writes and commit blocked) after a thrown variant, so the caller can
 retry `rollback()`; the regression tests pin both the success and the
 fail-closed paths in `TransactionTest`.
+
+`KeyError` is a flat message, not a oneof envelope: TiKV co-sets the
+compatibility `retryable` string with `conflict` (all supported releases) and
+with `txn_lock_not_found` (newer releases). The precedence is therefore:
+`locked`, `abort`, the two "already gone" success variants, `conflict`, then
+`retryable`. `abort` sits before the success/conflict/retryable branches so a
+fatal abort cannot be swallowed. A structured `conflict` maps to
+`TransactionConflictException` — the same mapping as prewrite and pessimistic
+lock — and is not retried even when `retryable` is co-set; only a bare
+`retryable` string is retried. This precedence was review point 1: the
+original #559 branch checked `retryable` first, so a real `txn_lock_not_found`
+payload (which newer TiKV co-tags) threw a retryable exception instead of
+succeeding, and a real `conflict` payload was retried instead of failing.

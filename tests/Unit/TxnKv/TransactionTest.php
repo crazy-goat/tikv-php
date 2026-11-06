@@ -6972,6 +6972,49 @@ class TransactionTest extends TestCase
         }
     }
 
+    public function testRollbackAbortWinsOverCompatibilityRetryable(): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $keyError = new KeyError();
+        $keyError->setAbort('simulated abort');
+        $keyError->setRetryable('simulated retryable');
+        $errorResponse->setError($keyError);
+
+        $batchRollbackCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchRollbackCalls,
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key1', 'value1');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertStringContainsString('Abort during rollback', $e->getMessage());
+        }
+
+        // A fatal abort is checked before the compatibility string, so the
+        // co-set `retryable` must not cause a retry.
+        $this->assertSame(1, $batchRollbackCalls);
+    }
+
     public function testPessimisticRollbackErrorsAreHandled(): void
     {
         $this->setUpRollbackRegionMocking();
@@ -7026,6 +7069,14 @@ class TransactionTest extends TestCase
             'txn_lock_not_found' => [
                 static function (KeyError $error): void {
                     $error->setTxnLockNotFound(new TxnLockNotFound());
+                },
+            ],
+            // Newer TiKV co-sets the compatibility string with the structured
+            // variant; the structured variant must win (review point 1).
+            'txn_lock_not_found + retryable' => [
+                static function (KeyError $error): void {
+                    $error->setTxnLockNotFound(new TxnLockNotFound());
+                    $error->setRetryable('txn lock not found');
                 },
             ],
         ];
@@ -7086,13 +7137,9 @@ class TransactionTest extends TestCase
         $primaryMismatch = new KeyError();
         $primaryMismatch->setPrimaryMismatch(new PrimaryMismatch());
 
-        $conflict = new KeyError();
-        $conflict->setConflict(new WriteConflict());
-
         return [
             'empty payload' => [new KeyError(), 'unknown error'],
             'primary_mismatch' => [$primaryMismatch, 'PrimaryMismatch'],
-            'conflict' => [$conflict, 'Conflict'],
         ];
     }
 
@@ -7149,6 +7196,72 @@ class TransactionTest extends TestCase
         $this->assertSame(2, $batchRollbackCalls);
         $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
         $this->assertSame([], $txn->getWriteSet());
+    }
+
+    /**
+     * @return array<string, array{0: KeyError}>
+     */
+    public static function rollbackConflictKeyErrorProvider(): array
+    {
+        $conflict = new KeyError();
+        $conflict->setConflict(new WriteConflict());
+
+        $conflictWithRetryable = new KeyError();
+        $conflictWithRetryable->setConflict(new WriteConflict());
+        $conflictWithRetryable->setRetryable('write conflict');
+
+        return [
+            'conflict' => [$conflict],
+            'conflict + retryable' => [$conflictWithRetryable],
+        ];
+    }
+
+    /**
+     * TiKV co-sets the compatibility `retryable` string with `conflict`; the
+     * structured variant must win and fail as a write conflict instead of
+     * entering the retry loop (review point 1).
+     */
+    #[DataProvider('rollbackConflictKeyErrorProvider')]
+    public function testRollbackConflictFailsAsTransactionConflict(KeyError $keyError): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $errorResponse->setError($keyError);
+
+        $batchRollbackCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchRollbackCalls,
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key1', 'value1');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('Write conflict during rollback', $e->getMessage());
+        }
+
+        // The structured conflict is fatal: the co-set `retryable` string
+        // must not turn it into a retry loop.
+        $this->assertSame(1, $batchRollbackCalls);
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
     }
 
     public function testPessimisticRollbackUnrecognisedKeyErrorFailsClosedBeforeBatchRollback(): void
