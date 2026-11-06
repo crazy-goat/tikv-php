@@ -122,12 +122,18 @@ final readonly class CheckedGrpcFuture
      *        the executor (issue #291): the TxnKv prewrite/commit paths rely
      *        on a caller-provided classifier for TxnRetryableException —
      *        without it the default classification treats them as fatal.
+     * @param (callable(): ?int)|null $targetStoreId Provider of the store the
+     *        failed attempt was addressed to (replica reads). Forwarded to
+     *        {@see RetryExecutor::execute()} so a transport failure closes
+     *        and invalidates the follower's address, not the leader's
+     *        (issue #247).
      */
     public static function fromRetryableDispatch(
         callable $dispatch,
         RetryExecutor $retryExecutor,
         string $key,
         ?callable $classifier = null,
+        ?callable $targetStoreId = null,
     ): self {
         $first = null;
         $eagerError = null;
@@ -167,7 +173,12 @@ final readonly class CheckedGrpcFuture
         return new self(
             inner: $firstInner,
             hasInnerFuture: $firstInner instanceof GrpcFuture,
-            waiter: static fn(): mixed => $retryExecutor->execute($key, $operation, $classifier),
+            waiter: static fn(): mixed => $retryExecutor->execute(
+                $key,
+                $operation,
+                $classifier,
+                $targetStoreId,
+            ),
         );
     }
 

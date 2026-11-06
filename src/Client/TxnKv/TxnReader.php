@@ -112,10 +112,11 @@ final readonly class TxnReader
         $budget = $retryExecutor->currentBudget();
 
         $excludedStore = null;
+        $targetStoreId = null;
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $state, &$excludedStore, $budget): ?string {
+            function () use ($key, $state, &$excludedStore, $budget, &$targetStoreId): ?string {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
@@ -125,6 +126,7 @@ final readonly class TxnReader
                     priority: $this->priority,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
                 $request = new GetRequest();
@@ -173,7 +175,10 @@ final readonly class TxnReader
                 $state->setReadValue($key, $value);
                 return $value;
             },
-            $classifier
+            $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -531,16 +536,23 @@ final readonly class TxnReader
         // The same operation budget bounds lock resolution triggered by a
         // locked key in any region of this batch (issue #569).
         $budget = $retryExecutor->currentBudget();
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            fn (): CheckedGrpcFuture => $this->batchGetForRegionAsync(
-                $this->regionResolver->getRegionInfo($firstKey),
-                $regionKeys,
-                $budget,
-            ),
+            function () use ($firstKey, $regionKeys, $budget, &$targetStoreId): CheckedGrpcFuture {
+                return $this->batchGetForRegionAsync(
+                    $this->regionResolver->getRegionInfo($firstKey),
+                    $regionKeys,
+                    $budget,
+                    $targetStoreId,
+                );
+            },
             $retryExecutor,
             $firstKey,
             $classifier,
+            static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -555,6 +567,7 @@ final readonly class TxnReader
         RegionInfo $region,
         array $regionKeys,
         ?RetryBudget $budget = null,
+        int &$targetStoreId = 0,
     ): CheckedGrpcFuture {
         $target = RegionContextFactory::resolveTarget(
             $region,
@@ -562,6 +575,7 @@ final readonly class TxnReader
             $this->regionResolver->getStore(...),
             priority: $this->priority,
         );
+        $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
         $request = new BatchGetRequest();
@@ -723,6 +737,7 @@ final readonly class TxnReader
             // needs re-clipping after a split.
             $freshEndKey = '';
             $excludedStore = null;
+            $targetStoreId = null;
             $batch = $retryExecutor->execute($cursorStart, function () use (
                 $cursorStart,
                 $endKey,
@@ -731,6 +746,7 @@ final readonly class TxnReader
                 &$excludedStore,
                 &$freshEndKey,
                 $budget,
+                &$targetStoreId,
             ): array {
                 // Resolve the region on every attempt so cache invalidation
                 // and leader switching performed by the retry executor take
@@ -745,6 +761,7 @@ final readonly class TxnReader
                     priority: $this->priority,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
                 $freshEndKey = $fresh->endKey;
 
@@ -810,7 +827,9 @@ final readonly class TxnReader
                 $this->handleReadKeyErrors($pairErrors, 'Scan', $budget);
 
                 return $subResults;
-            }, $classifier);
+            }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            });
 
             foreach ($batch as $row) {
                 $results[] = $row;

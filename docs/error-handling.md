@@ -186,8 +186,8 @@ Verdict legend:
 | `LockWaitTimeoutException` | **New transaction** — the pessimistic locks were not acquired, the transaction cannot proceed |
 | `TxnRetryableException` | Escapes only when the surrounding executor gives up; treat like other txn errors: **new transaction** unless the op is idempotent |
 | `RetryBudgetExhaustedException` | **Retry if idempotent** — the client already retried internally until its budget ran out (attempt cap or deadline); check `getPrevious()` for the root cause |
-| `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint). An `EpochNotMatch` that carries a usable `current_regions` payload refreshes the cache instead of forcing a PD lookup; an empty or unusable payload still invalidates. `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
-| `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff |
+| `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint). An `EpochNotMatch` that carries a usable `current_regions` payload refreshes the cache instead of forcing a PD lookup; an empty or unusable payload still invalidates. A `StoreNotMatch` also drops the store address it names, so the next attempt re-resolves it through PD instead of reusing a stale address (issue #247). `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
+| `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff. A retryable transport failure also drops the address of the store it could not reach, so a rescheduled store is re-resolved from PD on the next attempt instead of being retried on its old address (issue #247) |
 | `StoreNotFoundException` | **Do not retry blindly** — PD no longer knows the store backing the region. The retry executor treats it as a fatal routing error and invalidates the cached region when the missing store belongs to it (issue #627), so the next request re-resolves instead of serving the same stale entry until its TTL expires. The store still has to come back in PD; a short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal sub-batch indices (not region IDs, not user keys), so the affected keys are unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
 | `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; check `getContext()['pendingRegions']` for the regions without a result. The deadline is finite by default (`batchDeadlineMs`, 60000 ms). `Transaction::commit()` never throws it after the commit point (see below) |
@@ -691,6 +691,15 @@ Notes:
   exception; its empty/unusable-payload fallback keeps
   `retry_region_error:epoch_not_match` only where the stale entry is still
   cached (e.g. RawKV). (#246)
+- A `StoreNotMatch` region error, and a retryable transport failure against a
+  store, drop that store's address from the store cache as well as the cached
+  region. The next attempt therefore asks PD for a fresh `GetStore`; without
+  the drop a rescheduled TiKV pod kept its old address in the cache for the
+  rest of its TTL (up to 660 s with the defaults) and every retry reopened a
+  channel to the dead endpoint. Non-routing errors such as `ServerIsBusy`
+  keep the address, exactly as they keep the region (issue #245). The
+  invalidation is logged with reason `store_not_match` or `transport_error`.
+  (#247)
 - A fanned-out batch or range operation (`batchGet()`, `batchPut()`,
   `batchDelete()`, `batchScan()`, `deleteRange()`, `deletePrefix()`,
   `checksum()`) reports a region's `RetryBudgetExhaustedException` inside

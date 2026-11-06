@@ -9,6 +9,7 @@ use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsMultiplexer;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
@@ -278,6 +279,7 @@ final class RawKvClient
             batchCommands: self::resolveBatchCommands($options),
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            storeCache: $bundle->storeCache,
         );
     }
 
@@ -337,6 +339,13 @@ final class RawKvClient
          * Null itself also means passthrough for a hand-built client.
          */
         private readonly ?CodecInterface $codec = null,
+        /**
+         * Store-address cache the retry executor drops when a StoreNotMatch
+         * or a transport failure proves the cached address wrong (issue
+         * #247). Null for a hand-built client: the resolver then has no
+         * store cache to invalidate.
+         */
+        private readonly ?StoreCacheInterface $storeCache = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -368,6 +377,7 @@ final class RawKvClient
             $this->pdEndpoints,
             $this->allowedStorePorts,
             $this->epochNotMatchCodec(),
+            $this->storeCache,
         );
         $this->crud = $crud ?? new RawKvCrud(
             $grpc,
@@ -701,6 +711,7 @@ final class RawKvClient
             $this->pdEndpoints,
             $this->allowedStorePorts,
             $this->epochNotMatchCodec(),
+            $this->storeCache,
         );
 
         return new RetryExecutor(
