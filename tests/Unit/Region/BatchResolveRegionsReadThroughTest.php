@@ -10,6 +10,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use CrazyGoat\TiKV\Tests\Unit\Support\StubRegionCache;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -336,7 +337,7 @@ class BatchResolveRegionsReadThroughTest extends TestCase
             ->willReturn($stuck);
 
         $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('"' . bin2hex('a') . '" (1 bytes); refusing to silently drop');
+        $this->expectExceptionMessage(KeyRedactor::redact('a') . '; refusing to silently drop');
         $this->resolver->batchResolveRegions(['a']);
     }
 
@@ -396,7 +397,7 @@ class BatchResolveRegionsReadThroughTest extends TestCase
             ->willReturn([$this->region(1, 'a', 'm')]);
 
         $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('"' . bin2hex('z') . '" (1 bytes); refusing to silently drop');
+        $this->expectExceptionMessage(KeyRedactor::redact('z') . '; refusing to silently drop');
         $this->resolver->batchResolveRegions(['a', 'z']);
     }
 
@@ -559,7 +560,7 @@ class BatchResolveRegionsReadThroughTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturn([$this->region(2, 'q', '')]);
 
         $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('"' . bin2hex('n') . '" (1 bytes); refusing to silently drop');
+        $this->expectExceptionMessage(KeyRedactor::redact('n') . '; refusing to silently drop');
         $this->resolver->batchResolveRegions(['a', 'n']);
     }
 
@@ -576,7 +577,7 @@ class BatchResolveRegionsReadThroughTest extends TestCase
             $this->resolver->batchResolveRegions(['z', 'a', 'y']);
             self::fail('both z and y are unresolvable and the call must fail');
         } catch (TiKvException $e) {
-            self::assertStringContainsString('"' . bin2hex('z') . '" (1 bytes)', $e->getMessage());
+            self::assertStringContainsString(KeyRedactor::redact('z'), $e->getMessage());
         }
     }
 

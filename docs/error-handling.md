@@ -61,8 +61,25 @@ itself is the only non-final class in the tree (it is the intended base for
 any custom project-wide exception work).
 
 > The client never throws a raw `\Exception`, `\RuntimeException` or
-> `\InvalidArgumentException`: everything that can reach your code is one of
-> the twenty classes above.
+> `\InvalidArgumentException` as an operation failure: everything that can
+> reach your code from a TiKV operation is one of the twenty classes above.
+> The two bootstrap/environment errors described next are the deliberate
+> exceptions.
+
+Two failures outside that hierarchy come from the redaction helper rather than
+from an operation:
+
+- [`KeyRedactor::setRedactor()`](../src/Client/Util/KeyRedactor.php) and
+  `KeyRedactor::setSalt()` throw `\LogicException` when called after the first
+  `KeyRedactor::redact()` call. This is a programming/bootstrap error: install
+  the redactor and the salt before creating the first client. No RawKV or
+  TxnKV operation calls these setters, so an operation cannot raise it.
+- `KeyRedactor::redact()` throws `\Random\RandomException` when
+  `random_bytes()` fails while generating the default salt on first use. This
+  is an environment failure, not a TiKV operation failure. Configure a fixed
+  salt with `KeyRedactor::setSalt()` at bootstrap if the platform can fail this
+  way, or let it surface and treat it as fatal: the client will not fall back
+  to a weak salt.
 
 `TiKvException` itself is also thrown **directly** — no more specific subclass —
 at sixteen `throw new TiKvException(...)` statements across multiple call
@@ -80,7 +97,7 @@ contract changes (noted per row):
 | `TimestampOracle::requestTimestampRange()` (private; reached from `getTimestamp()`, `getTimestampBatch()` and the pool refill) | The TSO RPC failed. **Re-wraps a `GrpcException`** (preserved as `getPrevious()`, gRPC status code kept) into the base class, so `catch (GrpcException)` around a transaction begin/commit will **not** match. Reachable from every timestamp mint (`begin()`, `commit()`, …). | `TSO request failed: %s` (sprintf'd with the wrapped message) |
 | `TimestampOracle::extractTimestampRange()` (private, same call) | The TSO response carried no timestamp. Fail-closed: no local timestamp is fabricated. | `TSO response missing timestamp` |
 | `SafePointCache::get()` | PD returned a negative GC safe point (defensive; PD safe points are uint64). Caught by `TxnKvClient::validateStartTsAgainstGcSafePoint()`, which degrades to a warning (fail-open), so it does not normally reach the caller. | `PD returned invalid GC safe point: %d` |
-| `TwoPhaseCommitter` heartbeat (reachable via `Transaction::heartbeat()`) | `KvTxnHeartBeat` reported a `retryable` or `abort` KeyError payload → `TransactionConflictException`; a `locked` payload → `TxnRetryableException` (`BackoffType::TxnLock`, deliberately **not** `LockResolver::resolveLock()`ed — the only lock a heartbeat can report is the calling transaction's own primary lock, and resolving it would roll the transaction back under itself); any other payload variant (`txn_not_found`, `txn_lock_not_found`, …) → the base class with the variant named, via the shared `KeyErrorDescriber` (see [#492](https://github.com/crazy-goat/tikv-php/issues/492)). | `Heartbeat failed: retryable: <server text>` / `Heartbeat failed: abort: <server text>` / `Heartbeat failed: locked key "<redacted primary>"` / `Heartbeat failed: <variant>` |
+| `TwoPhaseCommitter` heartbeat (reachable via `Transaction::heartbeat()`) | `KvTxnHeartBeat` reported a `retryable` or `abort` KeyError payload → `TransactionConflictException`; a `locked` payload → `TxnRetryableException` (`BackoffType::TxnLock`, deliberately **not** `LockResolver::resolveLock()`ed — the only lock a heartbeat can report is the calling transaction's own primary lock, and resolving it would roll the transaction back under itself); any other payload variant (`txn_not_found`, `txn_lock_not_found`, …) → the base class with the variant named, via the shared `KeyErrorDescriber` (see [#492](https://github.com/crazy-goat/tikv-php/issues/492)). | `Heartbeat failed: retryable: <server text>` / `Heartbeat failed: abort: <server text>` / `Heartbeat failed: locked key <redacted primary>` / `Heartbeat failed: <variant>` |
 | `TwoPhaseCommitter` prewrite (reachable via `Transaction::commit()`) | `KvPrewrite` reported a `KeyError`: `deadlock` → `DeadlockException` (key/hash/lockTs); `locked` → resolves the lock then `TxnRetryableException`; `conflict` / `retryable` / `abort` and `already_exist` / `assertion_failed` / `primary_mismatch` / `txn_not_found` / `commit_ts_too_large` → `TransactionConflictException`; any other variant (`commit_ts_expired`, `txn_lock_not_found`, …) → the base class with the variant named, via `KeyErrorDescriber`. Fail-closed (issue #214): before that fix, unhandled variants fell out of the loop and prewrite was treated as successful, so `KvCommit` ran against keys that held no lock. Since issue #213, prewrite runs inside the shared retry executor with the transaction classifier: region errors (`NotLeader`, `EpochNotMatch`, `RegionNotFound`, `ServerIsBusy`) and a resolved `locked` conflict are auto-retried (the region is re-resolved on each attempt), while `DeadlockException`, `TransactionConflictException` and unrecognised variants are fatal and escape `commit()`. | `Deadlock detected during prewrite` / `Lock conflict during prewrite, resolved - retry` / `Write conflict during prewrite` / `Prewrite failed: <variant>` |
 | `TwoPhaseCommitter` pessimistic lock (reachable from eager `Transaction::set()`/`delete()` and from deferred `commit()`) | `KvPessimisticLock` reported a `KeyError`: `deadlock` → `DeadlockException`; `locked` → resolves the lock then `TxnRetryableException`; `conflict` / `retryable` / `abort` → `TransactionConflictException`; any other variant → the base class with the variant named, via `KeyErrorDescriber` (fail-closed, issue #454). | `Pessimistic lock failed: <variant>` |
 | `TxnReader::handleReadKeyError()` (private; reached by `get()`, `batchGet()`, and `scan()`) | An unrecognised transactional read `KeyError` variant is fail-closed rather than treated as a missing value. Locks are resolved and retried separately; retryable errors become `TransactionConflictException`; GC aborts become `TxnAbortedByGcException`. | `Get failed: <variant>` / `BatchGet failed: <variant>` / `Scan failed: <variant>` |
