@@ -145,6 +145,85 @@ class RetryOperationBudgetTest extends TestCase
         );
     }
 
+    public function testBeginOperationSharesTheServerBusyBudgetAcrossExecuteCalls(): void
+    {
+        $executor = $this->executor(
+            maxBackoffMs: PHP_INT_MAX,
+            deadlineMs: 0,
+            serverBusyBudgetMs: 2000,
+        )->beginOperation();
+        $classifier = static fn (TiKvException $e): BackoffType => BackoffType::ServerBusy;
+
+        // ServerBusy sleeps are 2000 ms base with equal jitter, i.e.
+        // [1000, 2000] and [2000, 4000] ms. The first charge always fits the
+        // 2000 ms budget, so the first execute() retries once; the second
+        // charge is at least 3000 ms in total and exhausts it.
+        $firstAttempts = 0;
+        try {
+            $executor->execute('first', function () use (&$firstAttempts): never {
+                $firstAttempts++;
+                throw new TiKvException('ServerIsBusy');
+            }, $classifier);
+        } catch (TiKvException) {
+            // Expected: the shared ServerBusy budget is exhausted.
+        }
+        self::assertSame(2, $firstAttempts, 'The first execute() must spend the ServerBusy budget');
+
+        $secondAttempts = 0;
+        $caught = null;
+        try {
+            $executor->execute('second', function () use (&$secondAttempts): never {
+                $secondAttempts++;
+                throw new TiKvException('ServerIsBusy');
+            }, $classifier);
+        } catch (TiKvException $e) {
+            $caught = $e;
+        }
+
+        self::assertSame('ServerIsBusy', $caught->getMessage());
+        self::assertSame(
+            1,
+            $secondAttempts,
+            'A second execute() on the same operation must charge the exhausted ServerBusy budget',
+        );
+    }
+
+    public function testBeginOperationStartsAFreshDeadlineForTheNextOperation(): void
+    {
+        $executor = $this->executor(
+            maxBackoffMs: 20000,
+            deadlineMs: 200,
+        )->beginOperation();
+
+        // Exhaust the operation's wall-clock deadline with a successful but
+        // slow first execute().
+        $first = $executor->execute('first', function (): string {
+            usleep(300_000);
+            return 'first';
+        });
+        self::assertSame('first', $first);
+
+        $secondAttempts = 0;
+        try {
+            $executor->execute('second', function () use (&$secondAttempts): string {
+                $secondAttempts++;
+                return 'second';
+            });
+        } catch (RetryBudgetExhaustedException) {
+            // Expected: the same operation's deadline is already spent.
+        }
+        self::assertSame(0, $secondAttempts);
+
+        // A new beginOperation() is a new logical operation, so it must get a
+        // fresh deadline instead of inheriting the exhausted one.
+        $fresh = $executor->beginOperation();
+        self::assertSame(
+            'fresh',
+            $fresh->execute('third', static fn (): string => 'fresh'),
+            'A new beginOperation() must start a fresh wall-clock deadline',
+        );
+    }
+
     public function testTheAttemptCapStaysPerExecuteCallWithinOneOperation(): void
     {
         $executor = $this->executor(
@@ -182,6 +261,7 @@ class RetryOperationBudgetTest extends TestCase
         int $maxBackoffMs,
         int $deadlineMs,
         int $maxAttempts = RetryExecutor::DEFAULT_MAX_ATTEMPTS,
+        int $serverBusyBudgetMs = 10000,
     ): RetryExecutor {
         $regionCache = $this->createMock(RegionCacheInterface::class);
         // Nothing cached: the invalidation paths find no region, so the
@@ -190,7 +270,7 @@ class RetryOperationBudgetTest extends TestCase
 
         return new RetryExecutor(
             maxBackoffMs: $maxBackoffMs,
-            serverBusyBudgetMs: 10000,
+            serverBusyBudgetMs: $serverBusyBudgetMs,
             regionCache: $regionCache,
             grpc: $this->createMock(GrpcClientInterface::class),
             regionResolver: new RegionResolver(

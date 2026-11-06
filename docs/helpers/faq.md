@@ -1259,18 +1259,20 @@ retryable because the outcome is indeterminate; the idempotency split is
 REG-08's job, not the classifier's.
 
 
-## Jittered backoff makes "exact retry count" budget tests flaky — assert ranges with a shared-budget lower bound
+## Jittered backoff makes "exact retry count" budget tests flaky — assert the range that distinguishes the budget semantics
 
 When all `BackoffType`s became jittered (issue #242, equal jitter `[expo/2, expo]`), unit
 tests that asserted an **exact** retry/call count against a `maxBackoffMs` budget broke:
 randomly halved sleeps can squeeze one extra attempt into the same budget
-(`tests/Unit/RawKv/RetryBudgetSharedAcrossRegionsTest.php` went from always 6 calls to
-6–8). Fix pattern: assert the invariant the test actually cares about — the *lower* bound
-that distinguishes per-region from shared budgets (`>= 6`) plus a derived upper bound
-(`<= 8`) — not the exact count. Anything comparing budget-exhaustion attempt counts must
-now tolerate ±1 attempt per jittered exponential step. Also: `1 << $attempt` instead of
-`2 ** $attempt` keeps the exponent math int-typed so Rector's `RecastingRemovalRector`
-doesn't strip a needed `(int)` cast before `intdiv()`.
+(`tests/Unit/RawKv/RetryBudgetSharedAcrossRegionsTest.php` used to assert always 6 calls,
+then 6–8 under per-region budgets; since issue #223 the same file pins the shared budget
+at 4–5 calls and the per-region alternative at 6–8). Fix pattern: assert the invariant the
+test actually cares about — the bound that distinguishes the two semantics (`<= 5` for the
+shared budget, `>= 6` for per-region) plus a derived counter-bound — not the exact count.
+Anything comparing budget-exhaustion attempt counts must now tolerate ±1 attempt per
+jittered exponential step. Also: `1 << $attempt` instead of `2 ** $attempt` keeps the
+exponent math int-typed so Rector's `RecastingRemovalRector` doesn't strip a needed `(int)`
+cast before `intdiv()`.
 
 ## Budget carry-over detection becomes probabilistic under jittered backoff
 
