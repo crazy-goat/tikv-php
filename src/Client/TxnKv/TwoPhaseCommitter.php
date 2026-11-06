@@ -1709,6 +1709,23 @@ final readonly class TwoPhaseCommitter
         );
     }
 
+    /**
+     * Translate a KeyError returned by a rollback RPC into an exception, or
+     * an intentional success when the lock is already gone.
+     *
+     * `txn_not_found` and `txn_lock_not_found` are the only variants that
+     * mean there is nothing left to clean up: the transaction (or its lock)
+     * was never written, or another resolver already rolled it back. TiKV's
+     * own rollback path returns success when the lock is missing (it
+     * collapses an existing rollback record and returns `Ok`), so these two
+     * variants are defensive; they are normally returned by
+     * `CheckTxnStatus`/`Commit`.
+     *
+     * Every other variant means the server did not confirm the rollback and
+     * must fail closed (issue #559): falling through used to let
+     * `rollback()` clear the write set and report `RolledBack` while the
+     * locks stayed in TiKV until their TTL expired.
+     */
     private function handleRollbackError(KeyError $error): void
     {
         $locked = $error->getLocked();
@@ -1724,6 +1741,33 @@ final readonly class TwoPhaseCommitter
             );
         }
 
+        // `abort` is the one compatibility string that must never be
+        // swallowed by a structured variant: the transaction is known to
+        // have failed for good, so retrying the rollback cannot help.
+        $abort = $error->getAbort();
+        if ($abort !== '') {
+            throw new TransactionConflictException(
+                'Abort during rollback: ' . $abort,
+            );
+        }
+
+        // The lock (or the whole transaction) is already gone: there is
+        // nothing left to roll back, so this is an intentional success.
+        // Checked before the compatibility `retryable` string because TiKV
+        // co-sets `retryable` with `txn_lock_not_found` (newer releases);
+        // the structured variant is the more precise signal.
+        if ($error->getTxnNotFound() !== null || $error->getTxnLockNotFound() !== null) {
+            return;
+        }
+
+        // A structured conflict is a definite failure, not a transient lock
+        // wait. TiKV co-sets `retryable` with `conflict`, so this branch must
+        // precede the compatibility string (same mapping as prewrite and
+        // pessimistic lock).
+        if ($error->getConflict() !== null) {
+            throw new TransactionConflictException('Write conflict during rollback');
+        }
+
         $retryable = $error->getRetryable();
         if ($retryable !== '') {
             throw new TxnRetryableException(
@@ -1732,12 +1776,9 @@ final readonly class TwoPhaseCommitter
             );
         }
 
-        $abort = $error->getAbort();
-        if ($abort !== '') {
-            throw new TransactionConflictException(
-                'Abort during rollback: ' . $abort,
-            );
-        }
+        throw new TiKvException(
+            'Rollback failed: ' . KeyErrorDescriber::describe($error),
+        );
     }
 
     // ---------------------------------------------------------------
