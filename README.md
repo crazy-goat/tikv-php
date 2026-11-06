@@ -765,6 +765,12 @@ Two consequences for the API:
 
 ### PSR-3 Logging
 
+> **Monolog is optional.** The logging snippet below uses Monolog for
+> illustration, but it is a **dev-only** dependency of this library. Install it
+> in your own project with `composer require monolog/monolog`, or pass any PSR-3
+> `LoggerInterface` implementation instead — the client itself only depends on
+> `psr/log`.
+
 ```php
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use Monolog\Logger;
@@ -791,12 +797,12 @@ $client = RawKvClient::create(['127.0.0.1:2379'], logger: $logger);
 require 'vendor/autoload.php';
 
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
-use Monolog\Logger;
-use Monolog\Handler\StreamHandler;
+use Psr\Log\NullLogger;
 
-// Setup logging
-$logger = new Logger('tikv');
-$logger->pushHandler(new StreamHandler('php://stderr', Logger::INFO));
+// Setup logging. Logging is optional and any PSR-3 logger works; the no-op
+// logger keeps this example runnable with the published package alone.
+// Monolog is only a dev dependency: composer require monolog/monolog
+$logger = new NullLogger();
 
 // Connect to TiKV
 $pdEndpoints = ['127.0.0.1:2379'];
@@ -1058,6 +1064,11 @@ Run any example:
 make up  # Start TiKV cluster first
 php examples/basic.php
 ```
+
+> `examples/logging.php` uses Monolog for illustration, and Monolog is a
+> **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or adapt the example to any PSR-3
+> `LoggerInterface`; the other examples run with the published package alone.
 
 > `examples/txn.php` needs a cluster in default (V1) mode, so use
 > `docker-compose.txnkv.yml` and start from fresh volumes — TiKV refuses to

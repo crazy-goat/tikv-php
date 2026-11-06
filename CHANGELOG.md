@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- **[DOC-21]**: Monolog is now declared as a **dev-only** dependency of the examples. `README.md` states that the client itself only depends on `psr/log` and that any PSR-3 `LoggerInterface` works, and names `composer require monolog/monolog` for the snippets that use it; the Complete Example uses `NullLogger` instead, so it runs with the published package alone. `examples/logging.php` exits with an actionable message instead of `Class "Monolog\Logger" not found` when Monolog is not installed. (#387)
+
 ### Fixed
 
 - `RawKvClient` now documents the previously missing exception types on its public operations: `InvalidArgumentException` on `scanIterator()`, `scanPrefixIterator()` and `ingest()` (the `scanPrefix()` annotation already existed); `RetryBudgetExhaustedException` and `StoreNotFoundException` on every method that runs its retry loop directly (including `scan()`, `scanPrefix()` and `reverseScan()`); and `BatchPartialFailureException` / `BatchDeadlineExceededException` on the fanned-out batch and range operations, where a region's retry-budget or missing-store failure is reported inside the wrapper. The lazy iterator factories point at `ScanIterator::next()`/`valid()`, where their RPCs and retry exceptions actually surface, and `ingest()` documents `StoreNotFoundException` without a retry-budget annotation because `SstIngestor` has no `RetryExecutor`. A new guard test derives the retrying and argument-validating methods from the source and fails when one of them lacks `RetryBudgetExhaustedException`, `StoreNotFoundException`, `InvalidArgumentException` or `BatchPartialFailureException`; `docs/error-handling.md` now explains that a fanned-out operation reports a region's retry-budget failure inside `BatchPartialFailureException` rather than throwing it directly, and its `StoreNotFoundException` retryability note matches the region-cache invalidation added in #627. The exception hierarchy now also lists `KeyOutOfBoundsException` (API V2) and the internal `BatchCommandsStreamException`. (#385)
