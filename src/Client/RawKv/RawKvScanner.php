@@ -26,6 +26,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
+use CrazyGoat\TiKV\Client\Region\RegionScanSource;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
@@ -302,68 +303,19 @@ final readonly class RawKvScanner
      * Enumerate the regions covering the key range [startKey, endKey) in
      * bounded batches.
      *
-     * The region cache is consulted first: when it already holds the
-     * complete chain the range is served locally, so a paginated scan issues
-     * no PD RPC per page (issue #293). Only an incomplete chain — a cold or
-     * partially warm cache, or a gap — falls back to PD, and then only for
-     * $batchSize regions at a time (issue #282): asking PD for the whole
-     * range answers with every region of the keyspace, which is tens of
-     * megabytes for a query that reads one region.
-     *
-     * The batches are yielded lazily, so a consumer that is satisfied by the
-     * first batch never triggers the next PD call. The next batch starts at
-     * the last region's end key, compared bytewise (issue #186).
+     * Delegates to {@see RegionScanSource}, which serves contiguous cached
+     * runs locally and asks PD only for the uncovered gap at the cursor
+     * (issue #425). The batches are yielded lazily, so a consumer satisfied
+     * by the first batch never triggers the next PD call (issue #282/#293).
      *
      * @param int $batchSize number of regions to request per PD call
      * @return \Generator<int, list<RegionInfo>>
      */
     private function regionBatches(string $startKey, string $endKey, int $batchSize): \Generator
     {
-        $cursor = $startKey;
+        $source = new RegionScanSource($this->pdClient, $this->regionCache, $this->metrics);
 
-        while (true) {
-            $cached = $this->regionCache->getRegionsInRange($cursor, $endKey);
-            if ($cached !== []) {
-                // The cache holds the complete chain for the range, so this is
-                // the last batch and PD is not consulted at all.
-                yield RegionScanBatch::trimToCursor($cached, $cursor);
-
-                return;
-            }
-
-            $batch = array_values($this->pdClient->scanRegions($cursor, $endKey, $batchSize));
-            if ($batch === []) {
-                return;
-            }
-
-            foreach ($batch as $region) {
-                $this->regionCache->put($region);
-            }
-
-            yield RegionScanBatch::trimToCursor($batch, $cursor);
-
-            $lastEndKey = $batch[count($batch) - 1]->endKey;
-            if ($lastEndKey === '') {
-                // The last region of the keyspace: nothing follows it.
-                return;
-            }
-            if ($endKey !== '' && KeyOrder::gte($lastEndKey, $endKey)) {
-                // The requested range is covered.
-                return;
-            }
-            if (KeyOrder::lte($lastEndKey, $cursor)) {
-                // No forward progress: stop instead of asking PD for the same
-                // page again.
-                return;
-            }
-            if (count($batch) < $batchSize) {
-                // PD answered with fewer regions than requested, so the range
-                // holds no more.
-                return;
-            }
-
-            $cursor = $lastEndKey;
-        }
+        yield from $source->batches($startKey, $endKey, $batchSize);
     }
 
     /**

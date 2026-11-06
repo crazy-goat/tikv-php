@@ -472,6 +472,7 @@ and limitations: `docs/configuration.md` → "Batch Commands Multiplexing".
 - Track region epochs
 - Handle leader changes
 - Invalidate on errors
+- Support opt-in refresh and preload (`RegionCacheWarmer`, issue #425)
 
 **Cache Structure**:
 ```php
@@ -499,6 +500,22 @@ heap records.
 - **ServerIsBusy / DiskFull / IsWitness / RecoveryInProgress**: Keep the
   cached region — the request reached the right region, so only the retry
   backoff applies (issue #245)
+
+**Opt-in refresh and preload (issue #425)**:
+
+PHP has no background threads, so `RegionCacheWarmer` owns no timer and starts
+no loop. A long-running worker calls `refreshRegionCache()` from its own tick
+(the `reapIdleChannels()` pattern), throttled by
+`options['regionCacheRefreshMs']` (default `0`, disabled), or warms the cache
+at boot with `preloadRegions([['start', 'end'], ...])`. Refresh re-queries PD
+for a bounded slice of the cached regions (128 per tick, round-robin) on each
+region's start key and folds the answer back through `put()`; a stale epoch is
+updated, a split or merge supersedes the entry silently, and an answer that
+does not cover the start key drops it. The first PD failure aborts the tick
+and the cached entries are kept; neither method throws on a PD failure, and
+both are no-ops after `close()`. Scan-path range resolution is a separate
+mechanism (`RegionScanSource`, see the Scan Operation flow), not part of the
+refresh tick.
 
 ### 7. LockResolver
 
@@ -758,9 +775,9 @@ invalidation / leader switching and backoff. The batch wrappers use it since
           │
           ▼
 ┌─────────────────────┐
-│  scanRegions()      │  Get all regions in range
-│   • Query PD        │
-│   • Returns [R1,R2] │
+│  RegionScanSource   │  Cache first, PD only for gaps
+│   • Cached run      │  (RawKV: 'scan' metrics,
+│   • Gap → PD scan   │   TxnKV: 'txn_scan' metrics)
 └─────────┬───────────┘
           │
           ▼
@@ -790,6 +807,13 @@ invalidation / leader switching and backoff. The batch wrappers use it since
 │  (preserve order)   │
 └─────────────────────┘
 ```
+
+Both scanners enumerate regions through `RegionScanSource` (issue #425): a
+contiguous cached run is served without PD, and at the first gap one bounded
+`ScanRegions` call starts at the gap's key and its answer is cached. This is
+the same source for RawKV and TxnKV, so the two paths cannot drift apart, and
+it emits the scan-path `regionCacheHit()` / `regionCacheMiss()` counters
+(`scan` and `txn_scan`).
 
 An unbounded (`limit: 0`) `scan()` / `scanPrefix()` / `reverseScan()`
 executes the per-region sub-scans concurrently, in windows of at most
@@ -847,6 +871,8 @@ the sequential retrying path.
 - Refresh on EpochNotMatch from its `current_regions` payload; invalidate
   when the payload is absent or unusable
 - Update on NotLeader hint
+- Offer an opt-in tick (`refreshRegionCache()`) and an explicit boot-time
+  preload (`preloadRegions()`) for long-lived workers (issue #425)
 - Drop the cached store address on a `StoreNotMatch` region error or a
   transport failure to that store, so the next attempt asks PD for a fresh
   `GetStore` instead of retrying a stale address (issue #247)
@@ -858,6 +884,10 @@ the sequential retrying path.
   retried without a re-handshake. The exception carries the address of the
   failed call, so a nested lock-resolution RPC against another region also
   closes its own channel
+
+**Trade-off**: refresh costs one PD `GetRegion` per cached region, which is
+why it is opt-in and throttled by `regionCacheRefreshMs` rather than running
+by default.
 
 ### 4. Automatic Retries
 

@@ -23,6 +23,8 @@ use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -31,6 +33,7 @@ use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
+use CrazyGoat\TiKV\Client\Region\RegionScanSource;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
@@ -85,6 +88,8 @@ final readonly class TxnReader
          * original wire bytes.
          */
         private int $priority = CommandPri::Normal,
+        /** Metrics backend for scan-path region-cache hit/miss counters (issue #425). */
+        private MetricsInterface $metrics = new NoOpMetrics(),
         /** Optional Context control fields applied to every read (issue #426). */
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every read request (issue #427). */
@@ -305,28 +310,21 @@ final readonly class TxnReader
 
         $results = [];
         $remaining = $limit;
-        $cursor = $startKey;
         $batchSize = RegionScanBatch::forRowBudget($limit);
 
         $clipper = new RegionRangeClipper();
-        while ($remaining > 0) {
-            $regions = array_values($this->pdClient->scanRegions($cursor, $endKey, $batchSize));
-            if ($regions === []) {
-                break;
-            }
+        // The cache is read first and PD is asked only for the gaps (issue
+        // #425), so a warm cache turns every page of a transactional scan
+        // into zero PD round trips. The source trims a batch to the cursor a
+        // merge may have moved it to, exactly as the old loop did.
+        $source = new RegionScanSource(
+            $this->pdClient,
+            $this->regionCache,
+            $this->metrics,
+            'txn_scan',
+        );
 
-            foreach ($regions as $region) {
-                $this->regionCache->put($region);
-            }
-
-            $batchCount = count($regions);
-            $lastEndKey = $regions[$batchCount - 1]->endKey;
-
-            // A region that starts below the cursor is the region a merge
-            // produced after the previous batch was enumerated: the part
-            // below the cursor was read already (RegionScanBatch::trimToCursor()).
-            $regions = RegionScanBatch::trimToCursor($regions, $cursor);
-
+        foreach ($source->batches($startKey, $endKey, $batchSize) as $regions) {
             foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
                 $regionResults = $this->executeScanForRegion(
                     $scanStart,
@@ -342,34 +340,9 @@ final readonly class TxnReader
 
                 $remaining -= count($regionResults);
                 if ($remaining <= 0) {
-                    break;
+                    break 2;
                 }
             }
-
-            if ($remaining <= 0) {
-                break;
-            }
-
-            if ($lastEndKey === '') {
-                // The last region of the keyspace: nothing follows it.
-                break;
-            }
-            if ($endKey !== '' && KeyOrder::gte($lastEndKey, $endKey)) {
-                // The requested range is covered.
-                break;
-            }
-            if (KeyOrder::lte($lastEndKey, $cursor)) {
-                // No forward progress: stop instead of asking PD for the same
-                // page again.
-                break;
-            }
-            if ($batchCount < $batchSize) {
-                // PD answered with fewer regions than requested, so the range
-                // holds no more.
-                break;
-            }
-
-            $cursor = $lastEndKey;
         }
 
         if ($wholeRange && $remaining <= 0) {

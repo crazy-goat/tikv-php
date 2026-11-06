@@ -142,7 +142,7 @@ that keeps existing, correct code working.
 | Surface | What it covers |
 |---|---|
 | `RawKv\RawKvClient` | every public method — the RawKV entry point |
-| `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `reapIdleChannels()`, `close()` — the TxnKV entry point |
+| `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `reapIdleChannels()`, `refreshRegionCache()`, `preloadRegions()`, `close()` — the TxnKV entry point |
 | `TxnKv\Transaction` | every public method — the transaction handle |
 | `RawKv\CasResult`, `RawKv\ChecksumResult` | the result DTOs of `compareAndSwap()` and `checksum()` |
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
@@ -923,6 +923,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 - ✅ **Slow log** — `options['slowLog']` logs the RawKV operations that are slower than their per-operation threshold
 - ✅ **PSR-3 Logging** — Structured logging with any PSR-3 logger
 - ✅ **Idle channel reaping** — `reapIdleChannels()` on both clients drops cached gRPC channels idle longer than `idleTtlMs`, for a worker to call from its own tick
+- ✅ **Region cache refresh** — `refreshRegionCache()` on both clients re-queries PD for the cached regions at most once per `regionCacheRefreshMs`, for the same worker tick; `preloadRegions()` warms the cache at boot
 
 ### API Versions and Codec
 - ✅ **API V1 and V2** — `options['apiVersion']` and `options['keyspace']`; V2 prefixes the keys with the mode and the keyspace ID
@@ -957,6 +958,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `expectedClusterId` | The PD cluster ID every PD/TSO response must report when set — a mismatch or a missing cluster-ID header throws instead of adopting the server's value ([Cluster Identity Verification](docs/configuration.md#cluster-identity-verification-issue-308-sec-05)) |
 | `allowedStoreHosts` / `storeHostPolicy` / `allowedStorePorts` | Which store addresses the client is allowed to talk to |
 | `gcSafePointValidation` / `gcSafePointRefreshMs` | TxnKV GC safe-point validation and its refresh interval |
+| `regionCacheRefreshMs` | Minimum interval between non-forced `refreshRegionCache()` ticks; `0` (default) disables the non-forced refresh, which is opt-in ([Region Cache Refresh and Preload](docs/configuration.md#region-cache-refresh-and-preload)) |
 
 The transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
 `grpc`) cannot be combined with `grpcClient` — they configure a transport the
@@ -988,7 +990,8 @@ Two settings are methods on the client rather than options:
 ### Infrastructure
 - ✅ **PD Region Discovery** — With RegionEpoch support
 - ✅ **Region Routing** — Direct to correct TiKV node
-- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor
+- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. Both scan paths (RawKV and TxnKV `Transaction::scan()`) read the cache first and query PD only for the uncovered ranges, and report `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels
+- ✅ **Region cache refresh and preload** — opt-in, PHP-process-model friendly (no timers): call `refreshRegionCache()` from a worker tick (throttled by `options['regionCacheRefreshMs']`, default `0` = disabled) and `preloadRegions([['start', 'end'], ...])` at boot to warm the keys the worker will touch without serving a read. Both keep the old entry and only log when PD fails, and are no-ops after `close()` ([Region Cache Refresh and Preload](docs/configuration.md#region-cache-refresh-and-preload))
 - ✅ **Store Cache** — In-memory caching of store addresses
 - ✅ **Retry Logic** — Automatic retry with exponential backoff; the wall-clock bound of one retry loop is `options['retryDeadlineMs']` (see [Retry System](docs/architecture.md#8-retry-system))
 - ✅ **NotLeader Handling** — Automatic leader redirection

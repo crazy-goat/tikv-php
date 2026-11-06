@@ -270,6 +270,7 @@ final class Transaction
             replicaReadPolicy: $this->replicaReadPolicy,
             logger: $this->logger,
             priority: $this->priority,
+            metrics: $this->metrics,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );

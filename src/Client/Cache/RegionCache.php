@@ -179,15 +179,32 @@ class RegionCache implements RegionCacheInterface
 
     public function getRegionsInRange(string $startKey, string $endKey): array
     {
+        $regions = $this->getCachedChain($startKey, $endKey);
+        $last = $regions === [] ? null : $regions[count($regions) - 1];
+        if (
+            $last instanceof RegionInfo
+            && ($last->endKey === '' || ($endKey !== '' && KeyOrder::gte($last->endKey, $endKey)))
+        ) {
+            return $regions;
+        }
+
+        // A partial chain is not a complete answer: the caller falls back to
+        // PD for the range (the gap-aware scanner uses getCachedChain()
+        // instead, so it scans only the uncovered window).
+        return [];
+    }
+
+    public function getCachedChain(string $startKey, string $endKey): array
+    {
         $regions = [];
         $cursor = $startKey;
 
         while (true) {
             $region = $this->getByKey($cursor);
             if (!$region instanceof RegionInfo) {
-                // A gap (or an expired/cold start region): let the caller
-                // fall back to a single PD scanRegions() call.
-                return [];
+                // A gap (or an expired/cold start region): the chain ends
+                // here and the consumer scans the remainder from PD.
+                return $regions;
             }
 
             $regions[] = $region;
@@ -202,13 +219,34 @@ class RegionCache implements RegionCacheInterface
             }
 
             // Require strictly forward progress: a non-advancing end key
-            // means the cached layout is inconsistent, so defer to PD.
+            // means the cached layout is inconsistent, so stop the chain and
+            // let PD answer for the remainder.
             if (KeyOrder::lte($region->endKey, $cursor)) {
-                return [];
+                return $regions;
             }
 
             $cursor = $region->endKey;
         }
+    }
+
+    /**
+     * Snapshot of every held entry, keyed by region ID (issue #425).
+     *
+     * Deliberately does not touch LRU recency or drop expired entries: the
+     * refresher is the component that decides whether an entry is still
+     * usable, and including an expired entry is what makes a tick able to
+     * revive a cache that sat idle past its TTL.
+     *
+     * @return array<int, RegionInfo>
+     */
+    public function getCachedRegions(): array
+    {
+        $regions = [];
+        foreach ($this->entriesById as $regionId => $entry) {
+            $regions[$regionId] = $this->resolveRegionInfo($entry);
+        }
+
+        return $regions;
     }
 
     /**

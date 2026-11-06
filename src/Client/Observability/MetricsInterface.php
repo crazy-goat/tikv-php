@@ -115,6 +115,11 @@ interface MetricsInterface
      *                           #233, #627)
      * - 'lock_resolve':       LockResolver dropped the region after resolving
      *                           a lock
+     * - 'refresh':            RegionCacheWarmer dropped the region because a
+     *                           refresh tick's PD answer no longer covers its
+     *                           start key (issue #425); a refresh that merely
+     *                           supersedes the entry with a newer one is a
+     *                           put() and emits nothing
      *
      * Note: NotLeader responses whose hint peer is still valid only switch
      * the cached leader (switchLeader()) and do NOT invalidate, so they emit

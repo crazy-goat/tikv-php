@@ -38,6 +38,7 @@ use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Region\RegionCacheWarmer;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
@@ -221,6 +222,19 @@ final class RawKvClient
     public const OPT_BATCH_COMMANDS = 'batchCommands';
 
     /**
+     * options[] key for the region-cache refresh interval in milliseconds
+     * (issue #425). A long-running worker calls
+     * {@see RawKvClient::refreshRegionCache()} from its own tick; the method
+     * performs at most one refresh per interval. 0 (the default) disables the
+     * throttled refresh entirely, so nothing changes for an application that
+     * does not opt in; a forced refresh still works. Must be >= 0.
+     */
+    public const OPT_REGION_CACHE_REFRESH_MS = 'regionCacheRefreshMs';
+
+    /** Default region-cache refresh interval: disabled (issue #425). */
+    public const DEFAULT_REGION_CACHE_REFRESH_MS = RegionCacheWarmer::DEFAULT_REFRESH_INTERVAL_MS;
+
+    /**
      * options[] key for the resource group every request belongs to (issue
      * #427). Set on `Context.resource_control_context.resource_group_name`.
      * Default: unset = no resource-control fields are sent. The name must be
@@ -269,6 +283,9 @@ final class RawKvClient
     private readonly int $retryDeadlineMs;
     /** Max in-flight requests for fanned-out batch and range operations (#295, #264). */
     private readonly int $maxConcurrency;
+
+    /** Opt-in region-cache refresh and preload (#425). */
+    private readonly RegionCacheWarmer $regionCacheWarmer;
 
     /**
      * @param string[] $pdEndpoints
@@ -322,6 +339,7 @@ final class RawKvClient
             batchCommands: self::resolveBatchCommands($options),
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            regionCacheRefreshMs: self::resolveRegionCacheRefreshMs($options),
             maxIngestSize: self::resolveMaxIngestSize($options),
             storeCache: $bundle->storeCache,
             requestContext: self::resolveRequestContext($options),
@@ -386,6 +404,18 @@ final class RawKvClient
          */
         private readonly ?CodecInterface $codec = null,
         /**
+         * Minimum interval between two non-forced
+         * {@see self::refreshRegionCache()} calls, in milliseconds (issue
+         * #425). 0 (the default) disables the throttled refresh; see
+         * {@see self::OPT_REGION_CACHE_REFRESH_MS}.
+         */
+        int $regionCacheRefreshMs = self::DEFAULT_REGION_CACHE_REFRESH_MS,
+        /**
+         * Pre-built warmer (test seam). When null, the client builds one from
+         * its PD client, region cache and logger.
+         */
+        ?RegionCacheWarmer $regionCacheWarmer = null,
+        /**
          * Maximum payload bytes of one ingest() call; 0 = unlimited
          * (issue #297).
          */
@@ -411,6 +441,9 @@ final class RawKvClient
          */
         private readonly ResourceControl $resourceControl = new ResourceControl(),
     ) {
+        if ($regionCacheRefreshMs < 0) {
+            throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
+        }
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
@@ -446,6 +479,8 @@ final class RawKvClient
             $this->epochNotMatchCodec(),
             $this->storeCache,
         );
+        $this->regionCacheWarmer = $regionCacheWarmer
+            ?? new RegionCacheWarmer($pdClient, $regionCache, $this->logger, $regionCacheRefreshMs);
         $this->crud = $crud ?? new RawKvCrud(
             $grpc,
             $regionResolver,
@@ -712,6 +747,34 @@ final class RawKvClient
         }
 
         return $batchCommands;
+    }
+
+    /**
+     * Resolve options['regionCacheRefreshMs'] (see
+     * OPT_REGION_CACHE_REFRESH_MS) for create(): the minimum interval between
+     * two non-forced region-cache refreshes (issue #425). 0 disables it.
+     * Must be >= 0.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRegionCacheRefreshMs(array $options): int
+    {
+        if (!array_key_exists(self::OPT_REGION_CACHE_REFRESH_MS, $options)) {
+            return self::DEFAULT_REGION_CACHE_REFRESH_MS;
+        }
+
+        $refreshMs = $options[self::OPT_REGION_CACHE_REFRESH_MS];
+        if (!is_int($refreshMs)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['regionCacheRefreshMs'] must be an int (milliseconds), %s given",
+                get_debug_type($refreshMs),
+            ));
+        }
+        if ($refreshMs < 0) {
+            throw new InvalidArgumentException("options['regionCacheRefreshMs'] must be >= 0");
+        }
+
+        return $refreshMs;
     }
 
     /**
@@ -1670,6 +1733,66 @@ final class RawKvClient
         }
 
         $this->grpc->reapIdleChannels();
+    }
+
+    /**
+     * Refresh the cached regions from PD (issue #425).
+     *
+     * PHP has no background threads, so nothing runs on its own: a long-lived
+     * worker calls this from its own tick. A non-forced call performs at most
+     * one refresh per `options['regionCacheRefreshMs']` (default 0, i.e.
+     * disabled) and returns 0 when the interval has not elapsed.
+     * `$force = true` bypasses that interval only; it does not remove the
+     * per-tick bound below.
+     *
+     * One call re-resolves at most
+     * `RegionCacheWarmer::DEFAULT_MAX_REGIONS_PER_REFRESH` (128) cached
+     * regions through a PD `GetRegion` on each region's start key,
+     * round-robin: successive calls continue where the previous one stopped,
+     * so the whole cache is refreshed over several ticks rather than in one
+     * unbounded burst. Within that slice a newer epoch or leader updates the
+     * entry in place, a split or merge supersedes it (the replacement is
+     * stored and the stale entry is dropped silently), and an answer that no
+     * longer covers the entry's start key drops it. The first PD failure
+     * aborts the tick, is logged at warning level and keeps the cached
+     * entries, so this method never throws. No-op after `close()`.
+     *
+     * @return int number of distinct regions the cache still holds after the
+     *         tick (a merge or split arriving later in the tick counts once,
+     *         a leaderless answer counts zero)
+     */
+    public function refreshRegionCache(bool $force = false): int
+    {
+        if ($this->closed) {
+            return 0;
+        }
+
+        return $this->regionCacheWarmer->refresh($force);
+    }
+
+    /**
+     * Resolve and cache the regions of the given ranges without serving a
+     * user read (issue #425).
+     *
+     * Each range is a `[startKey, endKey]` pair of half-open bounds, where an
+     * empty `endKey` means +infinity (the same convention as `scan()`). Use it
+     * at worker boot to warm the keys the worker will touch. A PD failure is
+     * logged and leaves the existing cache untouched; it is never thrown.
+     * No-op after `close()`.
+     *
+     * @param array<array-key, mixed> $ranges list of `[startKey, endKey]` pairs
+     * @return int number of regions cached
+     *
+     * @throws InvalidArgumentException when a range is not a pair of strings or
+     *         is reversed (`startKey` sorts after a non-empty `endKey`)
+     */
+    public function preloadRegions(array $ranges): int
+    {
+        if ($this->closed) {
+            return 0;
+        }
+
+        return $this->regionCacheWarmer->preload($ranges);
     }
 
     public function close(): void
