@@ -1060,6 +1060,30 @@ final readonly class TwoPhaseCommitter
                 $secondaries,
             ): CheckedGrpcFuture {
                 $region = $this->regionResolver->getRegionInfo($firstKey);
+                $keys = array_map(
+                    static fn (Mutation $mutation): string => $mutation->getKey(),
+                    $group['mutations'],
+                );
+
+                if (!$this->regionCoversAllKeys($region, $keys)) {
+                    // The group was formed against a pre-split layout (the
+                    // region changed between grouping and this attempt, or
+                    // the cache was refreshed from EpochNotMatch). Sending
+                    // the whole group to $region would put keys at/after its
+                    // exclusive end into the request, which TiKV rejects with
+                    // a KeyError. Re-group against the current layout and
+                    // prewrite each region separately instead (issue #246).
+                    return $this->prewriteSplitGroup(
+                        $group['mutations'],
+                        $group['isPrimary'],
+                        $lockTtlMs,
+                        $primary,
+                        $state,
+                        $useOnePc,
+                        $useAsyncCommit,
+                        $secondaries,
+                    );
+                }
 
                 return $this->prewriteForRegionAsync(
                     $region,
@@ -1076,6 +1100,150 @@ final readonly class TwoPhaseCommitter
             $firstKey,
             $classifier,
         );
+    }
+
+    /**
+     * Prewrite a group whose keys no longer fit in one region.
+     *
+     * A group is built from the region cache before the prewrite phase. A
+     * split between that grouping and the first (or a retried) prewrite can
+     * leave the group spanning two or more regions; sending it to the first
+     * key's region puts keys at/after that region's exclusive end into the
+     * request, and TiKV answers with a KeyError such as "Key … is out of
+     * [region N] [.., end)". Re-resolve every mutation's key and send one
+     * prewrite per region instead. This is the prewrite counterpart of the
+     * pessimistic-lock and rollback regroup paths (#503/#505), but it is
+     * local to the group so the primary/secondary ordering remains intact.
+     *
+     * The sub-prewrites run sequentially: the primary sub-group is sent first
+     * in the normal path (its lock must be durable before any secondary
+     * lock), and last in the async-commit path (the primary is the commit
+     * decision barrier). A split group cannot use 1PC.
+     *
+     * @param Mutation[] $mutations
+     * @param string[] $secondaries
+     */
+    private function prewriteSplitGroup(
+        array $mutations,
+        bool $isPrimaryGroup,
+        int $lockTtlMs,
+        string $primary,
+        TransactionState $state,
+        bool $useOnePc,
+        bool $useAsyncCommit,
+        array $secondaries,
+    ): CheckedGrpcFuture {
+        $groups = [];
+        foreach ($mutations as $mutation) {
+            $key = $mutation->getKey();
+            // getRegionInfo() validates that the returned region contains
+            // the key (issue #253), so a stale entry ending exactly at the
+            // key cannot be used for it.
+            $region = $this->regionResolver->getRegionInfo($key);
+            // Include the range and epoch in the key: two resolutions can
+            // observe different versions of the same region ID if the cache
+            // is refreshed while this loop runs. Merging them by ID alone
+            // could send an old key to the newer, narrower range.
+            $groupKey = sprintf(
+                '%d:%s:%s:%d:%d',
+                $region->regionId,
+                bin2hex($region->startKey),
+                bin2hex($region->endKey),
+                $region->epochVersion,
+                $region->epochConfVer,
+            );
+            $groups[$groupKey] ??= ['region' => $region, 'mutations' => []];
+            $groups[$groupKey]['mutations'][] = $mutation;
+        }
+
+        if (count($groups) === 1) {
+            $only = array_values($groups)[0];
+
+            return $this->prewriteForRegionAsync(
+                $only['region'],
+                $only['mutations'],
+                $lockTtlMs,
+                $primary,
+                $state,
+                $useOnePc,
+                $useAsyncCommit,
+                $secondaries,
+            );
+        }
+
+        $primaryGroupKey = null;
+        foreach ($groups as $groupKey => $group) {
+            foreach ($group['mutations'] as $mutation) {
+                if ($mutation->getKey() === $primary) {
+                    $primaryGroupKey = $groupKey;
+                    break 2;
+                }
+            }
+        }
+
+        $ordered = [];
+        if ($isPrimaryGroup && $primaryGroupKey !== null) {
+            if ($useAsyncCommit) {
+                foreach ($groups as $groupKey => $group) {
+                    if ($groupKey !== $primaryGroupKey) {
+                        $ordered[] = $group;
+                    }
+                }
+                $ordered[] = $groups[$primaryGroupKey];
+            } else {
+                $ordered[] = $groups[$primaryGroupKey];
+                foreach ($groups as $groupKey => $group) {
+                    if ($groupKey !== $primaryGroupKey) {
+                        $ordered[] = $group;
+                    }
+                }
+            }
+        } else {
+            $ordered = array_values($groups);
+        }
+
+        return CheckedGrpcFuture::fromCallable(function () use (
+            $ordered,
+            $primary,
+            $lockTtlMs,
+            $state,
+            $useAsyncCommit,
+            $secondaries,
+        ): array {
+            $minCommitTs = 0;
+            $onePcCommitTs = 0;
+
+            foreach ($ordered as $group) {
+                $isPrimarySubGroup = false;
+                foreach ($group['mutations'] as $mutation) {
+                    if ($mutation->getKey() === $primary) {
+                        $isPrimarySubGroup = true;
+                        break;
+                    }
+                }
+
+                $subAsyncCommit = $useAsyncCommit && $isPrimarySubGroup;
+                /** @var array{minCommitTs: int, onePcCommitTs: int} $result */
+                $result = $this->prewriteForRegionAsync(
+                    $group['region'],
+                    $group['mutations'],
+                    $lockTtlMs,
+                    $primary,
+                    $state,
+                    false,
+                    $subAsyncCommit,
+                    $subAsyncCommit ? $secondaries : [],
+                )->waitForExecutor();
+
+                $minCommitTs = max($minCommitTs, $result['minCommitTs']);
+                $onePcCommitTs = max($onePcCommitTs, $result['onePcCommitTs']);
+            }
+
+            return [
+                'minCommitTs' => $minCommitTs,
+                'onePcCommitTs' => $onePcCommitTs,
+            ];
+        });
     }
 
     /**

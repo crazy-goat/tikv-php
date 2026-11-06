@@ -1952,8 +1952,9 @@ PHPStan L9 correlates the try/catch: at the rethrow check it already knows
 Test seam: drive the composition directly with `fromCallable()` futures (no
 `\Grpc\Call` mocks, no ext-grpc) and a real `RetryExecutor` over a mocked
 `RegionCacheInterface`; `NotLeader` with a hint must call `switchLeader`
-(not `invalidate`), `EpochNotMatch` must `invalidate`, and a non-retryable
-error must propagate after exactly one attempt.
+(not `invalidate`), an `EpochNotMatch` with an empty payload must
+`invalidate`, and a non-retryable error must propagate after exactly one
+attempt.
 `tests/Unit/Batch/CheckedGrpcFutureRetryableDispatchTest.php` is the
 reference. When a test pins dispatch counts through a dead endpoint, pass
 `maxAttempts: 1` (or a tiny `maxBackoffMs`) to stop the new wait-phase retry
@@ -1969,6 +1970,54 @@ that (and/or `grpc->callAsync`, exactly one per dispatch): with
 `maxAttempts: 2` both are exactly 2, while the old dispatch-only-retry code
 resolved once. Reference:
 `RawKvBatchTest::testBatchGetWithRetryReResolvesRegionOnEveryAttempt`.
+
+## EpochNotMatch `current_regions` has no leader — seed it from the stale cached entry (issue #246)
+
+`errorpb.EpochNotMatch.current_regions` is a `metapb.Region` list, and
+`metapb.Region` has **no leader field** (only `peers`, `region_epoch`, …).
+Mapping it through `RegionInfoMapper::fromProto($region, null, $codec)` yields
+`leaderStoreId = 0`, which `RegionCache::put()` deliberately refuses to cache
+(issue #576) — so the "avoid PD" path would silently do nothing. The leader
+must come from the stale cached entry's leader store: if that store is still
+one of the new region's peers, use the new peer on that store (same assumption
+as client-go's `onRegionEpochNotMatch`; a replica read may have been sent to a
+follower, but the cached leader is still the right seed). If the old leader
+store is gone from the new peer set, treat the payload as unusable and fall
+back to PD.
+
+Two more traps in the same path:
+
+- `RegionErrorHandler::check()` invalidates the TxnKV entry **before** the
+  `RegionException` reaches `RetryExecutor`, so the stale leader is already
+  gone from the cache. `check()` therefore captures `getById($regionId)` into
+  `RegionException::$cachedRegion` before invalidating; RawKV check sites pass
+  no cache, so the executor reads the entry with `getByKey($key)` instead.
+- The payload is all-or-nothing and must be *newer*. A same-ID region whose
+  epoch is not strictly newer is ignored by `RegionCache::put()` (issue #249),
+  so accepting it would retry the same stale routing until the budget runs
+  out; the executor rejects it and falls back to PD. A returned region that
+  does not contain the key is also a fallback, not a reason to cache the
+  partial payload. A successful executor-side refresh is a superseding
+  `put()`, so it emits no `regionInvalidated()` metric of its own (issue
+  #238); the `check()` drop above is counted separately. The executor's
+  fallback emits `retry_region_error:epoch_not_match` only where the stale
+  entry is still cached (e.g. RawKV); at TxnKV sites `check()` already
+  dropped it, so only `region_error:epoch_not_match` is emitted.
+
+## A refreshed EpochNotMatch can leave a prewrite group spanning regions — re-group before retry (issue #246)
+
+`prewriteWithRetry()` re-resolves only the group's first key. If a split
+happened after `groupMutationsByRegion()` built the group, the refreshed cache
+may now give a narrow left region while the group still contains keys at or
+after its **exclusive** end. Replaying that group to the left region produces a
+`KeyError.abort` with a message such as `Key 0100… is out of [region 14]
+[, 0100…)`, not another `EpochNotMatch`, so the retry loop cannot recover.
+The group must be re-grouped by resolving **every** mutation's key and sending
+one prewrite per region. Keep the primary sub-group first in the normal path
+and last for async commit; a split group cannot use 1PC. Unlike the
+pessimistic-lock/rollback re-groups (#503/#505), this one is local to the
+prewrite group, so the primary/secondary phase ordering is unchanged.
+Reference: `TransactionTest::testCommitPrewriteRegroupsGroupAfterSplitAtExclusiveEnd`.
 
 ## `limit: 0` scans paginate and are guarded, not capped (RAW-06, issue #191)
 

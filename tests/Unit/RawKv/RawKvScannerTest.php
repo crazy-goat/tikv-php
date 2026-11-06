@@ -194,6 +194,42 @@ class RawKvScannerTest extends TestCase
         $this->assertSame('val2', $result[1]['value']);
     }
 
+    public function testScanSingleKeyRangeSendsTheSuccessorBoundAndReturnsOneKey(): void
+    {
+        $region = $this->defaultRegion('a', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('k');
+        $pair->setValue('v');
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use ($response): RawScanResponse {
+                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame('k', $request->getStartKey());
+                    $this->assertSame("k\x00", $request->getEndKey());
+
+                    return $response;
+                },
+            );
+
+        $result = $this->scanner->scan('k', "k\x00", 100, false);
+
+        $this->assertSame([['key' => 'k', 'value' => 'v']], $result);
+    }
+
     public function testScanMultipleRegionsMergesResultsInOrder(): void
     {
         $region1 = $this->defaultRegion('a', 'm', regionId: 1);
@@ -954,6 +990,56 @@ class RawKvScannerTest extends TestCase
         $this->assertSame('key_a', $result[0]['key']);
         $this->assertSame('key_m', $result[1]['key']);
         $this->assertSame('key_z', $result[2]['key']);
+    }
+
+    public function testScanWithBothBoundsEmptyTreatsTheEmptyEndKeyAsInfinity(): void
+    {
+        $region = $this->defaultRegion('', 'z');
+        $this->stubRegionLookup([$region]);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('key_a');
+        $pair->setValue('val_a');
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use ($response): RawScanResponse {
+                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame('', $request->getStartKey());
+                    $this->assertSame(
+                        'z',
+                        $request->getEndKey(),
+                        'an empty end key means +infinity, not an empty range',
+                    );
+
+                    return $response;
+                },
+            );
+
+        $result = $this->scanner->scan('', '', 100, false);
+
+        $this->assertSame([['key' => 'key_a', 'value' => 'val_a']], $result);
+    }
+
+    public function testReverseScanWithBothBoundsEmptyReturnsNoRowsWithoutRpc(): void
+    {
+        // [end, start) == ['', '') is empty. The clipper's empty-end sentinel
+        // also marks an unbounded region end, so without an explicit guard the
+        // first region would be scanned instead.
+        $this->expectNoRpc();
+
+        $this->assertSame([], $this->scanner->reverseScan('', '', 100, false));
     }
 
     // ========================================================================

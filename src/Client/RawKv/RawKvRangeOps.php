@@ -69,6 +69,8 @@ final readonly class RawKvRangeOps
      */
     public function deleteRange(string $startKey, string $endKey, string $columnFamily = ''): void
     {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'deleteRange');
+
         if ($startKey === $endKey) {
             return;
         }
@@ -119,6 +121,8 @@ final readonly class RawKvRangeOps
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'checksum');
+
         // One range operation is one logical operation: every region shares
         // one retry budget (issue #223).
         $executor = $this->createRetryExecutor()->beginOperation();

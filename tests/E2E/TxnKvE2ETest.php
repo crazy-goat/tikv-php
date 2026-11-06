@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
@@ -704,10 +705,14 @@ PHP;
     // Client lifecycle (close behavior)
     // ========================================================================
 
-    private function createFreshTxnClient(): TxnKvClient
+    private function createFreshTxnClient(?InMemoryMetrics $metrics = null): TxnKvClient
     {
         $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
-        return TxnKvClient::create($pdEndpoints);
+        $options = $metrics instanceof InMemoryMetrics
+            ? [TxnKvClient::OPT_METRICS => $metrics]
+            : [];
+
+        return TxnKvClient::create($pdEndpoints, null, $options);
     }
 
     public function testCloseThenBeginThrowsClientClosedException(): void
@@ -732,28 +737,53 @@ PHP;
         $client->begin();
     }
 
-    public function testTransactionBeforeCloseRemainsUsable(): void
+    public function testCloseRollsBackTransactionHeldAcrossClose(): void
     {
         $key = $this->uniqueKey('txn-lifecycle');
-        $otherKey = $this->uniqueKey('txn-lifecycle-other');
         $this->keysToCleanup[] = $key;
-        $this->keysToCleanup[] = $otherKey;
 
-        $client = $this->createFreshTxnClient();
+        $metrics = new InMemoryMetrics();
+        $client = $this->createFreshTxnClient($metrics);
         $txn = $client->begin(['pessimistic' => false]);
         $txn->set($key, 'value-before-close');
 
-        // Close the client — this releases the shared gRPC connection pool.
-        $client->close();
-
-        // Reading a key from the local write set does NOT require a gRPC call.
+        // Before close() the transaction is active and reads its own buffered
+        // write locally.
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
         $this->assertSame('value-before-close', $txn->get($key));
 
-        // But reading a key NOT in the write set requires a remote gRPC call,
-        // which is blocked by the GrpcClient closed guard.
-        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidStateException::class);
-        $this->expectExceptionMessage('gRPC client is closed');
-        $txn->get($otherKey);
+        // Give the transaction a real server-side lock. close() must roll that
+        // lock back, not just discard the local write set.
+        $this->prewriteOnly($key, $txn->getStartTs(), 'value-before-close');
+
+        // close() rolls the live transaction back before it releases the
+        // transport and the PD client.
+        $client->close();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame(
+            1,
+            $metrics->getRpcStarted('tikvpb.Tikv/KvBatchRollback'),
+            'close() must issue the rollback RPC for the live transaction',
+        );
+
+        // The transaction is inactive now: using it fails before any RPC.
+        try {
+            $txn->get($key);
+            $this->fail('A transaction held across close() must not be usable');
+        } catch (InvalidStateException $e) {
+            $this->assertStringContainsString('Transaction is not active', $e->getMessage());
+        }
+
+        // The prewritten lock is gone: a fresh client reads the key as absent.
+        $reader = $this->createFreshTxnClient();
+        try {
+            $readTxn = $reader->begin(['pessimistic' => false]);
+            $this->assertNull($readTxn->get($key));
+            $readTxn->rollback();
+        } finally {
+            $reader->close();
+        }
     }
 
     public function testMultiplePostCloseBeginAllThrow(): void

@@ -514,6 +514,13 @@ application, so closing one client cannot break the other clients sharing it.
 A client that built its own transport (the normal case) closes it in
 `close()` as before.
 
+A `TxnKvClient` still owns the transactions it began when the transport is
+shared: `close()` rolls the still-active ones back before releasing its other
+resources, so the rollback can reach TiKV even though the client does not
+close the transport. Finish transactions explicitly anyway — a rollback that
+fails during `close()` is only logged (see
+[`close()` semantics](operations.md#close-semantics)).
+
 Because the supplied transport was configured by the application, the
 transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
 `grpc`) cannot be combined with it — they would configure a transport the
@@ -1671,7 +1678,11 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 **Cache behavior**:
 - Cache entries are invalidated on routing errors
 - `NotLeader` errors update the cache with new leader info
-- `EpochNotMatch` errors invalidate affected regions
+- `EpochNotMatch` errors refresh the affected regions from TiKV's
+  `current_regions` payload when it is usable, so the retry needs no PD
+  `GetRegion`; an empty, undecodable, leaderless, older-epoch or
+  non-covering payload invalidates the region and falls back to PD
+  (issue #246)
 - `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` keep the
   cached region — the request reached the right region, so the retry reuses it
 
@@ -1938,7 +1949,7 @@ The library emits the following counter tags:
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
 | `regionCacheHit()`             | `'region_resolution'`      | Region was found in the cache                     |
 | `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
-| `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. Invalidating an ID that is not cached emits nothing. |
+| `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
 
 For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
 

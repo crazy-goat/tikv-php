@@ -311,12 +311,34 @@ in-flight futures are cancelled, so the applied subset is likewise unknown.
 
 ## Scanning Operations
 
+### Range bounds
+
+Every range operation takes a half-open `[startKey, endKey)` range. An empty
+`endKey` means "unbounded": +infinity for `scan()`, `scanPrefix()`,
+`batchScan()`, `deleteRange()` and `checksum()`, and the start of the keyspace
+for `reverseScan()`, whose arguments are `[upper bound, lower bound)`. An
+empty `startKey` is valid for a forward range (it means the start of the
+keyspace).
+
+A **reversed** range is rejected with `InvalidArgumentException` before any PD
+or store RPC: `startKey > endKey` for the forward operations (`scan()`,
+`scanIterator()`, `batchScan()`, `deleteRange()`, `checksum()`) and
+`startKey < endKey` for `reverseScan()`, whose first argument is the upper
+bound. `startKey == endKey` with a non-empty `endKey` is a valid empty range:
+it returns no rows and deletes nothing. Because an empty `endKey` is the
+unbounded sentinel, `scan('', '')` and `batchScan([['', '']])` cover the whole
+keyspace, while `deleteRange('', '')` keeps its explicit no-op guard and
+`reverseScan('', '')` is empty (both bounds are the keyspace minimum). This
+turns the most common reverse-scan mistake into an error instead of a silent
+empty result. The comparison is bytewise, so `scan('20', '100')` is rejected
+even though PHP would compare the numeric strings in the other order.
+
 ### Scan
 
 Range scan over keys:
 
 ```php
-$results = $client->scan('startKey', 'endKey', limit: 100, keyOnly: false);
+$results = $client->scan('startKey', 'stopKey', limit: 100, keyOnly: false);
 // Returns: [['key' => 'k1', 'value' => 'v1'], ['key' => 'k2', 'value' => 'v2'], ...]
 ```
 
@@ -478,11 +500,11 @@ follows:
 - **Rewindable** — calling `rewind()` (e.g. running the same `foreach` twice)
   restarts the iteration from the original start key and re-scans from the
   beginning; it does not cache results.
-- **Exceptions** — `batchSize` is validated synchronously in the factory call
-  (plus `ClientClosedException` if the client is closed), but the actual scan
-  RPCs happen lazily during iteration: `RegionException` and `GrpcException`
-  can be thrown mid-`foreach`, and the underlying scans use the same automatic
-  retry logic as `scan()`.
+- **Exceptions** — `batchSize` and the range order are validated synchronously
+  in the factory call (plus `ClientClosedException` if the client is closed),
+  but the actual scan RPCs happen lazily during iteration: `RegionException`
+  and `GrpcException` can be thrown mid-`foreach`, and the underlying scans use
+  the same automatic retry logic as `scan()`.
 - **No reverse iterator** — there is no descending counterpart; for reverse
   reads use `reverseScan()`. `limit: 0` returns the whole range by paging
   internally (guarded by `options['maxScanRows']`, checked per fetched page);
@@ -543,10 +565,10 @@ $messages = $client->reverseScan($newest . "\x00", 'msg:user:123:', limit: 5);
 - `endKey` = lower bound (inclusive) — the **second** argument
 - Results are in descending order
 
-Passing the bounds the other way round is the most common mistake here: the
-range is empty, the call succeeds, and you get an empty array with no error. If
-a reverse scan returns nothing, check that the first argument sorts after the
-second.
+Passing the bounds the other way round is the most common mistake here. It is
+rejected with `InvalidArgumentException` before any RPC instead of returning a
+silent empty array: the first argument must sort after the second. An empty
+`endKey` (the second argument) means "down to the start of the keyspace".
 
 ### Batch Scan
 
@@ -562,7 +584,9 @@ $results = $client->batchScan($ranges, eachLimit: 50, keyOnly: false);
 ```
 
 **Parameters:**
-- `ranges` (array<array{0: string, 1: string}>): Array of [startKey, endKey] pairs
+- `ranges` (array<array{0: string, 1: string}>): Array of `[startKey, endKey]`
+  pairs; an empty `endKey` means +infinity. A reversed range rejects the whole
+  call with `InvalidArgumentException` before any RPC.
 - `eachLimit` (int): Maximum results per range (required)
 - `keyOnly` (bool, optional): Return only keys
 
@@ -597,12 +621,14 @@ foreach ($dailyLogs as $day => $logs) {
 Delete all keys in a range:
 
 ```php
-$client->deleteRange('startKey', 'endKey');
+$client->deleteRange('startKey', 'stopKey');
 ```
 
 **Parameters:**
 - `startKey` (string): Start of range (inclusive)
-- `endKey` (string): End of range (exclusive)
+- `endKey` (string): End of range (exclusive); an empty `endKey` deletes to the
+  end of the keyspace. A reversed range throws `InvalidArgumentException`
+  before any RPC.
 
 **Returns:** `void`
 
@@ -970,7 +996,7 @@ Compute CRC64-XOR checksum over a key range:
 ```php
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 
-$checksum = $client->checksum('data:start', 'data:end');
+$checksum = $client->checksum('data:a', 'data:z');
 // Returns: ChecksumResult object
 ```
 
@@ -1167,13 +1193,26 @@ userland state, and a live channel is not serializable.
 
 ### `close()` semantics
 
-`close()` releases the client's resources in three steps, each with its own
-guard: it clears the region cache, closes the gRPC transport if the client
-owns it, and closes the PD client (always — there is no ownership flag for
-it). A failing step is logged at error level and does not stop the others, so:
+`close()` releases the client's resources in guarded steps: `TxnKvClient`
+first rolls back the transactions it began that are still active
+(`RawKvClient` has no transactions), then the client clears the region cache,
+closes the gRPC transport if the client owns it, and closes the PD client
+(always — there is no ownership flag for it). The transaction rollback runs
+while the region cache, transport and PD client are still usable, so an
+abandoned transaction does not leave its locks behind until the TTL expires.
+A failing step is logged at error level and does not stop the others, so:
 
 - `close()` is **idempotent** — a second call does nothing;
 - `close()` **never throws**.
+
+A rollback that fails during `close()` is logged and the transaction stays
+active; its destructor keeps the existing best-effort rollback fallback. A
+transaction that already committed or rolled back is not rolled back again.
+The rollback is a real RPC, so `close()` can block while it retries; its
+retry budget is the transaction's usual one. The rollback is attempted for a
+client that shares the application's transport (`options['grpcClient']`)
+too — the client owns its transactions even when it does not own the
+transport. The transport itself is still never closed in that case.
 
 For a client that owns its transport, `close()` is **not graceful**: it
 closes the channels that still carry in-flight calls, so an operation that is
@@ -1205,25 +1244,29 @@ setters remain callable: `close()`, `reapIdleChannels()`, `getMetrics()`,
 `getColumnFamily()` and `getClusterId()` (which returns `null` after close
 because the PD client resets the cached cluster ID). A `Transaction` obtained
 before `close()` holds the transport and the PD client directly and does not
-check the client's closed flag: with an owned transport its RPCs fail with
-`InvalidStateException`; with a shared transport they can still reach TiKV.
-Finish open transactions before closing the client (see below).
+check the client's closed flag. `TxnKvClient::close()` rolls back the
+transactions it began while they are still active, so a successfully rolled
+back transaction is closed and cannot be used afterwards. If that rollback
+fails, the transaction stays active: with an owned transport its RPCs then
+fail with `InvalidStateException`; with a shared transport they can still
+reach TiKV. Finish open transactions before closing the client (see below).
 
 ### Transactions
 
 An active `Transaction` is rolled back by its destructor when it goes out of
-scope, and a failed destructor rollback is logged. That is a safety net, not
-the contract:
+scope, and a failed destructor rollback is logged. `TxnKvClient::close()` is a
+second safety net: it rolls back the transactions it began that are still
+active before it releases the transport. That is still not the contract:
 
-- call `commit()` or `rollback()` explicitly. Destructor timing is not
-  guaranteed, and the destructor rollback is a real RPC that can block
+- call `commit()` or `rollback()` explicitly. Destructor and `close()` timing
+  are not guaranteed, and either rollback is a real RPC that can block
   shutdown while it retries;
 - until the rollback succeeds or the lock TTL expires, the transaction's
   server-side locks stay in place and block other writers;
-- close the client only after the transactions are finished: a client that
-  owns and closed its transport cannot roll them back, so the locks stay
-  until their TTL expires. With a shared transport the rollback may still
-  reach TiKV, but relying on that is fragile.
+- a rollback that fails inside `close()` is only logged — `close()` never
+  throws — so the locks stay until the transaction's destructor succeeds or
+  their TTL expires. Do not rely on `close()` to clean up transactions:
+  finish them explicitly before closing the client.
 
 ## Cluster and lifecycle
 
