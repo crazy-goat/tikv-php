@@ -236,6 +236,51 @@ class RetryExecutorEpochNotMatchTest extends TestCase
         self::assertSame(2, $right->epochVersion);
     }
 
+    /**
+     * Region ranges are half-open: a returned region whose end key equals
+     * the requested key does not cover it. Treating that end as inclusive
+     * would route a prewrite for the boundary key to the region that ends
+     * there; TiKV rejects it with "Key … is out of [region N] [.., end)".
+     */
+    public function testRegionEndingExactlyAtTheKeyDoesNotCoverIt(): void
+    {
+        $stale = $this->region(self::REGION_ID, 'a', 'z', 1);
+        [$cache, $metrics, $pdClient, $resolver] = $this->cacheWithStaleRegion($stale);
+        $fresh = $this->region(9, self::KEY, 'z', 2);
+        $pdClient->expects($this->once())
+            ->method('getRegion')
+            ->with(self::KEY)
+            ->willReturn($fresh);
+
+        $error = RegionException::fromRegionError($this->epochNotMatchError([
+            // [a, k) ends exactly at the requested key 'k'.
+            $this->protoRegion(2, 'a', self::KEY, 2),
+        ]));
+
+        $calls = 0;
+        $result = $this->createExecutor($cache, $resolver, $metrics)->execute(
+            self::KEY,
+            function () use (&$calls, $resolver, $error): RegionInfo {
+                $calls++;
+                if ($calls === 1) {
+                    throw $error;
+                }
+
+                return $resolver->getRegionInfo(self::KEY);
+            },
+            $this->zeroSleepClassifier(),
+        );
+
+        self::assertSame(2, $calls);
+        self::assertSame(9, $result->regionId, 'the retry must resolve the region that starts at the boundary');
+        self::assertNull($cache->getById(2), 'the non-covering payload region must not be cached');
+        self::assertSame(
+            1,
+            $metrics->getInvalidations('retry_region_error:epoch_not_match'),
+            'the boundary payload must fall back to the #245 invalidation path',
+        );
+    }
+
     public function testEmptyCurrentRegionsStillInvalidateAndFallBackToPd(): void
     {
         $stale = $this->region(self::REGION_ID, 'a', 'z', 1);

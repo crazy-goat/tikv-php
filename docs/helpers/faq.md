@@ -2004,6 +2004,21 @@ Two more traps in the same path:
   entry is still cached (e.g. RawKV); at TxnKV sites `check()` already
   dropped it, so only `region_error:epoch_not_match` is emitted.
 
+## A refreshed EpochNotMatch can leave a prewrite group spanning regions — re-group before retry (issue #246)
+
+`prewriteWithRetry()` re-resolves only the group's first key. If a split
+happened after `groupMutationsByRegion()` built the group, the refreshed cache
+may now give a narrow left region while the group still contains keys at or
+after its **exclusive** end. Replaying that group to the left region produces a
+`KeyError.abort` with a message such as `Key 0100… is out of [region 14]
+[, 0100…)`, not another `EpochNotMatch`, so the retry loop cannot recover.
+The group must be re-grouped by resolving **every** mutation's key and sending
+one prewrite per region. Keep the primary sub-group first in the normal path
+and last for async commit; a split group cannot use 1PC. Unlike the
+pessimistic-lock/rollback re-groups (#503/#505), this one is local to the
+prewrite group, so the primary/secondary phase ordering is unchanged.
+Reference: `TransactionTest::testCommitPrewriteRegroupsGroupAfterSplitAtExclusiveEnd`.
+
 ## `limit: 0` scans paginate and are guarded, not capped (RAW-06, issue #191)
 
 `RawKvScanner::validateScanLimit()` used to normalise a `0` limit to
