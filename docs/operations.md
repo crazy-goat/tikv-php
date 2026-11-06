@@ -1193,13 +1193,26 @@ userland state, and a live channel is not serializable.
 
 ### `close()` semantics
 
-`close()` releases the client's resources in three steps, each with its own
-guard: it clears the region cache, closes the gRPC transport if the client
-owns it, and closes the PD client (always — there is no ownership flag for
-it). A failing step is logged at error level and does not stop the others, so:
+`close()` releases the client's resources in guarded steps: `TxnKvClient`
+first rolls back the transactions it began that are still active
+(`RawKvClient` has no transactions), then the client clears the region cache,
+closes the gRPC transport if the client owns it, and closes the PD client
+(always — there is no ownership flag for it). The transaction rollback runs
+while the region cache, transport and PD client are still usable, so an
+abandoned transaction does not leave its locks behind until the TTL expires.
+A failing step is logged at error level and does not stop the others, so:
 
 - `close()` is **idempotent** — a second call does nothing;
 - `close()` **never throws**.
+
+A rollback that fails during `close()` is logged and the transaction stays
+active; its destructor keeps the existing best-effort rollback fallback. A
+transaction that already committed or rolled back is not rolled back again.
+The rollback is a real RPC, so `close()` can block while it retries; its
+retry budget is the transaction's usual one. The rollback is attempted for a
+client that shares the application's transport (`options['grpcClient']`)
+too — the client owns its transactions even when it does not own the
+transport. The transport itself is still never closed in that case.
 
 For a client that owns its transport, `close()` is **not graceful**: it
 closes the channels that still carry in-flight calls, so an operation that is
@@ -1231,25 +1244,29 @@ setters remain callable: `close()`, `reapIdleChannels()`, `getMetrics()`,
 `getColumnFamily()` and `getClusterId()` (which returns `null` after close
 because the PD client resets the cached cluster ID). A `Transaction` obtained
 before `close()` holds the transport and the PD client directly and does not
-check the client's closed flag: with an owned transport its RPCs fail with
-`InvalidStateException`; with a shared transport they can still reach TiKV.
-Finish open transactions before closing the client (see below).
+check the client's closed flag. `TxnKvClient::close()` rolls back the
+transactions it began while they are still active, so a successfully rolled
+back transaction is closed and cannot be used afterwards. If that rollback
+fails, the transaction stays active: with an owned transport its RPCs then
+fail with `InvalidStateException`; with a shared transport they can still
+reach TiKV. Finish open transactions before closing the client (see below).
 
 ### Transactions
 
 An active `Transaction` is rolled back by its destructor when it goes out of
-scope, and a failed destructor rollback is logged. That is a safety net, not
-the contract:
+scope, and a failed destructor rollback is logged. `TxnKvClient::close()` is a
+second safety net: it rolls back the transactions it began that are still
+active before it releases the transport. That is still not the contract:
 
-- call `commit()` or `rollback()` explicitly. Destructor timing is not
-  guaranteed, and the destructor rollback is a real RPC that can block
+- call `commit()` or `rollback()` explicitly. Destructor and `close()` timing
+  are not guaranteed, and either rollback is a real RPC that can block
   shutdown while it retries;
 - until the rollback succeeds or the lock TTL expires, the transaction's
   server-side locks stay in place and block other writers;
-- close the client only after the transactions are finished: a client that
-  owns and closed its transport cannot roll them back, so the locks stay
-  until their TTL expires. With a shared transport the rollback may still
-  reach TiKV, but relying on that is fragile.
+- a rollback that fails inside `close()` is only logged — `close()` never
+  throws — so the locks stay until the transaction's destructor succeeds or
+  their TTL expires. Do not rely on `close()` to clean up transactions:
+  finish them explicitly before closing the client.
 
 ## Cluster and lifecycle
 

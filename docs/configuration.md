@@ -514,6 +514,13 @@ application, so closing one client cannot break the other clients sharing it.
 A client that built its own transport (the normal case) closes it in
 `close()` as before.
 
+A `TxnKvClient` still owns the transactions it began when the transport is
+shared: `close()` rolls the still-active ones back before releasing its other
+resources, so the rollback can reach TiKV even though the client does not
+close the transport. Finish transactions explicitly anyway — a rollback that
+fails during `close()` is only logged (see
+[`close()` semantics](operations.md#close-semantics)).
+
 Because the supplied transport was configured by the application, the
 transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
 `grpc`) cannot be combined with it — they would configure a transport the
