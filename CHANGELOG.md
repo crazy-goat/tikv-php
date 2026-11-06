@@ -23,6 +23,8 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+## [v0.11.0] - 2026-11-07
+
 ### Added
 
 - Scan-path region-cache read-through (issue #425). RawKV scans already consulted the cache, but treated it as all-or-nothing: one missing region re-scanned the whole remaining window from PD. Both RawKV scans and TxnKV `Transaction::scan()` now enumerate regions through the new `RegionScanSource`: a contiguous cached run is served locally, and at the first gap one bounded `ScanRegions` call starts exactly at the gap's key and caches its answer for the next page and the next scan. The scan path now emits `regionCacheHit()` / `regionCacheMiss()` under the labels `scan` (RawKV) and `txn_scan` (TxnKV). A split or merge the client has not learned through an `EpochNotMatch` yet is still recovered by the existing region-error retry. Covered by tests for a warm cache (zero PD calls), a gap (PD starts at the gap), a cold cache, and a split/merge between cache population and scan use. (#425)
