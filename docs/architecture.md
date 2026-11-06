@@ -216,6 +216,19 @@ Optimistic Transaction                   Pessimistic Transaction
 └──────────────────────┘
 ```
 
+**Rollback semantics**: `rollback()` is a best-effort cleanup that fails
+closed. `KvBatchRollback` and `KVPessimisticRollback` responses are inspected
+variant by variant, and structured variants take precedence over TiKV's
+compatibility `retryable` string: `locked` is resolved and the rollback is
+retried, `abort` is fatal, `txn_not_found` / `txn_lock_not_found` confirm the
+rollback because the transaction or its lock is already gone (even when
+`retryable` is co-set), and a structured `conflict` is a fatal
+`TransactionConflictException` rather than a retry. A bare `retryable` string
+is retried; every other `KeyError` (including an empty payload) throws the
+base `TiKvException`, so the write set is not cleared and the transaction is
+not reported `RolledBack`; it stays active-but-unwritable so the caller (or
+the destructor) can retry the cleanup (issue #559).
+
 ### 3. TimestampOracle
 
 **Location**: `src/Client/Connection/TimestampOracle.php`
@@ -471,6 +484,17 @@ entries). A lock of a known transaction skips `CheckTxnStatus`. A live or
 undetermined status is never cached. `resolveLocks()` takes several locks,
 checks each transaction once, and sends one `ResolveLock` per region and
 transaction with all keys of that transaction in the region.
+
+An errored status check is not a status. A region error, a gRPC failure or a
+`KeyError` in the `CheckTxnStatus` response is propagated as a retryable
+failure (`TxnRetryableException` with `BackoffType::TxnLock` for a `KeyError`)
+through the caller's retry executor, so the response's zeroed status fields can
+never be read as "not committed" and drive a rollback. The async-commit
+secondary check follows the same rule: a `KeyError` in the
+`CheckSecondaryLocks` response is retryable, and a region error while grouping
+the secondaries propagates instead of falling back to the TTL/rollback path.
+Only a successful response decides commit versus rollback (issue #224,
+TXN-19).
 
 ### 8. Retry System
 
