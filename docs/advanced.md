@@ -19,9 +19,11 @@ Production-ready patterns and advanced usage of the TiKV PHP Client.
 
 For daemons, workers, and long-running scripts, create one client at startup
 and reuse it for the life of the process. Closing and recreating it throws
-away the region cache and the channel handles — and it does not give you
-fresh connections, because ext-grpc keeps the underlying channel in its
-process-global persistent table. See
+away the region cache and the channel handles — and it does not necessarily
+give you fresh connections: ext-grpc keeps the underlying channel in its
+process-global persistent table (one per target), so only a channel created
+beyond that per-target bound is private to its handle and released with it.
+See
 [Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model).
 
 ```php

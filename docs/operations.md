@@ -1065,8 +1065,8 @@ A transactional scan has its own cap of 10240 rows. See [Scan](#scan).
 ## Connection lifecycle and process model
 
 The client is **not thread-safe**: its caches are plain mutable state with no
-locking. Use one instance per PHP process, build a fresh one in each forked
-child, and never share an instance between threads or processes.
+locking. Use one instance at a time per PHP process, build a fresh one in each
+forked child, and never share an instance between threads or processes.
 
 ### What a client holds
 
@@ -1105,7 +1105,9 @@ transport it was given unless you pass `ownsGrpcClient: false` — see
 [Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients).
 A `RegionCache` passed to the constructor is still cleared by `close()` (the
 client has no ownership flag for it), so do not share one between clients
-that you close independently.
+that you close independently. The same applies to the `PdClient`: `close()`
+always closes it (there is no `ownsPdClient` flag), resetting its store
+cache, TSO pool and leader-discovery state.
 
 ### Long-running workers and CLI daemons (recommended)
 
@@ -1154,16 +1156,19 @@ userland state, and a live channel is not serializable.
 
 `close()` releases the client's resources in three steps, each with its own
 guard: it clears the region cache, closes the gRPC transport if the client
-owns it, and closes the PD client. A failing step is logged at error level
-and does not stop the others, so:
+owns it, and closes the PD client (always — there is no ownership flag for
+it). A failing step is logged at error level and does not stop the others, so:
 
 - `close()` is **idempotent** — a second call does nothing;
 - `close()` **never throws**.
 
-`close()` is **not graceful**: it closes the channels that still carry
-in-flight calls, so an operation that is running when the client is closed
-fails. Finish outstanding operations before calling it, or expect them to
-fail.
+For a client that owns its transport, `close()` is **not graceful**: it
+closes the channels that still carry in-flight calls, so an operation that is
+running when the client is closed fails — finish outstanding operations
+before calling `close()`, or expect them to fail. A client built with
+`options['grpcClient']` does not close the shared transport, so its in-flight
+calls continue (and become the application's responsibility when it closes
+the transport).
 
 `__destruct()` calls `close()`, so a forgotten `close()` is not a leak: the
 caches and handles are released when the object is destroyed. In a
