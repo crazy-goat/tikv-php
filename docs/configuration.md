@@ -741,7 +741,11 @@ $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
 // The client closes the transport it was given in close() — pass
 // ownsGrpcClient: false to keep the ownership with the application.
-$client = new RawKvClient($pdClient, $grpc);
+// Pass the same storeCache, or a StoreNotMatch / transport failure cannot
+// drop the stale address: the client's resolver has no cache to invalidate
+// while PdClient keeps serving that entry. Omitting storeCache disables
+// early invalidation.
+$client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 ```
 
 > **Note:** the manual path above is for the rare case where the client has

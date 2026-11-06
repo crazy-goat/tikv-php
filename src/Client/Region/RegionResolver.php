@@ -577,21 +577,26 @@ final readonly class RegionResolver
      * immediately reopens one to the same endpoint.
      *
      * A store ID <= 0 is ignored: an unset protobuf field must not evict an
-     * unrelated entry. `$reason` is logged so the cause is visible next to
-     * the region invalidation reason.
+     * unrelated entry. `$reason` is logged only after a real drop, so a
+     * hand-built resolver without a store cache (or an ID that is not cached)
+     * does not log an invalidation that did not happen. `$reason` matches the
+     * cause next to the region invalidation reason.
      */
     public function invalidateStore(int $storeId, string $reason): void
     {
-        if ($storeId <= 0) {
+        if ($storeId <= 0 || !$this->storeCache instanceof StoreCacheInterface) {
             return;
         }
+        if (!$this->storeCache->get($storeId) instanceof Store) {
+            return;
+        }
+
+        $this->storeCache->invalidate($storeId);
 
         $this->logger->info('Invalidated store address cache', [
             'storeId' => $storeId,
             'reason' => $reason,
         ]);
-
-        $this->storeCache?->invalidate($storeId);
     }
 
     /**

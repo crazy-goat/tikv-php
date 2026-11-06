@@ -15,8 +15,12 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\ReplicaReadMode;
+use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -51,10 +55,10 @@ class RetryExecutorStoreInvalidationTest extends TestCase
         $this->grpc = $this->createMock(GrpcClientInterface::class);
     }
 
-    private function store(string $address): Store
+    private function store(string $address, int $storeId = self::STORE_ID): Store
     {
         $store = new Store();
-        $store->setId(self::STORE_ID);
+        $store->setId($storeId);
         $store->setAddress($address);
 
         return $store;
@@ -105,17 +109,24 @@ class RetryExecutorStoreInvalidationTest extends TestCase
      * RegionResolver always goes through PdClient::getStore(); the store
      * cache is PdClient's.
      */
-    private function installPdClientUsingStoreCache(StoreCache $storeCache, int &$rpcCalls): void
-    {
+    /**
+     * @param array<int, string> $freshAddresses address per store ID; other
+     *        IDs get self::NEW_ADDRESS
+     */
+    private function installPdClientUsingStoreCache(
+        StoreCache $storeCache,
+        int &$rpcCalls,
+        array $freshAddresses = [],
+    ): void {
         $this->pdClient->method('getStore')
-            ->willReturnCallback(function (int $storeId) use ($storeCache, &$rpcCalls): Store {
+            ->willReturnCallback(function (int $storeId) use ($storeCache, &$rpcCalls, $freshAddresses): Store {
                 $cached = $storeCache->get($storeId);
                 if ($cached instanceof Store) {
                     return $cached;
                 }
 
                 $rpcCalls++;
-                $fresh = $this->store(self::NEW_ADDRESS);
+                $fresh = $this->store($freshAddresses[$storeId] ?? self::NEW_ADDRESS, $storeId);
                 $storeCache->put($fresh);
 
                 return $fresh;
@@ -337,5 +348,89 @@ class RetryExecutorStoreInvalidationTest extends TestCase
         $this->assertSame([self::OLD_ADDRESS], $addresses);
         $this->assertSame(0, $rpcCalls);
         $this->assertSame(self::OLD_ADDRESS, $storeCache->get(self::STORE_ID)?->getAddress());
+    }
+
+    /**
+     * P1 regression (issue #247): a follower read that fails at transport
+     * level must evict and close the follower's address, not the leader's.
+     * Evicting the leader would leave the dead follower cached (the retry
+     * hits it again) and waste the healthy leader entry.
+     */
+    public function testFollowerTransportFailureInvalidatesTheFollowerAndKeepsTheLeader(): void
+    {
+        $leaderAddress = 'leader:20160';
+        $followerOldAddress = 'follower-old:20160';
+        $followerNewAddress = 'follower-new:20160';
+
+        $storeCache = new StoreCache();
+        $storeCache->put($this->store($leaderAddress, 1));
+        $storeCache->put($this->store($followerOldAddress, 2));
+
+        $region = new RegionInfo(
+            regionId: 42,
+            leaderPeerId: 10,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            peers: [
+                new PeerInfo(peerId: 10, storeId: 1),
+                new PeerInfo(peerId: 11, storeId: 2),
+            ],
+        );
+        $regionCache = new RegionCache();
+        $regionCache->put($region);
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $regionCache,
+            logger: new NullLogger(),
+            storeCache: $storeCache,
+        );
+
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls, [2 => $followerNewAddress]);
+
+        // The channel to the dead follower is closed first (from the cache),
+        // then that follower entry is dropped.
+        $this->grpc->expects($this->once())
+            ->method('closeChannel')
+            ->with($followerOldAddress);
+
+        $policy = new ReplicaReadPolicy(ReplicaReadMode::Follower);
+        $targetStoreId = null;
+        $addresses = [];
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$addresses, &$targetStoreId, $policy, $region, $resolver): string {
+                $target = RegionContextFactory::resolveTarget(
+                    $region,
+                    $policy,
+                    $resolver->getStore(...),
+                );
+                $targetStoreId = $target->storeId;
+                $addresses[] = $resolver->resolveStoreAddress($target->storeId);
+                if (count($addresses) === 1) {
+                    throw new GrpcException('connection reset', 14);
+                }
+
+                return 'ok';
+            },
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
+        );
+
+        $this->assertSame('ok', $result);
+        $this->assertSame(
+            [$followerOldAddress, $followerNewAddress],
+            $addresses,
+            'the retry must re-resolve the failed follower, not replay its old address',
+        );
+        $this->assertSame(1, $rpcCalls, 'only the follower needs a fresh PD GetStore');
+        $this->assertSame(
+            $leaderAddress,
+            $storeCache->get(1)?->getAddress(),
+            'the healthy leader entry must survive a follower failure',
+        );
+        $this->assertSame($followerNewAddress, $storeCache->get(2)?->getAddress());
     }
 }

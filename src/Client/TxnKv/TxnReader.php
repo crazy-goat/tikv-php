@@ -108,10 +108,11 @@ final readonly class TxnReader
         $retryExecutor = $retryExecutor->beginOperation();
 
         $excludedStore = null;
+        $targetStoreId = null;
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $state, &$excludedStore): ?string {
+            function () use ($key, $state, &$excludedStore, &$targetStoreId): ?string {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
@@ -121,6 +122,7 @@ final readonly class TxnReader
                     priority: $this->priority,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
                 $request = new GetRequest();
@@ -169,7 +171,10 @@ final readonly class TxnReader
                 $state->setReadValue($key, $value);
                 return $value;
             },
-            $classifier
+            $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -524,15 +529,22 @@ final readonly class TxnReader
         callable $classifier,
     ): CheckedGrpcFuture {
         $firstKey = $regionKeys[0] ?? '';
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            fn (): CheckedGrpcFuture => $this->batchGetForRegionAsync(
-                $this->regionResolver->getRegionInfo($firstKey),
-                $regionKeys,
-            ),
+            function () use ($firstKey, $regionKeys, &$targetStoreId): CheckedGrpcFuture {
+                return $this->batchGetForRegionAsync(
+                    $this->regionResolver->getRegionInfo($firstKey),
+                    $regionKeys,
+                    $targetStoreId,
+                );
+            },
             $retryExecutor,
             $firstKey,
             $classifier,
+            static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -546,6 +558,7 @@ final readonly class TxnReader
     private function batchGetForRegionAsync(
         RegionInfo $region,
         array $regionKeys,
+        int &$targetStoreId = 0,
     ): CheckedGrpcFuture {
         $target = RegionContextFactory::resolveTarget(
             $region,
@@ -553,6 +566,7 @@ final readonly class TxnReader
             $this->regionResolver->getStore(...),
             priority: $this->priority,
         );
+        $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
         $request = new BatchGetRequest();
@@ -700,6 +714,7 @@ final readonly class TxnReader
             // needs re-clipping after a split.
             $freshEndKey = '';
             $excludedStore = null;
+            $targetStoreId = null;
             $batch = $retryExecutor->execute($cursorStart, function () use (
                 $cursorStart,
                 $endKey,
@@ -707,6 +722,7 @@ final readonly class TxnReader
                 $maxScanLimit,
                 &$excludedStore,
                 &$freshEndKey,
+                &$targetStoreId,
             ): array {
                 // Resolve the region on every attempt so cache invalidation
                 // and leader switching performed by the retry executor take
@@ -721,6 +737,7 @@ final readonly class TxnReader
                     priority: $this->priority,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
                 $freshEndKey = $fresh->endKey;
 
@@ -786,7 +803,9 @@ final readonly class TxnReader
                 $this->handleReadKeyErrors($pairErrors, 'Scan');
 
                 return $subResults;
-            }, $classifier);
+            }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            });
 
             foreach ($batch as $row) {
                 $results[] = $row;

@@ -73,10 +73,21 @@ final readonly class RetryExecutor
      * @template T
      * @param callable(): T $operation
      * @param (callable(TiKvException): ?BackoffType)|null $classifier Custom error classifier
+     * @param (callable(): ?int)|null $targetStoreId Provider of the store ID
+     *        the FAILED attempt was actually addressed to. Pass it for reads
+     *        that may target a follower (`ReplicaReadPolicy`): a transport
+     *        failure then closes and invalidates that follower's address
+     *        instead of the cached leader's (issue #247). Without it the
+     *        executor falls back to the cached region's leader, which is
+     *        correct for leader-only operations.
      * @return T
      */
-    public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
-    {
+    public function execute(
+        string $key,
+        callable $operation,
+        ?callable $classifier = null,
+        ?callable $targetStoreId = null,
+    ): mixed {
         // Retry budget lives in a RetryBudget object, not in instance fields:
         // a single executor is reused across many operations, and
         // maxBackoffMs/serverBusyBudgetMs/deadlineMs are documented as
@@ -193,6 +204,15 @@ final readonly class RetryExecutor
                         && self::invalidatesRoutingOnRetry($e)
                     ) {
                         $cached = $this->regionCache->getByKey($key);
+                        // Issue #247 (REG-16): the region cache and the store
+                        // address cache are separate. A transport failure may
+                        // have hit a follower (replica read), not the cached
+                        // leader, so the provider is authoritative when the
+                        // caller supplies one. Fall back to the cached
+                        // leader only for leader-targeted operations.
+                        $failedStoreId = $this->targetStoreIdOf($targetStoreId)
+                            ?? ($cached instanceof RegionInfo ? $cached->leaderStoreId : null);
+
                         if ($cached instanceof RegionInfo) {
                             // The cache itself emits regionInvalidated() with
                             // the kind-tagged reason — do not emit here too.
@@ -205,40 +225,39 @@ final readonly class RetryExecutor
                                 'regionId' => $cached->regionId,
                                 'errorKind' => $e instanceof RegionException ? $e->errorKind?->value : null,
                             ]);
+                        }
 
-                            if ($e instanceof GrpcException) {
-                                // Resolve the channel address BEFORE dropping
-                                // the store entry: resolveStoreAddress() reads
-                                // the store cache, and invalidating first
-                                // would force a PD GetStore just to close a
-                                // channel.
-                                try {
-                                    $address = $this->regionResolver->resolveStoreAddress($cached->leaderStoreId);
-                                    $this->grpc->closeChannel($address);
-                                } catch (StoreNotFoundException) {
-                                }
+                        if ($e instanceof GrpcException && $failedStoreId !== null) {
+                            // Resolve the channel address BEFORE dropping the
+                            // store entry: resolveStoreAddress() reads the
+                            // store cache, and invalidating first would force
+                            // a PD GetStore just to close a channel.
+                            try {
+                                $address = $this->regionResolver->resolveStoreAddress($failedStoreId);
+                                $this->grpc->closeChannel($address);
+                            } catch (StoreNotFoundException) {
                             }
                         }
 
-                        // Issue #247 (REG-16): the region cache and the store
-                        // address cache are separate. A StoreNotMatch says the
-                        // address the request went to is wrong, and a transport
-                        // failure against a store says its cached address may
-                        // be wrong (a rescheduled pod keeps the store ID and
-                        // changes the address). Drop the entry so the next
-                        // attempt asks PD instead of retrying the same dead
-                        // endpoint for the rest of its 660 s TTL.
+                        // A StoreNotMatch says the address the request went
+                        // to is wrong; a transport failure says the address
+                        // it could not reach may be wrong (a rescheduled pod
+                        // keeps the store ID and changes the address). Drop
+                        // that entry so the next attempt asks PD instead of
+                        // retrying the same dead endpoint for the rest of its
+                        // 660 s TTL.
                         //
                         // The region may already be gone here: TxnKV call
                         // sites run RegionErrorHandler::check() before the
                         // executor sees the exception, so the StoreNotMatch
-                        // payload's request_store_id (or the region captured on
-                        // the exception) is the fallback.
+                        // payload's request_store_id (or the target/region
+                        // captured for this attempt) is the fallback.
                         $this->invalidateStoreForRetry(
                             $e,
                             $cached instanceof RegionInfo
                                 ? $cached
                                 : ($e instanceof RegionException ? $e->cachedRegion : null),
+                            $failedStoreId,
                         );
                     }
                 }
@@ -632,13 +651,18 @@ final readonly class RetryExecutor
      * `$cached` is the region the request was routed through, when known.
      * RegionErrorHandler::check() may already have removed it at TxnKV call
      * sites, in which case the StoreNotMatch payload still names the store.
+     * `$failedStoreId` is the store the failed attempt actually targeted
+     * (from the caller's ReplicaReadTarget), when known.
      */
-    private function invalidateStoreForRetry(TiKvException $e, ?RegionInfo $cached): void
-    {
+    private function invalidateStoreForRetry(
+        TiKvException $e,
+        ?RegionInfo $cached,
+        ?int $failedStoreId,
+    ): void {
         if ($e instanceof RegionException && $e->errorKind === ErrorKind::StoreNotMatch) {
             $storeId = (int) ($e->storeNotMatch?->getRequestStoreId() ?? 0);
-            if ($storeId <= 0 && $cached instanceof RegionInfo) {
-                $storeId = $cached->leaderStoreId;
+            if ($storeId <= 0) {
+                $storeId = $failedStoreId ?? ($cached instanceof RegionInfo ? $cached->leaderStoreId : 0);
             }
 
             $this->regionResolver->invalidateStore($storeId, 'store_not_match');
@@ -646,9 +670,29 @@ final readonly class RetryExecutor
             return;
         }
 
-        if ($e instanceof GrpcException && $cached instanceof RegionInfo) {
-            $this->regionResolver->invalidateStore($cached->leaderStoreId, 'transport_error');
+        if ($e instanceof GrpcException) {
+            $storeId = $failedStoreId ?? ($cached instanceof RegionInfo ? $cached->leaderStoreId : null);
+            if ($storeId !== null) {
+                $this->regionResolver->invalidateStore($storeId, 'transport_error');
+            }
         }
+    }
+
+    /**
+     * Read the caller's failed-attempt target store ID.
+     *
+     * A non-positive or non-int answer means "not known" — an unset protobuf
+     * field or a caller that did not resolve a target must not evict store 0.
+     */
+    private function targetStoreIdOf(?callable $provider): ?int
+    {
+        if ($provider === null) {
+            return null;
+        }
+
+        $storeId = $provider();
+
+        return is_int($storeId) && $storeId > 0 ? $storeId : null;
     }
 
     /**
