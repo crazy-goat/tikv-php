@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- **[DOC-21]**: Monolog is now declared as a **dev-only** dependency of the examples. `README.md` states that the client itself only depends on `psr/log` and that any PSR-3 `LoggerInterface` works, and names `composer require monolog/monolog` for the snippets that use it; the Complete Example uses `NullLogger` instead, so it runs with the published package alone. `examples/logging.php` exits with an actionable message instead of `Class "Monolog\Logger" not found` when Monolog is not installed. (#387)
+
 ### Tests
 
 - The negative-scan-limit guard is now pinned to reject the call before the **scan RPC**: `RawKvClient::scan()`, `reverseScan()` and `scanPrefix()` (and their `RawKvScanner` counterparts) throw `InvalidArgumentException` before any PD or store RPC, and `Transaction::scan()` throws before the transactional scan RPC (a pessimistic transaction refreshes its read timestamp first, which the new test pins). `scan(limit: 0)` is pinned to send `MAX_SCAN_LIMIT` (10240) as the per-page wire budget. No production behaviour changes — the guard shipped in v0.4.0 (#332); this adds the missing regression coverage for the rejection ordering. (#310)
