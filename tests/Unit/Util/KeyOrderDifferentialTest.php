@@ -426,11 +426,12 @@ final class KeyOrderDifferentialTest extends TestCase
      * reverse `RawScan` against region 1's leader, in place of the per-region loop with
      * its per-region error handling and limit accounting. The rows it returns are the
      * right rows, so this is not data loss — but it is one RPC over the whole keyspace
-     * where the loop asked for one bounded sub-range, and `reverseScan('', '')` reaches
-     * it from the public API with no guard at all. Changing that is a `src/` change and
-     * belongs in its own PR; the unbounded reverse `RawScan` is tracked separately. This
-     * test exists for the other half of the statement: if the `$scanEnd !== ''` guard
-     * ever goes, *this* test must fail, and nothing else in the repository does.
+     * where the loop asked for one bounded sub-range. A *direct* `clipReverse('', '')`
+     * still yields this degenerate sub-range; the public `reverseScan('', '')` now
+     * short-circuits in `RawKvScanner` before the clipper (issue #343). The unbounded
+     * reverse `RawScan` is tracked separately. This test exists for the other half of
+     * the statement: if the `$scanEnd !== ''` guard ever goes, *this* test must fail,
+     * and nothing else in the repository does.
      */
     public function testClipReverseOverAnEmptyReverseRequest(): void
     {
@@ -684,9 +685,10 @@ final class KeyOrderDifferentialTest extends TestCase
      *   nothing for inverted reverse bounds, so `clipReverse()` yields no sub-range, no
      *   RPC is issued and the difference is genuinely unobservable. That is 90 of the
      *   170 requests.
-     * - `reverseScan('', '')`, whose `('', '']` sub-range *is* issued, as one unbounded
-     *   reverse `RawScan` — observable, and pinned apart in
-     *   {@see self::testClipReverseOverAnEmptyReverseRequest()}.
+     * - a *direct* `clipReverse('', '')`, whose `('', '']` sub-range *is* issued, as
+     *   one unbounded reverse `RawScan` — observable, and pinned apart in
+     *   {@see self::testClipReverseOverAnEmptyReverseRequest()}. The public
+     *   `reverseScan('', '')` now short-circuits before the clipper (issue #343).
      */
     private function reverseRangeIsEmpty(string $startKey, string $endKey): bool
     {

@@ -440,7 +440,10 @@ replacement walks only the affected ordered range; TTL cleanup pops only due
 heap records.
 
 **Invalidation Strategy**:
-- **EpochNotMatch**: Invalidate specific region
+- **EpochNotMatch**: Refresh the cache from TiKV's `current_regions` payload
+  when it is usable (the returned regions cover the key, decode cleanly, and
+  the old leader is still a peer); otherwise invalidate the specific region
+  and let the next attempt resolve it through PD (issue #246)
 - **NotLeader**: Update leader info or invalidate
 - **RegionNotFound**: Invalidate and retry
 - **ServerIsBusy / DiskFull / IsWitness / RecoveryInProgress**: Keep the
@@ -461,9 +464,23 @@ heap records.
 ```php
 class LockResolver
 {
-    public function resolveLock(string $primaryLock, LockInfo $lock, int $remainingDeadlineMs = 0): void;
+    public function resolveLock(
+        string $primaryLock,
+        LockInfo $lock,
+        int $remainingDeadlineMs = 0,
+        bool $notLeaderOwnedByRetryExecutor = true,
+    ): void;
 }
 ```
+
+The last flag is a property of the call site, not of the resolver: a
+`resolveLock()` running inside a `RetryExecutor::execute()` closure leaves
+NotLeader handling to `RetryExecutor::handleNotLeader()` (valid-hint leader
+switching), while a direct call site such as the pessimistic-lock loop passes
+`false` so `RegionErrorHandler::check()` self-invalidates with `'not_leader'`.
+The resolver threads the flag through every region-error check it performs —
+`KvCheckTxnStatus`, `KvCheckSecondaryLocks`, the batch `KvResolveLock`, and the
+async-commit finalization (`resolveAsyncCommitLocks()`, issue #568).
 
 **Lock Resolution Flow**:
 ```
@@ -480,7 +497,8 @@ Transaction encounters lock on key
     ┌────┴────┐
     │ Status? │
     ├─────────┤
-    │ Locked  │──Wait and retry
+    │ Locked  │──Throw TxnRetryableException (the caller's
+    │         │  RetryExecutor owns the backoff, issue #206)
     │ Committed│──ResolveLock with commitTs
     │ RolledBack│──ResolveLock (cleanup)
     └─────────┘
@@ -742,7 +760,8 @@ enum BackoffType
 
 **Strategy**:
 - Cache on first access
-- Invalidate on EpochNotMatch
+- Refresh on EpochNotMatch from its `current_regions` payload; invalidate
+  when the payload is absent or unusable
 - Update on NotLeader hint
 
 ### 4. Automatic Retries
@@ -941,11 +960,15 @@ Operation Failed
 
 **EpochNotMatch** (Region split/merge):
 ```php
-// 1. Invalidate cache
-$regionCache->invalidate($regionId);
-
-// 2. Retry with a small jittered backoff (2–500 ms, issue #241)
-// New region info fetched from PD
+// 1. If TiKV sent current_regions, map them and put them into the cache.
+//    The new regions supersede the old entry, and their leader is seeded
+//    from the stale cached entry's leader store when that store is still
+//    one of their peers. No PD round trip.
+//    If the payload is empty, undecodable, leaderless, older-epoch or
+//    does not cover the key, invalidate the entry instead.
+// 2. Retry with a small jittered backoff (2–500 ms, issue #241).
+//    The retry re-resolves the key: from the refreshed cache on the
+//    payload path, or from PD on the fallback path (issue #246).
 ```
 
 **NotLeader** (Leader changed):
