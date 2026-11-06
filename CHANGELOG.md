@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `RawKvClient` now documents the previously missing exception types on its public operations: `InvalidArgumentException` on `scanPrefix()`, `scanIterator()`, `scanPrefixIterator()` and `ingest()`; `RetryBudgetExhaustedException` and `StoreNotFoundException` on every method that runs its retry loop directly (including `scan()`, `scanPrefix()` and `reverseScan()`); and `BatchPartialFailureException` / `BatchDeadlineExceededException` on the fanned-out batch and range operations, where a region's retry-budget or missing-store failure is reported inside the wrapper. The lazy iterator factories point at `ScanIterator::next()`/`valid()`, where their RPCs and retry exceptions actually surface, and `ingest()` documents `StoreNotFoundException` without a retry-budget annotation because `SstIngestor` has no `RetryExecutor`. A new guard test derives the retrying and argument-validating methods from the source, so a missing annotation fails the suite; `docs/error-handling.md` now explains that a fanned-out operation reports a region's retry-budget failure inside `BatchPartialFailureException` rather than throwing it directly, and its `StoreNotFoundException` retryability note matches the region-cache invalidation added in #627. The exception hierarchy now also lists `KeyOutOfBoundsException` (API V2) and the internal `BatchCommandsStreamException`. (#385)
+
 ## [v0.10.0] - 2026-11-06
 
 ### Added
