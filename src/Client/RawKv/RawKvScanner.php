@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -80,6 +81,8 @@ final readonly class RawKvScanner
          */
         private int $scanPageSize = self::MAX_SCAN_LIMIT,
         private MetricsInterface $metrics = new NoOpMetrics(),
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
     ) {
         if ($this->maxScanRows < 1) {
             throw new InvalidArgumentException('maxScanRows must be >= 1');
@@ -1084,6 +1087,7 @@ final readonly class RawKvScanner
                     $this->replicaReadPolicy,
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
+                    requestContext: $this->requestContext,
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -1216,6 +1220,7 @@ final readonly class RawKvScanner
                 $this->replicaReadPolicy,
                 $this->regionResolver->getStore(...),
                 excludedStoreId: $excludedStore,
+                requestContext: $this->requestContext,
             );
             $excludedStore = null;
             $targetStoreId = $target->storeId;
@@ -1495,6 +1500,7 @@ final readonly class RawKvScanner
                 $fresh,
                 $this->replicaReadPolicy,
                 $this->regionResolver->getStore(...),
+                requestContext: $this->requestContext,
             );
             $targetStoreId = $target->storeId;
             $address = $this->regionResolver->resolveStoreAddress($target->storeId);

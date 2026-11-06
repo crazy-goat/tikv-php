@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
@@ -185,6 +186,12 @@ final class Transaction
          * it, so keeping it on the hot read path would grow without bound.
          */
         private readonly bool $trackReadSet = false,
+        /**
+         * Optional Context control fields applied to this transaction's
+         * requests (issue #426). Null (the default) applies none and leaves
+         * the serialized Context unchanged.
+         */
+        private readonly ?RequestContextOptions $requestContext = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -255,6 +262,7 @@ final class Transaction
             replicaReadPolicy: $this->replicaReadPolicy,
             logger: $this->logger,
             priority: $this->priority,
+            requestContext: $this->requestContext,
         );
 
         $this->committer = new TwoPhaseCommitter(
@@ -277,6 +285,7 @@ final class Transaction
             pessimisticLockTtlMs: $this->pessimisticLockTtlMs,
             maxTxnBatchSize: $this->maxTxnBatchSize,
             maxTxnBatchCount: $this->maxTxnBatchCount,
+            requestContext: $this->requestContext,
         );
     }
 

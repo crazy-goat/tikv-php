@@ -160,7 +160,7 @@ final class TxnKvClient
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self;
     
     // Transaction lifecycle
-    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int), optimisticLockTtlMs (int), pessimisticLockTtlMs (int)
+    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int), optimisticLockTtlMs (int), pessimisticLockTtlMs (int), requestContext (?RequestContextOptions)
     public function beginOptimistic(array $options = []): Transaction;   // begin() with pessimistic = false
     public function beginPessimistic(array $options = []): Transaction;  // begin() with pessimistic = true
     public function close(): void;
