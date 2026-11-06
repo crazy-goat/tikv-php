@@ -207,6 +207,11 @@ final readonly class RetryExecutor
                             ]);
 
                             if ($e instanceof GrpcException) {
+                                // Resolve the channel address BEFORE dropping
+                                // the store entry: resolveStoreAddress() reads
+                                // the store cache, and invalidating first
+                                // would force a PD GetStore just to close a
+                                // channel.
                                 try {
                                     $address = $this->regionResolver->resolveStoreAddress($cached->leaderStoreId);
                                     $this->grpc->closeChannel($address);
@@ -214,6 +219,27 @@ final readonly class RetryExecutor
                                 }
                             }
                         }
+
+                        // Issue #247 (REG-16): the region cache and the store
+                        // address cache are separate. A StoreNotMatch says the
+                        // address the request went to is wrong, and a transport
+                        // failure against a store says its cached address may
+                        // be wrong (a rescheduled pod keeps the store ID and
+                        // changes the address). Drop the entry so the next
+                        // attempt asks PD instead of retrying the same dead
+                        // endpoint for the rest of its 660 s TTL.
+                        //
+                        // The region may already be gone here: TxnKV call
+                        // sites run RegionErrorHandler::check() before the
+                        // executor sees the exception, so the StoreNotMatch
+                        // payload's request_store_id (or the region captured on
+                        // the exception) is the fallback.
+                        $this->invalidateStoreForRetry(
+                            $e,
+                            $cached instanceof RegionInfo
+                                ? $cached
+                                : ($e instanceof RegionException ? $e->cachedRegion : null),
+                        );
                     }
                 }
 
@@ -581,6 +607,48 @@ final readonly class RetryExecutor
         }
 
         return 'retry_region_error';
+    }
+
+    /**
+     * Drop the store-address cache entry that a retryable error invalidated
+     * (issue #247, REG-16).
+     *
+     * Two errors are evidence about the STORE address rather than the region:
+     *
+     * - `StoreNotMatch`: TiKV answered because the request reached the wrong
+     *   store. The payload names the store ID the request carried, which is
+     *   the cache entry to drop. When the payload is absent (a hand-built
+     *   exception or a server that left the fields unset), the cached
+     *   region's leader store is the best remaining answer.
+     * - a `GrpcException`: the transport could not reach the store. The
+     *   address may be stale because a rescheduled TiKV pod keeps its store
+     *   ID and comes back on a new address; closing the channel alone makes
+     *   every retry reopen it against the same dead endpoint.
+     *
+     * Non-routing retryable errors (`ServerIsBusy`, `DiskFull`, …) never
+     * reach this method, so a busy but correctly addressed store keeps its
+     * cached address (issue #245).
+     *
+     * `$cached` is the region the request was routed through, when known.
+     * RegionErrorHandler::check() may already have removed it at TxnKV call
+     * sites, in which case the StoreNotMatch payload still names the store.
+     */
+    private function invalidateStoreForRetry(TiKvException $e, ?RegionInfo $cached): void
+    {
+        if ($e instanceof RegionException && $e->errorKind === ErrorKind::StoreNotMatch) {
+            $storeId = (int) ($e->storeNotMatch?->getRequestStoreId() ?? 0);
+            if ($storeId <= 0 && $cached instanceof RegionInfo) {
+                $storeId = $cached->leaderStoreId;
+            }
+
+            $this->regionResolver->invalidateStore($storeId, 'store_not_match');
+
+            return;
+        }
+
+        if ($e instanceof GrpcException && $cached instanceof RegionInfo) {
+            $this->regionResolver->invalidateStore($cached->leaderStoreId, 'transport_error');
+        }
     }
 
     /**

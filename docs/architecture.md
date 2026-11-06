@@ -740,6 +740,9 @@ enum BackoffType
 - Refresh on EpochNotMatch from its `current_regions` payload; invalidate
   when the payload is absent or unusable
 - Update on NotLeader hint
+- Drop the cached store address on a `StoreNotMatch` region error or a
+  transport failure to that store, so the next attempt asks PD for a fresh
+  `GetStore` instead of retrying a stale address (issue #247)
 
 ### 4. Automatic Retries
 

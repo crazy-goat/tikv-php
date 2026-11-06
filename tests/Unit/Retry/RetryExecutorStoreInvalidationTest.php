@@ -1,0 +1,341 @@
+<?php
+
+declare(strict_types=1);
+
+namespace CrazyGoat\TiKV\Tests\Unit\Retry;
+
+use CrazyGoat\Proto\Errorpb\Error;
+use CrazyGoat\Proto\Errorpb\ServerIsBusy;
+use CrazyGoat\Proto\Errorpb\StoreNotMatch;
+use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Cache\RegionCache;
+use CrazyGoat\TiKV\Client\Cache\StoreCache;
+use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use PHPUnit\Framework\MockObject\MockObject;
+use PHPUnit\Framework\TestCase;
+use Psr\Log\NullLogger;
+
+/**
+ * Issue #247 (REG-16): a StoreNotMatch or a transport failure against a store
+ * must drop that store's address from the store cache, so the next attempt
+ * asks PD for a fresh GetStore instead of retrying the same stale address for
+ * the rest of its TTL.
+ *
+ * These tests use a real StoreCache, RegionCache and RegionResolver and a
+ * mocked PdClient: the assertion is on the observable next resolution (PD is
+ * called exactly once and the second attempt sees the new address), not on a
+ * mocked call.
+ */
+class RetryExecutorStoreInvalidationTest extends TestCase
+{
+    private const KEY = 'k';
+    private const STORE_ID = 1;
+    private const OLD_ADDRESS = 'old-store:20160';
+    private const NEW_ADDRESS = 'new-store:20160';
+
+    private PdClientInterface&MockObject $pdClient;
+
+    private GrpcClientInterface&MockObject $grpc;
+
+    protected function setUp(): void
+    {
+        $this->pdClient = $this->createMock(PdClientInterface::class);
+        $this->grpc = $this->createMock(GrpcClientInterface::class);
+    }
+
+    private function store(string $address): Store
+    {
+        $store = new Store();
+        $store->setId(self::STORE_ID);
+        $store->setAddress($address);
+
+        return $store;
+    }
+
+    private function region(): RegionInfo
+    {
+        return new RegionInfo(
+            regionId: 42,
+            leaderPeerId: 1,
+            leaderStoreId: self::STORE_ID,
+            epochConfVer: 1,
+            epochVersion: 1,
+        );
+    }
+
+    private function storeNotMatch(): RegionException
+    {
+        $storeNotMatch = new StoreNotMatch();
+        $storeNotMatch->setRequestStoreId(self::STORE_ID);
+        $storeNotMatch->setActualStoreId(99);
+
+        $error = new Error();
+        $error->setMessage('store not match');
+        $error->setStoreNotMatch($storeNotMatch);
+
+        return RegionException::fromRegionError($error);
+    }
+
+    private function serverBusy(): RegionException
+    {
+        $error = new Error();
+        $error->setMessage('server is busy');
+        $error->setServerIsBusy(new ServerIsBusy());
+
+        return RegionException::fromRegionError($error);
+    }
+
+    private function zeroSleepClassifier(): \Closure
+    {
+        return static fn (TiKvException $e): BackoffType => BackoffType::None;
+    }
+
+    /**
+     * Give the mocked PdClient the production PdClient's store-cache
+     * behaviour: a cache hit answers without a PD round trip, a miss issues
+     * the GetStore (counted in $rpcCalls) and caches the fresh answer.
+     * RegionResolver always goes through PdClient::getStore(); the store
+     * cache is PdClient's.
+     */
+    private function installPdClientUsingStoreCache(StoreCache $storeCache, int &$rpcCalls): void
+    {
+        $this->pdClient->method('getStore')
+            ->willReturnCallback(function (int $storeId) use ($storeCache, &$rpcCalls): Store {
+                $cached = $storeCache->get($storeId);
+                if ($cached instanceof Store) {
+                    return $cached;
+                }
+
+                $rpcCalls++;
+                $fresh = $this->store(self::NEW_ADDRESS);
+                $storeCache->put($fresh);
+
+                return $fresh;
+            });
+    }
+
+    /**
+     * @return array{StoreCache, RegionCache, RegionResolver}
+     */
+    private function cacheWithStaleAddress(): array
+    {
+        $storeCache = new StoreCache();
+        $storeCache->put($this->store(self::OLD_ADDRESS));
+
+        $regionCache = new RegionCache();
+        $regionCache->put($this->region());
+
+        return [
+            $storeCache,
+            $regionCache,
+            new RegionResolver(
+                $this->pdClient,
+                $regionCache,
+                logger: new NullLogger(),
+                storeCache: $storeCache,
+            ),
+        ];
+    }
+
+    private function executor(RegionCache $regionCache, RegionResolver $resolver, int $maxAttempts = 2): RetryExecutor
+    {
+        return new RetryExecutor(
+            maxBackoffMs: 10000,
+            serverBusyBudgetMs: 10000,
+            regionCache: $regionCache,
+            grpc: $this->grpc,
+            regionResolver: $resolver,
+            logger: new NullLogger(),
+            maxAttempts: $maxAttempts,
+            deadlineMs: 0,
+        );
+    }
+
+    public function testStoreNotMatchDropsTheStoreAndTheNextAttemptAsksPdAgain(): void
+    {
+        [$storeCache, $regionCache, $resolver] = $this->cacheWithStaleAddress();
+        $error = $this->storeNotMatch();
+
+        // The stale address must not satisfy the second attempt: exactly one
+        // fresh GetStore, and its answer is what the retry uses.
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls);
+
+        $addresses = [];
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$addresses, $resolver, $error): string {
+                $addresses[] = $resolver->resolveStoreAddress(self::STORE_ID);
+                if (count($addresses) === 1) {
+                    throw $error;
+                }
+
+                return 'ok';
+            },
+            $this->zeroSleepClassifier(),
+        );
+
+        $this->assertSame('ok', $result);
+        $this->assertSame(
+            [self::OLD_ADDRESS, self::NEW_ADDRESS],
+            $addresses,
+            'the retry must resolve the store through PD instead of the stale cache entry',
+        );
+        $this->assertSame(1, $rpcCalls, 'the retry must issue exactly one fresh PD GetStore');
+        $this->assertSame(
+            self::NEW_ADDRESS,
+            $storeCache->get(self::STORE_ID)?->getAddress(),
+            'the fresh PD answer must be cached again',
+        );
+        $this->assertNull(
+            $regionCache->getByKey(self::KEY),
+            'the routing error still drops the region, as issue #245 requires',
+        );
+    }
+
+    public function testStoreNotMatchDropsTheStoreEvenWhenTheRegionIsAlreadyGone(): void
+    {
+        // TxnKV call sites run RegionErrorHandler::check() before the
+        // executor sees the exception, so the region entry is already
+        // dropped. The StoreNotMatch payload must still name the store.
+        $storeCache = new StoreCache();
+        $storeCache->put($this->store(self::OLD_ADDRESS));
+        $regionCache = new RegionCache();
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $regionCache,
+            logger: new NullLogger(),
+            storeCache: $storeCache,
+        );
+        $error = $this->storeNotMatch();
+
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls);
+
+        $addresses = [];
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$addresses, $resolver, $error): string {
+                $addresses[] = $resolver->resolveStoreAddress(self::STORE_ID);
+                if (count($addresses) === 1) {
+                    throw $error;
+                }
+
+                return 'ok';
+            },
+            $this->zeroSleepClassifier(),
+        );
+
+        $this->assertSame('ok', $result);
+        $this->assertSame(
+            [self::OLD_ADDRESS, self::NEW_ADDRESS],
+            $addresses,
+            'the payload request_store_id must invalidate the store without a cached region',
+        );
+        $this->assertSame(1, $rpcCalls);
+    }
+
+    public function testTransportFailureDropsTheStoreAndTheNextAttemptAsksPdAgain(): void
+    {
+        [$storeCache, $regionCache, $resolver] = $this->cacheWithStaleAddress();
+
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls);
+
+        // The channel to the dead address is closed first (from the cache),
+        // then the address is dropped.
+        $this->grpc->expects($this->once())
+            ->method('closeChannel')
+            ->with(self::OLD_ADDRESS);
+
+        $addresses = [];
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$addresses, $resolver): string {
+                $addresses[] = $resolver->resolveStoreAddress(self::STORE_ID);
+                if (count($addresses) === 1) {
+                    throw new GrpcException('connection reset', 14);
+                }
+
+                return 'ok';
+            },
+            $this->zeroSleepClassifier(),
+        );
+
+        $this->assertSame('ok', $result);
+        $this->assertSame(
+            [self::OLD_ADDRESS, self::NEW_ADDRESS],
+            $addresses,
+            'a transport failure must force a fresh PD GetStore on the retry',
+        );
+        $this->assertSame(1, $rpcCalls);
+        $this->assertSame(self::NEW_ADDRESS, $storeCache->get(self::STORE_ID)?->getAddress());
+    }
+
+    public function testServerIsBusyRetryKeepsTheStoreAddress(): void
+    {
+        [$storeCache, $regionCache, $resolver] = $this->cacheWithStaleAddress();
+        $error = $this->serverBusy();
+
+        // Issue #245: a busy store reached the right region and the right
+        // address, so neither cache may be dropped.
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls);
+        $this->grpc->expects($this->never())->method('closeChannel');
+
+        $addresses = [];
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$addresses, $resolver, $error): string {
+                $addresses[] = $resolver->resolveStoreAddress(self::STORE_ID);
+                if (count($addresses) === 1) {
+                    throw $error;
+                }
+
+                return 'ok';
+            },
+            $this->zeroSleepClassifier(),
+        );
+
+        $this->assertSame('ok', $result);
+        $this->assertSame(
+            [self::OLD_ADDRESS, self::OLD_ADDRESS],
+            $addresses,
+            'a non-routing retry must reuse the cached store address',
+        );
+        $this->assertSame(0, $rpcCalls, 'a non-routing retry must not ask PD for the store');
+        $this->assertSame(self::OLD_ADDRESS, $storeCache->get(self::STORE_ID)?->getAddress());
+        $this->assertNotNull($regionCache->getByKey(self::KEY));
+    }
+
+    public function testSuccessfulOperationKeepsTheStoreAddress(): void
+    {
+        [$storeCache, $regionCache, $resolver] = $this->cacheWithStaleAddress();
+
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls);
+
+        $addresses = [];
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$addresses, $resolver): string {
+                $addresses[] = $resolver->resolveStoreAddress(self::STORE_ID);
+
+                return 'ok';
+            },
+        );
+
+        $this->assertSame('ok', $result);
+        $this->assertSame([self::OLD_ADDRESS], $addresses);
+        $this->assertSame(0, $rpcCalls);
+        $this->assertSame(self::OLD_ADDRESS, $storeCache->get(self::STORE_ID)?->getAddress());
+    }
+}
