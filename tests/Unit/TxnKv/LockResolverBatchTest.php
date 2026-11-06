@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
@@ -156,6 +157,28 @@ class LockResolverBatchTest extends TestCase
         $resolver->resolveLock('1000', $this->lock('1002', 100));
 
         $this->assertCount(1, $this->checks);
+    }
+
+    public function testErroredStatusInBatchResolutionIsRetryableAndResolvesNothing(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setRetryable('status check failed');
+        $status = $this->txnStatus();
+        $status->setError($keyError);
+        $this->statusByTs[100] = $status;
+
+        try {
+            $this->resolver()->resolveLocks([
+                $this->lock('1001', 100),
+                $this->lock('1002', 100),
+            ]);
+            $this->fail('Expected an errored CheckTxnStatus to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+        }
+
+        $this->assertCount(1, $this->checks);
+        $this->assertSame([], $this->resolves, 'an errored status check must never drive a rollback');
     }
 
     public function testLiveLockIsNotCached(): void

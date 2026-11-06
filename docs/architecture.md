@@ -472,6 +472,17 @@ undetermined status is never cached. `resolveLocks()` takes several locks,
 checks each transaction once, and sends one `ResolveLock` per region and
 transaction with all keys of that transaction in the region.
 
+An errored status check is not a status. A region error, a gRPC failure or a
+`KeyError` in the `CheckTxnStatus` response is propagated as a retryable
+failure (`TxnRetryableException` with `BackoffType::TxnLock` for a `KeyError`)
+through the caller's retry executor, so the response's zeroed status fields can
+never be read as "not committed" and drive a rollback. The async-commit
+secondary check follows the same rule: a `KeyError` in the
+`CheckSecondaryLocks` response is retryable, and a region error while grouping
+the secondaries propagates instead of falling back to the TTL/rollback path.
+Only a successful response decides commit versus rollback (issue #224,
+TXN-19).
+
 ### 8. Retry System
 
 **Location**: `src/Client/Retry/` — `RetryExecutor` runs the loop; `RawKvClient::createRetryExecutor()` builds one per operation
