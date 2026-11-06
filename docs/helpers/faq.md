@@ -3,6 +3,21 @@
 Frequently asked questions and recurring pitfalls in crazy-goat/tikv-php.
 Ordered roughly by how often they bite.
 
+## A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep
+
+Issue #569 describes `LockResolver` capping a lock-TTL `usleep()` at
+`maxBackoffMs`, but #206 removed that sleep: a live lock now raises
+`TxnRetryableException` and the caller's `RetryExecutor` owns the backoff.
+The remaining overshoot is the lock-resolution RPC time (`lockResolveTimeoutMs`
+defaults to 5 s and the TSO fetch to 3 s), not a sleep. The seam is
+`RetryContext`: `RetryExecutor::execute()` configures it with the deadline and
+operation start time, `CheckedGrpcFuture::fromRetryableDispatch()` forwards it,
+and `TwoPhaseCommitter` passes its live remaining value into
+`LockResolver::resolveLock()`. Do not reintroduce a sleep in `LockResolver`:
+it would break the #206 resolve-then-retry contract. The context computes the
+remaining budget at call time, so time spent inside the current attempt's RPC
+is already deducted; a snapshot taken before the attempt would overstate it.
+
 ## RetryExecutor unit tests that need zero-sleep retries: use DataIsNotReady or an explicit classifier
 
 Since issue #241 (REG-10) `EpochNotMatch` classifies as `BackoffType::EpochNotMatch`

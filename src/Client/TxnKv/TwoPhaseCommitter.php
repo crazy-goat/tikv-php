@@ -43,6 +43,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryContext;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
@@ -948,6 +949,10 @@ final readonly class TwoPhaseCommitter
      *
      * @param Mutation[] $mutations
      * @param string[] $secondaries
+     * @param RetryContext|null $retryContext Retry budget view of the enclosing
+     *        prewrite retry loop, if any. Its remaining wall-clock budget bounds
+     *        lock resolution triggered by a `KeyError.locked` response
+     *        (issue #569).
      */
     private function prewriteForRegionAsync(
         RegionInfo $region,
@@ -958,6 +963,7 @@ final readonly class TwoPhaseCommitter
         bool $useOnePc = false,
         bool $useAsyncCommit = false,
         array $secondaries = [],
+        ?RetryContext $retryContext = null,
     ): CheckedGrpcFuture {
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
         $request = $this->buildPrewriteRequest(
@@ -986,7 +992,7 @@ final readonly class TwoPhaseCommitter
             $this->timeoutMs('write'),
         );
 
-        return CheckedGrpcFuture::fromCallable(function () use ($future, $region): array {
+        return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $retryContext): array {
             /** @var PrewriteResponse $response */
             $response = $future->wait();
             // The prewrite runs under RetryExecutor via
@@ -1006,7 +1012,10 @@ final readonly class TwoPhaseCommitter
 
             $errors = $response->getErrors();
             if (count($errors) > 0) {
-                $this->handlePrewriteErrors($errors);
+                $this->handlePrewriteErrors(
+                    $errors,
+                    $retryContext?->remainingDeadlineMs() ?? 0,
+                );
             }
 
             return [
@@ -1037,6 +1046,10 @@ final readonly class TwoPhaseCommitter
         callable $classifier,
     ): CheckedGrpcFuture {
         $firstKey = $group['firstKey'];
+        // Shared with the executor: it is refreshed before every attempt, so
+        // a `KeyError.locked` response can bound lock resolution by the
+        // prewrite's own remaining retry deadline (issue #569).
+        $retryContext = new RetryContext();
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
@@ -1048,6 +1061,7 @@ final readonly class TwoPhaseCommitter
                 $useOnePc,
                 $useAsyncCommit,
                 $secondaries,
+                $retryContext,
             ): CheckedGrpcFuture {
                 $region = $this->regionResolver->getRegionInfo($firstKey);
 
@@ -1060,11 +1074,13 @@ final readonly class TwoPhaseCommitter
                     $useOnePc,
                     $useAsyncCommit,
                     $secondaries,
+                    $retryContext,
                 );
             },
             $retryExecutor,
             $firstKey,
             $classifier,
+            $retryContext,
         );
     }
 
@@ -1105,8 +1121,12 @@ final readonly class TwoPhaseCommitter
 
     /**
      * @param iterable<KeyError> $errors
+     * @param int $remainingDeadlineMs Remaining wall-clock budget of the
+     *        enclosing prewrite retry loop (0 = no deadline). It bounds the
+     *        lock resolution triggered by a `KeyError.locked` response so a
+     *        lock TTL wait cannot overshoot the retry deadline (issue #569).
      */
-    private function handlePrewriteErrors(iterable $errors): void
+    private function handlePrewriteErrors(iterable $errors, int $remainingDeadlineMs = 0): void
     {
         foreach ($errors as $keyError) {
             $deadlock = $keyError->getDeadlock();
@@ -1118,7 +1138,7 @@ final readonly class TwoPhaseCommitter
             if ($locked !== null) {
                 $rawPrimary = $locked->getPrimaryLock();
                 $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                $this->lockResolver->resolveLock($lockPrimary, $locked);
+                $this->lockResolver->resolveLock($lockPrimary, $locked, $remainingDeadlineMs);
                 throw new TxnRetryableException(
                     'Lock conflict during prewrite, resolved - retry',
                     BackoffType::TxnLock,
@@ -1639,8 +1659,12 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): CheckedGrpcFuture {
+        // See prewriteWithRetry(): the rollback's lock-conflict path must
+        // respect the same wall-clock deadline as the retry loop (issue #569).
+        $retryContext = new RetryContext();
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, $retryContext): CheckedGrpcFuture {
                 // Resolve the region on every attempt so cache
                 // invalidation and leader switching performed by the
                 // retry executor take effect (issue #502): a stale
@@ -1685,7 +1709,7 @@ final readonly class TwoPhaseCommitter
                     $this->timeoutMs('write'),
                 );
 
-                return CheckedGrpcFuture::fromCallable(function () use ($future, $region) {
+                return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $retryContext) {
                     /** @var BatchRollbackResponse $response */
                     $response = $future->wait();
                     RegionErrorHandler::check(
@@ -1697,7 +1721,10 @@ final readonly class TwoPhaseCommitter
 
                     $error = $response->getError();
                     if ($error !== null) {
-                        $this->handleRollbackError($error);
+                        $this->handleRollbackError(
+                            $error,
+                            $retryContext->remainingDeadlineMs(),
+                        );
                     }
 
                     return $response;
@@ -1706,10 +1733,11 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
+            $retryContext,
         );
     }
 
-    private function handleRollbackError(KeyError $error): void
+    private function handleRollbackError(KeyError $error, int $remainingDeadlineMs = 0): void
     {
         $locked = $error->getLocked();
         if ($locked !== null) {
@@ -1717,7 +1745,7 @@ final readonly class TwoPhaseCommitter
             $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
             // Active locks propagate a retryable exception; after they expire,
             // retry rollback so the rollback RPC can be attempted again.
-            $this->lockResolver->resolveLock($lockPrimary, $locked);
+            $this->lockResolver->resolveLock($lockPrimary, $locked, $remainingDeadlineMs);
             throw new TxnRetryableException(
                 'Lock encountered during rollback, resolved - retry',
                 BackoffType::TxnLock,
@@ -2431,8 +2459,12 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): CheckedGrpcFuture {
+        // See prewriteWithRetry(): the rollback's lock-conflict path must
+        // respect the same wall-clock deadline as the retry loop (issue #569).
+        $retryContext = new RetryContext();
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys, $forUpdateTs): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, $forUpdateTs, $retryContext): CheckedGrpcFuture {
                 // Resolve the region on every attempt so cache
                 // invalidation and leader switching performed by the
                 // retry executor take effect (issue #502) — see
@@ -2467,7 +2499,7 @@ final readonly class TwoPhaseCommitter
                     $this->timeoutMs('write'),
                 );
 
-                return CheckedGrpcFuture::fromCallable(function () use ($future, $region) {
+                return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $retryContext) {
                     /** @var PessimisticRollbackResponse $response */
                     $response = $future->wait();
                     RegionErrorHandler::check(
@@ -2479,7 +2511,10 @@ final readonly class TwoPhaseCommitter
 
                     $errors = $response->getErrors();
                     foreach ($errors as $keyError) {
-                        $this->handleRollbackError($keyError);
+                        $this->handleRollbackError(
+                            $keyError,
+                            $retryContext->remainingDeadlineMs(),
+                        );
                     }
 
                     return $response;
@@ -2488,6 +2523,7 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
+            $retryContext,
         );
     }
 

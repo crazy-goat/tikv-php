@@ -632,6 +632,15 @@ Notes:
 - Deadline checks run *before* each attempt; worst-case worker occupancy is
   therefore approximately the deadline plus one more in-flight attempt
   (bounded by the gRPC timeout).
+- Lock resolution inside a retry loop (a `KeyError.locked` during prewrite or
+  rollback) shares the same remaining deadline: its `CheckTxnStatus` (and the
+  TSO fetch it performs), `CheckSecondaryLocks` and `ResolveLock` RPCs are
+  capped by it, so one resolution cannot outlive the operation. A live lock is
+  still reported as retryable (the executor owns the backoff) and the resolver
+  never sleeps for the lock TTL; the executor's deadline check raises
+  `RetryBudgetExhaustedException` when the budget is spent. With
+  `retryDeadlineMs=0` the configured `lockResolveTimeoutMs`/`tsoTimeoutMs`
+  apply unchanged.
 - `ErrorClassifier` decides which errors are retryable: NotLeader /
   EpochNotMatch / ServerIsBusy / StaleCommand / RegionNotFound and friends
   retry with typed backoff curves, while `RaftEntryTooLarge`,

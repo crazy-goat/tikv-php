@@ -65,10 +65,19 @@ final readonly class RetryExecutor
      * @template T
      * @param callable(): T $operation
      * @param (callable(TiKvException): ?BackoffType)|null $classifier Custom error classifier
+     * @param RetryContext|null $context Optional per-invocation view of the
+     *        wall-clock budget. The executor configures it with its deadline
+     *        and operation start time, so an operation can bound a nested
+     *        call (lock resolution, for example) by the same deadline instead
+     *        of adding an independent timeout (issue #569).
      * @return T
      */
-    public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
-    {
+    public function execute(
+        string $key,
+        callable $operation,
+        ?callable $classifier = null,
+        ?RetryContext $context = null,
+    ): mixed {
         // Per-invocation retry state lives in locals, not instance fields:
         // a single executor is reused across many operations, and
         // maxBackoffMs/serverBusyBudgetMs are documented as per-operation
@@ -112,6 +121,11 @@ final readonly class RetryExecutor
             if ($this->deadlineMs > 0) {
                 $this->assertDeadlineNotExhausted($key, $startTimeMs, $attempt, $lastError);
             }
+
+            // Publish the budget for nested calls (issue #569). The context
+            // computes the remaining value at call time, so time spent inside
+            // the attempt's RPC is accounted for as well.
+            $context?->configure($this->deadlineMs, $startTimeMs);
 
             try {
                 return $operation();

@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
+use CrazyGoat\TiKV\Client\Retry\RetryContext;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -65,6 +66,68 @@ class RetryExecutorTest extends TestCase
     {
         $result = $this->executor->execute('key', fn(): string => 'success');
         $this->assertSame('success', $result);
+    }
+
+    private function executorWithDeadline(int $deadlineMs): RetryExecutor
+    {
+        return new RetryExecutor(
+            20000,
+            600000,
+            $this->regionCache,
+            $this->grpc,
+            new RegionResolver($this->pdClient, $this->regionCache),
+            new NullLogger(),
+            deadlineMs: $deadlineMs,
+        );
+    }
+
+    /**
+     * Issue #569: the context exposes the live remaining budget, so a nested
+     * call made later in the attempt sees the time the attempt has already
+     * spent (a snapshot taken before the attempt would overstate it).
+     */
+    public function testRetryContextExposesTheLiveRemainingDeadline(): void
+    {
+        $context = new RetryContext();
+        $executor = $this->executorWithDeadline(5000);
+
+        $observed = $executor->execute(
+            'key',
+            function () use ($context): int {
+                $before = $context->remainingDeadlineMs();
+                usleep(20_000);
+                $after = $context->remainingDeadlineMs();
+
+                self::assertGreaterThan(0, $before);
+                self::assertLessThanOrEqual(5000, $before);
+                self::assertLessThan($before, $after, 'the remaining budget must shrink during the attempt');
+
+                return $after;
+            },
+            null,
+            $context,
+        );
+
+        $this->assertGreaterThan(0, $observed);
+    }
+
+    /**
+     * Issue #569: `0` is the "no deadline" sentinel, so a disabled deadline
+     * keeps the nested call's historical behaviour.
+     */
+    public function testRetryContextReportsZeroWhenTheDeadlineIsDisabled(): void
+    {
+        $context = new RetryContext();
+        $executor = $this->executorWithDeadline(0);
+
+        $observed = $executor->execute(
+            'key',
+            static fn(): int => $context->remainingDeadlineMs(),
+            null,
+            $context,
+        );
+
+        $this->assertSame(0, $observed);
     }
 
     public function testExecuteRaftEntryTooLargeThrowsImmediately(): void
