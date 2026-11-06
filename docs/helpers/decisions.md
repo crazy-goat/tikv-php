@@ -1461,9 +1461,9 @@ Two different failure modes share one issue, and they get two different defaults
    so a rejected write sends no RPC.
 2. **Batching is always on.** The defaults (16 KiB and 512 items per region) match client-go's
    `DefTxnCommitBatchSize` and RawKV's `MAX_BATCH_LIMIT`; both are far above the normal
-   transaction, so a small transaction still sends one prewrite and one commit per region. The
-   splitter is `RawKvSplitter::splitIntoBatches()`, the same generic helper the RawKV batch paths
-   use.
+   transaction, so a small transaction still sends one prewrite, one pessimistic lock and one
+   commit per region. The splitter is `RawKvSplitter::splitIntoBatches()`, the same generic
+   helper the RawKV batch paths use.
 3. **A batch is a group, not a special case inside the RPC loop.** Splitting before the
    primary/secondary grouping lets the existing retry, fan-out, KeyError and region-error
    machinery apply unchanged. The batch that carries the primary key is still prewritten last for
@@ -1479,6 +1479,31 @@ Two different failure modes share one issue, and they get two different defaults
    async primary prewrite can therefore exceed the budget, and a single item larger than the
    limit still forms its own batch so the server rejects it instead of the client silently
    dropping it.
+
+## `is_first_lock` belongs to the batch that holds the primary lock (#225)
+
+TiKV uses `PessimisticLockRequest.is_first_lock` to decide whether a
+transaction can be skipped by the deadlock detector: a transaction holding no
+other lock cannot be part of a cycle. The flag therefore describes the batch
+that contains the transaction's primary lock, not the first region batch or
+the first request of a fan-out.
+
+The pessimistic-lock pass derives the pass-level bool once from
+`TransactionState::hasAcknowledgedPessimisticLocks()` and sets the wire flag
+only on the batch whose keys contain the primary
+(`in_array($primary, $keys, true)`). The bool is deliberately not cleared when
+an earlier batch succeeds: the fan-out dispatches all first attempts before
+any response is processed, and a retry of the primary batch must keep the
+flag. At most one batch per pass carries it, and no batch carries it when the
+transaction already acknowledged a lock (for example the second eager `set()`
+of a transaction).
+
+The pass also splits each region's keys with the #430
+`maxTxnBatchSize`/`maxTxnBatchCount` limits, so the primary can genuinely sit
+in a later batch of the first region or in a later region; the flag follows
+the primary instead of the iteration position. That batching is why the
+regression tests can construct the shape the old
+`$isFirstLock && $groupIndex === $firstGroupIndex` rule got wrong.
 
 ## Reversed RawKV ranges are rejected before any RPC (#343)
 
