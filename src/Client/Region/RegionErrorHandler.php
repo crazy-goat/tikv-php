@@ -44,8 +44,11 @@ final class RegionErrorHandler
      * non-routing error (ServerIsBusy, DiskFull, IsWitness,
      * RecoveryInProgress, …) reached the region that owns the key, so the
      * cached entry stays — the same routing table RetryExecutor uses
-     * (issue #245). This is the consistent behaviour expected by Transaction
-     * and LockResolver callers.
+     * (issue #245). For EpochNotMatch the stale entry is also captured on the
+     * exception before the drop, so RetryExecutor can seed the new regions'
+     * leader from the stale cached entry's leader store and refresh the cache
+     * without PD (issue #246). This is the consistent behaviour expected by
+     * Transaction and LockResolver callers.
      *
      * NotLeader ownership depends on where check() runs:
      *
@@ -78,7 +81,19 @@ final class RegionErrorHandler
             if ($regionError !== null) {
                 // Build the exception first: the typed ErrorKind lives on it
                 // and decides whether the cached region is still correct.
-                $exception = RegionException::fromRegionError($regionError);
+                // Capture the stale entry before invalidating it: an
+                // EpochNotMatch payload carries no leader, and the retry
+                // needs the stale cached entry's leader store in order to
+                // cache the new regions without asking PD (issue #246).
+                $cachedRegion = null;
+                if (
+                    $cache instanceof RegionCacheInterface
+                    && $regionId !== null
+                    && $regionError->hasEpochNotMatch()
+                ) {
+                    $cachedRegion = $cache->getById($regionId);
+                }
+                $exception = RegionException::fromRegionError($regionError, $cachedRegion);
                 $isNotLeader = $exception->notLeader instanceof NotLeader;
 
                 if ($cache instanceof RegionCacheInterface && $regionId !== null) {

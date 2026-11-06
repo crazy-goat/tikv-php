@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommandPri;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
@@ -29,6 +30,7 @@ use CrazyGoat\Proto\Kvrpcpb\TxnLockNotFound;
 use CrazyGoat\Proto\Kvrpcpb\TxnNotFound;
 use CrazyGoat\Proto\Kvrpcpb\WriteConflict;
 use CrazyGoat\Proto\Metapb\Peer;
+use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -3637,6 +3639,146 @@ class TransactionTest extends TestCase
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
         $this->assertSame(2, $prewriteCalls);
         $this->assertSame(['127.0.0.1:20161', '127.0.0.1:20162'], $prewriteAddresses);
+    }
+
+    /**
+     * Issue #246: a split between grouping and prewrite must not send a key
+     * that equals the old region's exclusive end to that region. The
+     * EpochNotMatch payload refreshes the cache to [.., k2) + [k2, ..); the
+     * retry must split the group and prewrite k1 to region 1 and k2 to
+     * region 2, instead of replaying both mutations against region 1.
+     */
+    public function testCommitPrewriteRegroupsGroupAfterSplitAtExclusiveEnd(): void
+    {
+        $stale = $this->makeRegion(1, '', '');
+        $left = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: '',
+            endKey: 'k2',
+        );
+        $right = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k2',
+            endKey: '',
+        );
+
+        $cache = $this->stubStatefulRegionCache([$stale]);
+        $this->regionCache->method('invalidate')->willReturnCallback($cache->invalidate(...));
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+        $this->pdClient->method('scanRegions')->willReturn([$stale]);
+        // The payload only carries the left half: the boundary key 'k2' is
+        // not covered by it and must be resolved through PD per key.
+        $this->pdClient->expects($this->once())
+            ->method('getRegion')
+            ->with('k2')
+            ->willReturn($right);
+
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(2);
+
+        $leftPeer = new Peer();
+        $leftPeer->setId(1);
+        $leftPeer->setStoreId(1);
+        $protoLeft = new Region();
+        $protoLeft->setId(1);
+        $protoLeft->setStartKey('');
+        $protoLeft->setEndKey('k2');
+        $protoLeft->setRegionEpoch($epoch);
+        $protoLeft->setPeers([$leftPeer]);
+
+        $payload = new EpochNotMatch();
+        $payload->setCurrentRegions([$protoLeft]);
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setMessage('epoch not match');
+        $regionError->setEpochNotMatch($payload);
+
+        $staleResponse = new PrewriteResponse();
+        $staleResponse->setRegionError($regionError);
+        $okResponse = new PrewriteResponse();
+
+        /** @var list<PrewriteRequest> $prewriteRequests */
+        $prewriteRequests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$prewriteRequests,
+                $left,
+                $right,
+                $staleResponse,
+                $okResponse,
+            ): object {
+                if ($method === 'KvPrewrite') {
+                    self::assertInstanceOf(PrewriteRequest::class, $request);
+                    $prewriteRequests[] = $request;
+                    if (count($prewriteRequests) === 1) {
+                        return $staleResponse;
+                    }
+
+                    $context = $request->getContext();
+                    $requestRegion = match ($context?->getRegionId()) {
+                        1 => $left,
+                        2 => $right,
+                        default => null,
+                    };
+                    self::assertInstanceOf(
+                        RegionInfo::class,
+                        $requestRegion,
+                        'unexpected request region id: ' . var_export($context?->getRegionId(), true),
+                    );
+                    foreach ($request->getMutations() as $mutation) {
+                        self::assertTrue(
+                            KeyOrder::inRange($mutation->getKey(), $requestRegion->startKey, $requestRegion->endKey),
+                            sprintf(
+                                'prewrite key %s must be inside the request region [%s, %s)',
+                                bin2hex($mutation->getKey()),
+                                bin2hex($requestRegion->startKey),
+                                bin2hex($requestRegion->endKey),
+                            ),
+                        );
+                    }
+
+                    return $okResponse;
+                }
+
+                return match ($method) {
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        // One failed pre-split attempt, then one request per post-split region.
+        $this->assertCount(3, $prewriteRequests);
+
+        $retriedLeft = $prewriteRequests[1];
+        $this->assertSame(1, $retriedLeft->getContext()?->getRegionId());
+        $this->assertCount(1, $retriedLeft->getMutations());
+        $this->assertSame('k1', $retriedLeft->getMutations()[0]->getKey());
+
+        $retriedRight = $prewriteRequests[2];
+        $this->assertSame(2, $retriedRight->getContext()?->getRegionId());
+        $this->assertCount(1, $retriedRight->getMutations());
+        $this->assertSame('k2', $retriedRight->getMutations()[0]->getKey());
     }
 
     /**

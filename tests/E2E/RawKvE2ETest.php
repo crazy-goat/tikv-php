@@ -8,6 +8,7 @@ use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
@@ -844,12 +845,16 @@ class RawKvE2ETest extends TestCase
             )),
             'the "\x00" suffix makes the upper bound inclusive of $newest',
         );
+    }
 
-        // The same call with the bounds the other way round is the footgun
-        // documented above the snippets: the upper bound sorts BELOW the
-        // lower bound, so every region is clipped away and the call succeeds
-        // with zero rows instead of raising.
-        $this->assertSame([], $this->testClient->reverseScan('log:', 'log;', limit: 10));
+    public function testReverseScanReversedBoundsThrowBeforeAnyRpc(): void
+    {
+        // The bounds the other way round are rejected before any PD or store
+        // RPC: reverseScan() takes the upper bound first.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid range in reverseScan');
+
+        $this->testClient->reverseScan('log:', 'log;', limit: 10);
     }
 
     public function testReverseScanWithLimit(): void

@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Region;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Tests\Unit\Support\BinaryKeyVectors;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 #[CoversClass(RegionRangeClipper::class)]
@@ -18,6 +20,78 @@ final class RegionRangeClipperTest extends TestCase
     protected function setUp(): void
     {
         $this->clipper = new RegionRangeClipper();
+    }
+
+    // ========================================================================
+    // Range-order validation (issue #343)
+    // ========================================================================
+
+    #[DataProvider('validForwardRanges')]
+    public function testAssertForwardRangeOrderAcceptsNonReversedRanges(string $start, string $end): void
+    {
+        $this->expectNotToPerformAssertions();
+
+        RegionRangeClipper::assertForwardRangeOrder($start, $end, 'scan');
+    }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function validForwardRanges(): iterable
+    {
+        yield 'ordinary' => ['a', 'z'];
+        yield 'empty range' => ['a', 'a'];
+        yield 'unbounded end' => ['a', ''];
+        yield 'keyspace start' => ['', 'z'];
+        yield 'byte order, not numeric order' => ['100', '20'];
+    }
+
+    #[DataProvider('reversedForwardRanges')]
+    public function testAssertForwardRangeOrderRejectsReversedRanges(string $start, string $end): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid range in scan: start key must not sort after end key');
+
+        RegionRangeClipper::assertForwardRangeOrder($start, $end, 'scan');
+    }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function reversedForwardRanges(): iterable
+    {
+        yield 'ordinary' => ['z', 'a'];
+        yield 'byte order, not numeric order' => ['20', '100'];
+    }
+
+    #[DataProvider('validReverseRanges')]
+    public function testAssertReverseRangeOrderAcceptsNonReversedRanges(string $start, string $end): void
+    {
+        $this->expectNotToPerformAssertions();
+
+        RegionRangeClipper::assertReverseRangeOrder($start, $end, 'reverseScan');
+    }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function validReverseRanges(): iterable
+    {
+        yield 'ordinary' => ['z', 'a'];
+        yield 'empty range' => ['a', 'a'];
+        yield 'unbounded lower bound' => ['a', ''];
+        yield 'byte order, not numeric order' => ['20', '100'];
+    }
+
+    #[DataProvider('reversedReverseRanges')]
+    public function testAssertReverseRangeOrderRejectsReversedRanges(string $start, string $end): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid range in reverseScan: start key must not sort before end key');
+
+        RegionRangeClipper::assertReverseRangeOrder($start, $end, 'reverseScan');
+    }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function reversedReverseRanges(): iterable
+    {
+        yield 'ordinary' => ['a', 'z'];
+        yield 'empty upper bound' => ['', 'a'];
+        yield 'byte order, not numeric order' => ['100', '20'];
     }
 
     // ========================================================================

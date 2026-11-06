@@ -377,6 +377,28 @@ needs the *kind*, not the exception — stays compatible with the commitment,
 because what callers are promised is the routing/non-routing table, not the
 class it lives in.
 
+## `notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)
+
+`LockResolver` is reached from two kinds of call site: executor-owned ones
+(prewrite and rollback after #213/#502, and the `TxnReader` read retries) and
+direct ones (the pessimistic-lock `do-while` in `TwoPhaseCommitter`, which has
+no enclosing `RetryExecutor`). The flag is therefore an argument of
+`resolveLock()` / `resolveLocks()`, not a constant and not something the
+resolver can derive from the method it is in. It must reach **every**
+`RegionErrorHandler::check()` on the lock-resolution path — `KvCheckTxnStatus`,
+`KvCheckSecondaryLocks`, the batch `KvResolveLock`, and the async-commit
+finalization in `resolveAsyncCommitLocks()`. The async-commit path used to
+hardcode `false`, so at executor-owned sites a `NotLeader` was self-invalidated
+by `check()` instead of being handed to `handleNotLeader()`: the cache entry was
+gone before the hint could be applied, so valid-hint leader switching was
+defeated and the next attempt had to re-resolve through PD (#474). The issue
+text calls this a double-count of `regionInvalidated('not_leader')`, but with
+the current cache `invalidate()` is a no-op on an ID that is already gone, so
+the observable harm is the lost hint switch, not a second metric. Do not flip
+the constant to `true` either — the pessimistic-lock loop still needs `false`
+to drop a stale entry before its local retry (issue #568, pinned by
+`OnePhaseAsyncCommitTest::testAsyncCommitResolveNotLeader*`).
+
 ## A class of bug gets a seam, a rule and a fixture — not three site patches (issue #180)
 
 Closing #180 after #186, #232 and #261: the answer to "how do we know this class
@@ -1079,6 +1101,35 @@ README ("Connection Lifetime and Transport Ownership") and
 manual-construction snippet). Keep them in sync — the contradiction #407 had to
 fix was a snippet sitting next to the rule and breaking it.
 
+## A client rolls back its live transactions before releasing the transport (issue #226)
+
+`TxnKvClient` tracks the transactions it began through `WeakReference` and, in
+`close()`, rolls back the ones still `Active` before it clears the region cache
+and closes the owned transport and the PD client. The order is the point: PHP
+does not guarantee destruction order, so relying on `Transaction::__destruct()`
+alone left the rollback racing a closed transport, and the locks lived until
+their TTL expired.
+
+Three decisions inside it:
+
+1. **Weak tracking, not ownership.** A strong list would keep an abandoned
+   transaction (and its write set) alive until the client itself died;
+   `WeakReference` only lets `close()` reach transactions the caller still
+   holds. References to finished transactions are pruned on `begin()`.
+2. **Rollback, not invalidation.** A committed or rolled back transaction is
+   skipped by its status; a live one goes through the public
+   `Transaction::rollback()`, so `close()` and the destructor share one
+   implementation and the existing error handling. `close()` does not invent a
+   second "client closed" state for transactions — a successful rollback closes
+   the transaction through its own state machine.
+3. **The shared-transport case is handled too.** A client that does not own the
+   transport (`options['grpcClient']`) still owns the transactions it began, so
+   it attempts the rollback before releasing its other resources; the transport
+   itself is still never closed by the client. Finishing transactions
+   explicitly stays the contract: a rollback failure inside `close()` is logged
+   (`close()` never throws), and with a shared transport the transaction can
+   still be used afterwards.
+
 ## The transaction mode is stated explicitly, but `begin()` keeps its pessimistic default (issue #439)
 
 Issue #439 (DIV-03) recorded the divergence from the official clients:
@@ -1428,6 +1479,18 @@ Two different failure modes share one issue, and they get two different defaults
    async primary prewrite can therefore exceed the budget, and a single item larger than the
    limit still forms its own batch so the server rejects it instead of the client silently
    dropping it.
+
+## Reversed RawKV ranges are rejected before any RPC (#343)
+
+`scan()`, `scanIterator()`, `batchScan()`, `deleteRange()` and `checksum()` take
+`[startKey, endKey)`; `reverseScan()` takes `[upper bound, lower bound)`. A reversed range is
+rejected with `InvalidArgumentException` before PD or a store is contacted instead of being
+clipped to an empty result. Clipping was silent for `reverseScan()` (the old docs advertised the
+empty result) and undefined for the forward operations, so the most common mistake looked like
+"no rows". `startKey == endKey` with a non-empty end key stays a valid empty range. An empty end
+key is the +infinity sentinel for forward operations (`scan('', '')` covers the whole keyspace)
+and the keyspace start for `reverseScan()`, so `reverseScan('', '')` is empty.
+`deleteRange('', '')` keeps its explicit no-op guard rather than deleting the whole keyspace.
 
 ## Rollback KeyErrors fail closed; only `txn_not_found` / `txn_lock_not_found` are success (#559)
 
