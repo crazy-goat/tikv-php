@@ -946,17 +946,28 @@ code needs the raw key, read it from the typed accessor instead of parsing
 it out of a message — `RetryBudgetExhaustedException::getRawKey()` and
 `LockWaitTimeoutException::getKey()`.
 
-#### Installing a stricter redactor
+#### Installing a custom redactor
 
 `KeyRedactor::setRedactor()` replaces the default redactor:
 
 ```php
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 
+$secret = getenv('TIKV_LOG_REDACTION_SECRET');
+if ($secret === false || $secret === '') {
+    throw new \RuntimeException('TIKV_LOG_REDACTION_SECRET must be set');
+}
+
 KeyRedactor::setRedactor(
     fn (string $key): string => 'hmac:' . substr(hash_hmac('sha256', $key, $secret), 0, 16)
 );
 ```
+
+The default is already a keyed SHA-256 hash with a per-process CSPRNG salt, so
+override it only when you need to match an existing token scheme (a prefix, a
+different digest length, or an HMAC secret your log pipeline already uses).
+If you only need tokens that are comparable across processes or restarts, use
+`KeyRedactor::setSalt()` above instead.
 
 The callable receives the raw key and returns the string that is logged in
 its place. Install it once, before the first client is created and before the

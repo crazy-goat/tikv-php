@@ -59,8 +59,25 @@ the only non-final class in the tree (it is the intended base for any custom
 project-wide exception work).
 
 > The client never throws a raw `\Exception`, `\RuntimeException` or
-> `\InvalidArgumentException`: everything that can reach your code is one of
-> the twenty classes above.
+> `\InvalidArgumentException` as an operation failure: everything that can
+> reach your code from a TiKV operation is one of the twenty classes above.
+> The two bootstrap/environment errors described next are the deliberate
+> exceptions.
+
+Two failures outside that hierarchy come from the redaction helper rather than
+from an operation:
+
+- [`KeyRedactor::setRedactor()`](../src/Client/Util/KeyRedactor.php) and
+  `KeyRedactor::setSalt()` throw `\LogicException` when called after the first
+  `KeyRedactor::redact()` call. This is a programming/bootstrap error: install
+  the redactor and the salt before creating the first client. No RawKV or
+  TxnKV operation calls these setters, so an operation cannot raise it.
+- `KeyRedactor::redact()` throws `\Random\RandomException` when
+  `random_bytes()` fails while generating the default salt on first use. This
+  is an environment failure, not a TiKV operation failure. Configure a fixed
+  salt with `KeyRedactor::setSalt()` at bootstrap if the platform can fail this
+  way, or let it surface and treat it as fatal: the client will not fall back
+  to a weak salt.
 
 `TiKvException` itself is also thrown **directly** — no more specific subclass —
 at sixteen `throw new TiKvException(...)` statements across multiple call

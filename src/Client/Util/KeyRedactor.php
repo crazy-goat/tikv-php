@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Util;
 
-use InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use LogicException;
 
 /**
@@ -29,12 +29,13 @@ use LogicException;
  * ## Example output
  *
  * - `key_a` (5 bytes)     → `#3c469e9d6c5875d3 (5 bytes)`
- * - an 8-byte binary key  → `#a1b2c3d4e5f6f7f8 (8 bytes)`
- * - an empty key          → `"" (0 bytes)`
+ * - an 8-byte binary key  → `#7c9e2b41f8a0d635 (8 bytes)`
+ * - an empty key (default redactor) → `"" (0 bytes)`
  *
  * The examples show the shape only: the digest depends on the process salt,
- * so it is not a fixed value for a given key. An empty key has no content to
- * hash and keeps the readable `"" (0 bytes)` form.
+ * so it is not a fixed value for a given key. With the default redactor an
+ * empty key has no content to hash and keeps the readable `"" (0 bytes)`
+ * form; a custom redactor receives the empty string like any other key.
  *
  * The redactor and the salt are process-global and one-shot: both
  * {@see setRedactor()} and {@see setSalt()} throw a {@see LogicException}
@@ -116,7 +117,9 @@ final class KeyRedactor
      * {@see setSalt()}), so the same key produces the same token within a
      * process and different tokens across processes with different salts.
      *
-     * An empty key has no content to hash and returns `"" (0 bytes)`.
+     * An empty key has no content to hash; with the default redactor it
+     * returns `"" (0 bytes)`. A custom redactor receives it like any other
+     * key.
      *
      * If a custom redactor is configured, it is invoked instead.
      */

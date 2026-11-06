@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Util;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use CrazyGoat\TiKV\Tests\Unit\Support\KeyRedactorState;
-use InvalidArgumentException;
 use LogicException;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 class KeyRedactorTest extends TestCase
 {
@@ -104,6 +105,8 @@ class KeyRedactorTest extends TestCase
 
     public function testEmptySaltIsRejected(): void
     {
+        // The client exception, not the global \InvalidArgumentException:
+        // callers follow docs/error-handling.md and catch the client class.
         $this->expectException(InvalidArgumentException::class);
 
         KeyRedactor::setSalt('');
@@ -138,6 +141,23 @@ class KeyRedactorTest extends TestCase
 
         $this->expectException(LogicException::class);
         KeyRedactor::setRedactor(fn(string $key): string => $key);
+    }
+
+    public function testThrowingCustomRedactorStillCountsAsFirstUse(): void
+    {
+        KeyRedactor::setRedactor(function (string $key): string {
+            throw new RuntimeException('custom redactor failed');
+        });
+
+        try {
+            KeyRedactor::redact('hello');
+            self::fail('the custom redactor must throw');
+        } catch (RuntimeException $e) {
+            self::assertSame('custom redactor failed', $e->getMessage());
+        }
+
+        $this->expectException(LogicException::class);
+        KeyRedactor::setRedactor(null);
     }
 
     public function testSetSaltAfterFirstUseIsRejected(): void
