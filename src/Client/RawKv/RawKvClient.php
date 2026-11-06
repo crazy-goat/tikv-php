@@ -955,7 +955,9 @@ final class RawKvClient
      * constant memory and has no row cap.
      *
      * @param int $limit Maximum rows to return; 0 = the whole range
-     *                   (paginated internally, guarded by maxScanRows)
+     *                   (paginated internally, guarded by maxScanRows). A
+     *                   negative value throws InvalidArgumentException before
+     *                   any RPC
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
@@ -986,7 +988,8 @@ final class RawKvClient
      * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
      * instead of truncating (issue #440). A bounded scan (`limit > 0`)
      * returns at most `limit` rows, so a result whose count equals the limit
-     * may be truncated.
+     * may be truncated. A negative `limit` throws `InvalidArgumentException`
+     * before any RPC.
      *
      * For large prefixes prefer {@see RawKvClient::scanPrefixIterator()},
      * which pages the prefix with constant memory and has no row cap.
@@ -1030,7 +1033,9 @@ final class RawKvClient
      * forward alternative is {@see RawKvClient::scanIterator()}.
      *
      * @param int $limit Maximum rows to return; 0 = the whole range
-     *                   (paginated internally, guarded by maxScanRows)
+     *                   (paginated internally, guarded by maxScanRows). A
+     *                   negative value throws InvalidArgumentException before
+     *                   any RPC
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
