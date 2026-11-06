@@ -377,6 +377,28 @@ needs the *kind*, not the exception — stays compatible with the commitment,
 because what callers are promised is the routing/non-routing table, not the
 class it lives in.
 
+## `notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)
+
+`LockResolver` is reached from two kinds of call site: executor-owned ones
+(prewrite and rollback after #213/#502, and the `TxnReader` read retries) and
+direct ones (the pessimistic-lock `do-while` in `TwoPhaseCommitter`, which has
+no enclosing `RetryExecutor`). The flag is therefore an argument of
+`resolveLock()` / `resolveLocks()`, not a constant and not something the
+resolver can derive from the method it is in. It must reach **every**
+`RegionErrorHandler::check()` on the lock-resolution path — `KvCheckTxnStatus`,
+`KvCheckSecondaryLocks`, the batch `KvResolveLock`, and the async-commit
+finalization in `resolveAsyncCommitLocks()`. The async-commit path used to
+hardcode `false`, so at executor-owned sites a `NotLeader` was self-invalidated
+by `check()` instead of being handed to `handleNotLeader()`: the cache entry was
+gone before the hint could be applied, so valid-hint leader switching was
+defeated and the next attempt had to re-resolve through PD (#474). The issue
+text calls this a double-count of `regionInvalidated('not_leader')`, but with
+the current cache `invalidate()` is a no-op on an ID that is already gone, so
+the observable harm is the lost hint switch, not a second metric. Do not flip
+the constant to `true` either — the pessimistic-lock loop still needs `false`
+to drop a stale entry before its local retry (issue #568, pinned by
+`OnePhaseAsyncCommitTest::testAsyncCommitResolveNotLeader*`).
+
 ## A class of bug gets a seam, a rule and a fixture — not three site patches (issue #180)
 
 Closing #180 after #186, #232 and #261: the answer to "how do we know this class
@@ -986,6 +1008,23 @@ Two smaller rules the same fix settled:
   pushed up to 10 240 elements onto the VM stack per region; a foreach append
   costs nothing and reads the same.
 
+## An unbounded reverse scan fans out like the forward one, but every reverse shrink falls back (issue #555)
+
+`reverseScan(limit: 0)` reuses `RawKvScanner::scanSegmentsInParallel()` with
+`$reverse = true`: the clipped segments are already in descending order, every
+window dispatches its sends before awaiting, and the responses are
+concatenated in that order, so the descending result order is restored without
+a sort. The two directions differ in where a split-after-enumeration hole
+lands. A forward segment that shrank leaves `[freshEnd, segmentEnd)` *after*
+its coverage; only the final segment has the sequential continuation, so a
+non-final shrink falls back to the whole sequential page. A reverse segment
+that shrank leaves `[freshEnd, scanStart)` *above* its coverage, between it
+and the next-higher segment; appending a continuation would break the
+descending order, and `executeReverseScanForSubRange()` already knows how to
+splice that part in, so **every** reverse shrink falls back to the sequential
+page. The bounded reverse path (`limit > 0`) is deliberately unchanged and
+stays sequential.
+
 ## The parallel prewrite reports its aggregated failure, it does not throw it (issue #431, GAP-17)
 
 The prewrite fan-out (issue #291, PERF-04) collects every failing region into
@@ -1439,9 +1478,9 @@ Two different failure modes share one issue, and they get two different defaults
    so a rejected write sends no RPC.
 2. **Batching is always on.** The defaults (16 KiB and 512 items per region) match client-go's
    `DefTxnCommitBatchSize` and RawKV's `MAX_BATCH_LIMIT`; both are far above the normal
-   transaction, so a small transaction still sends one prewrite and one commit per region. The
-   splitter is `RawKvSplitter::splitIntoBatches()`, the same generic helper the RawKV batch paths
-   use.
+   transaction, so a small transaction still sends one prewrite, one pessimistic lock and one
+   commit per region. The splitter is `RawKvSplitter::splitIntoBatches()`, the same generic
+   helper the RawKV batch paths use.
 3. **A batch is a group, not a special case inside the RPC loop.** Splitting before the
    primary/secondary grouping lets the existing retry, fan-out, KeyError and region-error
    machinery apply unchanged. The batch that carries the primary key is still prewritten last for
@@ -1457,6 +1496,31 @@ Two different failure modes share one issue, and they get two different defaults
    async primary prewrite can therefore exceed the budget, and a single item larger than the
    limit still forms its own batch so the server rejects it instead of the client silently
    dropping it.
+
+## `is_first_lock` belongs to the batch that holds the primary lock (#225)
+
+TiKV uses `PessimisticLockRequest.is_first_lock` to decide whether a
+transaction can be skipped by the deadlock detector: a transaction holding no
+other lock cannot be part of a cycle. The flag therefore describes the batch
+that contains the transaction's primary lock, not the first region batch or
+the first request of a fan-out.
+
+The pessimistic-lock pass derives the pass-level bool once from
+`TransactionState::hasAcknowledgedPessimisticLocks()` and sets the wire flag
+only on the batch whose keys contain the primary
+(`in_array($primary, $keys, true)`). The bool is deliberately not cleared when
+an earlier batch succeeds: the fan-out dispatches all first attempts before
+any response is processed, and a retry of the primary batch must keep the
+flag. At most one batch per pass carries it, and no batch carries it when the
+transaction already acknowledged a lock (for example the second eager `set()`
+of a transaction).
+
+The pass also splits each region's keys with the #430
+`maxTxnBatchSize`/`maxTxnBatchCount` limits, so the primary can genuinely sit
+in a later batch of the first region or in a later region; the flag follows
+the primary instead of the iteration position. That batching is why the
+regression tests can construct the shape the old
+`$isFirstLock && $groupIndex === $firstGroupIndex` rule got wrong.
 
 ## Reversed RawKV ranges are rejected before any RPC (#343)
 

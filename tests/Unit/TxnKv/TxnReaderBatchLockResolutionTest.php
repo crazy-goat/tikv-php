@@ -47,6 +47,9 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
     /** @var list<ResolveLockRequest> */
     private array $resolves = [];
 
+    /** @var list<array{method: string, timeoutMs: ?int}> */
+    private array $callTimeouts = [];
+
     private object $readResponse;
 
     protected function setUp(): void
@@ -57,6 +60,7 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->methods = [];
         $this->resolves = [];
+        $this->callTimeouts = [];
 
         $region = new RegionInfo(1, 1, 1, 1, 1, '', '');
         $store = new Store();
@@ -70,8 +74,16 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
         $this->grpc->method('call')->willReturnCallback(
-            function (string $address, string $service, string $method, mixed $request): object {
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+                ?string $responseClass = null,
+                ?int $timeoutMs = null,
+            ): object {
                 $this->methods[] = $method;
+                $this->callTimeouts[] = ['method' => $method, 'timeoutMs' => $timeoutMs];
                 if ($method === 'KvCheckTxnStatus') {
                     $status = new CheckTxnStatusResponse();
                     $status->setCommitVersion(3000);
@@ -108,7 +120,7 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         return static fn (): ?BackoffType => null;
     }
 
-    private function executor(): RetryExecutor
+    private function executor(int $deadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS): RetryExecutor
     {
         return new RetryExecutor(
             1000,
@@ -117,6 +129,7 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
             $this->grpc,
             $this->regionResolver,
             new \Psr\Log\NullLogger(),
+            deadlineMs: $deadlineMs,
         );
     }
 
@@ -236,6 +249,43 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
             );
         } finally {
             $this->assertSame(['k1', 'k2'], $this->resolvedKeys());
+        }
+    }
+
+    /**
+     * The read's retry budget caps the lock-resolution RPCs too (issue #569):
+     * a lock conflict encountered during a scan must not spend the configured
+     * 5 s lock-resolution timeout after the operation's deadline is nearly
+     * spent.
+     */
+    public function testLockResolutionRpcTimeoutIsCappedByTheReadRetryDeadline(): void
+    {
+        $response = new ScanResponse();
+        $response->setPairs([$this->lockedPair('k1')]);
+        $this->readResponse = $response;
+
+        try {
+            $this->reader()->scan(
+                'k0',
+                'k9',
+                10,
+                new TransactionState(),
+                $this->executor(500),
+                static fn (): null => null,
+            );
+        } catch (TxnRetryableException) {
+            // Expected: the lock was resolved and the read must be retried.
+        }
+
+        $lockCalls = array_values(array_filter(
+            $this->callTimeouts,
+            static fn (array $call): bool => in_array($call['method'], ['KvCheckTxnStatus', 'KvResolveLock'], true),
+        ));
+        self::assertNotEmpty($lockCalls);
+        foreach ($lockCalls as $call) {
+            self::assertNotNull($call['timeoutMs']);
+            self::assertGreaterThan(0, $call['timeoutMs']);
+            self::assertLessThanOrEqual(500, $call['timeoutMs']);
         }
     }
 }
