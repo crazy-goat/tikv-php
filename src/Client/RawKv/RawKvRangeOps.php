@@ -64,8 +64,11 @@ final readonly class RawKvRangeOps
      * others as a
      * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException}.
      * Retryable region errors carried on a response are retried per
-     * sub-range inside the wait phase (issue #566), so a leader transfer or
-     * region split recovers transparently instead of failing the operation.
+     * sub-range inside the wait phase (issue #566), so a leader transfer — or
+     * a split whose fresh region still covers the sub-range — recovers
+     * transparently; a split that leaves the fresh region smaller than the
+     * sub-range still fails closed via
+     * {@see self::assertRegionCoversRange()}.
      * deleteRange is idempotent, so retrying the whole operation remains safe.
      *
      * Retries re-resolve the region per attempt (issue #190), so the
@@ -78,7 +81,9 @@ final readonly class RawKvRangeOps
             return;
         }
 
-        $executor = $this->createRetryExecutor();
+        // One range operation is one logical operation: every region shares
+        // one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         foreach ($regions as $region) {
             $this->regionCache->put($region);
@@ -124,7 +129,9 @@ final readonly class RawKvRangeOps
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
-        $executor = $this->createRetryExecutor();
+        // One range operation is one logical operation: every region shares
+        // one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         foreach ($regions as $region) {
             $this->regionCache->put($region);

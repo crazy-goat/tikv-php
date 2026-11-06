@@ -39,6 +39,21 @@ sleeps alone (budget exhaustion implies > 50 ms of sleeps), not from
 scheduling overhead. The #241 tests in `RetryExecutorTest` are the reference
 implementation of this sizing.
 
+## The retry budget is per logical operation, not per execute() call
+
+Since issue #223 a client's fan-out entry points wrap their `RetryExecutor`
+in `beginOperation()`, so every `execute()` call for one scan, batch,
+transactional read, commit, rollback or range operation charges the same
+`maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline. A standalone
+`RetryExecutor` still resets the budget on every `execute()` call (issue
+#271), and `beginOperation()` on the same executor starts a new operation.
+Consequence for tests: a multi-region `RawKvScanner`/`RawKvRangeOps`/
+`TxnReader` operation shares one budget across regions (a later region gets
+no fresh budget after an earlier one spent it), while two calls to
+`execute()` on a bare executor each get a full budget. The attempt cap stays
+per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
+on ordinary one-retry-per-region traffic.
+
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
 A test like `try { $executor->execute($k, fn () => throw …); $this->fail(...); } catch (TiKvException) {}`
@@ -1246,18 +1261,20 @@ retryable because the outcome is indeterminate; the idempotency split is
 REG-08's job, not the classifier's.
 
 
-## Jittered backoff makes "exact retry count" budget tests flaky — assert ranges with a shared-budget lower bound
+## Jittered backoff makes "exact retry count" budget tests flaky — assert the range that distinguishes the budget semantics
 
 When all `BackoffType`s became jittered (issue #242, equal jitter `[expo/2, expo]`), unit
 tests that asserted an **exact** retry/call count against a `maxBackoffMs` budget broke:
 randomly halved sleeps can squeeze one extra attempt into the same budget
-(`tests/Unit/RawKv/RetryBudgetSharedAcrossRegionsTest.php` went from always 6 calls to
-6–8). Fix pattern: assert the invariant the test actually cares about — the *lower* bound
-that distinguishes per-region from shared budgets (`>= 6`) plus a derived upper bound
-(`<= 8`) — not the exact count. Anything comparing budget-exhaustion attempt counts must
-now tolerate ±1 attempt per jittered exponential step. Also: `1 << $attempt` instead of
-`2 ** $attempt` keeps the exponent math int-typed so Rector's `RecastingRemovalRector`
-doesn't strip a needed `(int)` cast before `intdiv()`.
+(`tests/Unit/RawKv/RetryBudgetSharedAcrossRegionsTest.php` used to assert always 6 calls,
+then 6–8 under per-region budgets; since issue #223 the same file pins the shared budget
+at 4–5 calls and the per-region alternative at 6–8). Fix pattern: assert the invariant the
+test actually cares about — the bound that distinguishes the two semantics (`<= 5` for the
+shared budget, `>= 6` for per-region) plus a derived counter-bound — not the exact count.
+Anything comparing budget-exhaustion attempt counts must now tolerate ±1 attempt per
+jittered exponential step. Also: `1 << $attempt` instead of `2 ** $attempt` keeps the
+exponent math int-typed so Rector's `RecastingRemovalRector` doesn't strip a needed `(int)`
+cast before `intdiv()`.
 
 ## Budget carry-over detection becomes probabilistic under jittered backoff
 
@@ -1882,26 +1899,35 @@ The regression tests live in `TransactionTest` and use the shared
 asserts `['KvPessimisticLock']`, i.e. no `KvPrewrite`/`KvCommit`); there is
 also a first-variant-wins test for multi-error responses.
 
-## Range-op retries only see dispatch-phase failures — make both callAsync attempts throw in the regression test
+## Range-op retries: dispatch-phase re-resolve (#190) and response-borne retry (#566)
 
 `RawKvRangeOps::deleteRange()/checksum()` fan their per-region sends out
-through `callAsync()` and return an un-waited `CheckedGrpcFuture`; the wait
-happens later inside `BatchAsyncExecutor`, outside `RetryExecutor::execute()`.
-So moving `getRegionInfo($startKey)` inside the retry closure (#190) only
-helps for errors raised during *dispatch* (`callAsync()` itself or
-store-address resolution) — a region error carried on the response surfaces
-at wait time and is not retried per region at all (the documented fan-out
-trade-off). Proving the re-resolve in a pure-PHP `Unit` test therefore does
-**not** need a successful second future: let the first `callAsync()` throw a
-retryable `TiKvException('StaleCommand')` and the second throw a
-deliberately non-retryable one (`ErrorClassifier` leaves it unclassified, so
-the loop stops and the original exception propagates). Record the target
-address of each attempt and assert the pair — e.g.
-`['tikv1:20160', 'tikv2:20160']` — with `regionCache->getByKey()` stubbed
+through `callAsync()`. Since #190 the retry closure re-resolves
+`getRegionInfo($startKey)` on every attempt, which covers errors raised during
+*dispatch* (`callAsync()` itself or store-address resolution): the first
+`callAsync()` throws a retryable `TiKvException('StaleCommand')`, the retry
+re-resolves and sends to the new leader, and the test records the target
+address of each attempt — e.g. `['tikv1:20160', 'tikv2:20160']` — with
+`regionCache->getByKey()` stubbed
 `willReturnOnConsecutiveCalls($stale, $stale, null)` so the retry models the
 invalidation lookup before going to PD. No `\Grpc\Call` / resolved-future
 machinery is required, so the test stays in the `Unit` suite under `php -n`.
-The same harness covers the fail-closed shrink guard: let the
+
+Before #566 that dispatch-phase harness was the whole story: the wait happened
+later inside `BatchAsyncExecutor`, outside `RetryExecutor::execute()`, so a
+region error carried on the response surfaced at wait time and was not retried
+per region at all (the documented #295 fan-out trade-off). Issue #566 moved
+both wrappers onto `CheckedGrpcFuture::fromRetryableDispatch()` (the #183
+pattern): the first attempt is still dispatched eagerly, so the #295 fan-out is
+unchanged, while the wait phase runs the whole dispatch+await cycle under the
+operation-scoped retry executor (`beginOperation()`, #223) and re-resolves the
+region on every attempt. Response-borne coverage now lives in
+`RawKvRangeOpsRetryTest`
+(`testDeleteRangeRetriesResponseBorneNotLeaderAndSucceeds`,
+`testChecksumRetriesResponseBorneEpochNotMatchAndSucceeds`); the
+dispatch-phase harness above still covers #190.
+
+The same dispatch-phase harness covers the fail-closed shrink guard: let the
 post-invalidation `getRegion` return a smaller region (end key `k` for the
 request `a..z`); `assertRegionCoversRange()` fires before the second send, so
 expect exactly **one** `callAsync` and a `TiKvException` whose message
