@@ -31,8 +31,8 @@ use Psr\Log\NullLogger;
  * order across several regions, more than one send in flight at a time, the
  * bounded path still sequential, a region error falling back to the
  * retrying sequential path, and an empty range issuing no store RPC. The
- * degenerate `reverseScan('', '')` request (one unbounded reverse RawScan)
- * is pinned separately so the fan-out does not change it.
+ * `reverseScan('', '')` boundary is pinned separately: master's #343 guard
+ * treats it as the empty range (no RPC), so the fan-out must not change it.
  */
 final class RawKvScannerReverseFanOutTest extends TestCase
 {
@@ -431,51 +431,33 @@ final class RawKvScannerReverseFanOutTest extends TestCase
 
     public function testReverseScanEmptyRangeSendsNoStoreRpc(): void
     {
-        // reverseScan($upper, $lower) with $upper < $lower is bytewise empty.
+        // reverseScan($upper, $lower) with equal bounds is the valid empty
+        // range [a, a): the clipper yields no segment and no store RPC runs.
         $this->regionCache->method('getRegionsInRange')->willReturn([]);
         $this->pdClient->method('scanRegions')->willReturn([]);
         $this->pdClient->expects($this->never())->method('getStore');
         $this->grpc->expects($this->never())->method('call');
         $this->grpc->expects($this->never())->method('callAsync');
 
-        $result = $this->scanner()->reverseScan('a', 'z', 0, false);
+        $result = $this->scanner()->reverseScan('a', 'a', 0, false);
 
         $this->assertSame([], $result);
     }
 
     /**
-     * `reverseScan('', '')` is not an empty range: clipReverse() yields the
-     * degenerate ('', ''] sub-range for the region that starts at the
-     * keyspace start, and the scan issues one unbounded reverse RawScan.
-     * The fan-out must not change that (the single segment stays on the
-     * sequential path).
+     * `reverseScan('', '')` is the empty range: an empty end key is the
+     * start of the keyspace, not +infinity, so the scan returns before
+     * enumeration and sends no RPC (issue #343). The fan-out must not change
+     * that.
      */
-    public function testReverseScanOfTheEmptyRequestStillIssuesOneUnboundedReverseScan(): void
+    public function testReverseScanOfBothEmptyBoundsIsEmptyWithoutRpc(): void
     {
-        $this->stubWarmChain([
-            $this->region('', 'm', 1),
-            $this->region('m', 'z', 2),
-        ]);
-
+        $this->regionCache->expects($this->never())->method('getRegionsInRange');
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->expects($this->never())->method('getStore');
+        $this->grpc->expects($this->never())->method('call');
         $this->grpc->expects($this->never())->method('callAsync');
-        $this->grpc->expects($this->once())->method('call')->willReturnCallback(
-            function (
-                string $address,
-                string $service,
-                string $method,
-                Message $request,
-            ): Message {
-                /** @var RawScanRequest $request */
-                $this->assertTrue($request->getReverse());
-                $this->assertSame('', $request->getStartKey());
-                $this->assertSame('', $request->getEndKey());
 
-                return $this->scanResponse('b', 'a');
-            },
-        );
-
-        $result = $this->scanner()->reverseScan('', '', 0, false);
-
-        $this->assertSame(['b', 'a'], array_column($result, 'key'));
+        $this->assertSame([], $this->scanner()->reverseScan('', '', 0, false));
     }
 }

@@ -394,9 +394,9 @@ foreach ($client->scanPrefixIterator('log:2024-01-', batchSize: 1000, keyOnly: t
 
 The iterator fetches a page of up to `batchSize` rows (default `1024`, bounds
 `1 <= batchSize <= 10240`) per underlying `scan()` call and continues from
-after the page's last key until the range is exhausted. `batchSize` is
-validated immediately; scan RPCs (and their `RegionException` / `GrpcException`
-failures) happen lazily during iteration. The iterator is rewindable —
+after the page's last key until the range is exhausted. `batchSize` and the
+range order are validated immediately; scan RPCs (and their `RegionException` /
+`GrpcException` failures) happen lazily during iteration. The iterator is rewindable —
 `rewind()` re-scans from the original start key — and there is no reverse
 variant. Full semantics: [Iterating Large Ranges](operations.md#iterating-large-ranges).
 
@@ -689,7 +689,7 @@ The interface has six methods (full reference with emitted tag examples:
 | `retryAttempted()`     | A retryable error triggers another attempt                |
 | `regionCacheHit()`     | A region was served from the client's region cache        |
 | `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
-| `regionInvalidated()`  | A region was dropped from the cache (e.g. `region_error:epoch_not_match`, `retry_region_error:epoch_not_match`, `fatal_region_error`); non-routing errors keep the entry |
+| `regionInvalidated()`  | A region was dropped from the cache (e.g. `region_error:epoch_not_match`, `retry_region_error:epoch_not_match`, `fatal_region_error`); non-routing errors keep the entry, and a successful executor-side `EpochNotMatch` `current_regions` refresh is a superseding `put()` that emits nothing of its own (issue #246) |
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
 

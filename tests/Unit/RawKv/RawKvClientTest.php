@@ -10,10 +10,15 @@ use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawCASResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawChecksumRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawChecksumResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeRequest;
+use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
@@ -508,6 +513,210 @@ class RawKvClientTest extends TestCase
         $this->client->reverseScan('start', $key);
     }
 
+    public function testPutAcceptsKeyAtExactlyMaxKeySize(): void
+    {
+        $key = str_repeat('k', RawKvClient::MAX_KEY_SIZE);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use ($key): RawPutResponse {
+                    $this->assertInstanceOf(RawPutRequest::class, $request);
+                    $this->assertSame($key, $request->getKey());
+
+                    return new RawPutResponse();
+                },
+            );
+
+        $this->client->put($key, 'value');
+    }
+
+    public function testPutAcceptsValueAtExactlyMaxValueSize(): void
+    {
+        $value = str_repeat('v', RawKvClient::MAX_VALUE_SIZE);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use ($value): RawPutResponse {
+                    $this->assertInstanceOf(RawPutRequest::class, $request);
+                    $this->assertSame($value, $request->getValue());
+
+                    return new RawPutResponse();
+                },
+            );
+
+        $this->client->put('key', $value);
+    }
+
+    public function testGetAcceptsKeyAtExactlyMaxKeySize(): void
+    {
+        $key = str_repeat('k', RawKvClient::MAX_KEY_SIZE);
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use ($key): RawGetResponse {
+                    $this->assertInstanceOf(RawGetRequest::class, $request);
+                    $this->assertSame($key, $request->getKey());
+
+                    $response = new RawGetResponse();
+                    $response->setValue('value');
+
+                    return $response;
+                },
+            );
+
+        $this->assertSame('value', $this->client->get($key));
+    }
+
+    public function testScanAcceptsStartAndEndKeysAtExactlyMaxKeySize(): void
+    {
+        $startKey = str_repeat('a', RawKvClient::MAX_KEY_SIZE);
+        $endKey = str_repeat('b', RawKvClient::MAX_KEY_SIZE);
+        $region = $this->defaultRegion();
+
+        $this->regionCache->method('getByKey')->willReturn($region);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (
+                    $startKey,
+                    $endKey,
+                    $response,
+                ): RawScanResponse {
+                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame($startKey, $request->getStartKey());
+                    $this->assertSame($endKey, $request->getEndKey());
+
+                    return $response;
+                },
+            );
+
+        $result = $this->client->scan($startKey, $endKey, 10);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('k1', $result[0]['key']);
+    }
+
+    public function testReverseScanAcceptsStartAndEndKeysAtExactlyMaxKeySize(): void
+    {
+        $startKey = str_repeat('b', RawKvClient::MAX_KEY_SIZE);
+        $endKey = str_repeat('a', RawKvClient::MAX_KEY_SIZE);
+        $region = $this->defaultRegion();
+
+        $this->regionCache->method('getByKey')->willReturn($region);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (
+                    $startKey,
+                    $endKey,
+                    $response,
+                ): RawScanResponse {
+                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame($startKey, $request->getStartKey());
+                    $this->assertSame($endKey, $request->getEndKey());
+                    $this->assertTrue($request->getReverse());
+
+                    return $response;
+                },
+            );
+
+        $result = $this->client->reverseScan($startKey, $endKey, 10);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('k1', $result[0]['key']);
+    }
+
+    /**
+     * @param array<mixed> $args
+     */
+    #[DataProvider('reversedRangeProvider')]
+    public function testReversedRangeIsRejectedBeforeAnyRpc(string $method, array $args): void
+    {
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->expects($this->never())->method('getRegion');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid range in ' . $method);
+
+        $this->client->$method(...$args);
+    }
+
+    /** @return iterable<string, array{string, array<mixed>}> */
+    public static function reversedRangeProvider(): iterable
+    {
+        yield 'scan' => ['scan', ['z', 'a']];
+        yield 'reverseScan' => ['reverseScan', ['a', 'z']];
+        yield 'deleteRange' => ['deleteRange', ['z', 'a']];
+        yield 'checksum' => ['checksum', ['z', 'a']];
+        yield 'scanIterator' => ['scanIterator', ['z', 'a']];
+        yield 'batchScan' => ['batchScan', [[['z', 'a']], 10]];
+        yield 'batchScan with one reversed range' => ['batchScan', [[['a', 'b'], ['z', 'a']], 10]];
+    }
+
     public function testCompareAndSwapThrowsOnEmptyKey(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -556,6 +765,30 @@ class RawKvClientTest extends TestCase
         $this->assertNull($this->client->get('missing'));
     }
 
+    public function testGetDistinguishesAnEmptyValueFromAMissingKey(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $emptyValue = new RawGetResponse();
+        $emptyValue->setNotFound(false);
+        $emptyValue->setValue('');
+
+        $missingKey = new RawGetResponse();
+        $missingKey->setNotFound(true);
+        $missingKey->setValue('');
+
+        $this->grpc->method('call')
+            ->willReturnOnConsecutiveCalls($emptyValue, $missingKey);
+
+        // A stored empty value is not a missing key: the ?string contract
+        // distinguishes '' (present) from null (absent).
+        $this->assertSame('', $this->client->get('empty'));
+        $this->assertNull($this->client->get('missing'));
+    }
+
     public function testGetThrowsStoreNotFoundWhenStoreIsNull(): void
     {
         $this->regionCache->method('getByKey')->willReturn(null);
@@ -591,6 +824,33 @@ class RawKvClientTest extends TestCase
             ->willReturn(new RawPutResponse());
 
         $this->client->put('key', 'value');
+    }
+
+    public function testPutSendsAnEmptyValueUnchanged(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ): RawPutResponse {
+                    $this->assertInstanceOf(RawPutRequest::class, $request);
+                    $this->assertSame('key', $request->getKey());
+                    $this->assertSame('', $request->getValue());
+
+                    return new RawPutResponse();
+                },
+            );
+
+        $this->client->put('key', '');
     }
 
     // ========================================================================
@@ -907,7 +1167,7 @@ class RawKvClientTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit (99999) exceeds maximum allowed scan limit of 10240');
 
-        $this->client->reverseScan('k', 'l', 99999);
+        $this->client->reverseScan('l', 'k', 99999);
     }
 
     // ========================================================================
@@ -1009,6 +1269,51 @@ class RawKvClientTest extends TestCase
         $this->assertSame('v1', $result[0]['value']);
     }
 
+    public function testScanWithEmptyEndKeySendsAnEmptyEndKey(): void
+    {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturn($region);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $pair = new KvPair();
+        $pair->setKey('z');
+        $pair->setValue('v-z');
+        $response = new RawScanResponse();
+        $response->setKvs([$pair]);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use ($response): RawScanResponse {
+                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame('a', $request->getStartKey());
+                    $this->assertSame('', $request->getEndKey());
+
+                    return $response;
+                },
+            );
+
+        $result = $this->client->scan('a', '');
+
+        $this->assertSame(['z'], array_column($result, 'key'));
+    }
+
     // ========================================================================
     // deletePrefix()
     // ========================================================================
@@ -1088,7 +1393,7 @@ class RawKvClientTest extends TestCase
 
     public function testScanIteratorReturnsScanIterator(): void
     {
-        $iterator = $this->client->scanIterator('start', 'end');
+        $iterator = $this->client->scanIterator('a', 'z');
 
         $this->assertInstanceOf(ScanIterator::class, $iterator);
     }
@@ -1195,16 +1500,148 @@ class RawKvClientTest extends TestCase
         $this->assertSame('a', $result[2]['key']);
     }
 
+    public function testReverseScanWithEmptyEndKeyScansToTheStartOfTheKeyspace(): void
+    {
+        $lower = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $upper = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 'z',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $lower : $upper,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$lower, $upper]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $requests = [];
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (&$requests): RawScanResponse {
+                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $requests[] = $request;
+
+                    $response = new RawScanResponse();
+                    if ($request->getStartKey() === 'z') {
+                        $pair = new KvPair();
+                        $pair->setKey('c');
+                        $pair->setValue('v-c');
+                        $response->setKvs([$pair]);
+                    } else {
+                        $pair = new KvPair();
+                        $pair->setKey('a');
+                        $pair->setValue('v-a');
+                        $response->setKvs([$pair]);
+                    }
+
+                    return $response;
+                },
+            );
+
+        $result = $this->client->reverseScan('z', '');
+
+        $this->assertSame(['c', 'a'], array_column($result, 'key'));
+        $this->assertSame('m', $requests[1]->getStartKey());
+        $this->assertSame('', $requests[1]->getEndKey(), 'the lower bound of the last region is unbounded');
+    }
+
     // ========================================================================
     // deleteRange()
     // ========================================================================
 
-    public function testDeleteRangeWithSameStartEndReturnsEarly(): void
+    #[DataProvider('sameStartEndRangeProvider')]
+    public function testDeleteRangeWithSameStartEndReturnsEarly(string $startKey, string $endKey): void
     {
         $this->pdClient->expects($this->never())->method('scanRegions');
         $this->grpc->expects($this->never())->method('call');
 
-        $this->client->deleteRange('a', 'a');
+        $this->client->deleteRange($startKey, $endKey);
+    }
+
+    /** @return iterable<string, array{string, string}> */
+    public static function sameStartEndRangeProvider(): iterable
+    {
+        yield 'non-empty' => ['a', 'a'];
+        yield 'both empty' => ['', ''];
+    }
+
+    public function testDeleteRangeWithEmptyEndKeyDeletesThroughTheFinalRegion(): void
+    {
+        $first = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $last = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $first : $last,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$first, $last]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $requests = [];
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (&$requests): GrpcFuture {
+                    $this->assertInstanceOf(RawDeleteRangeRequest::class, $request);
+                    $requests[] = $request;
+
+                    return GrpcFuture::completed(new RawDeleteRangeResponse());
+                },
+            );
+
+        $this->client->deleteRange('a', '');
+
+        $this->assertSame(
+            [['a', 'm'], ['m', '']],
+            array_map(
+                static fn(RawDeleteRangeRequest $request): array => [
+                    $request->getStartKey(),
+                    $request->getEndKey(),
+                ],
+                $requests,
+            ),
+        );
     }
 
     // ========================================================================
@@ -1259,6 +1696,109 @@ class RawKvClientTest extends TestCase
         $this->assertSame('k1', $result[0][0]['key']);
         $this->assertCount(1, $result[1]);
         $this->assertSame('k2', $result[1][0]['key']);
+    }
+
+    public function testBatchScanWithEmptyEndKeyScansToInfinity(): void
+    {
+        $first = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'm',
+        );
+        $last = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $first : $last,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$first, $last]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $requests = [];
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (&$requests): GrpcFuture {
+                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $requests[] = $request;
+
+                    $response = new RawScanResponse();
+                    $pair = new KvPair();
+                    $pair->setKey($request->getStartKey() === 'a' ? 'k1' : 'k2');
+                    $pair->setValue('v');
+                    $response->setKvs([$pair]);
+
+                    return GrpcFuture::completed($response);
+                },
+            );
+
+        $result = $this->client->batchScan([['a', '']], 10);
+
+        $this->assertCount(1, $result);
+        $this->assertSame(['k1', 'k2'], array_column($result[0], 'key'));
+        $this->assertSame('m', $requests[1]->getStartKey());
+        $this->assertSame('', $requests[1]->getEndKey());
+    }
+
+    public function testBatchScanWithBothBoundsEmptyScansToInfinity(): void
+    {
+        $first = new RegionInfo(1, 1, 1, 1, 1, '', 'm');
+        $last = new RegionInfo(2, 1, 1, 1, 1, 'm', '');
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $first : $last,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$first, $last]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $requests = [];
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (&$requests): GrpcFuture {
+                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $requests[] = $request;
+
+                    $pair = new KvPair();
+                    $pair->setKey($request->getStartKey() === '' ? 'k1' : 'k2');
+                    $pair->setValue('v');
+                    $response = new RawScanResponse();
+                    $response->setKvs([$pair]);
+
+                    return GrpcFuture::completed($response);
+                },
+            );
+
+        $result = $this->client->batchScan([['', '']], 10);
+
+        $this->assertSame(['k1', 'k2'], array_column($result[0], 'key'));
+        $this->assertSame('', $requests[0]->getStartKey());
+        $this->assertSame('m', $requests[0]->getEndKey());
+        $this->assertSame('m', $requests[1]->getStartKey());
+        $this->assertSame('', $requests[1]->getEndKey());
     }
 
     // ========================================================================
@@ -2202,6 +2742,56 @@ class RawKvClientTest extends TestCase
         $this->assertSame(12345, $result->checksum);
         $this->assertSame(3, $result->totalKvs);
         $this->assertSame(100, $result->totalBytes);
+    }
+
+    public function testChecksumWithEmptyEndKeyCoversTheFinalRegion(): void
+    {
+        $first = new RegionInfo(1, 1, 1, 1, 1, 'a', 'm');
+        $last = new RegionInfo(2, 1, 1, 1, 1, 'm', '');
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $first : $last,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$first, $last]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $requests = [];
+        $checksums = [0b1010, 0b0101];
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (
+                    &$requests,
+                    &$checksums,
+                ): GrpcFuture {
+                    $this->assertInstanceOf(RawChecksumRequest::class, $request);
+                    $requests[] = $request;
+
+                    $response = new RawChecksumResponse();
+                    $response->setChecksum((int) array_shift($checksums));
+                    $response->setTotalKvs(2);
+                    $response->setTotalBytes(10);
+
+                    return GrpcFuture::completed($response);
+                },
+            );
+
+        $result = $this->client->checksum('a', '');
+
+        $this->assertSame(0b1111, $result->checksum);
+        $this->assertSame(4, $result->totalKvs);
+        $this->assertSame(20, $result->totalBytes);
+        $this->assertCount(2, $requests);
+        $this->assertSame('a', $requests[0]->getRanges()[0]->getStartKey());
+        $this->assertSame('m', $requests[0]->getRanges()[0]->getEndKey());
+        $this->assertSame('m', $requests[1]->getRanges()[0]->getStartKey());
+        $this->assertSame('', $requests[1]->getRanges()[0]->getEndKey());
     }
 
     // ========================================================================
