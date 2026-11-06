@@ -358,8 +358,9 @@ $client->ingest(['k1' => 'v1', 'k2' => 'v2'], ttl: 3600);
 > import mode, degrading it for all clients. Run `ingest()` only from a
 > dedicated, supervised CLI process, and see
 > [Bulk Import (SST Ingest)](docs/operations.md#bulk-import-sst-ingest) in the
-> operations guide for the full semantics, the fixed 60 s ingest deadline and
-> the recovery procedure for a cluster stuck in import mode.
+> operations guide for the full semantics, the configurable ingest deadline
+> (60 s by default) and the recovery procedure for a cluster stuck in import
+> mode.
 
 ### Transactions (TxnKV)
 

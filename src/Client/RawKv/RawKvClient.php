@@ -906,7 +906,14 @@ final class RawKvClient
     ): ScanIterator {
         $this->ensureOpen();
 
-        return $this->scanner->scanIterator($startKey, $endKey, $batchSize, $keyOnly, $this->columnFamily);
+        return $this->scanner->scanIterator(
+            $startKey,
+            $endKey,
+            $batchSize,
+            $keyOnly,
+            $this->columnFamily,
+            $this->ensureOpen(...),
+        );
     }
 
     /**
@@ -916,7 +923,13 @@ final class RawKvClient
     {
         $this->ensureOpen();
 
-        return $this->scanner->scanPrefixIterator($prefix, $batchSize, $keyOnly, $this->columnFamily);
+        return $this->scanner->scanPrefixIterator(
+            $prefix,
+            $batchSize,
+            $keyOnly,
+            $this->columnFamily,
+            $this->ensureOpen(...),
+        );
     }
 
     /**

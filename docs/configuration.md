@@ -1615,6 +1615,8 @@ $client = RawKvClient::create(
 );
 ```
 
+`checksumTimeoutMs` sizes `checksum()`, which reads a whole key range and is the operation most likely to need a longer deadline. `ingestTimeoutMs` sizes the SST ingest RPCs (the `SwitchMode` fan-out, the `RawWrite` stream and `Ingest`). Both are read from `options['timeout']` like every other key, so neither is a fixed deadline.
+
 The last three are **metadata-plane** deadlines and are configured separately from the
 store-RPC ones above because they address different failure modes: a hung PD (a
 blackholed connection, a PD process that accepts but never answers) takes down every
@@ -1634,7 +1636,7 @@ When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught
 
 ### Default Timeouts
 
-By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
+By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range and checksum, 60s for SST ingest, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
 
 `batchDeadlineMs` is finite by default (`TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, 60000 ms). When it is above `0`, it must not be less than any per-call timeout that a batch fan-out uses: `writeTimeoutMs`, `batchReadTimeoutMs`, `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs`, `checksumTimeoutMs` and `ingestTimeoutMs` (`readTimeoutMs` is not in the list: only point reads use it). If it is less, the `TimeoutConfig` constructor throws an `InvalidArgumentException` that names both fields. One wait is not interrupted by the deadline, so a deadline that is less than one call cannot be honoured. Such a setting has no meaning.
 
