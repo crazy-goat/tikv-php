@@ -366,6 +366,10 @@ final readonly class RawKvScanner
      * no reverse iterator; the unbounded, constant-memory alternative for a
      * forward range is {@see self::scanIterator()}.
      *
+     * An unbounded reverse scan fans the per-region reads of a page out
+     * concurrently, in windows of at most {@see self::$maxConcurrency}
+     * regions (issue #555); a bounded scan stays sequential.
+     *
      * @return array<array{key: string, value: ?string}>
      */
     public function reverseScan(
@@ -407,7 +411,15 @@ final readonly class RawKvScanner
         $upper = $startKey;
 
         while (true) {
-            $page = $this->reverseScanPage($executor, $upper, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
+            $page = $this->reverseScanPage(
+                $executor,
+                $upper,
+                $endKey,
+                $this->scanPageSize,
+                $keyOnly,
+                $columnFamily,
+                parallel: true,
+            );
 
             if ($page === []) {
                 break;
@@ -434,8 +446,8 @@ final readonly class RawKvScanner
     }
 
     /**
-     * Scan one bounded reverse page over the clipped regions. The wire range
-     * is [endKey, startKey); enumerate it through the region cache like the
+     * Scan one reverse page over the clipped regions. The wire range is
+     * [endKey, startKey); enumerate it through the region cache like the
      * forward scan, then walk it in reverse.
      *
      * PD's `ScanRegions` enumerates a range from its **lower** bound only,
@@ -446,11 +458,20 @@ final readonly class RawKvScanner
      * region of the keyspace at once, which can exceed the gRPC receive
      * limit outright.
      *
+     * A bounded reverse scan walks the clipped segments one after another.
+     * An unbounded page (`$parallel`) fans them out like the forward
+     * {@see self::scanSegmentsInParallel()} (issue #555): the sends of one
+     * window are all issued before any response is awaited, and the
+     * descending segment order is restored before the rows are concatenated.
+     *
      * @param int $limit positive page budget (never the `0` "unbounded"
      *                   sentinel: the public API routes `limit: 0` to
      *                   {@see self::reverseScanUnbounded()}). Passing `0`
      *                   here would set no request limit and silently read an
      *                   unbounded region.
+     * @param bool $parallel fan the page's segments out concurrently; only
+     *                       the unbounded page loop sets this, the bounded
+     *                       path stays sequential
      *
      * @return array<array{key: string, value: ?string}>
      */
@@ -461,6 +482,7 @@ final readonly class RawKvScanner
         int $limit,
         bool $keyOnly,
         string $columnFamily,
+        bool $parallel = false,
     ): array {
         assert($limit > 0, 'reverseScanPage() requires a positive page budget; use reverseScanUnbounded() for limit 0');
 
@@ -468,31 +490,33 @@ final readonly class RawKvScanner
             $this->resolveScanRegions($endKey, $startKey, RegionScanBatch::MAX_REGIONS),
         );
 
-        $results = [];
-        $remaining = $limit;
-
         $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipReverse($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
-            $regionResults = $this->executeScanForRegion(
-                $executor,
-                $scanStart,
-                $scanEnd,
-                $remaining,
-                $keyOnly,
-                true,
-                $columnFamily,
-            );
-            foreach ($regionResults as $row) {
-                $results[] = $row;
-            }
-
-            $remaining -= count($regionResults);
-            if ($remaining <= 0) {
-                break;
-            }
+        /** @var list<array{RegionInfo, string, string}> $segments */
+        $segments = iterator_to_array($clipper->clipReverse($regions, $startKey, $endKey), false);
+        if ($segments === []) {
+            return [];
         }
 
-        return $results;
+        if ($parallel && count($segments) > 1) {
+            return $this->scanSegmentsInParallel(
+                $executor,
+                $segments,
+                $endKey,
+                $limit,
+                $keyOnly,
+                $columnFamily,
+                true,
+            );
+        }
+
+        return $this->scanSegmentsSequentially(
+            $executor,
+            $segments,
+            $limit,
+            $keyOnly,
+            $columnFamily,
+            true,
+        );
     }
 
     /**
@@ -560,8 +584,13 @@ final readonly class RawKvScanner
      * Scan the given clipped sub-ranges one after another, subtracting each
      * region's yield from the remaining limit.
      *
+     * This is the bounded forward and reverse path, and the fallback of the
+     * concurrent page fan-out when a region error, a transport error or a
+     * split after enumeration makes the dispatched sends untrustworthy.
+     *
      * @param list<array{RegionInfo, string, string}> $segments
      * @param int $limit positive row budget
+     * @param bool $reverse true scans each segment [start, end) descending
      * @return array<array{key: string, value: ?string}>
      */
     private function scanSegmentsSequentially(
@@ -570,6 +599,7 @@ final readonly class RawKvScanner
         int $limit,
         bool $keyOnly,
         string $columnFamily,
+        bool $reverse = false,
     ): array {
         assert($limit > 0, 'scanSegmentsSequentially() requires a positive row budget');
 
@@ -583,7 +613,7 @@ final readonly class RawKvScanner
                 $scanEnd,
                 $remaining,
                 $keyOnly,
-                false,
+                $reverse,
                 $columnFamily,
             );
             foreach ($regionResults as $row) {
@@ -601,14 +631,16 @@ final readonly class RawKvScanner
 
     /**
      * Scan the clipped regions of an unbounded page concurrently, in bounded
-     * windows of at most {@see self::$maxConcurrency} regions (issue #293).
+     * windows of at most {@see self::$maxConcurrency} regions (issues #293
+     * and #555).
      *
      * Within a window every region's RawScan send is issued before any
      * response is awaited, so the regions' server-side latencies overlap;
-     * the window's responses are concatenated in region order and charged
-     * against the page budget. A further window is never dispatched once the
-     * budget is spent (the loop is gated on the remaining budget) and every
-     * region is given the *remaining* budget, so the fan-out holds at most
+     * the window's responses are concatenated in region order (descending
+     * for a reverse scan) and charged against the page budget. A further
+     * window is never dispatched once the budget is spent (the loop is
+     * gated on the remaining budget) and every region is given the
+     * *remaining* budget, so the fan-out holds at most
      * `maxConcurrency x limit` rows. Dispatch is still windowed by
      * {@see BatchAsyncExecutor}, so the previous unbounded "every region
      * with the full limit" behaviour is gone. Region ranges are disjoint, so
@@ -618,25 +650,35 @@ final readonly class RawKvScanner
      * are awaited outside a per-region retry loop): the whole page falls back
      * to {@see self::scanSegmentsSequentially()} — which re-resolves and
      * retries properly — on any failure, on a response that is not a
-     * {@see RawScanResponse}, or on a non-final region that shrank after
-     * enumeration (which would leave a hole before the next segment). Reads
-     * are idempotent, so discarding a partial concurrent result is safe.
+     * {@see RawScanResponse}, or on a region that shrank after enumeration
+     * (which would leave a hole in the page). Reads are idempotent, so
+     * discarding a partial concurrent result is safe. A forward scan detects
+     * a shrink on every segment but the final one (the final one has a
+     * continuation below); a reverse scan detects it on every segment,
+     * because the missing part lies above the segment and only the
+     * sequential reverse path can splice it back in order.
      *
      * The batch deadline spans all windows. A {@see BatchDeadlineExceededException}
      * is never a reason to fall back (the sequential path has no deadline): it
      * is rethrown with the configured deadline.
      *
      * @param list<array{RegionInfo, string, string}> $segments
-     * @param string $scanEnd exclusive end of the range the segments cover
+     *        clipped sub-ranges in scan order (ascending for forward,
+     *        descending for reverse)
+     * @param string $rangeEnd exclusive end of the forward range the segments
+     *        cover; unused by a reverse scan, whose split continuation lives
+     *        in {@see self::executeReverseScanForSubRange()}
+     * @param bool $reverse true scans each segment [start, end) descending
      * @return array<array{key: string, value: ?string}>
      */
     private function scanSegmentsInParallel(
         RetryExecutor $executor,
         array $segments,
-        string $scanEnd,
+        string $rangeEnd,
         int $limit,
         bool $keyOnly,
         string $columnFamily,
+        bool $reverse = false,
     ): array {
         $results = [];
         $remaining = $limit;
@@ -676,6 +718,7 @@ final readonly class RawKvScanner
                     $remaining,
                     $keyOnly,
                     $columnFamily,
+                    $reverse,
                     &$freshEnds,
                     $index,
                 ): CheckedGrpcFuture {
@@ -686,7 +729,7 @@ final readonly class RawKvScanner
                         $remaining,
                         $keyOnly,
                         $columnFamily,
-                        false,
+                        $reverse,
                         $freshEnds[$index],
                     );
                 };
@@ -711,31 +754,73 @@ final readonly class RawKvScanner
                     ],
                 );
             } catch (TiKvException) {
-                return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+                return $this->scanSegmentsSequentially(
+                    $executor,
+                    $segments,
+                    $limit,
+                    $keyOnly,
+                    $columnFamily,
+                    $reverse,
+                );
             }
 
             ksort($responses);
 
             foreach ($responses as $index => $response) {
                 if (!$response instanceof RawScanResponse || $response->getRegionError() !== null) {
-                    return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+                    return $this->scanSegmentsSequentially(
+                        $executor,
+                        $segments,
+                        $limit,
+                        $keyOnly,
+                        $columnFamily,
+                        $reverse,
+                    );
                 }
 
                 $freshEnd = $freshEnds[$index] ?? '';
-                $segmentEnd = $segments[$index][2];
+                $currentSegmentEnd = $segments[$index][2];
 
-                // A non-final region that shrank after enumeration (split)
-                // leaves a hole [freshEnd, segmentEnd): the next dispatched
-                // segment starts at segmentEnd, not at the fresh end key.
-                // Fall back to the sequential path, which re-resolves the
-                // region and continues past the split. The final segment is
-                // handled by the continuation below.
-                if (
+                if ($reverse) {
+                    // A reverse segment shrank when the fresh region's end
+                    // key dropped below the segment's upper bound: the send
+                    // was clipped to [scanEnd, freshEnd), so the part above
+                    // it would be dropped. Only the sequential reverse path
+                    // can splice the missing part back in descending order
+                    // (executeReverseScanForSubRange() continues past the
+                    // split), so re-run the whole page through it.
+                    if (
+                        $freshEnd !== ''
+                        && KeyOrder::lt($freshEnd, $segments[$index][1])
+                    ) {
+                        return $this->scanSegmentsSequentially(
+                            $executor,
+                            $segments,
+                            $limit,
+                            $keyOnly,
+                            $columnFamily,
+                            true,
+                        );
+                    }
+                } elseif (
                     $index !== $segmentCount - 1
                     && $freshEnd !== ''
-                    && KeyOrder::lt($freshEnd, $segmentEnd)
+                    && KeyOrder::lt($freshEnd, $currentSegmentEnd)
                 ) {
-                    return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+                    // A non-final forward region that shrank after enumeration
+                    // (split) leaves a hole [freshEnd, segmentEnd): the next
+                    // dispatched segment starts at segmentEnd, not at the
+                    // fresh end key. Fall back to the sequential path, which
+                    // re-resolves the region and continues past the split.
+                    // The final segment is handled by the continuation below.
+                    return $this->scanSegmentsSequentially(
+                        $executor,
+                        $segments,
+                        $limit,
+                        $keyOnly,
+                        $columnFamily,
+                        false,
+                    );
                 }
 
                 $batch = $this->parseScanPairs($response, $keyOnly);
@@ -752,23 +837,26 @@ final readonly class RawKvScanner
             }
         }
 
-        // Rare split-after-enumeration of the final region: it shrank, so
-        // continue from its fresh end key instead of dropping the remainder.
-        // Only when the final segment was actually consumed and the budget is
-        // not spent; passing the real remaining budget (never 0, which the
+        // Rare split-after-enumeration of the final forward region: it shrank,
+        // so continue from its fresh end key instead of dropping the
+        // remainder. A reverse shrink is handled by the fallback above (its
+        // missing part is above the segment, not below the range). Only when
+        // the final segment was actually consumed and the budget is not
+        // spent; passing the real remaining budget (never 0, which the
         // downstream executeScanForRegion() would read as "unbounded") bounds
         // the continuation wire read.
         if (
-            $lastIndex === $segmentCount - 1
+            !$reverse
+            && $lastIndex === $segmentCount - 1
             && $remaining > 0
             && $lastFreshEnd !== ''
             && KeyOrder::gt($lastFreshEnd, $segments[$lastIndex][1])
-            && ($scanEnd === '' || KeyOrder::lt($lastFreshEnd, $scanEnd))
+            && ($rangeEnd === '' || KeyOrder::lt($lastFreshEnd, $rangeEnd))
         ) {
             $rest = $this->executeScanForRegion(
                 $executor,
                 $lastFreshEnd,
-                $scanEnd,
+                $rangeEnd,
                 $remaining,
                 $keyOnly,
                 false,

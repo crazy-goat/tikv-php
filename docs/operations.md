@@ -518,6 +518,14 @@ scan (`limit > 0`) returns at most `limit` rows, so a result whose count
 equals the limit may be truncated. There is no reverse iterator — for a large
 reverse range raise the guard deliberately or page the range in the caller.
 
+An unbounded reverse scan whose page spans several regions issues the
+per-region reads **concurrently**, in windows of at most
+`options['maxConcurrency']` regions (default 16), and concatenates them in
+descending key order — the same fan-out as an unbounded forward scan. A
+region or transport error, or a region that split after enumeration, falls
+back to the sequential retrying path. A bounded reverse scan
+(`limit > 0`) stays sequential.
+
 **Example:**
 
 ```php
