@@ -174,7 +174,11 @@ interface PdClientInterface
      *
      * Called by TimestampOracle and PdClient itself when the cluster ID
      * is discovered during a cluster-id mismatch retry or from a response
-     * header. Idempotent.
+     * header. Idempotent. When the client was built with an expected cluster
+     * ID (issue #308, SEC-05), a different value throws a {@see TiKvException}
+     * instead of replacing the configured identity.
+     *
+     * @throws TiKvException when $clusterId differs from the expected cluster ID
      */
     public function setClusterId(int $clusterId): void;
 

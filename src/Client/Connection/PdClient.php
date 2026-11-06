@@ -30,6 +30,7 @@ use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\PdException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -62,6 +63,11 @@ final class PdClient implements PdClientInterface
      * @param TimeoutConfig $timeoutConfig deadlines for the PD and TSO RPCs
      *        (issue #260). Added last so the #416 positional signature stays
      *        stable; the default is {@see TimeoutConfig}
+     * @param int|null $expectedClusterId cluster ID every PD response must
+     *        report (issue #308, SEC-05). null = learn and adopt the ID PD
+     *        reports (the historical behaviour). A non-null value must be a
+     *        positive int; a response header or a cluster-id mismatch error
+     *        naming another ID throws before any retry or data-path request.
      */
     public function __construct(
         private readonly GrpcClientInterface $grpc,
@@ -79,7 +85,15 @@ final class PdClient implements PdClientInterface
          */
         private readonly CodecInterface $codec = new CodecV1(),
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
+        private readonly ?int $expectedClusterId = null,
     ) {
+        if ($expectedClusterId !== null && $expectedClusterId < 1) {
+            throw new InvalidArgumentException(sprintf(
+                'expectedClusterId must be greater than 0, got %d',
+                $expectedClusterId,
+            ));
+        }
+
         if (is_string($pdAddresses)) {
             $pdAddresses = [$pdAddresses];
         }
@@ -135,6 +149,7 @@ final class PdClient implements PdClientInterface
                 poolSize: $this->tsoPoolSize,
                 onTransportFailure: $this->markAddressBad(...),
                 tsoTimeoutMs: $this->timeoutConfig->tsoTimeoutMs,
+                expectedClusterId: $this->expectedClusterId,
             );
         }
 
@@ -419,6 +434,14 @@ final class PdClient implements PdClientInterface
 
     public function setClusterId(int $clusterId): void
     {
+        if ($this->expectedClusterId !== null && $clusterId !== $this->expectedClusterId) {
+            throw new TiKvException(sprintf(
+                'Cluster ID mismatch: expected %d, server reported %d',
+                $this->expectedClusterId,
+                $clusterId,
+            ));
+        }
+
         $this->clusterId = $clusterId;
     }
 
@@ -882,6 +905,11 @@ final class PdClient implements PdClientInterface
         } catch (GrpcException $e) {
             $extractedId = $this->extractClusterIdFromError($e->getMessage());
             if ($extractedId !== null) {
+                // The error string is server-controlled: validate it before
+                // adopting it, so it cannot override an expected or an
+                // already-established cluster ID (issue #308, SEC-05).
+                $this->assertReportedClusterIdMatches($extractedId);
+
                 $this->logger->warning(
                     'Cluster ID mismatch, retrying',
                     ['method' => $method, 'clusterId' => $extractedId],
@@ -912,21 +940,67 @@ final class PdClient implements PdClientInterface
 
     /**
      * Learn cluster ID from a successful PD response header.
+     *
+     * When an expected cluster ID is configured (issue #308, SEC-05), a
+     * header naming a different cluster throws before the ID is adopted and
+     * before the response is returned to the caller. The check also runs
+     * after the ID has been established, so a later response from an
+     * impostor cannot pass unnoticed.
      */
     private function learnClusterId(Message $response): void
     {
+        if (!method_exists($response, 'getHeader')) {
+            return;
+        }
+
+        $header = $response->getHeader();
+        if (!is_object($header) || !method_exists($header, 'getClusterId')) {
+            return;
+        }
+
+        /** @var int $clusterId */
+        $clusterId = $header->getClusterId();
+
+        if ($this->expectedClusterId !== null && $clusterId !== $this->expectedClusterId) {
+            throw new TiKvException(sprintf(
+                'Cluster ID mismatch: expected %d, server reported %d',
+                $this->expectedClusterId,
+                $clusterId,
+            ));
+        }
+
         if ($this->clusterId !== null) {
             return;
         }
 
-        if (method_exists($response, 'getHeader')) {
-            $header = $response->getHeader();
-            if (is_object($header) && method_exists($header, 'getClusterId')) {
-                /** @var int $clusterId */
-                $clusterId = $header->getClusterId();
-                $this->clusterId = $clusterId;
-                $this->logger->info('Learned cluster ID', ['clusterId' => $clusterId]);
-            }
+        $this->clusterId = $clusterId;
+        $this->logger->info('Learned cluster ID', ['clusterId' => $clusterId]);
+    }
+
+    /**
+     * Validate a cluster ID parsed out of a gRPC error string before it is
+     * adopted (issue #308, SEC-05).
+     *
+     * The error text is controlled by whichever server answers the socket,
+     * so it may not override a configured expected ID or a cluster ID that
+     * has already been established from a response header.
+     */
+    private function assertReportedClusterIdMatches(int $reportedClusterId): void
+    {
+        if ($this->expectedClusterId !== null && $reportedClusterId !== $this->expectedClusterId) {
+            throw new TiKvException(sprintf(
+                'Cluster ID mismatch: expected %d, server reported %d',
+                $this->expectedClusterId,
+                $reportedClusterId,
+            ));
+        }
+
+        if ($this->clusterId !== null && $this->clusterId !== $reportedClusterId) {
+            throw new TiKvException(sprintf(
+                'Cluster ID mismatch: established %d, server reported %d',
+                $this->clusterId,
+                $reportedClusterId,
+            ));
         }
     }
 

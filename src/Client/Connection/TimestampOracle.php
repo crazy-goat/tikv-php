@@ -132,6 +132,11 @@ final class TimestampOracle
      *        #260). Added last so the #292 positional signature stays
      *        stable; {@see TimeoutConfig} supplies the value, whose default
      *        is {@see self::DEFAULT_TSO_TIMEOUT_MS}
+     * @param int|null $expectedClusterId cluster ID every TSO response must
+     *        report (issue #308, SEC-05). null = learn and adopt the ID PD
+     *        reports (the historical behaviour). A non-null value must be a
+     *        positive int; a response header or a cluster-id mismatch error
+     *        naming another ID throws before a timestamp is served.
      */
     public function __construct(
         private readonly GrpcClientInterface $grpc,
@@ -146,7 +151,15 @@ final class TimestampOracle
         ?\Closure $pid = null,
         private readonly ?\Closure $onTransportFailure = null,
         private readonly int $tsoTimeoutMs = self::DEFAULT_TSO_TIMEOUT_MS,
+        private readonly ?int $expectedClusterId = null,
     ) {
+        if ($expectedClusterId !== null && $expectedClusterId < 1) {
+            throw new InvalidArgumentException(sprintf(
+                'expectedClusterId must be greater than 0, got %d',
+                $expectedClusterId,
+            ));
+        }
+
         $this->pdAddress = $pdAddress instanceof \Closure
             ? $pdAddress
             : static fn (): string => $pdAddress;
@@ -514,6 +527,11 @@ final class TimestampOracle
                 throw $e;
             }
 
+            // The error text is server-controlled: validate the ID before it
+            // is adopted, so it cannot override an expected or an
+            // already-established cluster ID (issue #308, SEC-05).
+            $this->assertReportedClusterIdMatches($extractedId);
+
             $this->logger->warning(
                 'Cluster ID mismatch on TSO, retrying',
                 ['clusterId' => $extractedId],
@@ -536,16 +554,65 @@ final class TimestampOracle
         }
     }
 
+    /**
+     * Learn the cluster ID from a TSO response header.
+     *
+     * With an expected cluster ID configured (issue #308, SEC-05) a header
+     * naming another cluster throws before the ID is adopted and before a
+     * timestamp is served. The check also runs after the ID has been
+     * established, so a later response from an impostor cannot pass
+     * unnoticed.
+     */
     private function learnClusterId(TsoResponse $response): void
     {
+        $header = $response->getHeader();
+        if ($header === null) {
+            return;
+        }
+
+        $clusterId = (int) $header->getClusterId();
+
+        if ($this->expectedClusterId !== null && $clusterId !== $this->expectedClusterId) {
+            throw new TiKvException(sprintf(
+                'Cluster ID mismatch: expected %d, server reported %d',
+                $this->expectedClusterId,
+                $clusterId,
+            ));
+        }
+
         if (($this->getClusterId)() !== null) {
             return;
         }
 
-        $header = $response->getHeader();
-        if ($header !== null) {
-            ($this->setClusterId)((int) $header->getClusterId());
-            $this->logger->info('Learned cluster ID', ['clusterId' => $header->getClusterId()]);
+        ($this->setClusterId)($clusterId);
+        $this->logger->info('Learned cluster ID', ['clusterId' => $clusterId]);
+    }
+
+    /**
+     * Validate a cluster ID parsed out of a gRPC error string before it is
+     * adopted (issue #308, SEC-05).
+     *
+     * The error text is controlled by whichever server answers the socket,
+     * so it may not override a configured expected ID or a cluster ID that
+     * has already been established from a response header.
+     */
+    private function assertReportedClusterIdMatches(int $reportedClusterId): void
+    {
+        if ($this->expectedClusterId !== null && $reportedClusterId !== $this->expectedClusterId) {
+            throw new TiKvException(sprintf(
+                'Cluster ID mismatch: expected %d, server reported %d',
+                $this->expectedClusterId,
+                $reportedClusterId,
+            ));
+        }
+
+        $establishedId = ($this->getClusterId)();
+        if ($establishedId !== null && $establishedId !== $reportedClusterId) {
+            throw new TiKvException(sprintf(
+                'Cluster ID mismatch: established %d, server reported %d',
+                $establishedId,
+                $reportedClusterId,
+            ));
         }
     }
 

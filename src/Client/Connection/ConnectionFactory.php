@@ -162,6 +162,7 @@ final class ConnectionFactory
         $resolvedMode = $mode ?? Mode::Raw;
         $resolvedCodec = $codec ?? new CodecV1($resolvedMode);
         $apiVersion = self::resolveApiVersion($options);
+        $expectedClusterId = self::resolveExpectedClusterId($options);
         // Built before the PdClients below: PD and TSO deadlines are
         // configured on TimeoutConfig and read from the client (issue #260).
         $timeoutConfig = self::buildTimeoutConfig($options);
@@ -177,6 +178,7 @@ final class ConnectionFactory
                 self::resolveTsoPoolSize($options),
                 new CodecV1($resolvedMode),
                 $timeoutConfig,
+                $expectedClusterId,
             );
             try {
                 $keyspaceId = (new KeyspaceResolver($probePdClient))->resolve($keyspaceName);
@@ -198,6 +200,7 @@ final class ConnectionFactory
             self::resolveTsoPoolSize($options),
             $resolvedCodec,
             $timeoutConfig,
+            $expectedClusterId,
         );
         if ($resolvedClusterId !== null) {
             $pdClient->setClusterId($resolvedClusterId);
@@ -393,6 +396,35 @@ final class ConnectionFactory
         }
 
         return $poolSize;
+    }
+
+    /**
+     * Resolve options['expectedClusterId'] (issue #308, SEC-05): the PD
+     * cluster ID every response header and cluster-id mismatch error must
+     * report. An absent or explicitly null option keeps the historical
+     * learn-and-adopt behaviour; any other non-positive or non-int value is
+     * a configuration error, not a silent no-op.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveExpectedClusterId(array $options): ?int
+    {
+        if (!array_key_exists('expectedClusterId', $options) || $options['expectedClusterId'] === null) {
+            return null;
+        }
+
+        $clusterId = $options['expectedClusterId'];
+        if (!is_int($clusterId)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['expectedClusterId'] must be an int (cluster ID), %s given",
+                get_debug_type($clusterId),
+            ));
+        }
+        if ($clusterId < 1) {
+            throw new InvalidArgumentException("options['expectedClusterId'] must be >= 1");
+        }
+
+        return $clusterId;
     }
 
     /**

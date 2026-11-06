@@ -929,6 +929,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `maxChannels` / `idleTtlMs` | The channel pool — how many gRPC channels the transport keeps open and after how long an unused one is evicted ([Channel Pool](docs/configuration.md#channel-pool-maxchannels-idlettlms)) |
 | `grpcClient` | A transport the application built — the client uses it as it is and never closes it ([Sharing One Transport](docs/configuration.md#sharing-one-transport-between-clients)) |
 | `tsoPoolSize` / `lowResTimestampMaxStalenessMs` | TSO batching and the low-resolution timestamp cache of the TxnKV timestamp oracle |
+| `expectedClusterId` | The PD cluster ID every PD/TSO response must report; a mismatch throws instead of adopting the server's value ([Cluster Identity Verification](docs/configuration.md#cluster-identity-verification-issue-308-sec-05)) |
 | `allowedStoreHosts` / `storeHostPolicy` / `allowedStorePorts` | Which store addresses the client is allowed to talk to |
 | `gcSafePointValidation` / `gcSafePointRefreshMs` | TxnKV GC safe-point validation and its refresh interval |
 

@@ -176,6 +176,99 @@ class ConnectionFactoryTest extends TestCase
     }
 
     // ========================================================================
+    // options['expectedClusterId'] — cluster identity verification (issue #308)
+    // ========================================================================
+
+    public function testExpectedClusterIdDefaultsToNull(): void
+    {
+        $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        /** @var int|null $expected */
+        $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
+        $this->assertNull($expected);
+    }
+
+    public function testExpectedClusterIdIsThreadedThroughToPdClient(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => 12345],
+        );
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        /** @var int|null $expected */
+        $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
+        $this->assertSame(12345, $expected);
+    }
+
+    public function testExpectedClusterIdIsThreadedThroughToTimestampOracle(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => 12345],
+        );
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        $oracle = (new \ReflectionMethod(PdClient::class, 'oracle'))->invoke($pdClient);
+        $this->assertInstanceOf(TimestampOracle::class, $oracle);
+
+        /** @var int|null $expected */
+        $expected = (new \ReflectionProperty(TimestampOracle::class, 'expectedClusterId'))->getValue($oracle);
+        $this->assertSame(12345, $expected);
+    }
+
+    public function testExpectedClusterIdRejectsNonIntValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['expectedClusterId'] must be an int (cluster ID)");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => '12345'],
+        );
+    }
+
+    public function testExpectedClusterIdRejectsZero(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['expectedClusterId'] must be >= 1");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => 0],
+        );
+    }
+
+    public function testExpectedClusterIdRejectsNegative(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['expectedClusterId'] must be >= 1");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => -1],
+        );
+    }
+
+    public function testExplicitNullExpectedClusterIdIsTreatedAsAbsent(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => null],
+        );
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        /** @var int|null $expected */
+        $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
+        $this->assertNull($expected);
+    }
+
+    // ========================================================================
     // options['timeout']['ingestTimeoutMs'] — SST ingest deadline (issue #185 row 5)
     // ========================================================================
 
