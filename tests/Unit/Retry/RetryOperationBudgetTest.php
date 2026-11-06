@@ -11,6 +11,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\TestCase;
@@ -39,6 +40,24 @@ class RetryOperationBudgetTest extends TestCase
      * two retries and the third charge (8-16 ms) always exceeds it.
      */
     private const TWO_RETRY_BUDGET_MS = 6;
+
+    public function testRemainingDeadlineIsOneAtExhaustion(): void
+    {
+        // The budget started 100 ms ago with a 50 ms deadline: it is spent.
+        $budget = new RetryBudget((int) (microtime(true) * 1000) - 100, 50);
+
+        self::assertSame(
+            1,
+            $budget->remainingDeadlineMs(),
+            'an exhausted budget must return 1, never 0 ("no deadline")',
+        );
+    }
+
+    public function testRemainingDeadlineIsZeroWhenDisabled(): void
+    {
+        self::assertSame(0, (new RetryBudget(0, 0))->remainingDeadlineMs());
+        self::assertSame(0, (new RetryBudget((int) (microtime(true) * 1000), 0))->remainingDeadlineMs());
+    }
 
     public function testBeginOperationSharesTheBackoffBudgetAcrossExecuteCalls(): void
     {

@@ -67,6 +67,76 @@ class RetryExecutorTest extends TestCase
         $this->assertSame('success', $result);
     }
 
+    private function executorWithDeadline(int $deadlineMs): RetryExecutor
+    {
+        return new RetryExecutor(
+            20000,
+            600000,
+            $this->regionCache,
+            $this->grpc,
+            new RegionResolver($this->pdClient, $this->regionCache),
+            new NullLogger(),
+            deadlineMs: $deadlineMs,
+        );
+    }
+
+    /**
+     * Issue #569: the operation budget exposes the live remaining deadline,
+     * so a nested call made later in the attempt sees the time the attempt
+     * has already spent (a snapshot taken before the attempt would overstate
+     * it).
+     */
+    public function testCurrentBudgetExposesTheLiveRemainingDeadline(): void
+    {
+        $executor = $this->executorWithDeadline(5000)->beginOperation();
+        $budget = $executor->currentBudget();
+        self::assertNotNull($budget);
+
+        $observed = $executor->execute(
+            'key',
+            function () use ($budget): int {
+                $before = $budget->remainingDeadlineMs();
+                usleep(20_000);
+                $after = $budget->remainingDeadlineMs();
+
+                self::assertGreaterThan(0, $before);
+                self::assertLessThanOrEqual(5000, $before);
+                self::assertLessThan($before, $after, 'the remaining budget must shrink during the attempt');
+
+                return $after;
+            },
+        );
+
+        $this->assertGreaterThan(0, $observed);
+    }
+
+    /**
+     * Issue #569: `0` is the "no deadline" sentinel, so a disabled deadline
+     * keeps the nested call's historical behaviour.
+     */
+    public function testCurrentBudgetReportsZeroWhenTheDeadlineIsDisabled(): void
+    {
+        $executor = $this->executorWithDeadline(0)->beginOperation();
+        $budget = $executor->currentBudget();
+        self::assertNotNull($budget);
+
+        $observed = $executor->execute(
+            'key',
+            static fn(): int => $budget->remainingDeadlineMs(),
+        );
+
+        $this->assertSame(0, $observed);
+    }
+
+    /**
+     * A standalone executor starts a fresh budget per execute() call, so it
+     * has no operation-scoped budget to read (issue #223, #569).
+     */
+    public function testStandaloneExecutorHasNoCurrentBudget(): void
+    {
+        $this->assertNull($this->executor->currentBudget());
+    }
+
     public function testExecuteRaftEntryTooLargeThrowsImmediately(): void
     {
         $this->expectException(TiKvException::class);

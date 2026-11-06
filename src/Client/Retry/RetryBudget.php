@@ -28,14 +28,39 @@ final class RetryBudget
     /**
      * @param int $startTimeMs Wall-clock start of the operation, or 0 when
      *                         the wall-clock deadline is disabled.
+     * @param int $deadlineMs  Wall-clock deadline for the operation, or 0
+     *                         when it is disabled.
      */
-    public function __construct(private readonly int $startTimeMs)
-    {
+    public function __construct(
+        private readonly int $startTimeMs,
+        private readonly int $deadlineMs = 0,
+    ) {
     }
 
     public function startTimeMs(): int
     {
         return $this->startTimeMs;
+    }
+
+    /**
+     * Remaining wall-clock budget in milliseconds, or 0 when the deadline is
+     * disabled.
+     *
+     * The value is computed at call time, so it accounts for the time the
+     * current attempt has already spent in an RPC; it is not a snapshot
+     * taken before the attempt. A configured but already-elapsed deadline
+     * returns 1, never 0, so a caller cannot mistake an exhausted budget for
+     * "no deadline" (issue #569).
+     */
+    public function remainingDeadlineMs(): int
+    {
+        if ($this->deadlineMs <= 0 || $this->startTimeMs <= 0) {
+            return 0;
+        }
+
+        $elapsedMs = (int) (microtime(true) * 1000) - $this->startTimeMs;
+
+        return max(1, $this->deadlineMs - $elapsedMs);
     }
 
     public function totalBackoffMs(): int

@@ -408,7 +408,10 @@ most `options['maxConcurrency']` regions (default 16): each window is dispatched
 with the remaining page budget, awaited, trimmed in key order, and the next
 window is only sent while budget remains. A region/transport error (or a region
 that split after enumeration) transparently falls back to the sequential
-retrying path. Because the complete result is still held in memory, an
+retrying path. The same fan-out applies to an unbounded `reverseScan()`:
+its per-region sends run concurrently in windows of at most
+`options['maxConcurrency']` regions, and the rows are concatenated in
+descending key order. Because the complete result is still held in memory, an
 unbounded scan is guarded by `options['maxScanRows']` (default 100000) and
 throws `ScanLimitExceededException` once the accumulated rows exceed that —
 never a silent truncation. The guard is checked per fetched page (after the
