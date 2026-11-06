@@ -2069,18 +2069,21 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Dispatch every region's FIRST pessimistic-lock attempt in parallel
-     * (issue #291): all sends are issued before any response is processed.
+     * Dispatch every region batch's FIRST pessimistic-lock attempt in
+     * parallel (issue #291): all sends are issued before any response is
+     * processed.
      *
-     * isFirstLock is true only for the first group of the pass: the flag
-     * marks the transaction's very first pessimistic lock RPC, and in the
-     * conflict-free sequential order exactly the first group's RPC carried
-     * it (later groups saw isFirstLock=false after the first group locked
-     * successfully). A bool parameter rather than an inline read of the
-     * caller's loop-carried local: PHPStan L9 narrows the local to its
-     * literal initializer at the dispatch site (the loop-carried mutation
-     * happens in the processing loop below), the same narrowing trap as the
-     * regroup counters (issue #503 review).
+     * `is_first_lock` describes the batch that holds the transaction's
+     * primary lock (issue #225): TiKV uses the flag to decide whether the
+     * transaction can be skipped by the deadlock detector, so it may be set
+     * only on the request whose mutations contain the primary key. It is not
+     * tied to the first region or the first request: a region's keys can be
+     * split into several size-bounded batches (the #430 limits), and the
+     * primary can sit in any of them. A bool parameter rather than an inline
+     * read of the caller's loop-carried local: PHPStan L9 narrows the local
+     * to its literal initializer at the dispatch site (the loop-carried
+     * mutation happens in the processing loop below), the same narrowing
+     * trap as the regroup counters (issue #503 review).
      *
      * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
      * @param int $waitTimeoutMs effective wait timeout for the first attempt
@@ -2094,7 +2097,6 @@ final readonly class TwoPhaseCommitter
         int $waitTimeoutMs,
         int $lockTtlMs,
     ): array {
-        $firstGroupIndex = array_key_first($keysByRegion);
         $firstAttempts = [];
         $mutationsByGroup = [];
         foreach ($keysByRegion as $groupIndex => $regionData) {
@@ -2116,7 +2118,7 @@ final readonly class TwoPhaseCommitter
                 $groupMutations,
                 $primary,
                 $forUpdateTs,
-                $isFirstLock && $groupIndex === $firstGroupIndex,
+                $isFirstLock && in_array($primary, $groupKeys, true),
                 $waitTimeoutMs,
                 $lockTtlMs,
             );
@@ -2216,9 +2218,12 @@ final readonly class TwoPhaseCommitter
             $state->addPessimisticLockAttempt($key);
         }
 
-        // The first successful lock request in the transaction is the only
-        // one that carries is_first_lock. Derive it from acknowledged locks,
-        // not from the caller's local state, so eager calls share one flag.
+        // `is_first_lock` may be carried only by the batch that holds the
+        // primary lock, and only while the transaction has not acknowledged
+        // a pessimistic lock yet (issue #225). Keep the pass-level bool for
+        // the whole pass: a retry of the primary batch must keep the flag
+        // even when an earlier batch of the same fan-out was acknowledged
+        // first. Eager calls derive it the same way.
         $isFirstLock = !$state->hasAcknowledgedPessimisticLocks();
         $pendingKeys = $keys;
         // Each re-group restores a full retry budget for the re-grouped
@@ -2231,7 +2236,11 @@ final readonly class TwoPhaseCommitter
         $regroups = [];
 
         while ($pendingKeys !== []) {
-            $keysByRegion = $this->groupStringsByRegion($pendingKeys);
+            // Split each region's keys into size- and count-bounded request
+            // batches (the same #430 limits prewrite and commit use), so a
+            // large pessimistic-lock pass cannot produce one oversized
+            // request per region and the primary can sit in a later batch.
+            $keysByRegion = $this->splitKeyGroups($this->groupStringsByRegion($pendingKeys));
             $pendingKeys = [];
 
             // The caller supplies the timestamp for this logical locking
@@ -2241,7 +2250,7 @@ final readonly class TwoPhaseCommitter
             // prewrite and rollback.
             $state->updateMaxForUpdateTs($forUpdateTs);
 
-            // Dispatch every region's FIRST pessimistic-lock attempt in
+            // Dispatch every region batch's FIRST pessimistic-lock attempt in
             // parallel (issue #291): all sends are issued before any region's
             // response is processed, so the lock-free common case costs one
             // round trip regardless of region count. Responses are then
@@ -2318,7 +2327,7 @@ final readonly class TwoPhaseCommitter
                                     $mutations,
                                     $primary,
                                     $forUpdateTs,
-                                    $isFirstLock,
+                                    $isFirstLock && in_array($primary, $regionKeys, true),
                                     $this->effectiveLockWaitTimeoutMs($elapsedMs),
                                     $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                                 );
@@ -2528,7 +2537,6 @@ final readonly class TwoPhaseCommitter
                     }
 
                     $state->markPessimisticLocksAcquired($regionKeys);
-                    $isFirstLock = false;
                 }
             } catch (\Throwable $e) {
                 // A failed lock pass leaves the transaction without a
@@ -2863,9 +2871,11 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Split each region's commit keys into size- and count-bounded request
-     * batches (issue #430). A commit request carries only keys, so the size
-     * of a key is its length.
+     * Split each region's key list into size- and count-bounded request
+     * batches (issue #430). Used by the commit phase, whose request carries
+     * only keys, and by the pessimistic-lock phase, whose mutations carry
+     * keys with an empty value (issue #225); in both cases the payload size
+     * of an item is its key length.
      *
      * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
      * @return list<array{region: RegionInfo, keys: string[]}>

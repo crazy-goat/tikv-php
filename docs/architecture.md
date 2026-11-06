@@ -216,6 +216,14 @@ Optimistic Transaction                   Pessimistic Transaction
 └──────────────────────┘
 ```
 
+Pessimistic-lock requests are split by the same `maxTxnBatchSize` /
+`maxTxnBatchCount` limits as prewrite and commit (issue #430), so one region
+can require several lock requests. `PessimisticLockRequest.is_first_lock` is
+carried only by the batch whose mutations contain the transaction's primary
+key (issue #225); it is not tied to the first region or the first request, and
+a retry of that batch keeps the flag. TiKV uses it to decide whether the
+transaction can be skipped by the deadlock detector, so flagging a secondary
+batch would hide a real lock-wait cycle.
 **Rollback semantics**: `rollback()` is a best-effort cleanup that fails
 closed. `KvBatchRollback` and `KVPessimisticRollback` responses are inspected
 variant by variant, and structured variants take precedence over TiKV's
@@ -568,6 +576,15 @@ enum BackoffType
 - **General**: 20 seconds total backoff
 - **ServerBusy**: 60 seconds separate budget
 - **Wall-clock deadline**: 30 seconds per operation (configurable via `options['retryDeadlineMs']`; issues #294, #237). Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget), so the worst case is ≈ deadline + the duration of the last in-flight RPC (bounded only by the gRPC timeout option, not by the retry deadline).
+
+**Fan-out and response-borne errors**: a fanned-out operation dispatches one
+request per region before awaiting any of them (`BatchAsyncExecutor`). When a
+retryable region error comes back *inside* a response rather than as a thrown
+gRPC error, `CheckedGrpcFuture::fromRetryableDispatch()` keeps the eager first
+dispatch and runs the remaining dispatch+await cycle under `RetryExecutor`
+during the wait phase, so the error is retried per region with cache
+invalidation / leader switching and backoff. The batch wrappers use it since
+#183 and `RawKvRangeOps` (`deleteRange()` / `checksum()`) since #566.
 
 ## Data Flow
 
