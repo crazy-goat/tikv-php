@@ -259,6 +259,57 @@ class SstIngestorTest extends TestCase
         self::assertCount(2500 - 2 * 1024, iterator_to_array($lastBatch->getPairs(), false));
     }
 
+    public function testIngestBoundsAChunkByPayloadBytesNotOnlyPairCount(): void
+    {
+        $region = $this->defaultRegion();
+        $store = $this->defaultStore();
+        $this->setupStandardPdMocks($region, $store);
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+
+        $captured = null;
+        $this->grpc->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                iterable $requests,
+            ) use (
+                $writeResponse,
+                &$captured
+): Message {
+                $captured = $requests;
+                return $writeResponse;
+            });
+
+        $value = str_repeat('v', 1024 * 1024);
+        $pairs = [];
+        for ($i = 0; $i < 6; $i++) {
+            $pairs[sprintf('key-%03d', $i)] = $value;
+        }
+
+        $this->ingestor->ingest($pairs);
+
+        self::assertInstanceOf(\Generator::class, $captured);
+        $requests = iterator_to_array($captured, false);
+        self::assertCount(3, $requests);
+
+        // Three 1 MiB values plus their keys fit in the 4 MiB chunk budget;
+        // the fourth would exceed it by 28 bytes, so the generator starts a
+        // second chunk instead of copying all six values into one.
+        foreach ([1 => 3, 2 => 3] as $index => $expectedPairs) {
+            $request = $requests[$index];
+            self::assertInstanceOf(RawWriteRequest::class, $request);
+            $batch = $request->getBatch();
+            self::assertNotNull($batch);
+            self::assertCount($expectedPairs, iterator_to_array($batch->getPairs(), false));
+        }
+    }
+
     // ========================================================================
     // Basic ingest flow
     // ========================================================================

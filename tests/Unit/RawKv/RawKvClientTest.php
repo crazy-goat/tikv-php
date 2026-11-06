@@ -47,6 +47,7 @@ use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\RawKv\ScanIterator;
+use CrazyGoat\TiKV\Client\RawKv\SstIngestor;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
@@ -255,6 +256,42 @@ class RawKvClientTest extends TestCase
 
         $this->assertSame($metrics, $client->getMetrics());
         $client->close();
+    }
+
+    public function testCreateForwardsMaxIngestSizeToTheIngestor(): void
+    {
+        $client = RawKvClient::create(
+            ['pd:2379'],
+            options: ['grpcClient' => $this->grpc, 'maxIngestSize' => 5],
+        );
+
+        self::assertSame(5, (new \ReflectionProperty(RawKvClient::class, 'maxIngestSize'))->getValue($client));
+        $ingestor = (new \ReflectionProperty(RawKvClient::class, 'ingestor'))->getValue($client);
+        self::assertInstanceOf(SstIngestor::class, $ingestor);
+        self::assertSame(5, (new \ReflectionProperty(SstIngestor::class, 'maxIngestSize'))->getValue($ingestor));
+
+        $client->close();
+    }
+
+    /**
+     * @return iterable<string, array{mixed, string}>
+     */
+    public static function invalidMaxIngestSizeProvider(): iterable
+    {
+        yield 'string' => ['5', "options['maxIngestSize'] must be an int, string given"];
+        yield 'negative' => [-1, "options['maxIngestSize'] must be >= 0"];
+    }
+
+    #[DataProvider('invalidMaxIngestSizeProvider')]
+    public function testCreateRejectsAnInvalidMaxIngestSize(mixed $value, string $message): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($message);
+
+        RawKvClient::create(
+            ['pd:2379'],
+            options: ['grpcClient' => $this->grpc, 'maxIngestSize' => $value],
+        );
     }
 
     // ========================================================================

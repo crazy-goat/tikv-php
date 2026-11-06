@@ -179,6 +179,12 @@ final class Transaction
          * Maximum bytes of the whole read set; 0 = unlimited (issue #297).
          */
         private readonly int $maxReadSetTotalSize = 0,
+        /**
+         * Whether get()/batchGet() retain their values in the read set
+         * (issue #297). Off by default: nothing in the commit path consumes
+         * it, so keeping it on the hot read path would grow without bound.
+         */
+        private readonly bool $trackReadSet = false,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -235,6 +241,7 @@ final class Transaction
             maxTxnTotalSize: $this->maxTxnTotalSize,
             maxReadSetEntries: $this->maxReadSetEntries,
             maxReadSetTotalSize: $this->maxReadSetTotalSize,
+            trackReadSet: $this->trackReadSet,
         );
 
         $this->reader = new TxnReader(
@@ -328,6 +335,9 @@ final class Transaction
      * The read set has the same shape as the write set and the same coercion
      * (issue #261; see {@see getWriteSet()}).
      *
+     * Empty unless the transaction was created with `trackReadSet: true`;
+     * only `get()` and `batchGet()` populate it — `scan()` does not.
+     *
      * @return array<array-key, ?string>
      */
     public function getReadSet(): array
@@ -375,6 +385,18 @@ final class Transaction
     public function getReadSetCount(): int
     {
         return $this->state->getReadSetCount();
+    }
+
+    /**
+     * Drop every tracked read and reset the read-set accounting (issue #297).
+     *
+     * Useful in a long-lived transaction built with `trackReadSet: true`:
+     * the transaction does not need its read set at commit, so a worker can
+     * release it after a batch of reads. A no-op when tracking is disabled.
+     */
+    public function clearReadSet(): void
+    {
+        $this->state->clearReadSet();
     }
 
     // ---------------------------------------------------------------

@@ -162,6 +162,16 @@ final class TxnKvClient
     public const OPT_MAX_READ_SET_TOTAL_SIZE = 'maxReadSetTotalSize';
 
     /**
+     * begin() options[] key for read-set tracking (issue #297). Defaults to
+     * false: `get()`/`batchGet()` do not retain values in `getReadSet()`,
+     * because nothing in the commit path consumes the read set and keeping it
+     * on the hot read path makes a long-lived transaction's memory grow
+     * without bound. Must be a bool. Passing true opts in to the map and to
+     * the `maxReadSetEntries` / `maxReadSetTotalSize` limits.
+     */
+    public const OPT_TRACK_READ_SET = 'trackReadSet';
+
+    /**
      * begin() options[] key for the maximum bytes of one prewrite/commit
      * request per region (issue #430). Default:
      * {@see TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE} (16384, client-go's
@@ -478,6 +488,7 @@ final class TxnKvClient
      *     maxTxnTotalSize?: int,
      *     maxReadSetEntries?: int,
      *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      * } $options
@@ -498,8 +509,9 @@ final class TxnKvClient
      *     lock automatically once half of the TTL has elapsed.
      *     `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` (each 0 =
      *     unlimited) bound the transaction's write set (issue #430);
+     *     `trackReadSet` (default false) opts in to read-set tracking;
      *     `maxReadSetEntries` and `maxReadSetTotalSize` (each 0 = unlimited)
-     *     bound the read set (issue #297);
+     *     bound the tracked read set (issue #297);
      *     `maxTxnBatchSize` (default 16384 bytes) and `maxTxnBatchCount`
      *     (default 512) split each region's prewrite mutations and commit keys
      *     into multiple requests. Exceeding a size limit throws
@@ -530,6 +542,7 @@ final class TxnKvClient
         $maxTxnEntryCount = $this->resolveIntOption($options, self::OPT_MAX_TXN_ENTRY_COUNT, 0, 0);
         $maxTxnEntrySize = $this->resolveIntOption($options, self::OPT_MAX_TXN_ENTRY_SIZE, 0, 0);
         $maxTxnTotalSize = $this->resolveIntOption($options, self::OPT_MAX_TXN_TOTAL_SIZE, 0, 0);
+        $trackReadSet = $this->resolveEnableFlag($options, self::OPT_TRACK_READ_SET);
         $maxReadSetEntries = $this->resolveIntOption($options, self::OPT_MAX_READ_SET_ENTRIES, 0, 0);
         $maxReadSetTotalSize = $this->resolveIntOption($options, self::OPT_MAX_READ_SET_TOTAL_SIZE, 0, 0);
         $maxTxnBatchSize = $this->resolveIntOption(
@@ -608,6 +621,7 @@ final class TxnKvClient
             maxTxnBatchCount: $maxTxnBatchCount,
             maxReadSetEntries: $maxReadSetEntries,
             maxReadSetTotalSize: $maxReadSetTotalSize,
+            trackReadSet: $trackReadSet,
         );
 
         $this->pruneFinishedTransactions();
@@ -646,6 +660,7 @@ final class TxnKvClient
      *     maxTxnTotalSize?: int,
      *     maxReadSetEntries?: int,
      *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      * } $options
@@ -685,6 +700,7 @@ final class TxnKvClient
      *     maxTxnTotalSize?: int,
      *     maxReadSetEntries?: int,
      *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      * } $options
@@ -715,6 +731,7 @@ final class TxnKvClient
      *     maxTxnTotalSize?: int,
      *     maxReadSetEntries?: int,
      *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      * } $options
@@ -736,8 +753,9 @@ final class TxnKvClient
     }
 
     /**
-     * Resolve a boolean begin() option (enable1Pc / enableAsyncCommit,
-     * issue #419). Defaults to false; a non-bool value is rejected.
+     * Resolve a boolean begin() option (enable1Pc / enableAsyncCommit, issue
+     * #419, and trackReadSet, issue #297). Defaults to false; a non-bool
+     * value is rejected.
      *
      * @param array<string, mixed> $options
      */

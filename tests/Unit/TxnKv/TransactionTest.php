@@ -107,6 +107,7 @@ class TransactionTest extends TestCase
      *     priority?: int,
      *     maxBackoffMs?: int,
      *     eagerPessimisticLocks?: bool,
+     *     trackReadSet?: bool,
      * } $options
      */
     private function createTransaction(array $options = []): Transaction
@@ -125,6 +126,7 @@ class TransactionTest extends TestCase
             // Existing tests cover the legacy commit-time pass; eager-lock
             // regressions opt in explicitly below.
             eagerPessimisticLocks: $options['eagerPessimisticLocks'] ?? false,
+            trackReadSet: $options['trackReadSet'] ?? false,
         );
     }
 
@@ -5208,8 +5210,32 @@ class TransactionTest extends TestCase
     }
 
     // ========================================================================
-    // get() — fills readSet
+    // get() — read-set tracking is opt-in
     // ========================================================================
+
+    public function testReadSetIsEmptyByDefaultAfterReads(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('some-value');
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+
+        self::assertSame('some-value', $txn->get('my-key'));
+        self::assertSame([], $txn->getReadSet());
+        self::assertSame(0, $txn->getReadSetCount());
+        self::assertSame(0, $txn->getReadSetSize());
+    }
+
 
     public function testGetPopulatesReadSet(): void
     {
@@ -5236,12 +5262,18 @@ class TransactionTest extends TestCase
             },
         );
 
-        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn = $this->createTransaction(['pessimistic' => false, 'trackReadSet' => true]);
         $txn->get('my-key');
 
         $this->assertSame(['KvGet'], $methods);
         $this->assertArrayHasKey('my-key', $txn->getReadSet());
         $this->assertSame('some-value', $txn->getReadSet()['my-key']);
+
+        $txn->clearReadSet();
+
+        $this->assertSame([], $txn->getReadSet());
+        $this->assertSame(0, $txn->getReadSetCount());
+        $this->assertSame(0, $txn->getReadSetSize());
     }
 
     public function testGetPopulatesReadSetWithNullOnNotFound(): void
@@ -5268,7 +5300,7 @@ class TransactionTest extends TestCase
             },
         );
 
-        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn = $this->createTransaction(['pessimistic' => false, 'trackReadSet' => true]);
         $result = $txn->get('missing');
 
         $this->assertSame(['KvGet'], $methods);

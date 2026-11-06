@@ -77,6 +77,8 @@ final class TransactionState
      * @param int $maxReadSetTotalSize Maximum bytes of the whole read set,
      *                                 measured as key length plus value
      *                                 length; 0 = unlimited (issue #297)
+     * @param bool $trackReadSet Whether setReadValue() retains values;
+     *                           false by default (issue #297)
      */
     public function __construct(
         private readonly int $startedAtMs = 0,
@@ -85,6 +87,7 @@ final class TransactionState
         private readonly int $maxTxnTotalSize = 0,
         private readonly int $maxReadSetEntries = 0,
         private readonly int $maxReadSetTotalSize = 0,
+        private readonly bool $trackReadSet = false,
     ) {
     }
 
@@ -390,7 +393,7 @@ final class TransactionState
     }
 
     /**
-     * Validate a read without applying it, so the reader can reject an
+     * Validate a read without applying it, so setReadValue() can reject an
      * oversized read set before retaining another value (issue #297).
      * Re-reading a key accounts for the entry it replaces, so a second read
      * never leaks budget.
@@ -398,7 +401,7 @@ final class TransactionState
      * @throws TransactionTooLargeException when the read would exceed one
      *         of the configured read-set limits
      */
-    public function assertReadAllowed(string $key, ?string $value): void
+    private function assertReadAllowed(string $key, ?string $value): void
     {
         $entrySize = $this->entrySize($key, $value);
         $exists = array_key_exists($key, $this->readSet);
@@ -409,11 +412,17 @@ final class TransactionState
     }
 
     /**
+     * Records a read only when read-set tracking is enabled (issue #297).
+     *
      * @throws TransactionTooLargeException when the read would exceed one
      *         of the configured read-set limits
      */
     public function setReadValue(string $key, ?string $value): void
     {
+        if (!$this->trackReadSet) {
+            return;
+        }
+
         $this->assertReadAllowed($key, $value);
 
         if (array_key_exists($key, $this->readSet)) {

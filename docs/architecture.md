@@ -229,18 +229,21 @@ base `TiKvException`, so the write set is not cleared and the transaction is
 not reported `RolledBack`; it stays active-but-unwritable so the caller (or
 the destructor) can retry the cleanup (issue #559).
 
-**Memory bounds**: the write and read sets grow in the PHP worker for the
-whole transaction. Both are opt-in bounded on `begin()` (`0` = unlimited):
-`maxTxnEntryCount` / `maxTxnEntrySize` / `maxTxnTotalSize` for the write set
-and `maxReadSetEntries` / `maxReadSetTotalSize` for the read set. Exceeding a
-limit throws `TransactionTooLargeException`; a write is rejected before it is
-buffered, a read before the fetched value is retained. The prewrite and
-commit requests are independently split per region by `maxTxnBatchSize` and
-`maxTxnBatchCount` (issue #430).
+**Memory bounds**: the write set grows in the PHP worker for the whole
+transaction and is opt-in bounded on `begin()` (`0` = unlimited) by
+`maxTxnEntryCount` / `maxTxnEntrySize` / `maxTxnTotalSize`. Exceeding a limit
+throws `TransactionTooLargeException` before the write is buffered. The
+prewrite and commit requests are independently split per region by
+`maxTxnBatchSize` and `maxTxnBatchCount` (issue #430).
 
-The read set is still populated by default, because it is part of the public
-`getReadSet()` API; a long-lived transaction that reads large values should
-set the read-set limits or call `clearReadSet()`. `RawKvClient::ingest()`
+Read-set tracking is **off by default** (`trackReadSet`): only `get()` and
+`batchGet()` would populate it, `scan()` never does, and nothing in the
+commit path consumes it. Opting in enables the public `getReadSet()` map and
+the `maxReadSetEntries` / `maxReadSetTotalSize` bounds; an oversized read is
+rejected before the fetched value is retained, but the RPC has already
+returned, and a whole `KvBatchGet` response is materialised before the check.
+A long-lived tracked transaction can call `Transaction::clearReadSet()`.
+`RawKvClient::ingest()`
 streams its SST payload instead of buffering a second full copy: it copies
 only the keys, groups them by region, and builds each `import_sstpb.Pair`
 chunk on demand from a generator consumed by the gRPC transport. Its opt-in

@@ -42,6 +42,14 @@ final readonly class SstIngestor
     private const IMPORT_SST_SERVICE = 'import_sstpb.ImportSST';
     private const INGEST_CHUNK_SIZE = 1024;
 
+    /**
+     * Maximum key-plus-value bytes of one data chunk. The pair-count cap
+     * alone is not a memory bound: 1024 large values could otherwise copy a
+     * whole 100 MB payload into one chunk. A single pair larger than this
+     * still forms its own chunk (issue #297).
+     */
+    private const INGEST_CHUNK_BYTES = 4 * 1024 * 1024;
+
     public function __construct(
         private GrpcClientInterface $grpc,
         private PdClientInterface $pdClient,
@@ -429,10 +437,11 @@ final readonly class SstIngestor
      * Build the RawWrite request stream lazily.
      *
      * The generator yields the metadata request first, then one data batch
-     * per {@see self::INGEST_CHUNK_SIZE} keys. Each chunk's `Pair` messages
-     * are released as soon as the stream asks for the next request, so the
-     * payload is not held as a full `Pair[]` array and a full request array
-     * at the same time (issue #297).
+     * per {@see self::INGEST_CHUNK_SIZE} keys or {@see self::INGEST_CHUNK_BYTES}
+     * payload bytes, whichever comes first. Each chunk's `Pair` messages are
+     * released as soon as the stream asks for the next request, so the payload
+     * is not held as a full `Pair[]` array and a full request array at the
+     * same time (issue #297).
      *
      * @param string[] $keys
      * @param array<string, string> $keyValuePairs
@@ -448,29 +457,49 @@ final readonly class SstIngestor
         $metaRequest->setMeta($sstMeta);
         yield $metaRequest;
 
-        $count = count($keys);
-        for ($offset = 0; $offset < $count; $offset += self::INGEST_CHUNK_SIZE) {
-            $pairs = [];
-            $end = min($offset + self::INGEST_CHUNK_SIZE, $count);
-            for ($i = $offset; $i < $end; $i++) {
-                $key = $keys[$i];
-                $pair = new Pair();
-                $pair->setKey($key);
-                $pair->setValue($keyValuePairs[$key]);
-                $pair->setOp(Pair\OP::Put);
-                $pairs[] = $pair;
+        /** @var list<Pair> $pairs */
+        $pairs = [];
+        $chunkBytes = 0;
+        foreach ($keys as $key) {
+            $value = $keyValuePairs[$key];
+            $entryBytes = strlen($key) + strlen($value);
+
+            $chunkIsFull = count($pairs) >= self::INGEST_CHUNK_SIZE
+                || $chunkBytes + $entryBytes > self::INGEST_CHUNK_BYTES;
+            if ($pairs !== [] && $chunkIsFull) {
+                yield $this->buildBatchRequest($pairs, $ttl);
+                $pairs = [];
+                $chunkBytes = 0;
             }
 
-            $batch = new RawWriteBatch();
-            $batch->setPairs($pairs);
-            if ($ttl !== null && $ttl > 0) {
-                $batch->setTtl($ttl);
-            }
-
-            $batchRequest = new RawWriteRequest();
-            $batchRequest->setBatch($batch);
-            yield $batchRequest;
+            $pair = new Pair();
+            $pair->setKey($key);
+            $pair->setValue($value);
+            $pair->setOp(Pair\OP::Put);
+            $pairs[] = $pair;
+            $chunkBytes += $entryBytes;
         }
+
+        if ($pairs !== []) {
+            yield $this->buildBatchRequest($pairs, $ttl);
+        }
+    }
+
+    /**
+     * @param list<Pair> $pairs
+     */
+    private function buildBatchRequest(array $pairs, ?int $ttl): RawWriteRequest
+    {
+        $batch = new RawWriteBatch();
+        $batch->setPairs($pairs);
+        if ($ttl !== null && $ttl > 0) {
+            $batch->setTtl($ttl);
+        }
+
+        $request = new RawWriteRequest();
+        $request->setBatch($batch);
+
+        return $request;
     }
 
     /**

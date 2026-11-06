@@ -125,6 +125,7 @@ final class TransactionSizeLimitTest extends TestCase
      *     maxTxnTotalSize?: int,
      *     maxReadSetEntries?: int,
      *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      *     enable1Pc?: bool,
@@ -153,6 +154,7 @@ final class TransactionSizeLimitTest extends TestCase
             maxTxnBatchCount: $options['maxTxnBatchCount'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
             maxReadSetEntries: $options['maxReadSetEntries'] ?? 0,
             maxReadSetTotalSize: $options['maxReadSetTotalSize'] ?? 0,
+            trackReadSet: $options['trackReadSet'] ?? false,
         );
     }
 
@@ -174,7 +176,7 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testDefaultReadSetLimitsAreUnlimited(): void
     {
-        $state = new TransactionState();
+        $state = new TransactionState(trackReadSet: true);
 
         for ($i = 0; $i < 1000; $i++) {
             $state->setReadValue('key' . $i, str_repeat('v', 100));
@@ -186,7 +188,7 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testReadSetEntryLimitAllowsExactlyTheLimit(): void
     {
-        $state = new TransactionState(0, 0, 0, 0, 2);
+        $state = new TransactionState(0, 0, 0, 0, maxReadSetEntries: 2, trackReadSet: true);
 
         $state->setReadValue('a', '1');
         $state->setReadValue('b', '2');
@@ -196,7 +198,7 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testReadSetEntryLimitRejectsTheEntryOverTheLimit(): void
     {
-        $state = new TransactionState(0, 0, 0, 0, 2);
+        $state = new TransactionState(0, 0, 0, 0, maxReadSetEntries: 2, trackReadSet: true);
         $state->setReadValue('a', '1');
         $state->setReadValue('b', '2');
 
@@ -207,7 +209,7 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testReadSetTotalSizeLimitAllowsExactlyTheLimit(): void
     {
-        $state = new TransactionState(0, 0, 0, 0, 0, 10);
+        $state = new TransactionState(maxReadSetTotalSize: 10, trackReadSet: true);
 
         $state->setReadValue('a', '1234');
         $state->setReadValue('b', '1234');
@@ -218,7 +220,7 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testReadSetTotalSizeLimitRejectsTheEntryOverTheLimit(): void
     {
-        $state = new TransactionState(0, 0, 0, 0, 0, 10);
+        $state = new TransactionState(maxReadSetTotalSize: 10, trackReadSet: true);
         $state->setReadValue('a', '1234');
         $state->setReadValue('b', '1234');
 
@@ -229,7 +231,7 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testRereadingAKeyDoesNotConsumeAdditionalReadSetBudget(): void
     {
-        $state = new TransactionState(0, 0, 0, 0, 0, 6);
+        $state = new TransactionState(maxReadSetTotalSize: 6, trackReadSet: true);
 
         $state->setReadValue('a', '1234');
         $state->setReadValue('a', '1234');
@@ -249,7 +251,7 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testClearReadSetResetsTheAccounting(): void
     {
-        $state = new TransactionState(0, 0, 0, 0, 1);
+        $state = new TransactionState(maxReadSetEntries: 1, trackReadSet: true);
         $state->setReadValue('a', '1');
 
         $state->clearReadSet();
@@ -264,7 +266,7 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testReadSetExceptionReportsTheLimitNameLimitAndActualValue(): void
     {
-        $state = new TransactionState(0, 0, 0, 0, 1);
+        $state = new TransactionState(maxReadSetEntries: 1, trackReadSet: true);
         $state->setReadValue('a', '1');
 
         try {
@@ -491,7 +493,7 @@ final class TransactionSizeLimitTest extends TestCase
             },
         );
 
-        $txn = $this->makeTransaction(['maxReadSetEntries' => 1]);
+        $txn = $this->makeTransaction(['maxReadSetEntries' => 1, 'trackReadSet' => true]);
 
         self::assertSame('v1', $txn->get('k1'));
         self::assertSame(1, $txn->getReadSetCount());
@@ -894,6 +896,7 @@ final class TransactionSizeLimitTest extends TestCase
             'maxTxnTotalSize' => 4096,
             'maxReadSetEntries' => 500,
             'maxReadSetTotalSize' => 2048,
+            'trackReadSet' => true,
             'maxTxnBatchSize' => 8192,
             'maxTxnBatchCount' => 64,
         ]);
@@ -903,6 +906,7 @@ final class TransactionSizeLimitTest extends TestCase
         self::assertSame(4096, (new \ReflectionProperty(Transaction::class, 'maxTxnTotalSize'))->getValue($txn));
         self::assertSame(500, (new \ReflectionProperty(Transaction::class, 'maxReadSetEntries'))->getValue($txn));
         self::assertSame(2048, (new \ReflectionProperty(Transaction::class, 'maxReadSetTotalSize'))->getValue($txn));
+        self::assertTrue((new \ReflectionProperty(Transaction::class, 'trackReadSet'))->getValue($txn));
         self::assertSame(8192, (new \ReflectionProperty(Transaction::class, 'maxTxnBatchSize'))->getValue($txn));
         self::assertSame(64, (new \ReflectionProperty(Transaction::class, 'maxTxnBatchCount'))->getValue($txn));
     }
@@ -916,6 +920,7 @@ final class TransactionSizeLimitTest extends TestCase
         self::assertSame(0, (new \ReflectionProperty(Transaction::class, 'maxTxnTotalSize'))->getValue($txn));
         self::assertSame(0, (new \ReflectionProperty(Transaction::class, 'maxReadSetEntries'))->getValue($txn));
         self::assertSame(0, (new \ReflectionProperty(Transaction::class, 'maxReadSetTotalSize'))->getValue($txn));
+        self::assertFalse((new \ReflectionProperty(Transaction::class, 'trackReadSet'))->getValue($txn));
         self::assertSame(
             TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
             (new \ReflectionProperty(Transaction::class, 'maxTxnBatchSize'))->getValue($txn),
@@ -948,6 +953,8 @@ final class TransactionSizeLimitTest extends TestCase
             yield $key . ' zero' => [$key, 0, "options['$key'] must be >= 1"];
             yield $key . ' negative' => [$key, -1, "options['$key'] must be >= 1"];
         }
+        yield 'trackReadSet string' => ['trackReadSet', '1', "options['trackReadSet'] must be a bool"];
+        yield 'trackReadSet int' => ['trackReadSet', 1, "options['trackReadSet'] must be a bool"];
     }
 
     #[DataProvider('invalidTxnSizeOptionProvider')]
@@ -989,6 +996,7 @@ final class TransactionSizeLimitTest extends TestCase
      *     maxTxnTotalSize?: int,
      *     maxReadSetEntries?: int,
      *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      * } $options
