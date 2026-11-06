@@ -106,6 +106,19 @@ contract changes (noted per row):
 | `RegionGrouper::resolvedRegion()` | The single accessor every region-grouping loop reads its resolved map through, so the message and the redacted key are the same everywhere. Thrown when the map lacks the key the loop is grouping; the resolver above already fails closed, so this is defense in depth and unreachable unless that contract changes. **Reached from** `groupKeysByRegionBatch()` (so `batchGet()`, `batchDelete()`, `LockResolver`, `TwoPhaseCommitter`), `groupItemsByRegion()` (`TwoPhaseCommitter`), `TxnReader::batchGetFromTiKV()`, `RawKvBatch::batchPut()` and its three multi-region re-split paths, and `SstIngestor::groupPairsByRegion()`. Skipping the key instead of throwing was silent data loss — `batchPut()`/`batchDelete()`/`ingest()` return `void`, and `batchGet()` cannot tell a skipped key from a missing one (issue #187). | `Region could not be resolved for key %s; refusing to silently drop it from the batch` (key redacted) |
 | `RawKvRangeOps::assertRegionCoversRange()` (private; called from `deleteRange()` and `checksum()`) | The resolved region shrank to an upper bound that no longer covers the clipped sub-range (split after enumeration). Deliberately free of every retry-classifier keyword so the retry loop stops without replaying the stale sub-range; a clamped raw read would otherwise be reported as a complete delete/checksum (issue #190). | `Region %d shrank to an upper bound of %s after enumeration and no longer covers the clipped sub-range starting at key %s; refusing a partial operation` (keys redacted) |
 
+`LockResolver::checkTxnStatus()` has its own fail-closed rule: a `KeyError` in
+a `CheckTxnStatusResponse` is not a status. It is logged and rethrown as a
+retryable `TxnRetryableException` (`BackoffType::TxnLock`), so the caller's
+retry executor asks again; reading the response's zeroed `commit_version` as
+"not committed" would send `KvResolveLock` at commit ts 0 and destroy a
+transaction whose outcome was never determined. Region errors and gRPC failures
+already propagate. The async-commit secondary check follows the same rule:
+`checkSecondaryLocks()` rethrows a `KeyError` from a
+`CheckSecondaryLocksResponse` as a retryable `TxnRetryableException` and lets a
+region error from grouping propagate, so an empty `locks` list caused by a
+failed RPC is never read as "rolled back". Only a successful response may drive
+the commit/rollback decision (issue #224, TXN-19).
+
 ### What Each Class Means
 
 | Class | Parent | Meaning |
@@ -131,7 +144,7 @@ contract changes (noted per row):
 | [`TransactionConflictException`](../src/Client/TxnKv/Exception/TransactionConflictException.php) | `TiKvException` | Write conflict / abort reported during prewrite, commit or pessimistic lock; accessor: `getConflictingKeys()` |
 | [`TransactionTooLargeException`](../src/Client/TxnKv/Exception/TransactionTooLargeException.php) | `TiKvException` | A write would exceed one of the transaction's write-set limits (issue #430): `maxTxnEntryCount`, `maxTxnEntrySize` or `maxTxnTotalSize` set on `begin()`; accessors: `getLimitName()`, `getLimit()`, `getActual()`. Thrown from `set()`/`delete()` before the write is buffered and before any RPC |
 | [`TxnAbortedByGcException`](../src/Client/TxnKv/Exception/TxnAbortedByGcException.php) | `TiKvException` | The transaction's start timestamp is below the cluster's GC safe point — the data it would read has been garbage collected. Raised by GC safe-point validation at `begin()` (default-on, `options['gcSafePointValidation'] => false` to disable) or when TiKV rejects a read with the "GC life time is shorter than transaction duration" abort |
-| [`TxnRetryableException`](../src/Client/TxnKv/Exception/TxnRetryableException.php) | `TiKvException` | A lock was encountered and resolved inside a transactional operation — safe to retry with the carried `public readonly BackoffType $backoffType` |
+| [`TxnRetryableException`](../src/Client/TxnKv/Exception/TxnRetryableException.php) | `TiKvException` | A lock was encountered and resolved inside a transactional operation, or a `CheckTxnStatus` response carried an error — safe to retry with the carried `public readonly BackoffType $backoffType` |
 | [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php) | `TiKvException` | The commit outcome is unknown (client-go's `ErrResultUndetermined`): the primary-key commit RPC failed at the transport level, so the commit may or may not have been applied — the transaction must NOT be rolled back; resolve out of band (e.g. `CheckTxnStatus`) |
 | `TiKvException` | `\RuntimeException` | Base class of every library exception |
 
