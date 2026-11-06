@@ -10,6 +10,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\TestCase;
 
 class RegionGrouperTest extends TestCase
@@ -191,7 +192,7 @@ class RegionGrouperTest extends TestCase
         $resolver = new RegionResolver($pdClient, $regionCache);
 
         $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('"7a" (1 bytes)');
+        $this->expectExceptionMessage(KeyRedactor::redact('z'));
         RegionGrouper::groupKeysByRegionBatch(['a', 'z'], $resolver);
     }
 
@@ -216,7 +217,7 @@ class RegionGrouperTest extends TestCase
         $resolver = new RegionResolver($pdClient, $regionCache);
 
         $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('"7a" (1 bytes)');
+        $this->expectExceptionMessage(KeyRedactor::redact('z'));
         RegionGrouper::groupItemsByRegion(
             [(object) ['key' => 'a'], (object) ['key' => 'z']],
             fn (object $item): string => $item->key,

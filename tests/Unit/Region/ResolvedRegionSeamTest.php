@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Region;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -64,7 +65,8 @@ class ResolvedRegionSeamTest extends TestCase
 
         $this->expectException(TiKvException::class);
         $this->expectExceptionMessage(
-            'Region could not be resolved for key "7a" (1 bytes); refusing to silently drop it from the batch',
+            'Region could not be resolved for key ' . KeyRedactor::redact('z')
+            . '; refusing to silently drop it from the batch',
         );
 
         RegionGrouper::resolvedRegion($resolved, 'z');
@@ -87,8 +89,9 @@ class ResolvedRegionSeamTest extends TestCase
 
     /**
      * The message must identify *which* key could not be routed while never
-     * putting raw key bytes in it (issue #269). 12 bytes is past the
-     * redactor's 8-byte hex prefix, so this also pins the truncated form.
+     * putting raw key bytes in it (issue #269). The token is the redactor's
+     * truncated keyed hash, so it is asserted through `redact()` rather than
+     * as a literal.
      */
     public function testMessageRedactsTheKeyItNames(): void
     {
@@ -96,12 +99,7 @@ class ResolvedRegionSeamTest extends TestCase
             RegionGrouper::resolvedRegion([], 'user:secret-tenant-id');
             self::fail('an unresolvable key must fail the call');
         } catch (TiKvException $e) {
-            // Asserted as the redactor's 8-byte hex prefix plus the total
-            // length rather than as one literal: `KeyRedactor`'s own
-            // long-key form has an unbalanced quote (KeyRedactor.php:70, see
-            // also KeyRedactorTest and docs/troubleshooting.md), and this
-            // test is about the redaction, not about that formatting.
-            self::assertStringContainsString('757365723a736563', $e->getMessage());
+            self::assertStringContainsString(KeyRedactor::redact('user:secret-tenant-id'), $e->getMessage());
             self::assertStringContainsString('(21 bytes)', $e->getMessage());
             self::assertStringNotContainsString('secret-tenant-id', $e->getMessage());
             self::assertStringNotContainsString('user:', $e->getMessage());
