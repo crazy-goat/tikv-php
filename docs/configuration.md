@@ -1182,7 +1182,7 @@ $txn = $client->begin([
 
 | Mode               | When it applies                                                            | What it saves                                  |
 |--------------------|----------------------------------------------------------------------------|------------------------------------------------|
-| `enable1Pc`        | Transaction touches a **single region** and has ≤ 128 keys.                 | The commit phase and the PD `getTimestamp()` round trip. |
+| `enable1Pc`        | Transaction fits in a **single prewrite batch**: one region, ≤ 128 keys, and within [`maxTxnBatchSize`/`maxTxnBatchCount`](#transaction-size-limits-and-request-batching-txnkv). | The commit phase and the PD `getTimestamp()` round trip. |
 | `enableAsyncCommit`| Transaction has ≤ 256 keys (any number of regions).                        | The commit phase (the PD round trip stays implicit in prewrite's `min_commit_ts`). |
 
 Details:
@@ -1194,7 +1194,7 @@ Details:
   prewrite), the client silently falls back to the normal two-phase path.
 - Async commit sets `use_async_commit`, the secondary keys and
   `max_commit_ts` (start timestamp + a bounded TSO gap) on the primary
-  region's prewrite, and derives the commit timestamp as the maximum of the
+  batch's prewrite, and derives the commit timestamp as the maximum of the
   returned `min_commit_ts` values (no extra increment — TiKV writes the data
   at `min_commit_ts`, so a reader whose snapshot ts equals it must see the
   write). The transaction is committed once the primary lock
@@ -1205,10 +1205,10 @@ Details:
   `min_commit_ts` values (client-go's recovery protocol: an undecided
   transaction whose secondaries are all still locked is help-committed at
   `max(min_commit_ts)` rather than stalled until the lock TTL expires).
-  The prewrite loop prewrites the primary region last (the commit-decision
+  The prewrite loop prewrites the primary batch last (the commit-decision
   barrier, client-go parity). When TiKV declines, the client falls back to
   two-phase commit.
-- If both options are set, one-phase commit is tried first (single region
+- If both options are set, one-phase commit is tried first (single batch
   only); async commit covers multi-region small transactions.
 - Both modes remain safe under TiKV's own server-side guards — the server
   never applies an unsafe fast commit, it just answers with a decline and the
@@ -1302,6 +1302,64 @@ server-side waits of the attempts — the budget counts the client's backoff
 sleeps, not the time the lock RPCs themselves take. Lower the value to keep a
 PHP worker slot free; raise it to let TiKV park the request instead of
 answering early and having the client send it again.
+
+## Transaction Size Limits and Request Batching (TxnKV)
+
+A transaction buffers its write set in the PHP worker until `commit()`, so a
+runaway write set can exhaust `memory_limit` and leave locks behind; and one
+region with many mutations produces a single prewrite/commit request that TiKV
+can reject with `RaftEntryTooLarge`. Both are configurable per transaction on
+`begin()` (issue #430):
+
+```php
+$txn = $client->begin([
+    'maxTxnEntryCount' => 10000,   // entries, 0 = unlimited (default)
+    'maxTxnEntrySize'  => 1048576, // key+value bytes, 0 = unlimited
+    'maxTxnTotalSize'  => 4194304, // whole write set, 0 = unlimited
+    'maxTxnBatchSize'  => 16384,   // bytes per prewrite/commit request
+    'maxTxnBatchCount' => 512,     // mutations/keys per request
+]);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `maxTxnEntryCount` | `0` (unlimited) | Maximum number of write-set entries. |
+| `maxTxnEntrySize` | `0` (unlimited) | Maximum bytes of one entry, measured as key length plus value length. A delete contributes the key length only. |
+| `maxTxnTotalSize` | `0` (unlimited) | Maximum bytes of the whole write set: the sum of every entry's key plus value length. |
+| `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite/commit request per region: key plus value length for a prewrite mutation, key length for a commit key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
+| `maxTxnBatchCount` | `512` | Maximum payload items — mutations (prewrite) or keys (commit) — of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
+
+The three size limits are **opt-in** (`0` = unlimited) because there is no
+single correct value for every application; set them for untrusted or
+unbounded workloads. Exceeding one throws
+`TransactionTooLargeException` from `set()`/`delete()` **before** the write is
+buffered and before any RPC — in a pessimistic transaction that means before
+the eager lock request, so a rejected write leaves no server-side lock. The
+exception names the limit (`getLimitName()`), the configured value
+(`getLimit()`) and the value the write would have produced (`getActual()`).
+Overwriting an existing key accounts for the entry it replaces, so a replace
+does not consume additional budget.
+
+`Transaction::getWriteSetSize()` returns the current write-set bytes and
+`Transaction::getWriteSetCount()` its entry count, so a transaction can be
+logged or exported as a metric without walking `getWriteSet()`.
+
+Batching is always on. `TwoPhaseCommitter` splits each region's prewrite
+mutations and commit keys with `RawKvSplitter::splitIntoBatches()` into
+requests bounded by both `maxTxnBatchSize` and `maxTxnBatchCount` **in payload
+terms**: key plus value bytes for a prewrite mutation, key bytes for a commit
+key, and item count. The bound does not cover request framing, `Context`,
+`primary_lock` or the async `secondaries` list, so an async primary prewrite
+can exceed `maxTxnBatchSize`; a single mutation larger than the budget still
+forms its own batch. The primary key's batch is still committed first; the
+remaining batches — including other batches of the primary's region — are
+secondary commits and are fanned out in parallel. One-phase commit remains
+limited to a single batch (a transaction split across several 1PC prewrites
+would be partially committed), and async commit carries its decision on the
+batch that holds the primary key. A batch that fails before the commit point
+still fails the whole transaction; after the primary commit, secondary-batch
+failures are logged and the transaction stays committed, exactly as for whole
+secondary regions.
 
 ## Transaction Priority (TxnKV)
 

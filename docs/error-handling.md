@@ -45,6 +45,7 @@ extends `\InvalidArgumentException` directly — it is **not** a
     ├── DeadlockException                          src/Client/TxnKv/Exception/
     ├── LockWaitTimeoutException                   src/Client/TxnKv/Exception/
     ├── TransactionConflictException               src/Client/TxnKv/Exception/
+    ├── TransactionTooLargeException               src/Client/TxnKv/Exception/
     ├── TxnAbortedByGcException                    src/Client/TxnKv/Exception/
     ├── TxnRetryableException                      src/Client/TxnKv/Exception/
     └── UndeterminedCommitException                src/Client/TxnKv/Exception/
@@ -53,13 +54,13 @@ extends `\InvalidArgumentException` directly — it is **not** a
 └── InvalidArgumentException                        src/Client/Exception/
 ```
 
-All nineteen `TiKvException` subclasses are `final`; `TiKvException` itself is
+All twenty `TiKvException` subclasses are `final`; `TiKvException` itself is
 the only non-final class in the tree (it is the intended base for any custom
 project-wide exception work).
 
 > The client never throws a raw `\Exception`, `\RuntimeException` or
 > `\InvalidArgumentException`: everything that can reach your code is one of
-> the nineteen classes above.
+> the twenty classes above.
 
 `TiKvException` itself is also thrown **directly** — no more specific subclass —
 at sixteen `throw new TiKvException(...)` statements across multiple call
@@ -106,6 +107,7 @@ contract changes (noted per row):
 | [`DeadlockException`](../src/Client/TxnKv/Exception/DeadlockException.php) | `TiKvException` | Pessimistic locking detected a deadlock; accessors: `getDeadlockKey()`, `getDeadlockKeyHash()`, `getLockTs()` |
 | [`LockWaitTimeoutException`](../src/Client/TxnKv/Exception/LockWaitTimeoutException.php) | `TiKvException` | A pessimistic lock wait exhausted its budget (`maxBackoffMs`); the per-request wait is `begin(['lockWaitTimeMs' => …])` (issue #443); accessors: `getKey()` (redacted message), `getTimeoutMs()` |
 | [`TransactionConflictException`](../src/Client/TxnKv/Exception/TransactionConflictException.php) | `TiKvException` | Write conflict / abort reported during prewrite, commit or pessimistic lock; accessor: `getConflictingKeys()` |
+| [`TransactionTooLargeException`](../src/Client/TxnKv/Exception/TransactionTooLargeException.php) | `TiKvException` | A write would exceed one of the transaction's write-set limits (issue #430): `maxTxnEntryCount`, `maxTxnEntrySize` or `maxTxnTotalSize` set on `begin()`; accessors: `getLimitName()`, `getLimit()`, `getActual()`. Thrown from `set()`/`delete()` before the write is buffered and before any RPC |
 | [`TxnAbortedByGcException`](../src/Client/TxnKv/Exception/TxnAbortedByGcException.php) | `TiKvException` | The transaction's start timestamp is below the cluster's GC safe point — the data it would read has been garbage collected. Raised by GC safe-point validation at `begin()` (default-on, `options['gcSafePointValidation'] => false` to disable) or when TiKV rejects a read with the "GC life time is shorter than transaction duration" abort |
 | [`TxnRetryableException`](../src/Client/TxnKv/Exception/TxnRetryableException.php) | `TiKvException` | A lock was encountered and resolved inside a transactional operation — safe to retry with the carried `public readonly BackoffType $backoffType` |
 | [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php) | `TiKvException` | The commit outcome is unknown (client-go's `ErrResultUndetermined`): the primary-key commit RPC failed at the transport level, so the commit may or may not have been applied — the transaction must NOT be rolled back; resolve out of band (e.g. `CheckTxnStatus`) |
@@ -141,6 +143,7 @@ Verdict legend:
 | `ScanLimitExceededException` | **Never retry** — the same query will hit the same guard. Switch to `scanIterator()`/`scanPrefixIterator()` (constant memory), raise `options['maxScanRows']`, or page the range explicitly |
 | `HealthCheckException` | Probe result only — no user data was touched. Re-probe after an interval instead of tight-looping |
 | `TransactionConflictException` | **New transaction** — the transaction's writes were not applied |
+| `TransactionTooLargeException` | **Never retry the same write** — the rejected entry was not buffered and no RPC was sent, so the transaction is still usable; commit the smaller write set or start a new transaction with larger `maxTxn*` limits |
 | `DeadlockException` | **New transaction** |
 | `TxnAbortedByGcException` | **New transaction** — the start timestamp is permanently behind GC; retrying the same transaction cannot succeed. For reads that must outlive `gc_life_time`, register a service safe point first (`TxnKvClient::holdGcSafePoint()`) |
 | `LockWaitTimeoutException` | **New transaction** — the pessimistic locks were not acquired, the transaction cannot proceed |
@@ -291,7 +294,7 @@ only the timing it produces differs.
 | `Transaction::commit()` | **No** | **No** | See [Transaction commit and the new-transaction rule](#transaction-commit-and-the-new-transaction-rule) |
 | `Transaction::rollback()` | Yes | **With care** | Rolling back an already-rolled-back transaction is a semantic no-op, but the client rejects it: `rollback()` requires an `Active` transaction and raises `InvalidStateException` otherwise. Retry only while `getStatus()` is still `Active` — and never after an `UndeterminedCommitException`, where the transaction was closed on purpose and must not be rolled back |
 | `Transaction::heartbeat()` | Yes | Yes | It only extends the primary lock's TTL, so repeating it grants another TTL — the lock outlives a single call, and nothing else changes. It requires a **writable** transaction (`InvalidStateException` otherwise) and a **pessimistic** one: an optimistic transaction holds no primary lock, so TiKV answers with a `KeyError` that surfaces as a retryable `TxnRetryableException` |
-| `Transaction::getTxnId()`, `Transaction::getStartTs()`, `Transaction::getCommitTs()`, `Transaction::getStatus()`, `Transaction::isPessimistic()`, `Transaction::getPriority()`, `Transaction::getWriteSet()`, `Transaction::getReadSet()` | Yes | Yes | Local state getters; no cluster state is touched |
+| `Transaction::getTxnId()`, `Transaction::getStartTs()`, `Transaction::getCommitTs()`, `Transaction::getStatus()`, `Transaction::isPessimistic()`, `Transaction::getPriority()`, `Transaction::getWriteSet()`, `Transaction::getReadSet()`, `Transaction::getWriteSetSize()`, `Transaction::getWriteSetCount()` | Yes | Yes | Local state getters; no cluster state is touched |
 
 ### The CAS and putIfAbsent retry hazard
 
@@ -460,13 +463,13 @@ addresses on the RPC path just the same.
 
 | Method | Throws | Notes |
 |---|---|---|
-| `__construct` | `InvalidArgumentException` | `retryDeadlineMs < 0`, `lockWaitTimeMs < 0` |
-| `getTxnId()` / `getStartTs()` / `getCommitTs()` / `getStatus()` / `isPessimistic()` / `getPriority()` / `getWriteSet()` / `getReadSet()` | — | State getters, nothing thrown |
+| `__construct` | `InvalidArgumentException` | `retryDeadlineMs < 0`, `lockWaitTimeMs < 0`, a negative `maxTxnEntryCount`/`maxTxnEntrySize`/`maxTxnTotalSize`, or a `maxTxnBatchSize`/`maxTxnBatchCount` below 1 |
+| `getTxnId()` / `getStartTs()` / `getCommitTs()` / `getStatus()` / `isPessimistic()` / `getPriority()` / `getWriteSet()` / `getReadSet()` / `getWriteSetSize()` / `getWriteSetCount()` | — | State getters, nothing thrown |
 | `get(string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `RegionException`, `GrpcException` | Locks resolved inline; a lock hit surfaces as `TxnRetryableException` (subclass of `TiKvException`) consumed by the retry executor |
 | `batchGet(array)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `RegionException`, `GrpcException` | Per-region reads use the shared retry executor; locked keys are resolved and the read is retried before a terminal error is exposed |
 | `scan(string, string, int $limit = 0)` | `InvalidArgumentException`, `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `RegionException`, `GrpcException`, `ScanLimitExceededException` | Limit normalized/rejected ('Scan limit must be 0 or greater', max 10240). `limit: 0` reads the whole range up to `Transaction::MAX_SCAN_LIMIT` (10240) rows; a range with more rows throws `ScanLimitExceededException` instead of returning a truncated result (issue #440). A bounded scan returns at most `limit` rows, so a result whose count equals the limit may be truncated |
-| `set(string, string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Buffers the value locally; default pessimistic mode acquires the physical lock before returning, so lock errors surface here. A failed eager lock triggers best-effort cleanup rollback; if cleanup fails, the transaction remains active but unwritable and `rollback()` can be retried. Set `eagerPessimisticLocks => false` to defer locking to `commit()` |
-| `delete(string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Same eager pessimistic-lock behavior and failure cleanup as `set()`; the tombstone remains buffered until commit |
+| `set(string, string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `TransactionTooLargeException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Buffers the value locally; default pessimistic mode acquires the physical lock before returning, so lock errors surface here. A failed eager lock triggers best-effort cleanup rollback; if cleanup fails, the transaction remains active but unwritable and `rollback()` can be retried. Set `eagerPessimisticLocks => false` to defer locking to `commit()`. A write that exceeds `maxTxnEntryCount`/`maxTxnEntrySize`/`maxTxnTotalSize` throws before the lock RPC (issue #430) |
+| `delete(string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `TransactionTooLargeException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Same eager pessimistic-lock behavior and failure cleanup as `set()`; the tombstone remains buffered until commit. The same write-set limits apply, counting the key bytes only |
 | `commit()` | `InvalidStateException`, `TiKvException` (incl. [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php)), `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | See [double-apply section](#transactioncommit-and-double-apply); since issue #213 prewrite runs inside the shared retry executor, so region errors and resolved `locked` conflicts are auto-retried while deadlocks/conflicts still escape |
 | `rollback()` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Only an `Active` transaction may be rolled back; a failed RPC leaves it active but non-writable so rollback can be retried |
 | `heartbeat(?int $adviseLockTtlMs = null): int` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Extends the primary lock TTL |

@@ -23,6 +23,7 @@ use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\UndeterminedCommitException;
 use Psr\Log\LoggerInterface;
@@ -147,12 +148,56 @@ final class Transaction
          * the tracked lock expiry is never later than the real one (issue #429).
          */
         ?int $startedAtMs = null,
+        /**
+         * Maximum number of write-set entries; 0 = unlimited (issue #430).
+         */
+        private readonly int $maxTxnEntryCount = 0,
+        /**
+         * Maximum bytes of one write-set key+value entry; 0 = unlimited
+         * (issue #430).
+         */
+        private readonly int $maxTxnEntrySize = 0,
+        /**
+         * Maximum bytes of the whole write set; 0 = unlimited (issue #430).
+         */
+        private readonly int $maxTxnTotalSize = 0,
+        /**
+         * Maximum bytes of one prewrite/commit request per region (issue
+         * #430); defaults to client-go's `DefTxnCommitBatchSize`.
+         */
+        private readonly int $maxTxnBatchSize = TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
+        /**
+         * Maximum mutations/keys of one prewrite/commit request per region
+         * (issue #430); defaults to RawKV's `MAX_BATCH_LIMIT`.
+         */
+        private readonly int $maxTxnBatchCount = TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
         if ($this->maxScanLimit < 1) {
             throw new InvalidArgumentException('maxScanLimit must be >= 1');
+        }
+        foreach (
+            [
+                'maxTxnEntryCount' => $this->maxTxnEntryCount,
+                'maxTxnEntrySize' => $this->maxTxnEntrySize,
+                'maxTxnTotalSize' => $this->maxTxnTotalSize,
+            ] as $name => $limit
+        ) {
+            if ($limit < 0) {
+                throw new InvalidArgumentException($name . ' must be >= 0');
+            }
+        }
+        foreach (
+            [
+                'maxTxnBatchSize' => $this->maxTxnBatchSize,
+                'maxTxnBatchCount' => $this->maxTxnBatchCount,
+            ] as $name => $limit
+        ) {
+            if ($limit < 1) {
+                throw new InvalidArgumentException($name . ' must be >= 1');
+            }
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         if ($lockWaitTimeMs < 0) {
@@ -173,7 +218,12 @@ final class Transaction
                 ));
             }
         }
-        $this->state = new TransactionState($startedAtMs ?? $this->nowMs());
+        $this->state = new TransactionState(
+            startedAtMs: $startedAtMs ?? $this->nowMs(),
+            maxTxnEntryCount: $this->maxTxnEntryCount,
+            maxTxnEntrySize: $this->maxTxnEntrySize,
+            maxTxnTotalSize: $this->maxTxnTotalSize,
+        );
 
         $this->reader = new TxnReader(
             startTs: $this->startTs,
@@ -212,6 +262,8 @@ final class Transaction
             lockWaitTimeMs: $this->lockWaitTimeMs,
             optimisticLockTtlMs: $this->optimisticLockTtlMs,
             pessimisticLockTtlMs: $this->pessimisticLockTtlMs,
+            maxTxnBatchSize: $this->maxTxnBatchSize,
+            maxTxnBatchCount: $this->maxTxnBatchCount,
         );
     }
 
@@ -275,6 +327,27 @@ final class Transaction
     public function getReadSet(): array
     {
         return $this->state->getReadSet();
+    }
+
+    /**
+     * Bytes currently held by the write set (issue #430).
+     *
+     * Every entry contributes its key length plus its value length; a delete
+     * contributes the key length only. The value is maintained incrementally,
+     * so it can be logged or exported as a metric on every write without
+     * re-walking the write set.
+     */
+    public function getWriteSetSize(): int
+    {
+        return $this->state->getWriteSetSize();
+    }
+
+    /**
+     * Number of entries currently held by the write set (issue #430).
+     */
+    public function getWriteSetCount(): int
+    {
+        return $this->state->getWriteSetCount();
     }
 
     // ---------------------------------------------------------------
@@ -467,12 +540,18 @@ final class Transaction
 
     /**
      * @throws InvalidStateException
+     * @throws TransactionTooLargeException when the write would exceed a
+     *         configured transaction size limit (issue #430); thrown before
+     *         the eager pessimistic lock RPC, so nothing reaches TiKV
      * @throws TiKvException if the pessimistic transaction cannot obtain a
      *         write timestamp or acquire its lock
      */
     public function set(string $key, string $value): void
     {
         $this->state->ensureWritable();
+        // Reject an oversized write before the eager pessimistic lock below
+        // sends any RPC (issue #430).
+        $this->state->assertWriteAllowed($key, $value);
         $this->keepPrimaryLockAlive();
         $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, $value);
@@ -480,12 +559,18 @@ final class Transaction
 
     /**
      * @throws InvalidStateException
+     * @throws TransactionTooLargeException when the write would exceed a
+     *         configured transaction size limit (issue #430); thrown before
+     *         the eager pessimistic lock RPC, so nothing reaches TiKV
      * @throws TiKvException if the pessimistic transaction cannot obtain a
      *         write timestamp or acquire its lock
      */
     public function delete(string $key): void
     {
         $this->state->ensureWritable();
+        // Reject an oversized write before the eager pessimistic lock below
+        // sends any RPC (issue #430).
+        $this->state->assertWriteAllowed($key, null);
         $this->keepPrimaryLockAlive();
         $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, null);
