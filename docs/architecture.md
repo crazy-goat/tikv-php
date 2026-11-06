@@ -741,6 +741,17 @@ invalidation / leader switching and backoff. The batch wrappers use it since
 └─────────────────────┘
 ```
 
+An unbounded (`limit: 0`) `scan()` / `scanPrefix()` / `reverseScan()`
+executes the per-region sub-scans concurrently, in windows of at most
+`options['maxConcurrency']` regions (default 16): every send in a window is
+issued before the first wait, and the responses are merged in key order
+(descending for a reverse scan). A bounded scan (`limit > 0`) walks the
+regions sequentially. The reverse path enumerates the region chain
+bottom-up (PD's `ScanRegions` only enumerates forwards), walks it top-down,
+and concatenates the per-region rows in descending order. A region or
+transport error, or a region that split after enumeration, falls back to
+the sequential retrying path.
+
 ## Key Design Decisions
 
 ### 1. Synchronous API

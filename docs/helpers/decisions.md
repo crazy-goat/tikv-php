@@ -1008,6 +1008,23 @@ Two smaller rules the same fix settled:
   pushed up to 10 240 elements onto the VM stack per region; a foreach append
   costs nothing and reads the same.
 
+## An unbounded reverse scan fans out like the forward one, but every reverse shrink falls back (issue #555)
+
+`reverseScan(limit: 0)` reuses `RawKvScanner::scanSegmentsInParallel()` with
+`$reverse = true`: the clipped segments are already in descending order, every
+window dispatches its sends before awaiting, and the responses are
+concatenated in that order, so the descending result order is restored without
+a sort. The two directions differ in where a split-after-enumeration hole
+lands. A forward segment that shrank leaves `[freshEnd, segmentEnd)` *after*
+its coverage; only the final segment has the sequential continuation, so a
+non-final shrink falls back to the whole sequential page. A reverse segment
+that shrank leaves `[freshEnd, scanStart)` *above* its coverage, between it
+and the next-higher segment; appending a continuation would break the
+descending order, and `executeReverseScanForSubRange()` already knows how to
+splice that part in, so **every** reverse shrink falls back to the sequential
+page. The bounded reverse path (`limit > 0`) is deliberately unchanged and
+stays sequential.
+
 ## The parallel prewrite reports its aggregated failure, it does not throw it (issue #431, GAP-17)
 
 The prewrite fan-out (issue #291, PERF-04) collects every failing region into
