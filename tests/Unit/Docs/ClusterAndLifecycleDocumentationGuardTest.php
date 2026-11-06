@@ -86,6 +86,26 @@ final class ClusterAndLifecycleDocumentationGuardTest extends TestCase
         }
     }
 
+    public function testOperationsGuideUsesTheRealPdExceptionAccessors(): void
+    {
+        $section = $this->section(
+            $this->readFile('docs/operations.md'),
+            self::SECTION_HEADING,
+        );
+
+        self::assertStringContainsString(
+            'getErrorTypeName()',
+            $section,
+            'The section must name the PdException accessor that exists: getErrorTypeName().',
+        );
+
+        self::assertStringNotContainsString(
+            'getErrorType()',
+            $section,
+            'PdException has no getErrorType() method; use the public $errorType property or getErrorTypeName().',
+        );
+    }
+
     public function testAdvancedGuideDoesNotRecommendAWriteBasedHealthProbe(): void
     {
         $section = $this->section(

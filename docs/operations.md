@@ -1232,7 +1232,7 @@ public function getClusterId(): ?int;
 public function getMetrics(): MetricsInterface;
 ```
 
-**`healthCheck()`** issues one PD `GetMembers` RPC through
+**`healthCheck()`** issues a PD `GetMembers` RPC through
 `PdClientInterface::ping()` and returns the cluster ID PD reports. It touches no
 user data and cannot fail with a "no region" error.
 
@@ -1243,7 +1243,9 @@ user data and cannot fail with a "no region" error.
   `HealthCheckException` for every other failure (PD unreachable, a gRPC
   transport error, or a PD-level error in the response header). The underlying
   exception is available through `getPrevious()`; a `PdException` there names
-  the failing RPC and carries `getErrorType()`.
+  the failing RPC in its public `$method` property, carries the raw
+  `pdpb.ErrorType` in its public `$errorType` property and its enum name from
+  `getErrorTypeName()`.
 - **What it proves:** the client is open and can reach a configured PD endpoint
   that accepts `GetMembers`. A successful probe also records the current PD
   leader reported by PD (when its address matches the configured endpoints) and
@@ -1307,8 +1309,8 @@ operations, scans (including both iterators) and delete-range operations. The
 setting is **per client instance**, not per call, so it applies to all later
 operations until it is changed. `setColumnFamily()` returns the client and
 performs no validation; TiKV rejects an unknown column family on the first
-request that uses it. The setting lives on the client instance: a client created
-after `close()` starts at `''`, so re-apply it.
+request that uses it. The setting lives on the client instance: a new client
+instance starts at `''`, so re-apply it.
 
 Two exceptions to "every operation":
 

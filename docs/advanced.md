@@ -778,7 +778,7 @@ echo $metrics->getRetries('NotLeader');                 // retries tagged with t
 ### Health Checks
 
 Use the purpose-built `healthCheck()` instead of probing with a write and a
-delete. It issues one PD `GetMembers` RPC, touches no user data, and does not
+delete. It issues a PD `GetMembers` RPC, touches no user data, and does not
 depend on any region being available:
 
 ```php
