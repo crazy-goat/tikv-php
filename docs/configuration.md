@@ -1794,32 +1794,33 @@ $metrics = $client->getMetrics();     // returns whatever was injected
 
 The client maintains persistent gRPC channels:
 
-- Channels are reused across requests
-- Automatic connection management
-- No explicit connection pool configuration needed
+- Channel handles are cached and reused for the life of the client; ext-grpc's
+  persistent table can also reuse the underlying connection across PHP-FPM
+  requests served by the same worker
+- Connection management is automatic: a channel in a failed state is replaced
+  on the next request
+- The defaults need no configuration
 
 The pool caches 64 channels by default — the `maxChannels` cap of `GrpcClient`.
-The cap is **soft**: a channel that still carries calls is never closed,
+The cap is **soft**: eviction never closes a channel that still carries calls,
 because closing it would destroy those calls. When every cached channel is
 busy — a batch that fans out over more stores than the cap holds — the pool
-grows past the cap until the calls settle, and the overshoot is logged at
-warning level:
+grows past the cap while the calls are in flight, and the overshoot is logged
+at warning level:
 
 ```
 Channel cache at capacity but all channels are busy; exceeding soft cap
 ```
 
 That warning is the signal that the workload touches more stores than the cap
-allows. The pool does not shrink back on its own when the calls settle: the
-eviction removes one least-recently-used idle channel per new address, and a
-channel that stays unused is dropped after the idle TTL (10 minutes by
-default). `maxChannels` is a constructor argument of `GrpcClient`; a client
-built by `RawKvClient::create()` uses the default of 64, because the factory
-does not expose the knob yet.
+allows. The pool does not shrink back on its own when the calls settle: on a
+later cache miss the least-recently-used idle channels are evicted down to
+the cap, and a channel that stays unused is dropped after the idle TTL
+(10 minutes by default). `maxChannels` and `idleTtlMs` are `create()`
+options; the defaults are 64 and 600000 ms — see
+[Channel Pool](#channel-pool-maxchannels-idlettlms) and
+[Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model).
 
-The pool itself is configurable when the defaults do not fit: `maxChannels`
-caps the number of open channels and `idleTtlMs` sets how long an unused one
-is kept — see [Channel Pool](#channel-pool-maxchannels-idlettlms).
 ### Resource Limits
 
 Consider PHP's resource limits:
@@ -1830,20 +1831,26 @@ memory_limit = 256M
 max_execution_time = 300
 ```
 
-For long-running processes (workers, daemons):
+For long-running processes (workers, daemons), create the client once and
+reuse it for the life of the process. Closing and recreating it throws away
+the region cache and the channel handles. Reap idle channel handles from the
+worker tick instead:
 
 ```php
-// Periodic cleanup in long-running processes
+$client = RawKvClient::create($pdEndpoints, logger: $logger);
+
 while (true) {
     // Process work
-    
-    // Optional: Force reconnection periodically
+
+    // Drop channel handles that have been idle longer than idleTtlMs
     if ($iteration % 1000 === 0) {
-        $client->close();
-        $client = RawKvClient::create($pdEndpoints, logger: $logger);
+        $client->reapIdleChannels();
     }
 }
 ```
+
+See [Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model)
+for the cache defaults and the PHP-FPM guidance.
 
 ## Configuration Checklist
 

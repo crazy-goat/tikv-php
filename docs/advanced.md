@@ -17,46 +17,38 @@ Production-ready patterns and advanced usage of the TiKV PHP Client.
 
 #### Long-Running Processes
 
-For daemons, workers, and long-running scripts:
+For daemons, workers, and long-running scripts, create one client at startup
+and reuse it for the life of the process. Closing and recreating it throws
+away the region cache and the channel handles — and it does not necessarily
+give you fresh connections: ext-grpc keeps the underlying channel in its
+process-global persistent table (one per target), so only a channel created
+beyond that per-target bound is private to its handle and released with it.
+See
+[Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model).
 
 ```php
 class TiKvWorker
 {
     private RawKvClient $client;
-    private int $operationsCount = 0;
-    private const RECONNECT_AFTER = 10000;
-    
+
     public function __construct(array $pdEndpoints)
     {
-        $this->connect($pdEndpoints);
-    }
-    
-    private function connect(array $pdEndpoints): void
-    {
         $this->client = RawKvClient::create($pdEndpoints);
-        $this->operationsCount = 0;
     }
-    
+
     public function processJob($job): void
     {
-        // Periodic reconnection to prevent stale connections
-        if ($this->operationsCount >= self::RECONNECT_AFTER) {
-            $this->client->close();
-            $this->connect(['127.0.0.1:2379']);
-        }
-        
-        try {
-            // Process job
-            $this->client->put($job['key'], $job['value']);
-            $this->operationsCount++;
-        } catch (TiKvException $e) {
-            // Reconnect on error
-            $this->client->close();
-            $this->connect(['127.0.0.1:2379']);
-            throw $e;
-        }
+        // The client retries retryable errors internally and reopens a
+        // channel by itself; do not close it on every TiKvException.
+        $this->client->put($job['key'], $job['value']);
     }
-    
+
+    public function tick(): void
+    {
+        // Drop channel handles that have been idle longer than idleTtlMs.
+        $this->client->reapIdleChannels();
+    }
+
     public function shutdown(): void
     {
         $this->client->close();
@@ -64,48 +56,15 @@ class TiKvWorker
 }
 ```
 
-#### Connection Pooling (Simulated)
+#### Connection Pooling
 
-While the client doesn't have explicit connection pooling, gRPC channels are reused:
-
-```php
-class TiKvPool
-{
-    private array $clients = [];
-    private array $config;
-    
-    public function __construct(array $config)
-    {
-        $this->config = $config;
-    }
-    
-    public function acquire(): RawKvClient
-    {
-        // Return existing client or create new one
-        foreach ($this->clients as $client) {
-            // Simple round-robin
-            return $client;
-        }
-        
-        $client = RawKvClient::create($this->config['endpoints']);
-        $this->clients[] = $client;
-        return $client;
-    }
-    
-    public function release(RawKvClient $client): void
-    {
-        // In PHP, we typically don't release - just reuse
-    }
-    
-    public function closeAll(): void
-    {
-        foreach ($this->clients as $client) {
-            $client->close();
-        }
-        $this->clients = [];
-    }
-}
-```
+The client has an explicit gRPC channel pool: it caches one channel per
+address, uses `maxChannels` (default 64) as a soft cap, and evicts a channel
+that has been idle for `idleTtlMs` (default 600000 ms). A long-lived client
+reuses those channels across operations; you do not need to pool clients
+yourself. See
+[Channel Pool](configuration.md#channel-pool-maxchannels-idlettlms) and
+[Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model).
 
 ### Caching Strategies
 

@@ -292,7 +292,9 @@ Always close the client when done:
 $client->close();
 ```
 
-This closes gRPC connections and releases resources.
+This releases the client's channel handles, region cache and PD client; the
+underlying connection may stay warm in the process (see
+[Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model)).
 
 ## Transactional Operations (TxnKV)
 
