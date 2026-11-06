@@ -543,7 +543,11 @@ each other's caches. Store addresses are cached for 600 s plus up to 60 s of
 jitter; a `StoreNotMatch` region error or a retryable transport failure against
 a store evicts that store's entry early, so a TiKV pod that was rescheduled to
 a new address is found again on the next attempt instead of after the TTL
-(issue #247).
+(issue #247). The `closeChannel()` that follows a transport failure targets the
+store the failed attempt used — a replica-read follower, or the leader the
+attempt resolved — rather than whatever the region cache names as the leader
+when the error is handled, and it runs only for `UNAVAILABLE`, not for a
+`DEADLINE_EXCEEDED` on a slow but healthy connection (issue #248).
 
 `options['metrics']` is a **client-side** option and is always applied: it
 backs the client-side counters (region cache, retries). The transport's own

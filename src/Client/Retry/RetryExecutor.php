@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
@@ -227,7 +228,11 @@ final readonly class RetryExecutor
                             ]);
                         }
 
-                        if ($e instanceof GrpcException && $failedStoreId !== null) {
+                        if (
+                            $e instanceof GrpcException
+                            && $failedStoreId !== null
+                            && $this->indicatesBrokenConnection($e)
+                        ) {
                             // Resolve the channel address BEFORE dropping the
                             // store entry: resolveStoreAddress() reads the
                             // store cache, and invalidating first would force
@@ -713,6 +718,24 @@ final readonly class RetryExecutor
         $storeId = $provider();
 
         return is_int($storeId) && $storeId > 0 ? $storeId : null;
+    }
+
+    /**
+     * Whether a gRPC failure is evidence that the channel itself is broken
+     * (issue #248, REG-17).
+     *
+     * A `DEADLINE_EXCEEDED` on a slow but healthy connection is a retryable
+     * transport failure (issue #240), but tearing the channel down for it
+     * forces a re-handshake on every slow scan and adds connection churn
+     * under load. Only UNAVAILABLE says the connection could not be used at
+     * all; the issue's acceptance criteria make that the only status that
+     * closes a channel. The store-address invalidation is deliberately not
+     * gated by this: a stale address is worth re-resolving even after a
+     * timeout.
+     */
+    private function indicatesBrokenConnection(GrpcException $e): bool
+    {
+        return $e->grpcStatusCode === GrpcStatusCode::Unavailable->value;
     }
 
     /**

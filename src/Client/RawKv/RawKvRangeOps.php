@@ -202,12 +202,15 @@ final readonly class RawKvRangeOps
         string $endKey,
         string $columnFamily = '',
     ): CheckedGrpcFuture {
+        $targetStoreId = null;
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($startKey, $endKey, $columnFamily): CheckedGrpcFuture {
+            function () use ($startKey, $endKey, $columnFamily, &$targetStoreId): CheckedGrpcFuture {
                 // Resolve the region on every attempt so retries pick up cache
                 // invalidation and leader switching (issue #190).
                 $region = $this->regionResolver->getRegionInfo($startKey);
                 $this->assertRegionCoversRange($region, $startKey, $endKey);
+                $targetStoreId = $region->leaderStoreId;
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $request = new RawDeleteRangeRequest();
@@ -249,6 +252,9 @@ final readonly class RawKvRangeOps
             },
             $executor,
             $startKey,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -273,12 +279,15 @@ final readonly class RawKvRangeOps
         string $startKey,
         string $endKey,
     ): CheckedGrpcFuture {
+        $targetStoreId = null;
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($startKey, $endKey): CheckedGrpcFuture {
+            function () use ($startKey, $endKey, &$targetStoreId): CheckedGrpcFuture {
                 // Resolve the region on every attempt so retries pick up cache
                 // invalidation and leader switching (issue #190).
                 $region = $this->regionResolver->getRegionInfo($startKey);
                 $this->assertRegionCoversRange($region, $startKey, $endKey);
+                $targetStoreId = $region->leaderStoreId;
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $range = new KeyRange();
@@ -323,6 +332,9 @@ final readonly class RawKvRangeOps
             },
             $executor,
             $startKey,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 

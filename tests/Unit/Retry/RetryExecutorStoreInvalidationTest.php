@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -432,5 +433,98 @@ class RetryExecutorStoreInvalidationTest extends TestCase
             'the healthy leader entry must survive a follower failure',
         );
         $this->assertSame($followerNewAddress, $storeCache->get(2)?->getAddress());
+    }
+
+    /**
+     * Regression (issue #248, REG-17): the channel to close is the store the
+     * FAILED ATTEMPT targeted, not whatever the region cache's leader is when
+     * the catch block runs. A concurrent leader switch (or a range operation
+     * that targeted a different store) must not make the executor tear down
+     * the healthy new leader's channel.
+     */
+    public function testTransportFailureClosesTheTargetStoreNotTheCachedLeader(): void
+    {
+        $leaderAddress = 'leader:20160';
+        $targetOldAddress = 'target-old:20160';
+        $targetNewAddress = 'target-new:20160';
+
+        $storeCache = new StoreCache();
+        $storeCache->put($this->store($leaderAddress, 1));
+        $storeCache->put($this->store($targetOldAddress, 2));
+
+        // The cache still names store 1 as the leader, while the failed
+        // attempt targeted store 2.
+        $regionCache = new RegionCache();
+        $regionCache->put($this->region());
+        $resolver = new RegionResolver(
+            $this->pdClient,
+            $regionCache,
+            logger: new NullLogger(),
+            storeCache: $storeCache,
+        );
+
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls, [2 => $targetNewAddress]);
+
+        $this->grpc->expects($this->once())
+            ->method('closeChannel')
+            ->with($targetOldAddress);
+
+        $targetStoreId = 2;
+        $attempts = 0;
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$attempts, $resolver, $targetStoreId): string {
+                $attempts++;
+                $resolver->resolveStoreAddress($targetStoreId);
+                if ($attempts === 1) {
+                    throw new GrpcException('connection reset', GrpcStatusCode::Unavailable->value);
+                }
+
+                return 'ok';
+            },
+            $this->zeroSleepClassifier(),
+            targetStoreId: static fn (): int => $targetStoreId,
+        );
+
+        $this->assertSame('ok', $result);
+        $this->assertSame(1, $rpcCalls, 'only the failed target store is re-resolved through PD');
+        $this->assertSame(
+            $leaderAddress,
+            $storeCache->get(1)?->getAddress(),
+            'the cached leader store must not be invalidated by a failure of another store',
+        );
+        $this->assertSame($targetNewAddress, $storeCache->get(2)?->getAddress());
+    }
+
+    /**
+     * Regression (issue #248, REG-17): a DEADLINE_EXCEEDED is a retryable
+     * transport failure on a slow but healthy connection, so it must not tear
+     * the channel down and force a re-handshake.
+     */
+    public function testDeadlineExceededDoesNotCloseTheChannel(): void
+    {
+        [$storeCache, $regionCache, $resolver] = $this->cacheWithStaleAddress();
+
+        $rpcCalls = 0;
+        $this->installPdClientUsingStoreCache($storeCache, $rpcCalls);
+        $this->grpc->expects($this->never())->method('closeChannel');
+
+        $attempts = 0;
+        $result = $this->executor($regionCache, $resolver)->execute(
+            self::KEY,
+            function () use (&$attempts, $resolver): string {
+                $attempts++;
+                $resolver->resolveStoreAddress(self::STORE_ID);
+                if ($attempts === 1) {
+                    throw new GrpcException('deadline exceeded', GrpcStatusCode::DeadlineExceeded->value);
+                }
+
+                return 'ok';
+            },
+            $this->zeroSleepClassifier(),
+        );
+
+        $this->assertSame('ok', $result);
     }
 }

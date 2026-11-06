@@ -368,7 +368,9 @@ final readonly class RawKvBatch
         int|array $ttl,
         bool $forCas = false,
         string $columnFamily = '',
+        int &$targetStoreId = 0,
     ): GrpcFuture {
+        $targetStoreId = $region->leaderStoreId;
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchPutRequest();
@@ -406,7 +408,9 @@ final readonly class RawKvBatch
         array $keys,
         bool $forCas = false,
         string $columnFamily = '',
+        int &$targetStoreId = 0,
     ): GrpcFuture {
+        $targetStoreId = $region->leaderStoreId;
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchDeleteRequest();
@@ -743,6 +747,7 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $firstKey = $pairs !== [] ? $pairs[0]->getKey() : '';
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
@@ -751,6 +756,7 @@ final readonly class RawKvBatch
                 $firstKey,
                 $forCas,
                 $columnFamily,
+                &$targetStoreId,
             ): CheckedGrpcFuture {
                 $fresh = $this->resolveRegion($firstKey);
 
@@ -764,11 +770,21 @@ final readonly class RawKvBatch
                 }
 
                 if ($allInRegion) {
-                    $inner = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
+                    $inner = $this->executeBatchPutForRegionAsync(
+                        $fresh,
+                        $pairs,
+                        $ttl,
+                        $forCas,
+                        $columnFamily,
+                        $targetStoreId,
+                    );
                     return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $firstKey);
                 }
 
                 // Multi-region path: dispatch every sub-region's send up-front.
+                // A single target cannot describe the failed attempt; the
+                // executor falls back to the cached leader in that case.
+                $targetStoreId = 0;
                 $keys = array_map(fn(KvPair $p): string => $p->getKey(), $pairs);
                 $resolved = $this->regionResolver->batchResolveRegions($keys);
 
@@ -818,6 +834,9 @@ final readonly class RawKvBatch
             },
             $retryExecutor,
             $firstKey,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -831,6 +850,7 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $key = $keys[0] ?? '';
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
@@ -838,6 +858,7 @@ final readonly class RawKvBatch
                 $key,
                 $forCas,
                 $columnFamily,
+                &$targetStoreId,
             ): CheckedGrpcFuture {
                 $fresh = $this->resolveRegion($key);
 
@@ -851,11 +872,20 @@ final readonly class RawKvBatch
                 }
 
                 if ($allInRegion) {
-                    $inner = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
+                    $inner = $this->executeBatchDeleteForRegionAsync(
+                        $fresh,
+                        $keys,
+                        $forCas,
+                        $columnFamily,
+                        $targetStoreId,
+                    );
                     return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $key);
                 }
 
                 // Multi-region path: dispatch every sub-region's send up-front.
+                // A single target cannot describe the failed attempt; the
+                // executor falls back to the cached leader in that case.
+                $targetStoreId = 0;
                 $resolved = $this->regionResolver->batchResolveRegions($keys);
 
                 $groups = [];
@@ -896,6 +926,9 @@ final readonly class RawKvBatch
             },
             $retryExecutor,
             $key,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
