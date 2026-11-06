@@ -1254,10 +1254,17 @@ lock key cannot leak into the exception text. Pinned by
 `::testRegionErrorDuringCheckTxnStatusIsRetriedAndSuccessfulResponseDecides()`
 and `::testGenuineNotCommittedResponseStillRollsBack()`.
 
-Known follow-up: `CheckSecondaryLocksResponse.error` is still ignored by the
-async-commit recovery path, which can read a missing `locks` list as "rolled
-back" for the same reason. That RPC is outside this issue's `CheckTxnStatus`
-scope and needs its own fix.
+The async-commit secondary check follows the same rule.
+`CheckSecondaryLocksResponse.error` is rethrown as a retryable
+`TxnRetryableException`, and a `RegionException` while grouping the
+secondaries propagates to the caller's executor. Before, an errored response
+left `locks` empty, which `checkSecondaryLocks()` read as "rolled back" and
+resolved at commit ts 0; a grouping failure returned `null` and fell through to
+the same TTL/rollback path. Both are destructive for an undetermined
+async-commit transaction. Pinned by
+`OnePhaseAsyncCommitTest::testErroredCheckSecondaryLocksIsRetryableAndResolvesNothing()`,
+`::testRegionErrorWhileGroupingSecondariesPropagates()` and
+`::testGenuineRolledBackSecondaryResolvesAtCommitTsZero()`.
 
 ## Atomic mode and plain writes use different TiKV paths (#399)
 

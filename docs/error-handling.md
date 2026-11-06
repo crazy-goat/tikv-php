@@ -111,8 +111,12 @@ retryable `TxnRetryableException` (`BackoffType::TxnLock`), so the caller's
 retry executor asks again; reading the response's zeroed `commit_version` as
 "not committed" would send `KvResolveLock` at commit ts 0 and destroy a
 transaction whose outcome was never determined. Region errors and gRPC failures
-already propagate. Only a successful response may drive the commit/rollback
-decision (issue #224, TXN-19).
+already propagate. The async-commit secondary check follows the same rule:
+`checkSecondaryLocks()` rethrows a `KeyError` from a
+`CheckSecondaryLocksResponse` as a retryable `TxnRetryableException` and lets a
+region error from grouping propagate, so an empty `locks` list caused by a
+failed RPC is never read as "rolled back". Only a successful response may drive
+the commit/rollback decision (issue #224, TXN-19).
 
 ### What Each Class Means
 

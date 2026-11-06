@@ -384,8 +384,9 @@ final readonly class LockResolver
      *   (secondaries + primary) are resolved with ResolveLock at that ts.
      *
      * @return array{state: 'committed'|'rolledback'|'undecided', commitTs: int}|null
-     *         null when the lock carries no secondaries or a region error
-     *         occurs (caller falls back to the TTL-wait path).
+     *         null when the lock carries no secondaries. A region error while
+     *         grouping the secondaries and an errored response both propagate
+     *         to the caller's retry executor (issue #224).
      */
     private function checkSecondaryLocks(
         LockInfo $lock,
@@ -400,14 +401,14 @@ final readonly class LockResolver
             return null;
         }
 
-        try {
-            $keysByRegion = RegionGrouper::groupKeysByRegionBatch(
-                $secondaries,
-                $this->regionResolver,
-            );
-        } catch (RegionException) {
-            return null;
-        }
+        // A routing failure here must reach the caller's retry executor. It is
+        // not "the transaction is undetermined": falling through to the TTL
+        // path could roll back a transaction whose secondaries were never
+        // checked (issue #224).
+        $keysByRegion = RegionGrouper::groupKeysByRegionBatch(
+            $secondaries,
+            $this->regionResolver,
+        );
 
         $lockTs = (int) $lock->getLockVersion();
         // client-go initializes the derived commit ts with the primary
@@ -447,6 +448,25 @@ final readonly class LockResolver
                 notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
                 keyErrorsHandledByCaller: true,
             );
+
+            $error = $response->getError();
+            if ($error !== null) {
+                // A failed secondary check is not a state: an errored response
+                // leaves `locks` empty, which the count check below would read
+                // as "the transaction was rolled back" and resolve at commit
+                // ts 0 (issue #224, TXN-19). Retry through the caller's
+                // executor instead; only a successful response may decide.
+                $detail = KeyErrorDescriber::describe($error);
+                $this->logger->warning('CheckSecondaryLocks returned error, retrying', [
+                    'regionId' => $region->regionId,
+                    'lockTs' => $lockTs,
+                    'error' => $detail,
+                ]);
+                throw new TxnRetryableException(
+                    'CheckSecondaryLocks failed: ' . $detail,
+                    BackoffType::TxnLock,
+                );
+            }
 
             $responseLocks = $response->getLocks();
             if (count($responseLocks) < count($regionKeys)) {
