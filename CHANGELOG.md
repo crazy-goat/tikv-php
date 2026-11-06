@@ -60,6 +60,7 @@ policy now classifies as internal.
 
 ### Tests
 
+- `tests/Unit/TxnKv/TransactionTest.php` no longer answers every gRPC method with one blanket response. Every response stub names the RPC it serves in a `match` with a `default => throw`, and the rollback, heartbeat, pessimistic-lock, batch-get, get and scan tests record and assert the RPC method sequence, so a test that claims a specific RPC fails when a different one is sent instead of passing with the wrong response type. (#352)
 - `MemComparableCodec` is pinned to TiDB `codec.EncodeBytes`: known-answer vectors for `abc` and a two-byte key, group-boundary and seeded random round-trip and sort-order tests, and a marker-range rejection test. No production behaviour changes — #415 already implemented the scheme and wired the TxnKV region-key encode/decode (`PdClient::getRegion()`/`scanRegions()`, `RegionInfoMapper::fromProto()`). The issue quotes `6162630000000000f9` for `abc`; the correct marker is `fa` (pad = 5). (#252)
 
 ## [v0.9.0] - 2026-10-21
