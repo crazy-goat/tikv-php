@@ -1187,6 +1187,30 @@ class PdClientTest extends TestCase
         $this->assertNull($client->getClusterId());
     }
 
+    public function testExpectedClusterIdRejectsHeaderlessResponse(): void
+    {
+        $response = new GetRegionResponse();
+        $response->setRegion($this->makeRegion('', ''));
+        $response->setLeader($this->makePeer(1, 1));
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
+
+        try {
+            $client->getRegion('key');
+            $this->fail('Expected TiKvException for a response without a cluster-ID header');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID missing: expected 12345, response carried none',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertNull($client->getClusterId());
+    }
+
     public function testEstablishedClusterIdCannotBeOverwrittenByErrorString(): void
     {
         $response = $this->makeGetRegionResponse();

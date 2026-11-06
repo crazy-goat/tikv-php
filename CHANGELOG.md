@@ -25,11 +25,11 @@ policy now classifies as internal.
 
 ### Added
 
-- `options['expectedClusterId']` on `RawKvClient::create()` / `TxnKvClient::create()` (issue #308, SEC-05): a positive integer that every cluster ID reported by PD — in a response header or in a `mismatch cluster id, need X but got Y` gRPC error string — must equal. It is threaded through `ConnectionFactory` into `PdClient` and `TimestampOracle`. Default: unset, which keeps the historical learn-and-adopt behaviour; an explicitly `null` value is treated as absent, while a non-int, `0` or a negative value throws `InvalidArgumentException` at client creation. Documented in `docs/configuration.md` ("Cluster Identity Verification"). (#308)
+- `options['expectedClusterId']` on `RawKvClient::create()` / `TxnKvClient::create()` (issue #308, SEC-05): a positive integer that every cluster ID reported by PD — in a response header or in a `mismatch cluster id, need X but got Y` gRPC error string — must equal. It is threaded through `ConnectionFactory` into `PdClient` and `TimestampOracle`. Default: unset, which keeps the historical initial learn-and-adopt behaviour (the no-overwrite rule for an already established ID applies regardless of the option); an explicitly `null` value is treated as absent, while a non-int, `0` or a negative value throws `InvalidArgumentException` at client creation. Documented in `docs/configuration.md` ("Cluster Identity Verification"). (#308)
 
 ### Security
 
-- The client no longer adopts a cluster ID unconditionally. When `options['expectedClusterId']` is set, a mismatching header ID or error-string ID throws `TiKvException` before any data-path request, and a cluster ID that has already been established can no longer be overwritten by a value parsed out of a server-controlled gRPC error string. `TimestampOracle` enforces the same checks on the TSO path, so a rogue or misconfigured PD cannot silently redirect the client to another cluster. (#308)
+- The client can verify the cluster ID instead of adopting it unconditionally. When `options['expectedClusterId']` is set, a mismatching header ID, a missing cluster-ID header, or a mismatching error-string ID throws `TiKvException` before any data-path request, and a cluster ID that has already been established can no longer be overwritten by a value parsed out of a server-controlled gRPC error string (that no-overwrite rule applies even when the option is unset). `TimestampOracle` enforces the same checks on the TSO path, so a rogue or misconfigured PD cannot silently redirect the client to another cluster. (#308)
 
 ## [v0.10.0] - 2026-11-06
 

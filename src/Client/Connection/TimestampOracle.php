@@ -557,16 +557,25 @@ final class TimestampOracle
     /**
      * Learn the cluster ID from a TSO response header.
      *
-     * With an expected cluster ID configured (issue #308, SEC-05) a header
-     * naming another cluster throws before the ID is adopted and before a
-     * timestamp is served. The check also runs after the ID has been
-     * established, so a later response from an impostor cannot pass
-     * unnoticed.
+     * With an expected cluster ID configured (issue #308, SEC-05) a response
+     * without a cluster-ID header is a protocol violation: leaving the ID
+     * unset would let a server bypass the check simply by omitting the
+     * header. A header naming another cluster also throws before the ID is
+     * adopted and before a timestamp is served. The mismatch check runs
+     * after the ID has been established too, so a later response from an
+     * impostor cannot pass unnoticed.
      */
     private function learnClusterId(TsoResponse $response): void
     {
         $header = $response->getHeader();
         if ($header === null) {
+            if ($this->expectedClusterId !== null) {
+                throw new TiKvException(sprintf(
+                    'Cluster ID missing: expected %d, response carried none',
+                    $this->expectedClusterId,
+                ));
+            }
+
             return;
         }
 

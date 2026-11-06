@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Connection;
 
+use CrazyGoat\Proto\Keyspacepb\LoadKeyspaceResponse;
+use CrazyGoat\Proto\Pdpb\ResponseHeader;
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionBundle;
@@ -12,7 +14,9 @@ use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -57,6 +61,42 @@ class ConnectionFactoryTest extends TestCase
         );
 
         $this->assertSame($codec, $bundle->codec);
+    }
+
+    public function testApiV2ProbeRejectsMismatchingExpectedClusterId(): void
+    {
+        // The API V2 probe is a separate PdClient built before the final one;
+        // it must enforce the option before the keyspace is resolved.
+        $header = new ResponseHeader();
+        $header->setClusterId(999);
+
+        $response = new LoadKeyspaceResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                '127.0.0.1:2379',
+                'keyspacepb.Keyspace',
+                'LoadKeyspace',
+                $this->anything(),
+                LoadKeyspaceResponse::class,
+            )
+            ->willReturn($response);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Cluster ID mismatch: expected 12345, server reported 999');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: [
+                'apiVersion' => 2,
+                'keyspace' => 'tenant-a',
+                'grpcClient' => $grpc,
+                'expectedClusterId' => 12345,
+            ],
+        );
     }
 
     // ========================================================================

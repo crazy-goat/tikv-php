@@ -161,8 +161,10 @@ interface PdClientInterface
      * Probe PD connectivity and learn the cluster ID.
      *
      * Issues a `GetMembers` RPC and returns the learned cluster ID, or null
-     * if the response carried no cluster ID header. Suitable as a health
-     * check: no user data is looked up and no "no region" failure can occur.
+     * if the response carried no cluster ID header. When an expected cluster
+     * ID is configured, a response without a cluster ID header throws
+     * instead of returning null. Suitable as a health check: no user data is
+     * looked up and no "no region" failure can occur.
      *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD-level error

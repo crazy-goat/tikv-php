@@ -1056,6 +1056,90 @@ class TimestampOracleTest extends TestCase
         $this->assertSame([], $setCalls);
     }
 
+    public function testExpectedClusterIdRejectsHeaderlessTsoResponse(): void
+    {
+        $response = $this->makeTsoResponse(1715000000000, 5, 1);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $clusterId = null;
+        $setCalls = [];
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            function () use (&$clusterId): ?int {
+                return $clusterId;
+            },
+            function (int $id) use (&$clusterId, &$setCalls): void {
+                $clusterId = $id;
+                $setCalls[] = $id;
+            },
+            new NullLogger(),
+            expectedClusterId: 12345,
+        );
+
+        try {
+            $oracle->getTimestamp();
+            $this->fail('Expected TiKvException for a headerless TSO response');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID missing: expected 12345, response carried none',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertNull($clusterId);
+        $this->assertSame([], $setCalls);
+    }
+
+    public function testExpectedClusterIdIsCheckedOnLaterTsoResponseHeaders(): void
+    {
+        $matching = $this->makeTsoResponse(1715000000000, 5, 1);
+        $matchingHeader = new ResponseHeader();
+        $matchingHeader->setClusterId(12345);
+        $matching->setHeader($matchingHeader);
+
+        $mismatching = $this->makeTsoResponse(1715000000001, 6, 1);
+        $mismatchingHeader = new ResponseHeader();
+        $mismatchingHeader->setClusterId(999);
+        $mismatching->setHeader($mismatchingHeader);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls($matching, $mismatching);
+
+        $clusterId = null;
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            function () use (&$clusterId): ?int {
+                return $clusterId;
+            },
+            function (int $id) use (&$clusterId): void {
+                $clusterId = $id;
+            },
+            new NullLogger(),
+            expectedClusterId: 12345,
+        );
+
+        $this->assertSame([(1715000000000 << 18) + 5], $oracle->getTimestampBatch(1));
+        $this->assertSame(12345, $clusterId);
+
+        try {
+            $oracle->getTimestampBatch(1);
+            $this->fail('Expected TiKvException for a later mismatching TSO header');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 12345, server reported 999',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(12345, $clusterId);
+    }
+
     public function testExpectedClusterIdRejectsMismatchingErrorStringId(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
