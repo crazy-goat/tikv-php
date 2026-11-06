@@ -216,6 +216,19 @@ Optimistic Transaction                   Pessimistic Transaction
 └──────────────────────┘
 ```
 
+**Rollback semantics**: `rollback()` is a best-effort cleanup that fails
+closed. `KvBatchRollback` and `KVPessimisticRollback` responses are inspected
+variant by variant, and structured variants take precedence over TiKV's
+compatibility `retryable` string: `locked` is resolved and the rollback is
+retried, `abort` is fatal, `txn_not_found` / `txn_lock_not_found` confirm the
+rollback because the transaction or its lock is already gone (even when
+`retryable` is co-set), and a structured `conflict` is a fatal
+`TransactionConflictException` rather than a retry. A bare `retryable` string
+is retried; every other `KeyError` (including an empty payload) throws the
+base `TiKvException`, so the write set is not cleared and the transaction is
+not reported `RolledBack`; it stays active-but-unwritable so the caller (or
+the destructor) can retry the cleanup (issue #559).
+
 ### 3. TimestampOracle
 
 **Location**: `src/Client/Connection/TimestampOracle.php`
@@ -487,6 +500,17 @@ undetermined status is never cached. `resolveLocks()` takes several locks,
 checks each transaction once, and sends one `ResolveLock` per region and
 transaction with all keys of that transaction in the region.
 
+An errored status check is not a status. A region error, a gRPC failure or a
+`KeyError` in the `CheckTxnStatus` response is propagated as a retryable
+failure (`TxnRetryableException` with `BackoffType::TxnLock` for a `KeyError`)
+through the caller's retry executor, so the response's zeroed status fields can
+never be read as "not committed" and drive a rollback. The async-commit
+secondary check follows the same rule: a `KeyError` in the
+`CheckSecondaryLocks` response is retryable, and a region error while grouping
+the secondaries propagates instead of falling back to the TTL/rollback path.
+Only a successful response decides commit versus rollback (issue #224,
+TXN-19).
+
 ### 8. Retry System
 
 **Location**: `src/Client/Retry/` — `RetryExecutor` runs the loop; `RawKvClient::createRetryExecutor()` builds one per operation
@@ -523,6 +547,7 @@ enum BackoffType
 ```
 
 **Retry Budgets**:
+- **Scope**: one budget per logical operation (issue #223). `RetryExecutor::beginOperation()` returns an executor whose `execute()` calls share the same `maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline, and every client fan-out entry point (`scan()`/`reverseScan()`/`batchScan()`, the batch methods, transactional reads, `commit()`, `rollback()`, `deleteRange()`, `checksum()`) uses one for all its regions and pages. A later operation starts from zero, so a read-heavy transaction cannot starve its commit. The attempt cap stays per `execute()` call (one retry loop), so a wide fan-out does not exhaust it on one retry per region.
 - **General**: 20 seconds total backoff
 - **ServerBusy**: 60 seconds separate budget
 - **Wall-clock deadline**: 30 seconds per operation (configurable via `options['retryDeadlineMs']`; issues #294, #237). Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget), so the worst case is ≈ deadline + the duration of the last in-flight RPC (bounded only by the gRPC timeout option, not by the retry deadline).

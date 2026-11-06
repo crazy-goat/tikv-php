@@ -11,6 +11,7 @@ use CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksResponse;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
@@ -22,9 +23,13 @@ use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
@@ -497,6 +502,193 @@ class OnePhaseAsyncCommitTest extends TestCase
         $this->assertInstanceOf(ResolveLockRequest::class, $captured[1]);
         $this->assertSame(self::START_TS, (int) $captured[1]->getStartVersion());
         $this->assertSame(4600, (int) $captured[1]->getCommitVersion());
+    }
+
+    public function testErroredCheckSecondaryLocksIsRetryableAndResolvesNothing(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->regionCache->method('getByKey')->willReturn($region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($region);
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getLowResolutionTimestamp')->willReturn((1 << 42) | 999);
+
+        $status = new CheckTxnStatusResponse();
+        $status->setCommitVersion(0);
+        $status->setLockTtl(3000);
+
+        $keyError = new KeyError();
+        $keyError->setRetryable('secondary check failed');
+        $secondary = new CheckSecondaryLocksResponse();
+        $secondary->setError($keyError);
+
+        /** @var list<string> $methods */
+        $methods = [];
+        /** @var list<ResolveLockRequest> $resolves */
+        $resolves = [];
+        $queue = [
+            ['method' => 'KvCheckTxnStatus', 'response' => $status],
+            ['method' => 'KvCheckSecondaryLocks', 'response' => $secondary],
+        ];
+        $index = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+            ?object $request = null,
+        ) use (
+            &$methods,
+            &$resolves,
+            &$queue,
+            &$index,
+        ): object {
+            $methods[] = $method;
+            if ($request instanceof ResolveLockRequest) {
+                $resolves[] = $request;
+            }
+            $call = $queue[$index++] ?? null;
+            if ($call === null || $call['method'] !== $method) {
+                throw new \RuntimeException("Unexpected method at $index: $method");
+            }
+            return $call['response'];
+        });
+
+        $resolver = new LockResolver(
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            $this->pdClient,
+            self::START_TS,
+        );
+
+        try {
+            $resolver->resolveLock('p', $this->makeAsyncLock());
+            $this->fail('Expected an errored CheckSecondaryLocks to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+            $this->assertStringContainsString(
+                'CheckSecondaryLocks failed: retryable: secondary check failed',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvCheckSecondaryLocks'], $methods);
+        $this->assertSame([], $resolves, 'an errored secondary check must never drive a rollback');
+    }
+
+    public function testRegionErrorWhileGroupingSecondariesPropagates(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn (string $key): ?RegionInfo => $key === 'p' ? $region : null,
+        );
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($region);
+        $this->pdClient->method('scanRegions')->willThrowException(
+            new RegionException('RegionResolver', 'PD scan failed', errorKind: ErrorKind::RegionNotFound),
+        );
+        $this->pdClient->method('getLowResolutionTimestamp')->willReturn((1 << 42) | 999);
+
+        $status = new CheckTxnStatusResponse();
+        $status->setCommitVersion(0);
+        $status->setLockTtl(3000);
+
+        /** @var list<string> $methods */
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+        ) use (
+            &$methods,
+            $status,
+        ): object {
+            $methods[] = $method;
+            if ($method === 'KvCheckTxnStatus') {
+                return $status;
+            }
+            throw new \RuntimeException("Unexpected method: $method");
+        });
+
+        $resolver = new LockResolver(
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            $this->pdClient,
+            self::START_TS,
+        );
+
+        try {
+            $resolver->resolveLock('p', $this->makeAsyncLock());
+            $this->fail('Expected the grouping region error to propagate');
+        } catch (RegionException $e) {
+            $this->assertSame(ErrorKind::RegionNotFound, $e->errorKind);
+        }
+
+        $this->assertSame(
+            ['KvCheckTxnStatus'],
+            $methods,
+            'a grouping failure must not fall through to a secondary check or a rollback',
+        );
+    }
+
+    public function testGenuineRolledBackSecondaryResolvesAtCommitTsZero(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->regionCache->method('getByKey')->willReturn($region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($region);
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getLowResolutionTimestamp')->willReturn((1 << 42) | 999);
+
+        $status = new CheckTxnStatusResponse();
+        $status->setCommitVersion(0);
+        $status->setLockTtl(3000);
+
+        // No locks returned: every secondary is gone, so the transaction was
+        // rolled back (commit_ts 0).
+        $secondary = new CheckSecondaryLocksResponse();
+
+        /** @var list<ResolveLockRequest> $resolves */
+        $resolves = [];
+        $queue = [
+            ['method' => 'KvCheckTxnStatus', 'response' => $status],
+            ['method' => 'KvCheckSecondaryLocks', 'response' => $secondary],
+            ['method' => 'KvResolveLock', 'response' => new ResolveLockResponse()],
+        ];
+        $index = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+            ?object $request = null,
+        ) use (
+            &$resolves,
+            &$queue,
+            &$index,
+        ): object {
+            if ($request instanceof ResolveLockRequest) {
+                $resolves[] = $request;
+            }
+            $call = $queue[$index++] ?? null;
+            if ($call === null || $call['method'] !== $method) {
+                throw new \RuntimeException("Unexpected method at $index: $method");
+            }
+            return $call['response'];
+        });
+
+        $resolver = new LockResolver(
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            $this->pdClient,
+            self::START_TS,
+        );
+        $resolver->resolveLock('p', $this->makeAsyncLock());
+
+        $this->assertCount(1, $resolves);
+        $this->assertSame(0, (int) $resolves[0]->getCommitVersion());
+        $this->assertSame(self::START_TS, (int) $resolves[0]->getStartVersion());
     }
 
     private function makeUndecidedStatusResponse(): CheckTxnStatusResponse
