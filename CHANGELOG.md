@@ -23,9 +23,18 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- **[DOC-21]**: Monolog is now declared as a **dev-only** dependency of the examples. `README.md` states that the client itself only depends on `psr/log` and that any PSR-3 `LoggerInterface` works, and names `composer require monolog/monolog` for the snippets that use it; the Complete Example uses `NullLogger` instead, so it runs with the published package alone. `examples/logging.php` exits with an actionable message instead of `Class "Monolog\Logger" not found` when Monolog is not installed. (#387)
+- **[DOC-31]**: `docs/operations.md` now has a **Cluster and lifecycle** section documenting the cluster-level and client-local methods of `RawKvClient`: `healthCheck()`, `getClusterId()`, `getMetrics()`, `setColumnFamily()` / `getColumnFamily()` and `isAtomicForCAS()`, with their signatures and return values, and the `HealthCheckException` / `ClientClosedException` contract of `healthCheck()`. It states that `healthCheck()` issues a PD `GetMembers` RPC and touches no user data, what that proves (the client is open and PD is reachable; the probe also records the PD leader and caches the cluster ID) and what it does not prove (the TiKV data path: stores, regions, reads and writes), and it pairs the probe with a shallow read when a readiness check must cover the data path. The column family is documented as a per-client-instance setting that applies to all subsequent key/value operations, where `''` selects TiKV's default column family; `checksum()` and `ingest()` always use the default, API V2 clients ignore the setting, and the iterators capture it when they are created. `docs/advanced.md` replaces the write-based `TiKvHealthChecker` example with a `healthCheck()` example, so the guide no longer recommends continuous write/delete traffic as a health probe. (#397)
+
 ### Fixed
 
 - `RetryExecutor` and `RegionErrorHandler::check()` now invalidate the cached region only when an error says the routing information is stale — `EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized` and `NotLeader` without a usable hint. Non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, `StaleCommand`, `DataIsNotReady`, `ReadIndexNotReady`, `ProposalInMergingMode`, `MaxTimestampNotSynced`, `MismatchPeerId`, `BucketVersionNotMatch`, `UndeterminedResult`) keep the cached region on both paths, so a busy leader no longer forces a PD `GetRegion` on every attempt. An unclassified error still invalidates conservatively. The `regionInvalidated()` reason now names the triggering kind: `retry_region_error:<kind>` for a classified routing error dropped by the retry executor (plain `retry_region_error` when the kind is unknown), and `region_error:<kind>` for the handler's own drop (plain `region_error` when the kind is unknown). (#245)
+
+### Tests
+
+- The negative-scan-limit guard is now pinned to reject the call before the **scan RPC**: `RawKvClient::scan()`, `reverseScan()` and `scanPrefix()` (and their `RawKvScanner` counterparts) throw `InvalidArgumentException` before any PD or store RPC, and `Transaction::scan()` throws before the transactional scan RPC (a pessimistic transaction refreshes its read timestamp first, which the new test pins). `scan(limit: 0)` is pinned to send `MAX_SCAN_LIMIT` (10240) as the per-page wire budget. No production behaviour changes — the guard shipped in v0.4.0 (#332); this adds the missing regression coverage for the rejection ordering. (#310)
 
 ## [v0.10.0] - 2026-11-06
 

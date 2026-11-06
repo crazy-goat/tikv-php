@@ -14,8 +14,9 @@ Complete reference for all TiKV RawKV operations supported by the PHP client.
 8. [Error Handling](#error-handling)
 9. [Limits](#limits)
 10. [Connection lifecycle and process model](#connection-lifecycle-and-process-model)
-11. [Best Practices](#best-practices)
-12. [Bulk Import (SST Ingest)](#bulk-import-sst-ingest)
+11. [Cluster and lifecycle](#cluster-and-lifecycle)
+12. [Best Practices](#best-practices)
+13. [Bulk Import (SST Ingest)](#bulk-import-sst-ingest)
 
 ## Basic CRUD Operations
 
@@ -394,10 +395,12 @@ foreach ($client->scanPrefixIterator('user:') as $key => $value) {
 ### Iterating Large Ranges
 
 A bounded `scan()` / `scanPrefix()` / `reverseScan()` call accepts at most
-`RawKvClient::MAX_SCAN_LIMIT` (10240) rows per RPC. Passing `limit: 0` does
-**not** cap the result at 10240: the client pages internally (10240 rows per
-RPC) and returns the complete range. That is convenient, but the whole result
-is still buffered in one PHP array, so an unbounded scan is guarded by
+`RawKvClient::MAX_SCAN_LIMIT` (10240) rows per RPC. A negative limit is
+rejected with `InvalidArgumentException` before any RPC is sent. Passing
+`limit: 0` does **not** cap the result at 10240: the client pages internally
+(10240 rows per RPC) and returns the complete range. That is convenient, but
+the whole result is still buffered in one PHP array, so an unbounded scan is
+guarded by
 `options['maxScanRows']` (default `RawKvClient::DEFAULT_MAX_SCAN_ROWS` =
 100000) — exceeding it throws `ScanLimitExceededException` rather than
 silently truncating. The guard is evaluated per internally fetched page
@@ -1034,7 +1037,7 @@ The client enforces these limits. The constants are public on `RawKvClient`.
 | Maximum key size | 8 MiB (8388608 bytes) | `MAX_KEY_SIZE` | Client, before any RPC. Throws `InvalidArgumentException` |
 | Maximum value size | 4 MiB (4194304 bytes) | `MAX_VALUE_SIZE` | Client, before any RPC. Throws `InvalidArgumentException` |
 | Minimum key size | 1 byte | `MIN_KEY_SIZE` | An empty key throws `InvalidArgumentException` |
-| Maximum scan limit | 10240 rows per RPC | `MAX_SCAN_LIMIT` | Client. See [Scan](#scan) |
+| Maximum scan limit | 10240 rows per RPC | `MAX_SCAN_LIMIT` | Client, before any RPC. A negative limit throws `InvalidArgumentException`; `limit: 0` means the whole range, paged internally. See [Scan](#scan) |
 | Keys per batch RPC | 512 | `MAX_BATCH_LIMIT` | Automatic split. No error |
 | Bytes per batch RPC | 16384 bytes (16 KiB) | `MAX_BATCH_GET_SIZE`, `MAX_BATCH_PUT_SIZE`, `MAX_BATCH_DELETE_SIZE` | Automatic split. No error |
 | Batch fan-out deadline | 60000 ms | `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS` | Client, `batchDeadlineMs`. Throws `BatchDeadlineExceededException`. `0` disables it |
@@ -1211,6 +1214,132 @@ the contract:
   owns and closed its transport cannot roll them back, so the locks stay
   until their TTL expires. With a shared transport the rollback may still
   reach TiKV, but relying on that is fragile.
+
+## Cluster and lifecycle
+
+These methods report on the cluster the client is connected to and configure the
+client instance. None of them touches user data. `healthCheck()` is the only one
+that sends an RPC and the only one that can throw a library exception; the rest
+are local accessors and setters that throw nothing. `TxnKvClient` has
+the same three cluster-level methods (`healthCheck()`, `getClusterId()` and
+`getMetrics()`); the column-family and atomic-mode settings are RawKV-only.
+
+### Health and cluster identity
+
+**Signatures:**
+
+```php
+public function healthCheck(): ?int;
+public function getClusterId(): ?int;
+public function getMetrics(): MetricsInterface;
+```
+
+**`healthCheck()`** issues a PD `GetMembers` RPC through
+`PdClientInterface::ping()` and returns the cluster ID PD reports. It touches no
+user data and cannot fail with a "no region" error.
+
+- **Returns:** the cluster ID, or `null` when PD answered but the response
+  carried no cluster-ID header ("reachable, identity unknown"). Both are a
+  successful probe.
+- **Throws:** `ClientClosedException` when the client has been closed, and
+  `HealthCheckException` for every other failure (PD unreachable, a gRPC
+  transport error, or a PD-level error in the response header). The underlying
+  exception is available through `getPrevious()`; a `PdException` there names
+  the failing RPC in its public `$method` property, carries the raw
+  `pdpb.ErrorType` in its public `$errorType` property and its enum name from
+  `getErrorTypeName()`.
+- **What it proves:** the client is open and can reach a configured PD endpoint
+  that accepts `GetMembers`. A successful probe also records the current PD
+  leader reported by PD (when its address matches the configured endpoints) and
+  caches the cluster ID, so subsequent PD and TSO RPCs target that leader.
+- **What it does not prove:** anything about the TiKV data path. It does not
+  contact a store, resolve a region, or read/write a key, so it can stay green
+  while every data operation fails — a down store, a missing region leader, a
+  degraded write path. It is a PD readiness probe, not a TiKV data-path probe.
+
+If a readiness check must also cover the data path, pair the PD probe with one
+shallow read of a key your deployment maintains:
+
+```php
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+
+try {
+    $client->healthCheck();                            // PD is reachable
+    $healthy = $client->get('health:canary') !== null; // region + store are reachable
+} catch (TiKvException $e) {
+    // HealthCheckException, ClientClosedException, or a data-path failure
+    $healthy = false;
+}
+```
+
+The read exercises region resolution and the read path; it still does not prove
+that writes work. Do not use a synthetic write/delete as a probe: at probe
+frequency it adds continuous write traffic to the cluster, and it fails whenever
+the write path is degraded even though the cluster is reachable. Monitor the
+write path through your application's own traffic and the counters exposed by
+`getMetrics()`.
+
+**`getClusterId()`** returns the cluster ID the client has already learned, or
+`null` when it has not learned one yet. It is a cached accessor: it sends no RPC
+and throws nothing. The ID is learned from the first PD response whose header
+carries it, or explicitly by `healthCheck()`. After `close()` it returns `null`
+because closing the PD client resets the cache.
+
+**`getMetrics()`** returns the metrics backend in use: the instance passed via
+`options['metrics']`, or the no-op default (`NoOpMetrics`) when none was
+configured. It is that same object, not a copy, so an `InMemoryMetrics` instance
+can be inspected after operations. It sends no RPC, throws nothing, and remains
+callable after `close()`.
+
+### Column family and atomic mode
+
+**Signatures:**
+
+```php
+public function setColumnFamily(string $cf): self;    // fluent, returns the client
+public function getColumnFamily(): string;
+public function setAtomicForCAS(bool $enabled): self; // see Atomic Operations
+public function isAtomicForCAS(): bool;
+```
+
+**Column family.** `setColumnFamily()` sets the TiKV column family of the
+client instance and `getColumnFamily()` reads it back. `''` — the default —
+means TiKV's default column family; the client does not send a `cf` field for an
+empty string. Any other value is sent verbatim as the `cf` field of every
+subsequent key/value request of that client: single-key CRUD, CAS, the batch
+operations, scans (including both iterators) and delete-range operations. The
+setting is **per client instance**, not per call, so it applies to all later
+operations until it is changed. `setColumnFamily()` returns the client and
+performs no validation; TiKV rejects an unknown column family on the first
+request that uses it. The setting lives on the client instance: a new client
+instance starts at `''`, so re-apply it.
+
+Two exceptions to "every operation":
+
+- `checksum()` and `ingest()` have no column-family parameter and always
+  operate on the default column family.
+- With `options['apiVersion' => 2]` the transport clears the `cf` field on every
+  RawKV request (API V2 treats an explicit column family as deprecated and uses
+  the keyspace's default), so `setColumnFamily()` has no effect on an API V2
+  client.
+
+`scanIterator()` and `scanPrefixIterator()` capture the column family when they
+are created; after changing it, create a new iterator. `TxnKvClient` has no
+column-family setting: transactions use the default column family.
+
+**Atomic mode.** `setAtomicForCAS()` / `isAtomicForCAS()` are the same kind of
+client-instance switch; the flag is off by default and `compareAndSwap()` /
+`putIfAbsent()` require it. See
+[Atomic Mode](#atomic-mode-setatomicforcas--isatomicforcas) for the full scope.
+
+```php
+$client->setColumnFamily('write');   // all later key/value operations
+$client->put('user:1', $payload);    // RawPut carries cf = 'write'
+$cf = $client->getColumnFamily();    // 'write'; '' is the default CF
+
+$client->setColumnFamily('');        // back to TiKV's default CF
+$atomic = $client->isAtomicForCAS(); // false unless setAtomicForCAS(true)
+```
 
 ## Best Practices
 
