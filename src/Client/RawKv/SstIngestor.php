@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -47,6 +48,8 @@ final readonly class SstIngestor
         private TimeoutConfig $timeoutConfig,
         private LoggerInterface $logger,
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
     ) {
     }
 
@@ -387,7 +390,10 @@ final readonly class SstIngestor
         SSTMeta $sstMeta,
     ): void {
         $ingestRequest = new IngestRequest();
-        $ingestRequest->setContext(RegionContextFactory::fromRegionInfo($region));
+        $ingestRequest->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+        ));
         $ingestRequest->setSst($sstMeta);
 
         /** @var IngestResponse $ingestResponse */

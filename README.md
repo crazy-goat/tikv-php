@@ -414,7 +414,7 @@ transaction's internal retry loop, default
 `Transaction::DEFAULT_RETRY_DEADLINE_MS`), `gcSafePointValidation`,
 `replicaRead` and `tsoPoolSize`. The per-transaction options
 (`pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit`,
-`eagerPessimisticLocks` and `lockWaitTimeMs`) belong to
+`eagerPessimisticLocks`, `lockWaitTimeMs` and `requestContext`) belong to
 `TxnKvClient::begin()`, not to `create()`.
 
 #### Reads and writes
@@ -458,7 +458,7 @@ $txn = $txnClient->beginOptimistic();
 
 Both are thin wrappers over `begin()`: they accept the same options
 (`priority`, `enable1Pc`, `enableAsyncCommit`, `eagerPessimisticLocks`,
-`lockWaitTimeMs`) and go through the same option handling. `lockWaitTimeMs`
+`lockWaitTimeMs`, `requestContext`) and go through the same option handling. `lockWaitTimeMs`
 matters in the pessimistic mode only — an optimistic transaction takes no
 pessimistic lock, so it never waits for one.
 
@@ -935,6 +935,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `maxConcurrency` | Maximum number of in-flight requests in the batch and range fan-outs |
 | `maxScanRows` | Row cap for an unbounded (`limit: 0`) scan; exceeding it throws `ScanLimitExceededException` |
 | `replicaRead` | A `ReplicaReadPolicy` object — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` ([Replica Reads](docs/configuration.md#replica-reads)) |
+| `requestContext` | A `RequestContextOptions` object — isolation level, not-fill-cache, max execution duration, request source, resource group tag/name and busy threshold applied to every request ([Request Context Controls](docs/configuration.md#request-context-controls-issue-426-gap-12)) |
 | `batchCommands` | RawKV experimental RPC multiplexing over the `BatchCommands` stream |
 | `apiVersion` / `keyspace` | API V2 with a named keyspace |
 | `grpc` | gRPC channel arguments (keepalive, message sizes) |
@@ -959,7 +960,9 @@ locking at write time — the default — or at commit time), `lockWaitTimeMs`
 `maxTxnEntrySize` / `maxTxnTotalSize` (write-set bounds, each 0 = unlimited),
 `maxTxnBatchSize` (bytes per prewrite/commit request per region, default
 16384) and `maxTxnBatchCount` (mutations/keys per prewrite/commit request per
-region, default 512).
+region, default 512). `requestContext` is a `RequestContextOptions`
+object that replaces the client-level `options['requestContext']` for this
+transaction only; pass `null` to disable the client-level controls.
 
 Two settings are methods on the client rather than options:
 `setAtomicForCAS()` / `isAtomicForCAS()` (see
@@ -1193,6 +1196,7 @@ the issue is still open.
 
 - ⬜ **The remaining gRPC channel parameters** — compression, the HTTP/2 initial window size and `keepalive_permit_without_calls` are still hard-coded (the message sizes and the keepalive times are configurable already) ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
+- ✅ **The remaining `kvrpcpb.Context` control fields** — isolation level, not-fill-cache, max execution duration, request source and resource group ([#426](https://github.com/crazy-goat/tikv-php/issues/426))
 - ⬜ **Resource control and resource groups** — per-request resource-group tags ([#427](https://github.com/crazy-goat/tikv-php/issues/427))
 - ⬜ **Background region-cache refresh and region preloading** ([#425](https://github.com/crazy-goat/tikv-php/issues/425))
 - ⬜ **Store health checking and failover to healthy replicas** ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
@@ -1200,7 +1204,6 @@ the issue is still open.
 - ⬜ **`RawBatchScan` RPC for multi-range scans** — `batchScan()` is a client-side loop today ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
 - ⬜ **Explicit key-locking API for pessimistic transactions** ([#436](https://github.com/crazy-goat/tikv-php/issues/436))
 - ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
-- ⬜ **The remaining `kvrpcpb.Context` control fields** — isolation level, not-fill-cache, request source ([#426](https://github.com/crazy-goat/tikv-php/issues/426))
 
 ## Contributing
 

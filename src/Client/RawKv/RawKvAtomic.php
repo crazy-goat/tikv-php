@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -29,6 +30,8 @@ final readonly class RawKvAtomic
         private TimeoutConfig $timeoutConfig,
         private LoggerInterface $logger = new NullLogger(),
         private ?SlowLogConfig $slowLogConfig = null,
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
     ) {
     }
 
@@ -67,7 +70,7 @@ final readonly class RawKvAtomic
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawCASRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
             $request->setKey($key);
             $request->setValue($newValue);
 

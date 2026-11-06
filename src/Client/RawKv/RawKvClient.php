@@ -37,6 +37,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
@@ -174,6 +175,18 @@ final class RawKvClient
     public const OPT_REPLICA_READ = 'replicaRead';
 
     /**
+     * options[] key for the optional `kvrpcpb.Context` control fields
+     * (issue #426, GAP-12): a
+     * {@see \CrazyGoat\TiKV\Client\Region\RequestContextOptions} instance
+     * carrying the isolation level, not-fill-cache flag, server-side
+     * max-execution duration, request source, resource group tag, busy
+     * threshold and resource group name applied to every request this
+     * client sends. Omitted or null (the default) applies none of them and
+     * leaves the serialized Context unchanged.
+     */
+    public const OPT_REQUEST_CONTEXT = 'requestContext';
+
+    /**
      * options[] key for the maximum number of rows an unbounded scan
      * (`limit: 0`) may return before throwing
      * {@see \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException}
@@ -278,6 +291,7 @@ final class RawKvClient
             batchCommands: self::resolveBatchCommands($options),
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            requestContext: self::resolveRequestContext($options),
         );
     }
 
@@ -337,6 +351,12 @@ final class RawKvClient
          * Null itself also means passthrough for a hand-built client.
          */
         private readonly ?CodecInterface $codec = null,
+        /**
+         * Optional Context control fields applied to every request
+         * (issue #426). Null (the default) leaves the serialized Context
+         * byte-for-byte unchanged.
+         */
+        private readonly ?RequestContextOptions $requestContext = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -376,6 +396,7 @@ final class RawKvClient
             $this->logger,
             $this->slowLogConfig,
             $this->replicaReadPolicy,
+            requestContext: $this->requestContext,
         );
         $this->atomic = $atomic ?? new RawKvAtomic(
             $grpc,
@@ -383,6 +404,7 @@ final class RawKvClient
             $timeoutConfig,
             $this->logger,
             $this->slowLogConfig,
+            requestContext: $this->requestContext,
         );
         $this->batch = $batch ?? new RawKvBatch(
             $grpc,
@@ -398,6 +420,7 @@ final class RawKvClient
             $batchCommands ? new BatchCommandsMultiplexer(
                 GrpcBatchCommandsTransport::forClient($grpc),
             ) : null,
+            requestContext: $this->requestContext,
         );
         $this->scanner = $scanner ?? new RawKvScanner(
             $pdClient,
@@ -414,6 +437,7 @@ final class RawKvClient
             $this->replicaReadPolicy,
             $maxScanRows,
             metrics: $metrics,
+            requestContext: $this->requestContext,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -428,6 +452,7 @@ final class RawKvClient
             $this->retryDeadlineMs,
             $this->maxConcurrency,
             metrics: $metrics,
+            requestContext: $this->requestContext,
         );
         $this->ingestor = new SstIngestor(
             $grpc,
@@ -436,6 +461,7 @@ final class RawKvClient
             $timeoutConfig,
             $this->logger,
             $this->maxConcurrency,
+            $this->requestContext,
         );
     }
 
@@ -674,6 +700,32 @@ final class RawKvClient
         }
 
         return $policy;
+    }
+
+    /**
+     * Resolve options['requestContext'] (see OPT_REQUEST_CONTEXT) for
+     * create(): the optional Context control fields applied to every
+     * request (issue #426). Must be a RequestContextOptions instance when
+     * set; absent or null means "apply none".
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRequestContext(array $options): ?RequestContextOptions
+    {
+        if (!array_key_exists(self::OPT_REQUEST_CONTEXT, $options) || $options[self::OPT_REQUEST_CONTEXT] === null) {
+            return null;
+        }
+
+        $requestContext = $options[self::OPT_REQUEST_CONTEXT];
+        if (!$requestContext instanceof RequestContextOptions) {
+            throw new InvalidArgumentException(sprintf(
+                "options['requestContext'] must be a %s, %s given",
+                RequestContextOptions::class,
+                get_debug_type($requestContext),
+            ));
+        }
+
+        return $requestContext;
     }
 
     /**

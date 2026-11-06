@@ -7,6 +7,8 @@ namespace CrazyGoat\TiKV\Client\Region;
 use Closure;
 use CrazyGoat\Proto\Kvrpcpb\CommandPri;
 use CrazyGoat\Proto\Kvrpcpb\Context;
+use CrazyGoat\Proto\Kvrpcpb\IsolationLevel;
+use CrazyGoat\Proto\Kvrpcpb\ResourceControlContext;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
@@ -51,6 +53,10 @@ final class RegionContextFactory
      *     (issue #336). Normal (0) is the proto3 default and is therefore
      *     not serialized — a request that never had a priority keeps its
      *     original wire bytes.
+     * @param RequestContextOptions|null $requestContext Optional control
+     *     fields (isolation level, not-fill-cache, max execution duration,
+     *     request source, resource group) applied on top of the routing
+     *     Context (issue #426). Null applies none of them.
      */
     public static function resolveTarget(
         RegionInfo $region,
@@ -59,10 +65,11 @@ final class RegionContextFactory
         ?int $excludedStoreId = null,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?RequestContextOptions $requestContext = null,
     ): ReplicaReadTarget {
         $leader = self::leaderPeer($region);
         $leaderTarget = new ReplicaReadTarget(
-            self::buildContext($region, $leader, false, $policy->staleRead, $codec, $priority),
+            self::buildContext($region, $leader, false, $policy->staleRead, $codec, $priority, $requestContext),
             $region->leaderStoreId,
         );
 
@@ -100,7 +107,15 @@ final class RegionContextFactory
         $peerInfo = $candidates[random_int(0, count($candidates) - 1)];
 
         return new ReplicaReadTarget(
-            self::buildContext($region, self::peerFromInfo($peerInfo), true, $policy->staleRead, $codec, $priority),
+            self::buildContext(
+                $region,
+                self::peerFromInfo($peerInfo),
+                true,
+                $policy->staleRead,
+                $codec,
+                $priority,
+                $requestContext,
+            ),
             $peerInfo->storeId,
         );
     }
@@ -112,11 +127,14 @@ final class RegionContextFactory
      *     (issue #336). Normal (0) is the proto3 default and is not
      *     serialized, so a request without a priority keeps its original
      *     wire bytes.
+     * @param RequestContextOptions|null $requestContext Optional control
+     *     fields applied on top of the routing Context (issue #426).
      */
     public static function fromRegionInfo(
         RegionInfo $region,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?RequestContextOptions $requestContext = null,
     ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
@@ -132,6 +150,7 @@ final class RegionContextFactory
         $ctx->setPeer($peer);
         $ctx->setPriority($priority);
         self::applyCodec($ctx, $codec);
+        self::applyRequestContext($ctx, $requestContext);
 
         return $ctx;
     }
@@ -143,6 +162,7 @@ final class RegionContextFactory
         bool $staleRead,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?RequestContextOptions $requestContext = null,
     ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
@@ -156,8 +176,46 @@ final class RegionContextFactory
         $ctx->setStaleRead($staleRead);
         $ctx->setPriority($priority);
         self::applyCodec($ctx, $codec);
+        self::applyRequestContext($ctx, $requestContext);
 
         return $ctx;
+    }
+
+    /**
+     * Copy the optional control fields onto the Context (issue #426).
+     *
+     * Each field is written only when it differs from its proto3 default, so
+     * an unset option leaves the serialized Context byte-for-byte unchanged.
+     */
+    private static function applyRequestContext(Context $context, ?RequestContextOptions $options): void
+    {
+        if (!$options instanceof RequestContextOptions) {
+            return;
+        }
+
+        if ($options->isolationLevel !== IsolationLevel::SI) {
+            $context->setIsolationLevel($options->isolationLevel);
+        }
+        if ($options->notFillCache) {
+            $context->setNotFillCache(true);
+        }
+        if ($options->maxExecutionDurationMs > 0) {
+            $context->setMaxExecutionDurationMs($options->maxExecutionDurationMs);
+        }
+        if ($options->requestSource !== '') {
+            $context->setRequestSource($options->requestSource);
+        }
+        if ($options->resourceGroupTag !== '') {
+            $context->setResourceGroupTag($options->resourceGroupTag);
+        }
+        if ($options->busyThresholdMs > 0) {
+            $context->setBusyThresholdMs($options->busyThresholdMs);
+        }
+        if ($options->resourceGroupName !== '') {
+            $resourceControlContext = new ResourceControlContext();
+            $resourceControlContext->setResourceGroupName($options->resourceGroupName);
+            $context->setResourceControlContext($resourceControlContext);
+        }
     }
 
     private static function applyCodec(Context $context, ?CodecInterface $codec): void
