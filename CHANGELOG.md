@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- **[DOC-21]**: Monolog is now declared as a **dev-only** dependency of the examples. `README.md` states that the client itself only depends on `psr/log` and that any PSR-3 `LoggerInterface` works, and names `composer require monolog/monolog` for the snippets that use it; the Complete Example uses `NullLogger` instead, so it runs with the published package alone. `examples/logging.php` exits with an actionable message instead of `Class "Monolog\Logger" not found` when Monolog is not installed. (#387)
+
 ## [v0.10.0] - 2026-11-06
 
 ### Added
