@@ -69,6 +69,8 @@ final readonly class RawKvRangeOps
      */
     public function deleteRange(string $startKey, string $endKey, string $columnFamily = ''): void
     {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'deleteRange');
+
         if ($startKey === $endKey) {
             return;
         }
@@ -117,6 +119,8 @@ final readonly class RawKvRangeOps
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'checksum');
+
         $executor = $this->createRetryExecutor();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         foreach ($regions as $region) {

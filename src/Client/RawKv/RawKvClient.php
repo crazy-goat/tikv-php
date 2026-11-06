@@ -1022,8 +1022,10 @@ final class RawKvClient
     /**
      * @throws ClientClosedException
      * @throws InvalidArgumentException When batchSize is below 1 or above
-     *         MAX_SCAN_LIMIT. The scan RPCs run during iteration; the
-     *         exceptions they raise are documented on {@see ScanIterator}.
+     *         MAX_SCAN_LIMIT, or when the range is reversed (`$startKey` sorts
+     *         after a non-empty `$endKey`). The scan RPCs run during
+     *         iteration; the exceptions they raise are documented on
+     *         {@see ScanIterator}.
      */
     public function scanIterator(
         string $startKey,
@@ -1241,6 +1243,8 @@ final class RawKvClient
 
     /**
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When the range is reversed
+     *         (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted
@@ -1291,6 +1295,8 @@ final class RawKvClient
 
     /**
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When the range is reversed
+     *         (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted

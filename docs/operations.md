@@ -302,6 +302,28 @@ in-flight futures are cancelled, so the applied subset is likewise unknown.
 
 ## Scanning Operations
 
+### Range bounds
+
+Every range operation takes a half-open `[startKey, endKey)` range. An empty
+`endKey` means "unbounded": +infinity for `scan()`, `scanPrefix()`,
+`batchScan()`, `deleteRange()` and `checksum()`, and the start of the keyspace
+for `reverseScan()`, whose arguments are `[upper bound, lower bound)`. An
+empty `startKey` is valid for a forward range (it means the start of the
+keyspace).
+
+A **reversed** range is rejected with `InvalidArgumentException` before any PD
+or store RPC: `startKey > endKey` for the forward operations (`scan()`,
+`scanIterator()`, `batchScan()`, `deleteRange()`, `checksum()`) and
+`startKey < endKey` for `reverseScan()`, whose first argument is the upper
+bound. `startKey == endKey` with a non-empty `endKey` is a valid empty range:
+it returns no rows and deletes nothing. Because an empty `endKey` is the
+unbounded sentinel, `scan('', '')` and `batchScan([['', '']])` cover the whole
+keyspace, while `deleteRange('', '')` keeps its explicit no-op guard and
+`reverseScan('', '')` is empty (both bounds are the keyspace minimum). This
+turns the most common reverse-scan mistake into an error instead of a silent
+empty result. The comparison is bytewise, so `scan('20', '100')` is rejected
+even though PHP would compare the numeric strings in the other order.
+
 ### Scan
 
 Range scan over keys:
@@ -468,11 +490,11 @@ follows:
 - **Rewindable** — calling `rewind()` (e.g. running the same `foreach` twice)
   restarts the iteration from the original start key and re-scans from the
   beginning; it does not cache results.
-- **Exceptions** — `batchSize` is validated synchronously in the factory call
-  (plus `ClientClosedException` if the client is closed), but the actual scan
-  RPCs happen lazily during iteration: `RegionException` and `GrpcException`
-  can be thrown mid-`foreach`, and the underlying scans use the same automatic
-  retry logic as `scan()`.
+- **Exceptions** — `batchSize` and the range order are validated synchronously
+  in the factory call (plus `ClientClosedException` if the client is closed),
+  but the actual scan RPCs happen lazily during iteration: `RegionException`
+  and `GrpcException` can be thrown mid-`foreach`, and the underlying scans use
+  the same automatic retry logic as `scan()`.
 - **No reverse iterator** — there is no descending counterpart; for reverse
   reads use `reverseScan()`. `limit: 0` returns the whole range by paging
   internally (guarded by `options['maxScanRows']`, checked per fetched page);
@@ -533,10 +555,10 @@ $messages = $client->reverseScan($newest . "\x00", 'msg:user:123:', limit: 5);
 - `endKey` = lower bound (inclusive) — the **second** argument
 - Results are in descending order
 
-Passing the bounds the other way round is the most common mistake here: the
-range is empty, the call succeeds, and you get an empty array with no error. If
-a reverse scan returns nothing, check that the first argument sorts after the
-second.
+Passing the bounds the other way round is the most common mistake here. It is
+rejected with `InvalidArgumentException` before any RPC instead of returning a
+silent empty array: the first argument must sort after the second. An empty
+`endKey` (the second argument) means "down to the start of the keyspace".
 
 ### Batch Scan
 
@@ -552,7 +574,9 @@ $results = $client->batchScan($ranges, eachLimit: 50, keyOnly: false);
 ```
 
 **Parameters:**
-- `ranges` (array<array{0: string, 1: string}>): Array of [startKey, endKey] pairs
+- `ranges` (array<array{0: string, 1: string}>): Array of `[startKey, endKey]`
+  pairs; an empty `endKey` means +infinity. A reversed range rejects the whole
+  call with `InvalidArgumentException` before any RPC.
 - `eachLimit` (int): Maximum results per range (required)
 - `keyOnly` (bool, optional): Return only keys
 
@@ -592,7 +616,9 @@ $client->deleteRange('startKey', 'endKey');
 
 **Parameters:**
 - `startKey` (string): Start of range (inclusive)
-- `endKey` (string): End of range (exclusive)
+- `endKey` (string): End of range (exclusive); an empty `endKey` deletes to the
+  end of the keyspace. A reversed range throws `InvalidArgumentException`
+  before any RPC.
 
 **Returns:** `void`
 

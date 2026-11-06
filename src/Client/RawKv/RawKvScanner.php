@@ -107,10 +107,16 @@ final readonly class RawKvScanner
      * whose count equals the limit may be truncated (issue #440). The
      * unbounded, constant-memory alternative is {@see self::scanIterator()}.
      *
+     * A reversed range (`startKey` sorts after a non-empty `endKey`) is
+     * rejected before any RPC.
+     *
      * @return array<array{key: string, value: ?string}>
+     *
+     * @throws InvalidArgumentException When the range is reversed
      */
     public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
     {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'scan');
         $limit = $this->validateScanLimit($limit);
 
         if ($limit === 0) {
@@ -360,7 +366,13 @@ final readonly class RawKvScanner
      * no reverse iterator; the unbounded, constant-memory alternative for a
      * forward range is {@see self::scanIterator()}.
      *
+     * A reversed range (`startKey` sorts before a non-empty `endKey`) is
+     * rejected before any RPC. An empty `endKey` is the start of the keyspace
+     * (not +infinity), so `reverseScan('', '')` is an empty range.
+     *
      * @return array<array{key: string, value: ?string}>
+     *
+     * @throws InvalidArgumentException When the range is reversed
      */
     public function reverseScan(
         string $startKey,
@@ -369,7 +381,16 @@ final readonly class RawKvScanner
         bool $keyOnly,
         string $columnFamily = '',
     ): array {
+        RegionRangeClipper::assertReverseRangeOrder($startKey, $endKey, 'reverseScan');
         $limit = $this->validateScanLimit($limit);
+
+        // [end, start) == ['', '') is empty: an empty start key is the
+        // keyspace minimum, not an unbounded upper bound. Return before the
+        // region enumeration — the clipper cannot skip this case because its
+        // empty-end sentinel also marks a region whose end is unbounded.
+        if ($startKey === '' && $endKey === '') {
+            return [];
+        }
 
         if ($limit === 0) {
             return $this->reverseScanUnbounded($startKey, $endKey, $keyOnly, $columnFamily);
@@ -785,9 +806,12 @@ final readonly class RawKvScanner
      *
      * At most {@see self::$maxConcurrency} requests are in flight at any
      * moment, and the returned outer array preserves input range order.
+     * Every range is validated before the first send; a reversed range
+     * rejects the whole call.
      *
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
+     * @throws InvalidArgumentException When a range is reversed
      * @throws \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException When any range fails
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly, string $columnFamily = ''): array
@@ -814,6 +838,7 @@ final readonly class RawKvScanner
         $calls = [];
         foreach ($ranges as $index => $range) {
             [$startKey, $endKey] = $range;
+            RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'batchScan');
             $calls[$index] = fn(): CheckedGrpcFuture => $this->scanRangeAsync(
                 $executor,
                 $clipper,
@@ -855,6 +880,8 @@ final readonly class RawKvScanner
         string $columnFamily = '',
         ?callable $guard = null,
     ): ScanIterator {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'scanIterator');
+
         return new ScanIterator(
             $this->scan(...),
             $startKey,

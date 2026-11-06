@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Region;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 
@@ -21,6 +22,46 @@ use CrazyGoat\TiKV\Client\Util\KeyOrder;
  */
 final readonly class RegionRangeClipper
 {
+    /**
+     * Reject a reversed forward range before any PD or store RPC.
+     *
+     * A forward range is `[startKey, endKey)`, so `startKey` must not sort
+     * after `endKey`. An empty `endKey` means +infinity and is always valid;
+     * `startKey === endKey` is a valid empty range (it returns no rows and
+     * deletes nothing), not a reversed one.
+     *
+     * @throws InvalidArgumentException When `startKey` sorts after a non-empty `endKey`
+     */
+    public static function assertForwardRangeOrder(string $startKey, string $endKey, string $method): void
+    {
+        if ($endKey !== '' && KeyOrder::gt($startKey, $endKey)) {
+            throw new InvalidArgumentException(sprintf(
+                'Invalid range in %s: start key must not sort after end key',
+                $method,
+            ));
+        }
+    }
+
+    /**
+     * Reject a reversed reverse-scan range before any PD or store RPC.
+     *
+     * A reverse scan reads `[endKey, startKey)` descending, so `startKey` is
+     * the exclusive upper bound and must not sort before `endKey`. An empty
+     * `endKey` means the start of the keyspace and is always valid;
+     * `startKey === endKey` is a valid empty range, not a reversed one.
+     *
+     * @throws InvalidArgumentException When `startKey` sorts before a non-empty `endKey`
+     */
+    public static function assertReverseRangeOrder(string $startKey, string $endKey, string $method): void
+    {
+        if ($endKey !== '' && KeyOrder::lt($startKey, $endKey)) {
+            throw new InvalidArgumentException(sprintf(
+                'Invalid range in %s: start key must not sort before end key',
+                $method,
+            ));
+        }
+    }
+
     /**
      * Clip a forward [start, end) range to each region's bounds.
      *
