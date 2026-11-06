@@ -563,6 +563,15 @@ enum BackoffType
 - **ServerBusy**: 60 seconds separate budget
 - **Wall-clock deadline**: 30 seconds per operation (configurable via `options['retryDeadlineMs']`; issues #294, #237). Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget), so the worst case is ≈ deadline + the duration of the last in-flight RPC (bounded only by the gRPC timeout option, not by the retry deadline).
 
+**Fan-out and response-borne errors**: a fanned-out operation dispatches one
+request per region before awaiting any of them (`BatchAsyncExecutor`). When a
+retryable region error comes back *inside* a response rather than as a thrown
+gRPC error, `CheckedGrpcFuture::fromRetryableDispatch()` keeps the eager first
+dispatch and runs the remaining dispatch+await cycle under `RetryExecutor`
+during the wait phase, so the error is retried per region with cache
+invalidation / leader switching and backoff. The batch wrappers use it since
+#183 and `RawKvRangeOps` (`deleteRange()` / `checksum()`) since #566.
+
 ## Data Flow
 
 ### Single Key Operation (Get)
