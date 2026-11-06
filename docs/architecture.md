@@ -141,10 +141,11 @@ final class RawKvClient
 - Lock resolution for concurrent conflicts
 - Heartbeat to extend lock TTL for long-running transactions (opportunistic for pessimistic transactions, explicit `heartbeat()` otherwise; see [Configuration](configuration.md#lock-ttls-and-the-primary-lock-keepalive-txnkv))
   - The prewrite heartbeat is checked only after the primary region's prewrite
-    and after the parallel secondary fan-out. A single `KvPrewrite` or
-    `KvCommit` RPC that outlives the lock TTL cannot be heartbeated mid-flight,
-    so keep `TimeoutConfig::$writeTimeoutMs` below the lock TTL or raise the
-    TTL (see [A single prewrite or commit RPC can outlive the lock TTL](configuration.md#a-single-prewrite-or-commit-rpc-can-outlive-the-lock-ttl))
+    and after the parallel secondary fan-out (in a multi-region async commit
+    the primary is prewritten after the fan-out, so those two checks coincide).
+    A single `KvPrewrite` or `KvCommit` RPC that outlives the lock TTL cannot
+    be heartbeated mid-flight, so keep `TimeoutConfig::$writeTimeoutMs` below
+    the lock TTL or raise the TTL (see [A single prewrite or commit RPC can outlive the lock TTL](configuration.md#a-single-prewrite-or-commit-rpc-can-outlive-the-lock-ttl))
 
 **Key Design Patterns**:
 - **Unit of Work**: Transaction tracks write set and read set

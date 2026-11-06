@@ -1379,6 +1379,12 @@ at a point where control returns to PHP. Those points are
 2. after the primary region's prewrite has been acknowledged, and
 3. after the parallel fan-out of the secondary prewrites has completed.
 
+In the default two-phase path those are two separate checks. A multi-region
+async commit deliberately prewrites the primary **last** (the primary lock is
+the commit-decision barrier), so its primary prewrite follows the fan-out and
+the two points coincide: it checks once, after the primary prewrite, and not
+again when the fan-out returns.
+
 There is no heartbeat **inside** a `KvPrewrite` or `KvCommit` call: the gRPC
 call blocks in the extension and PHP has no timer that could run while it is
 in flight. Nor is there one between the individual secondary batches, because
@@ -1387,8 +1393,12 @@ before checking the clock. If one RPC — or the gap between the last prewrite
 heartbeat and the primary commit, plus that commit RPC — takes longer than the
 lock TTL, the lock expires and a concurrent reader may resolve (roll back) the
 transaction. The later commit then fails with `TxnLockNotFound`. A
-single-region transaction is the simplest case: it has exactly one prewrite
-RPC and therefore no between-RPC point at which a heartbeat could be sent.
+single-region transaction **that fits in one request batch** (the default for
+small write sets) is the simplest case: it has exactly one prewrite RPC and
+therefore no between-RPC point at which a heartbeat could be sent. A larger
+single-region write set is split into a primary batch plus secondary batches
+in the same region and gets the same batch-boundary checks as a multi-region
+transaction, but no individual request can be heartbeated mid-flight.
 
 Four settings determine whether that can happen:
 

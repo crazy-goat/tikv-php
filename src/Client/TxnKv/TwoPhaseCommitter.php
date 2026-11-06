@@ -81,7 +81,9 @@ use Psr\Log\NullLogger;
  * leaves no lock, so a heartbeat would fail an already-committed transaction.
  * A lock can only be heartbeated at the points where control returns to PHP:
  * after the primary region's prewrite and after the parallel secondary
- * fan-out completes (plus the pessimistic pre-commit heartbeat). A single
+ * fan-out completes (plus the pessimistic pre-commit heartbeat); in a
+ * multi-region async commit the primary is prewritten last, so those two
+ * prewrite checks coincide. A single
  * prewrite or commit RPC that by itself outlives the TTL cannot be kept alive
  * (PHP has no timer), and neither can a slow commit phase after the last
  * heartbeat; the scaled TTL only narrows that window. Keep
