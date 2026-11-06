@@ -1459,17 +1459,27 @@ positive integer).
 **How it works** (see `src/Client/RawKv/SstIngestor.php`):
 
 1. Keys are sorted client-side (`ksort(..., SORT_STRING)` — SST data must be
-   sorted), converted to `import_sstpb.Pair` messages and grouped by region
-   (batch region resolution against PD).
-2. For each region the pairs are streamed to the region leader via the TiKV
-   ImportSST **`RawWrite`** client-streaming RPC (1024 pairs per chunk, first
-   message carries the SST metadata: UUID, key range, region epoch, CRC32),
-   and the resulting SST is committed with the **`Ingest`** RPC.
+   sorted) and grouped by region (batch region resolution against PD). Only
+   the keys are copied; the values stay in the caller's array.
+2. For each region the data is streamed lazily to the region leader via the
+   TiKV ImportSST **`RawWrite`** client-streaming RPC: the first message
+   carries the SST metadata (UUID, key range, region epoch, CRC32), then one
+   data chunk per 1024 keys. Each chunk's `import_sstpb.Pair` messages are
+   built on demand and released when the next chunk is requested, so the
+   payload is not held as a full `Pair[]` array plus a full request array plus
+   the serialised messages. The resulting SST is committed with the
+   **`Ingest`** RPC.
 
 This bypasses the normal Raft write path and writes pre-sorted data directly
 into regions, giving far higher throughput than `batchPut()` on large loads.
 Keys are validated like every other write (non-empty, key/value size limits);
-an empty array is a no-op.
+an empty array is a no-op. The opt-in
+`options['maxIngestSize']` cap (`0` = unlimited, set on
+`RawKvClient::create()`) bounds the whole payload in bytes and rejects an
+oversized call with `IngestTooLargeException` before the cluster is switched
+into import mode or any RPC is sent. Even with a cap, the caller's input array
+is held in memory for the whole call, so split very large imports into
+batches yourself.
 
 > **Cluster-wide side effect — read before running in production.** For the
 > duration of the call **every** TiKV store in the cluster is switched into

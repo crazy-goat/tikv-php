@@ -100,7 +100,9 @@ interface GrpcClientInterface
      * @param string $address Target address
      * @param string $service Service name (e.g., "import_sstpb.ImportSST")
      * @param string $method Method name (e.g., "Write")
-     * @param Message[] $requests Sequence of request messages to stream
+     * @param iterable<Message> $requests Sequence of request messages to
+     *        stream, possibly lazily. A generator is consumed once, in order,
+     *        so the implementation must not iterate it twice
      * @param class-string<T> $responseClass Response message class name
      * @param int|null $timeoutMs Deadline in milliseconds; null = the library
      *                            default ({@see GrpcClient::DEFAULT_TIMEOUT_MS});
@@ -114,7 +116,7 @@ interface GrpcClientInterface
         string $address,
         string $service,
         string $method,
-        array $requests,
+        iterable $requests,
         string $responseClass,
         ?int $timeoutMs = null,
     ): Message;

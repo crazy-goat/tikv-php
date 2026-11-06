@@ -171,6 +171,14 @@ final class Transaction
          * (issue #430); defaults to RawKV's `MAX_BATCH_LIMIT`.
          */
         private readonly int $maxTxnBatchCount = TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+        /**
+         * Maximum number of read-set entries; 0 = unlimited (issue #297).
+         */
+        private readonly int $maxReadSetEntries = 0,
+        /**
+         * Maximum bytes of the whole read set; 0 = unlimited (issue #297).
+         */
+        private readonly int $maxReadSetTotalSize = 0,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -183,6 +191,8 @@ final class Transaction
                 'maxTxnEntryCount' => $this->maxTxnEntryCount,
                 'maxTxnEntrySize' => $this->maxTxnEntrySize,
                 'maxTxnTotalSize' => $this->maxTxnTotalSize,
+                'maxReadSetEntries' => $this->maxReadSetEntries,
+                'maxReadSetTotalSize' => $this->maxReadSetTotalSize,
             ] as $name => $limit
         ) {
             if ($limit < 0) {
@@ -223,6 +233,8 @@ final class Transaction
             maxTxnEntryCount: $this->maxTxnEntryCount,
             maxTxnEntrySize: $this->maxTxnEntrySize,
             maxTxnTotalSize: $this->maxTxnTotalSize,
+            maxReadSetEntries: $this->maxReadSetEntries,
+            maxReadSetTotalSize: $this->maxReadSetTotalSize,
         );
 
         $this->reader = new TxnReader(
@@ -342,6 +354,27 @@ final class Transaction
     public function getWriteSetCount(): int
     {
         return $this->state->getWriteSetCount();
+    }
+
+    /**
+     * Bytes currently held by the read set (issue #297).
+     *
+     * Every entry contributes its key length plus its value length; a
+     * not-found read contributes the key length only. The value is maintained
+     * incrementally, so it can be logged or exported as a metric on every
+     * read without re-walking the read set.
+     */
+    public function getReadSetSize(): int
+    {
+        return $this->state->getReadSetSize();
+    }
+
+    /**
+     * Number of entries currently held by the read set (issue #297).
+     */
+    public function getReadSetCount(): int
+    {
+        return $this->state->getReadSetCount();
     }
 
     // ---------------------------------------------------------------

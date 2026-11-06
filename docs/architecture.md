@@ -229,6 +229,24 @@ base `TiKvException`, so the write set is not cleared and the transaction is
 not reported `RolledBack`; it stays active-but-unwritable so the caller (or
 the destructor) can retry the cleanup (issue #559).
 
+**Memory bounds**: the write and read sets grow in the PHP worker for the
+whole transaction. Both are opt-in bounded on `begin()` (`0` = unlimited):
+`maxTxnEntryCount` / `maxTxnEntrySize` / `maxTxnTotalSize` for the write set
+and `maxReadSetEntries` / `maxReadSetTotalSize` for the read set. Exceeding a
+limit throws `TransactionTooLargeException`; a write is rejected before it is
+buffered, a read before the fetched value is retained. The prewrite and
+commit requests are independently split per region by `maxTxnBatchSize` and
+`maxTxnBatchCount` (issue #430).
+
+The read set is still populated by default, because it is part of the public
+`getReadSet()` API; a long-lived transaction that reads large values should
+set the read-set limits or call `clearReadSet()`. `RawKvClient::ingest()`
+streams its SST payload instead of buffering a second full copy: it copies
+only the keys, groups them by region, and builds each `import_sstpb.Pair`
+chunk on demand from a generator consumed by the gRPC transport. Its opt-in
+`maxIngestSize` cap bounds the caller's payload before the cluster enters
+import mode and before any RPC (issue #297).
+
 ### 3. TimestampOracle
 
 **Location**: `src/Client/Connection/TimestampOracle.php`

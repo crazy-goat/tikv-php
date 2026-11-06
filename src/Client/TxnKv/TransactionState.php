@@ -31,6 +31,12 @@ final class TransactionState
     /** @var array<array-key, ?string> key => value read (for read-set tracking) */
     private array $readSet = [];
 
+    /**
+     * Bytes currently held by the read set, maintained incrementally like
+     * {@see $writeSetBytes} (issue #297).
+     */
+    private int $readSetBytes = 0;
+
     /** @var string[] keys pending a deferred pessimistic lock pass */
     private array $pendingLockKeys = [];
 
@@ -66,12 +72,19 @@ final class TransactionState
      *                             0 = unlimited (issue #430)
      * @param int $maxTxnTotalSize Maximum bytes of the whole write set;
      *                             0 = unlimited (issue #430)
+     * @param int $maxReadSetEntries Maximum number of read-set entries;
+     *                               0 = unlimited (issue #297)
+     * @param int $maxReadSetTotalSize Maximum bytes of the whole read set,
+     *                                 measured as key length plus value
+     *                                 length; 0 = unlimited (issue #297)
      */
     public function __construct(
         private readonly int $startedAtMs = 0,
         private readonly int $maxTxnEntryCount = 0,
         private readonly int $maxTxnEntrySize = 0,
         private readonly int $maxTxnTotalSize = 0,
+        private readonly int $maxReadSetEntries = 0,
+        private readonly int $maxReadSetTotalSize = 0,
     ) {
     }
 
@@ -318,6 +331,20 @@ final class TransactionState
         }
     }
 
+    private function assertReadCountWithinLimit(int $count): void
+    {
+        if ($this->maxReadSetEntries > 0 && $count > $this->maxReadSetEntries) {
+            throw TransactionTooLargeException::readSetCount($count, $this->maxReadSetEntries);
+        }
+    }
+
+    private function assertReadTotalSizeWithinLimit(int $bytes): void
+    {
+        if ($this->maxReadSetTotalSize > 0 && $bytes > $this->maxReadSetTotalSize) {
+            throw TransactionTooLargeException::readSetTotalSize($bytes, $this->maxReadSetTotalSize);
+        }
+    }
+
     /**
      * Returns the first key of the write set.
      *
@@ -362,14 +389,62 @@ final class TransactionState
         return $this->readSet;
     }
 
+    /**
+     * Validate a read without applying it, so the reader can reject an
+     * oversized read set before retaining another value (issue #297).
+     * Re-reading a key accounts for the entry it replaces, so a second read
+     * never leaks budget.
+     *
+     * @throws TransactionTooLargeException when the read would exceed one
+     *         of the configured read-set limits
+     */
+    public function assertReadAllowed(string $key, ?string $value): void
+    {
+        $entrySize = $this->entrySize($key, $value);
+        $exists = array_key_exists($key, $this->readSet);
+        $oldEntrySize = $exists ? $this->entrySize($key, $this->readSet[$key] ?? null) : 0;
+
+        $this->assertReadCountWithinLimit($exists ? count($this->readSet) : count($this->readSet) + 1);
+        $this->assertReadTotalSizeWithinLimit($this->readSetBytes - $oldEntrySize + $entrySize);
+    }
+
+    /**
+     * @throws TransactionTooLargeException when the read would exceed one
+     *         of the configured read-set limits
+     */
     public function setReadValue(string $key, ?string $value): void
     {
+        $this->assertReadAllowed($key, $value);
+
+        if (array_key_exists($key, $this->readSet)) {
+            $this->readSetBytes -= $this->entrySize($key, $this->readSet[$key] ?? null);
+        }
+
         $this->readSet[$key] = $value;
+        $this->readSetBytes += $this->entrySize($key, $value);
     }
 
     public function clearReadSet(): void
     {
         $this->readSet = [];
+        $this->readSetBytes = 0;
+    }
+
+    /**
+     * Number of entries in the read set (issue #297).
+     */
+    public function getReadSetCount(): int
+    {
+        return count($this->readSet);
+    }
+
+    /**
+     * Bytes held by the read set: key length plus value length per entry
+     * (issue #297).
+     */
+    public function getReadSetSize(): int
+    {
+        return $this->readSetBytes;
     }
 
     // -- Pending Lock Keys --------------------------------------------------------
