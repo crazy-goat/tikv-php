@@ -841,12 +841,17 @@ final readonly class RawKvScanner
         return $results;
     }
 
+    /**
+     * @param (callable(): void)|null $guard Invoked before every page fetch
+     *        (see {@see ScanIterator::__construct()})
+     */
     public function scanIterator(
         string $startKey,
         string $endKey,
         int $batchSize,
         bool $keyOnly,
         string $columnFamily = '',
+        ?callable $guard = null,
     ): ScanIterator {
         return new ScanIterator(
             $this->scan(...),
@@ -855,14 +860,20 @@ final readonly class RawKvScanner
             $batchSize,
             $keyOnly,
             $columnFamily,
+            $guard,
         );
     }
 
+    /**
+     * @param (callable(): void)|null $guard Invoked before every page fetch
+     *        (see {@see ScanIterator::__construct()})
+     */
     public function scanPrefixIterator(
         string $prefix,
         int $batchSize,
         bool $keyOnly,
         string $columnFamily = '',
+        ?callable $guard = null,
     ): ScanIterator {
         return new ScanIterator(
             $this->scan(...),
@@ -871,6 +882,7 @@ final readonly class RawKvScanner
             $batchSize,
             $keyOnly,
             $columnFamily,
+            $guard,
         );
     }
 
