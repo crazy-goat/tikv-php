@@ -1709,6 +1709,23 @@ final readonly class TwoPhaseCommitter
         );
     }
 
+    /**
+     * Translate a KeyError returned by a rollback RPC into an exception, or
+     * an intentional success when the lock is already gone.
+     *
+     * `txn_not_found` and `txn_lock_not_found` are the only variants that
+     * mean there is nothing left to clean up: the transaction (or its lock)
+     * was never written, or another resolver already rolled it back. TiKV's
+     * own rollback path returns success when the lock is missing (it
+     * collapses an existing rollback record and returns `Ok`), so these two
+     * variants are defensive; they are normally returned by
+     * `CheckTxnStatus`/`Commit`.
+     *
+     * Every other variant means the server did not confirm the rollback and
+     * must fail closed (issue #559): falling through used to let
+     * `rollback()` clear the write set and report `RolledBack` while the
+     * locks stayed in TiKV until their TTL expired.
+     */
     private function handleRollbackError(KeyError $error): void
     {
         $locked = $error->getLocked();
@@ -1738,6 +1755,16 @@ final readonly class TwoPhaseCommitter
                 'Abort during rollback: ' . $abort,
             );
         }
+
+        // The lock (or the whole transaction) is already gone: there is
+        // nothing left to roll back, so this is an intentional success.
+        if ($error->getTxnNotFound() !== null || $error->getTxnLockNotFound() !== null) {
+            return;
+        }
+
+        throw new TiKvException(
+            'Rollback failed: ' . KeyErrorDescriber::describe($error),
+        );
     }
 
     // ---------------------------------------------------------------

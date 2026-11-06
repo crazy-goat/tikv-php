@@ -20,10 +20,14 @@ use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
+use CrazyGoat\Proto\Kvrpcpb\PrimaryMismatch;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\TxnLockNotFound;
+use CrazyGoat\Proto\Kvrpcpb\TxnNotFound;
+use CrazyGoat\Proto\Kvrpcpb\WriteConflict;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
@@ -7006,5 +7010,188 @@ class TransactionTest extends TestCase
 
         $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
         $this->assertSame(2, $pessimisticRollbackCalls);
+    }
+
+    /**
+     * @return array<string, array{0: callable(KeyError): void}>
+     */
+    public static function alreadyGoneRollbackKeyErrorProvider(): array
+    {
+        return [
+            'txn_not_found' => [
+                static function (KeyError $error): void {
+                    $error->setTxnNotFound(new TxnNotFound());
+                },
+            ],
+            'txn_lock_not_found' => [
+                static function (KeyError $error): void {
+                    $error->setTxnLockNotFound(new TxnLockNotFound());
+                },
+            ],
+        ];
+    }
+
+    /**
+     * The two "already gone" variants are the only rollback KeyErrors that
+     * mean there is nothing left to clean up (issue #559).
+     *
+     * @param callable(KeyError): void $setVariant
+     */
+    #[DataProvider('alreadyGoneRollbackKeyErrorProvider')]
+    public function testRollbackTreatsAlreadyGoneKeyErrorAsConfirmedRollback(
+        callable $setVariant,
+    ): void {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $keyError = new KeyError();
+        $setVariant($keyError);
+        $errorResponse->setError($keyError);
+
+        $batchRollbackCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchRollbackCalls,
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key1', 'value1');
+
+        // The lock is already gone, so the error confirms the rollback
+        // instead of triggering a retry.
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame(1, $batchRollbackCalls);
+        $this->assertSame([], $txn->getWriteSet());
+    }
+
+    /**
+     * @return array<string, array{0: KeyError, 1: string}>
+     */
+    public static function unrecognisedRollbackKeyErrorProvider(): array
+    {
+        $primaryMismatch = new KeyError();
+        $primaryMismatch->setPrimaryMismatch(new PrimaryMismatch());
+
+        $conflict = new KeyError();
+        $conflict->setConflict(new WriteConflict());
+
+        return [
+            'empty payload' => [new KeyError(), 'unknown error'],
+            'primary_mismatch' => [$primaryMismatch, 'PrimaryMismatch'],
+            'conflict' => [$conflict, 'Conflict'],
+        ];
+    }
+
+    /**
+     * A rollback response carrying a variant the client does not handle must
+     * not be reported as a successful rollback (issue #559).
+     */
+    #[DataProvider('unrecognisedRollbackKeyErrorProvider')]
+    public function testRollbackUnrecognisedKeyErrorFailsClosed(KeyError $keyError, string $description): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $errorResponse->setError($keyError);
+
+        $batchRollbackCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchRollbackCalls,
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key1', 'value1');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame(TiKvException::class, $e::class);
+            $this->assertSame('Rollback failed: ' . $description, $e->getMessage());
+        }
+
+        // A fatal variant is not retried and the transaction stays active
+        // (rollback-started) so the caller can retry the cleanup.
+        $this->assertSame(1, $batchRollbackCalls);
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
+
+        // The transaction is still rollback-able: the next attempt with a
+        // success response clears the write set and closes it.
+        $txn->rollback();
+        $this->assertSame(2, $batchRollbackCalls);
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame([], $txn->getWriteSet());
+    }
+
+    public function testPessimisticRollbackUnrecognisedKeyErrorFailsClosedBeforeBatchRollback(): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse();
+        $keyError = new KeyError();
+        $keyError->setPrimaryMismatch(new PrimaryMismatch());
+        $errorResponse->setErrors([$keyError]);
+
+        $methods = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$methods,
+                $errorResponse,
+            ): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KVPessimisticRollback' => $errorResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('key1', 'value1');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame(TiKvException::class, $e::class);
+            $this->assertSame('Rollback failed: PrimaryMismatch', $e->getMessage());
+        }
+
+        // The pessimistic rollback failed before the batch rollback was
+        // attempted, and the variant was not retried.
+        $this->assertSame(['KVPessimisticRollback'], $methods);
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
     }
 }

@@ -216,6 +216,16 @@ Optimistic Transaction                   Pessimistic Transaction
 └──────────────────────┘
 ```
 
+**Rollback semantics**: `rollback()` is a best-effort cleanup that fails
+closed. `KvBatchRollback` and `KVPessimisticRollback` responses are inspected
+variant by variant: `locked` is resolved and the rollback is retried,
+`retryable` is retried, `abort` is fatal, and `txn_not_found` /
+`txn_lock_not_found` confirm the rollback because the transaction or its lock
+is already gone. Every other `KeyError` (including an empty payload) throws
+the base `TiKvException`, so the write set is not cleared and the transaction
+is not reported `RolledBack`; it stays active-but-unwritable so the caller (or
+the destructor) can retry the cleanup (issue #559).
+
 ### 3. TimestampOracle
 
 **Location**: `src/Client/Connection/TimestampOracle.php`
