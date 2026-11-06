@@ -377,6 +377,28 @@ needs the *kind*, not the exception — stays compatible with the commitment,
 because what callers are promised is the routing/non-routing table, not the
 class it lives in.
 
+## `notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)
+
+`LockResolver` is reached from two kinds of call site: executor-owned ones
+(prewrite and rollback after #213/#502, and the `TxnReader` read retries) and
+direct ones (the pessimistic-lock `do-while` in `TwoPhaseCommitter`, which has
+no enclosing `RetryExecutor`). The flag is therefore an argument of
+`resolveLock()` / `resolveLocks()`, not a constant and not something the
+resolver can derive from the method it is in. It must reach **every**
+`RegionErrorHandler::check()` on the lock-resolution path — `KvCheckTxnStatus`,
+`KvCheckSecondaryLocks`, the batch `KvResolveLock`, and the async-commit
+finalization in `resolveAsyncCommitLocks()`. The async-commit path used to
+hardcode `false`, so at executor-owned sites a `NotLeader` was self-invalidated
+by `check()` instead of being handed to `handleNotLeader()`: the cache entry was
+gone before the hint could be applied, so valid-hint leader switching was
+defeated and the next attempt had to re-resolve through PD (#474). The issue
+text calls this a double-count of `regionInvalidated('not_leader')`, but with
+the current cache `invalidate()` is a no-op on an ID that is already gone, so
+the observable harm is the lost hint switch, not a second metric. Do not flip
+the constant to `true` either — the pessimistic-lock loop still needs `false`
+to drop a stale entry before its local retry (issue #568, pinned by
+`OnePhaseAsyncCommitTest::testAsyncCommitResolveNotLeader*`).
+
 ## A class of bug gets a seam, a rule and a fixture — not three site patches (issue #180)
 
 Closing #180 after #186, #232 and #261: the answer to "how do we know this class
