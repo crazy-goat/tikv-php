@@ -113,41 +113,57 @@ final readonly class RawKvCrud
         bool $forCas = false,
         string $columnFamily = '',
     ): void {
-        $retryExecutor->execute($key, function () use ($key, $value, $ttl, $forCas, $columnFamily): null {
-            $region = $this->regionResolver->getRegionInfo($key);
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+        $targetStoreId = null;
 
-            $request = new RawPutRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo(
-                $region,
-                requestContext: $this->requestContext,
-                resourceControl: $this->resourceControl,
-            ));
-            $request->setKey($key);
-            $request->setValue($value);
-            if ($ttl > 0) {
-                $request->setTtl($ttl);
-            }
-            if ($forCas) {
-                $request->setForCas(true);
-            }
-            if ($columnFamily !== '') {
-                $request->setCf($columnFamily);
-            }
+        $retryExecutor->execute(
+            $key,
+            function () use (
+                $key,
+                $value,
+                $ttl,
+                $forCas,
+                $columnFamily,
+                &$targetStoreId,
+            ): null {
+                $region = $this->regionResolver->getRegionInfo($key);
+                $targetStoreId = $region->leaderStoreId;
+                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-            $response = $this->measure('write', $key, fn(): RawPutResponse => $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'RawPut',
-                $request,
-                RawPutResponse::class,
-                $this->timeoutMs('write'),
-            ));
-            /** @var RawPutResponse $response */
-            RegionErrorHandler::check($response);
+                $request = new RawPutRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo(
+                    $region,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
+                ));
+                $request->setKey($key);
+                $request->setValue($value);
+                if ($ttl > 0) {
+                    $request->setTtl($ttl);
+                }
+                if ($forCas) {
+                    $request->setForCas(true);
+                }
+                if ($columnFamily !== '') {
+                    $request->setCf($columnFamily);
+                }
 
-            return null;
-        });
+                $response = $this->measure('write', $key, fn(): RawPutResponse => $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'RawPut',
+                    $request,
+                    RawPutResponse::class,
+                    $this->timeoutMs('write'),
+                ));
+                /** @var RawPutResponse $response */
+                RegionErrorHandler::check($response);
+
+                return null;
+            },
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
+        );
     }
 
     public function delete(
@@ -156,8 +172,11 @@ final readonly class RawKvCrud
         bool $forCas = false,
         string $columnFamily = '',
     ): void {
-        $retryExecutor->execute($key, function () use ($key, $forCas, $columnFamily): null {
+        $targetStoreId = null;
+
+        $retryExecutor->execute($key, function () use ($key, $forCas, $columnFamily, &$targetStoreId): null {
             $region = $this->regionResolver->getRegionInfo($key);
+            $targetStoreId = $region->leaderStoreId;
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRequest();
@@ -186,6 +205,8 @@ final readonly class RawKvCrud
             RegionErrorHandler::check($response);
 
             return null;
+        }, targetStoreId: static function () use (&$targetStoreId): ?int {
+            return $targetStoreId;
         });
     }
 

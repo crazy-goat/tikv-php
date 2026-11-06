@@ -850,6 +850,14 @@ the sequential retrying path.
 - Drop the cached store address on a `StoreNotMatch` region error or a
   transport failure to that store, so the next attempt asks PD for a fresh
   `GetStore` instead of retrying a stale address (issue #247)
+- Close the channel of the store the failed attempt actually targeted, not
+  the cached leader's: every RPC path reports its target store to the retry
+  executor, so a replica-read follower or a store whose cached leader changed
+  during the attempt is the one torn down (issue #248). Only `UNAVAILABLE`
+  closes a channel; a `DEADLINE_EXCEEDED` on a slow but healthy connection is
+  retried without a re-handshake. The exception carries the address of the
+  failed call, so a nested lock-resolution RPC against another region also
+  closes its own channel
 
 ### 4. Automatic Retries
 

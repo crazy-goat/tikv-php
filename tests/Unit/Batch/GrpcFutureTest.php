@@ -75,6 +75,34 @@ class GrpcFutureTest extends TestCase
         $future->wait();
     }
 
+    /**
+     * Issue #248, P1: the target address must travel with the exception so a
+     * nested RPC failure (lock resolution against another region) closes the
+     * channel that actually failed.
+     */
+    public function testWaitExceptionCarriesTheTargetAddress(): void
+    {
+        $call = $this->createMock(Call::class);
+        $call->expects($this->once())
+            ->method('startBatch')
+            ->willReturn([
+                'status' => ['code' => 14, 'details' => 'Unavailable'],
+            ]);
+
+        $future = new GrpcFuture(
+            $call,
+            RawGetResponse::class,
+            targetAddress: 'primary-store:20160',
+        );
+
+        try {
+            $future->wait();
+            $this->fail('Expected a GrpcException');
+        } catch (GrpcException $e) {
+            $this->assertSame('primary-store:20160', $e->targetAddress);
+        }
+    }
+
     public function testWaitThrowsWhenOkStatusCarriesNoMessage(): void
     {
         $call = $this->createMock(Call::class);

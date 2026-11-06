@@ -778,6 +778,56 @@ class RawKvBatchTest extends TestCase
         return [$key => $value];
     }
 
+    /**
+     * Regression (issue #248, P2): a multi-region recovery fan-out must report
+     * the sub-future's own store before awaiting it, so a transport failure
+     * closes that store's channel rather than the first key's region leader.
+     */
+    public function testMultiRegionBatchGetClosesTheFailingSubRegionsStore(): void
+    {
+        // Grouping sees one broad region; by the time the wrapper re-resolves,
+        // the first key's region has shrunk and the keys span two regions.
+        $broad = new RegionInfo(1, 1, 1, 1, 1, '', '');
+        $narrow = new RegionInfo(1, 1, 1, 1, 1, '', 'm');
+        $second = new RegionInfo(2, 2, 2, 1, 1, 'm', '');
+        $this->regionCache->method('getByKey')
+            ->willReturnOnConsecutiveCalls($broad, $broad, $narrow, $narrow, $second, $narrow);
+
+        $this->pdClient->method('getStore')->willReturnCallback(static function (int $storeId): Store {
+            $store = new Store();
+            $store->setId($storeId);
+            $store->setAddress($storeId === 2 ? 'store2:20160' : 'store1:20160');
+
+            return $store;
+        });
+
+        $this->grpc->method('callAsync')->willReturnCallback(
+            static function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+                string $responseClass,
+                ?int $timeoutMs = null,
+            ): GrpcFuture {
+                if ($address === 'store2:20160') {
+                    return GrpcFuture::fromWaiter(static function (): Message {
+                        throw new GrpcException('connection reset', 14);
+                    });
+                }
+
+                return GrpcFuture::completed(new RawBatchGetResponse());
+            },
+        );
+
+        $this->grpc->expects($this->once())
+            ->method('closeChannel')
+            ->with('store2:20160');
+
+        $this->expectException(BatchPartialFailureException::class);
+        $this->batch->batchGet(['a', 'z'], $this->createRetryExecutor(1));
+    }
+
     private function createRetryExecutor(int $maxAttempts = RetryExecutor::DEFAULT_MAX_ATTEMPTS): RetryExecutor
     {
         return new RetryExecutor(

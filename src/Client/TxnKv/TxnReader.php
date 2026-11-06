@@ -541,10 +541,10 @@ final readonly class TxnReader
         callable $classifier,
     ): CheckedGrpcFuture {
         $firstKey = $regionKeys[0] ?? '';
-        $targetStoreId = 0;
         // The same operation budget bounds lock resolution triggered by a
         // locked key in any region of this batch (issue #569).
         $budget = $retryExecutor->currentBudget();
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use ($firstKey, $regionKeys, &$targetStoreId, $budget): CheckedGrpcFuture {
