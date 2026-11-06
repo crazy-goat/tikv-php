@@ -51,6 +51,9 @@ final class RegionContextFactory
      *     (issue #336). Normal (0) is the proto3 default and is therefore
      *     not serialized — a request that never had a priority keeps its
      *     original wire bytes.
+     * @param ResourceControl|null $resourceControl Resource-control metadata
+     *     (issue #427): the resource group and the resource-group tag. Null
+     *     (the default) writes neither field.
      */
     public static function resolveTarget(
         RegionInfo $region,
@@ -59,10 +62,11 @@ final class RegionContextFactory
         ?int $excludedStoreId = null,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?ResourceControl $resourceControl = null,
     ): ReplicaReadTarget {
         $leader = self::leaderPeer($region);
         $leaderTarget = new ReplicaReadTarget(
-            self::buildContext($region, $leader, false, $policy->staleRead, $codec, $priority),
+            self::buildContext($region, $leader, false, $policy->staleRead, $codec, $priority, $resourceControl),
             $region->leaderStoreId,
         );
 
@@ -100,7 +104,15 @@ final class RegionContextFactory
         $peerInfo = $candidates[random_int(0, count($candidates) - 1)];
 
         return new ReplicaReadTarget(
-            self::buildContext($region, self::peerFromInfo($peerInfo), true, $policy->staleRead, $codec, $priority),
+            self::buildContext(
+                $region,
+                self::peerFromInfo($peerInfo),
+                true,
+                $policy->staleRead,
+                $codec,
+                $priority,
+                $resourceControl,
+            ),
             $peerInfo->storeId,
         );
     }
@@ -112,11 +124,14 @@ final class RegionContextFactory
      *     (issue #336). Normal (0) is the proto3 default and is not
      *     serialized, so a request without a priority keeps its original
      *     wire bytes.
+     * @param ResourceControl|null $resourceControl Resource-control metadata
+     *     (issue #427); null writes neither resource-control field.
      */
     public static function fromRegionInfo(
         RegionInfo $region,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?ResourceControl $resourceControl = null,
     ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
@@ -131,6 +146,7 @@ final class RegionContextFactory
         $ctx->setRegionEpoch($epoch);
         $ctx->setPeer($peer);
         $ctx->setPriority($priority);
+        $resourceControl?->apply($ctx);
         self::applyCodec($ctx, $codec);
 
         return $ctx;
@@ -143,6 +159,7 @@ final class RegionContextFactory
         bool $staleRead,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
+        ?ResourceControl $resourceControl = null,
     ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
@@ -155,6 +172,7 @@ final class RegionContextFactory
         $ctx->setReplicaRead($replicaRead);
         $ctx->setStaleRead($staleRead);
         $ctx->setPriority($priority);
+        $resourceControl?->apply($ctx);
         self::applyCodec($ctx, $codec);
 
         return $ctx;

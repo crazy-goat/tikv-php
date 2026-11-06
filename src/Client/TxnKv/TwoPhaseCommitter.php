@@ -42,6 +42,7 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -241,6 +242,8 @@ final readonly class TwoPhaseCommitter
         private int $maxTxnBatchSize = self::DEFAULT_TXN_BATCH_SIZE,
         /** Maximum mutations/keys of one prewrite/commit request per region (issue #430). */
         private int $maxTxnBatchCount = self::DEFAULT_TXN_BATCH_COUNT,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -265,7 +268,11 @@ final readonly class TwoPhaseCommitter
      */
     private function buildContext(RegionInfo $region): Context
     {
-        return RegionContextFactory::fromRegionInfo($region, priority: $this->priority);
+        return RegionContextFactory::fromRegionInfo(
+            $region,
+            priority: $this->priority,
+            resourceControl: $this->resourceControl,
+        );
     }
 
     private function nowMs(): int

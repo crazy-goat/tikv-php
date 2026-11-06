@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
@@ -63,6 +64,8 @@ final readonly class RawKvBatch
          * unary path. Null (the default) keeps the pure unary fan-out.
          */
         private ?BatchCommandsMultiplexer $batchCommands = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -334,6 +337,7 @@ final readonly class RawKvBatch
             $region,
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
+            resourceControl: $this->resourceControl,
         );
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
@@ -370,7 +374,7 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region, resourceControl: $this->resourceControl));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -408,7 +412,7 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region, resourceControl: $this->resourceControl));
         $request->setKeys($keys);
         if ($forCas) {
             $request->setForCas(true);
@@ -547,6 +551,7 @@ final readonly class RawKvBatch
             $region,
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
+            resourceControl: $this->resourceControl,
         );
 
         $request = new RawBatchGetRequest();
@@ -574,7 +579,7 @@ final readonly class RawKvBatch
         string $columnFamily,
     ): BatchCommandsEntry {
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region, resourceControl: $this->resourceControl));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -604,7 +609,7 @@ final readonly class RawKvBatch
         string $columnFamily,
     ): BatchCommandsEntry {
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region));
+        $request->setContext(RegionContextFactory::fromRegionInfo($region, resourceControl: $this->resourceControl));
         $request->setKeys($keys);
         if ($forCas) {
             $request->setForCas(true);

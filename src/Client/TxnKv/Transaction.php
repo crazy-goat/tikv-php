@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
@@ -171,6 +172,13 @@ final class Transaction
          * (issue #430); defaults to RawKV's `MAX_BATCH_LIMIT`.
          */
         private readonly int $maxTxnBatchCount = TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+        /**
+         * Resource-control metadata carried on every request of this
+         * transaction (issue #427): the client-wide default with the
+         * begin() overrides applied. An empty instance leaves both
+         * resource-control fields unset.
+         */
+        private readonly ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -236,6 +244,7 @@ final class Transaction
             replicaReadPolicy: $this->replicaReadPolicy,
             logger: $this->logger,
             priority: $this->priority,
+            resourceControl: $this->resourceControl,
         );
 
         $this->committer = new TwoPhaseCommitter(
@@ -258,6 +267,7 @@ final class Transaction
             pessimisticLockTtlMs: $this->pessimisticLockTtlMs,
             maxTxnBatchSize: $this->maxTxnBatchSize,
             maxTxnBatchCount: $this->maxTxnBatchCount,
+            resourceControl: $this->resourceControl,
         );
     }
 

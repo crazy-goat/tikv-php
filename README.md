@@ -902,6 +902,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 - ✅ **Conflict retry** — typed `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`
 - ✅ **GC safe points** — `holdGcSafePoint()` / `releaseGcSafePoint()` for reads that outlive `gc_life_time`
 - ✅ **Replica reads** — `options['replicaRead']` picks the replica that serves a read — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` — on both clients
+- ✅ **Resource control** — `options['resourceGroup']` and `options['resourceGroupTag']` (and the matching `begin()` options) attribute every request to a TiKV resource group through `Context.resource_control_context` and `Context.resource_group_tag`
 - ✅ **One-phase and async commit** — the `begin()` options `enable1Pc` and `enableAsyncCommit`
 - ✅ **Transaction state** — `getTxnId()`, `getStartTs()`, `getCommitTs()`, `getStatus()`, `isPessimistic()`, `getPriority()`, `getWriteSet()`, `getWriteSetSize()`, `getWriteSetCount()`, `getReadSet()`
 
@@ -936,6 +937,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `maxScanRows` | Row cap for an unbounded (`limit: 0`) scan; exceeding it throws `ScanLimitExceededException` |
 | `replicaRead` | A `ReplicaReadPolicy` object — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` ([Replica Reads](docs/configuration.md#replica-reads)) |
 | `batchCommands` | RawKV experimental RPC multiplexing over the `BatchCommands` stream |
+| `resourceGroup` / `resourceGroupTag` | Resource-control attribution — the resource group and opaque tag sent on every request's `Context` ([Resource Control](docs/configuration.md#resource-control-resource-groups)) |
 | `apiVersion` / `keyspace` | API V2 with a named keyspace |
 | `grpc` | gRPC channel arguments (keepalive, message sizes) |
 | `maxChannels` / `idleTtlMs` | The channel pool — how many gRPC channels the transport keeps open and after how long an unused one is evicted ([Channel Pool](docs/configuration.md#channel-pool-maxchannels-idlettlms)) |

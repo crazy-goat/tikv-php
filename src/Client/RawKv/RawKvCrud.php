@@ -20,6 +20,7 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
@@ -35,6 +36,8 @@ final readonly class RawKvCrud
         private ?SlowLogConfig $slowLogConfig = null,
         /** Read preference for reads (issue #421); writes always target the leader. */
         private ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -51,6 +54,7 @@ final readonly class RawKvCrud
                     $this->replicaReadPolicy,
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
@@ -105,7 +109,10 @@ final readonly class RawKvCrud
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawPutRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo(
+                $region,
+                resourceControl: $this->resourceControl,
+            ));
             $request->setKey($key);
             $request->setValue($value);
             if ($ttl > 0) {
@@ -144,7 +151,10 @@ final readonly class RawKvCrud
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo(
+                $region,
+                resourceControl: $this->resourceControl,
+            ));
             $request->setKey($key);
             if ($forCas) {
                 $request->setForCas(true);
@@ -181,6 +191,7 @@ final readonly class RawKvCrud
                     $this->replicaReadPolicy,
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);

@@ -26,6 +26,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -64,6 +65,22 @@ final class TxnKvClient
      * the stale-read flag. Commits always target the leader.
      */
     public const OPT_REPLICA_READ = 'replicaRead';
+
+    /**
+     * options[] key for the client-wide resource group (issue #427). Every
+     * transaction begun by this client inherits it unless begin() overrides
+     * it. Sent as `Context.resource_control_context.resource_group_name`.
+     * Default: unset = no resource-control fields. The name must be 1 to 64
+     * characters of letters, digits, underscores or hyphens.
+     */
+    public const OPT_RESOURCE_GROUP = ResourceControl::OPTION_RESOURCE_GROUP;
+
+    /**
+     * options[] key for the client-wide opaque resource-group tag (issue
+     * #427), sent as `Context.resource_group_tag`. Default: unset = the
+     * field is not sent. Must be a non-empty string.
+     */
+    public const OPT_RESOURCE_GROUP_TAG = ResourceControl::OPTION_RESOURCE_GROUP_TAG;
 
     /**
      * options[] key for the GC safe-point cache refresh interval in
@@ -271,6 +288,7 @@ final class TxnKvClient
             metrics: $bundle->metrics,
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            resourceControl: ResourceControl::fromOptions($options),
         );
     }
 
@@ -324,6 +342,12 @@ final class TxnKvClient
          * again would fail or corrupt the cached range.
          */
         private readonly ?CodecInterface $codec = new CodecV1(Mode::Txn),
+        /**
+         * Client-wide resource-control metadata (issue #427), inherited by
+         * every transaction and overridable per begin() call. Empty by
+         * default, which sends no resource-control field.
+         */
+        private readonly ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -451,6 +475,8 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
@@ -492,6 +518,9 @@ final class TxnKvClient
 
         $pessimistic = (bool) ($options['pessimistic'] ?? true);
         $priority = (int) ($options['priority'] ?? 0);
+        $resourceControl = $this->resourceControl->withOverrides(
+            ResourceControl::fromOptions($options, 'begin() options'),
+        );
         $enable1Pc = $this->resolveEnableFlag($options, self::OPT_ENABLE_1PC);
         $enableAsyncCommit = $this->resolveEnableFlag($options, self::OPT_ENABLE_ASYNC_COMMIT);
         $eagerPessimisticLocks = $this->resolveEagerPessimisticLocks($options);
@@ -552,6 +581,7 @@ final class TxnKvClient
             timeoutConfig: $this->timeoutConfig,
             logger: $this->logger,
             statusCache: $this->resolvedStatusCache,
+            resourceControl: $resourceControl,
         );
 
         $transaction = new Transaction(
@@ -583,6 +613,7 @@ final class TxnKvClient
             maxTxnTotalSize: $maxTxnTotalSize,
             maxTxnBatchSize: $maxTxnBatchSize,
             maxTxnBatchCount: $maxTxnBatchCount,
+            resourceControl: $resourceControl,
         );
 
         $this->pruneFinishedTransactions();
@@ -610,6 +641,8 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
@@ -647,6 +680,8 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
@@ -675,6 +710,8 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,

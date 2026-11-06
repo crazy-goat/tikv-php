@@ -26,6 +26,7 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -46,6 +47,8 @@ final readonly class RawKvRangeOps
         private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
         private MetricsInterface $metrics = new NoOpMetrics(),
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -211,7 +214,10 @@ final readonly class RawKvRangeOps
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $request = new RawDeleteRangeRequest();
-                $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                $request->setContext(RegionContextFactory::fromRegionInfo(
+                    $region,
+                    resourceControl: $this->resourceControl,
+                ));
                 $request->setStartKey($startKey);
                 $request->setEndKey($endKey);
                 if ($columnFamily !== '') {
@@ -288,7 +294,10 @@ final readonly class RawKvRangeOps
                 }
 
                 $request = new RawChecksumRequest();
-                $request->setContext(RegionContextFactory::fromRegionInfo($region));
+                $request->setContext(RegionContextFactory::fromRegionInfo(
+                    $region,
+                    resourceControl: $this->resourceControl,
+                ));
                 $request->setAlgorithm(ChecksumAlgorithm::Crc64_Xor);
                 $request->setRanges([$range]);
 
