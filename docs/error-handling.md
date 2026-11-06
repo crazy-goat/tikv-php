@@ -419,13 +419,15 @@ a jittered delay; see
 One row per public method. "Throws" lists every exception class the method
 can raise, verified against both the `@throws` annotations and the method
 bodies. Three configuration/routing exceptions are deliberately *not* repeated
-in every row: `InvalidStoreAddressException` can escape any operation that
-resolves a store address on the RPC path, `PdException` can escape any
+in every row: `InvalidStoreAddressException` can escape an operation that
+resolves a store address on the RPC path, `PdException` can escape an
 operation that resolves a region or a store through PD, and — with
-`options['apiVersion'] => 2` — `KeyOutOfBoundsException` can escape any
-operation that sends or decodes a key outside the configured keyspace. Treat
-them as an additional possibility for every row that includes
-`RegionException`. (Since issue #234 every PD response header is checked, so
+`options['apiVersion'] => 2` — `KeyOutOfBoundsException` can escape an
+operation that sends or decodes a key outside the configured keyspace. These
+apply to a resolution that runs before a batch fan-out; a resolution inside
+the fan-out is reported in `BatchPartialFailureException` instead. Treat them
+as an additional possibility for every row that includes `RegionException`.
+(Since issue #234 every PD response header is checked, so
 a PD application-level error such as `NOT_BOOTSTRAPPED` is raised as
 `PdException` instead of degrading into an empty result — e.g. `scanRegions()`
 can no longer return `[]` for a failed `ScanRegions`, so `deleteRange()`
@@ -467,10 +469,10 @@ there at all.
 | `scan(string, string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchDeadlineExceededException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Limit validated (`'Scan limit must be 0 or greater'`; max 10240 per RPC). `limit: 0` returns the whole range by paging internally; collecting more than `options['maxScanRows']` rows throws `ScanLimitExceededException` instead of truncating (issue #191). A bounded scan returns at most `limit` rows, so a result whose count equals the limit may be truncated (issue #440). `BatchDeadlineExceededException` comes from a page fanned out across several regions |
 | `scanPrefix(string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchDeadlineExceededException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Delegates to `scan()`; same `limit: 0` pagination + guard semantics |
 | `reverseScan(...)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Limit validated; `limit: 0` pages internally (descending bound moves down each page) and is guarded by `options['maxScanRows']` |
-| `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved. A region's retry-budget/store failure is wrapped in `BatchPartialFailureException` |
-| `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole. A region's retry-budget/store failure is wrapped |
-| `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics |
-| `checksum(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Concurrent per-region checksums; idempotent. A region's retry-budget/store failure is wrapped |
+| `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved. A per-range or per-region `RegionException`, `GrpcException`, retry-budget failure or missing store is wrapped in `BatchPartialFailureException::getRegionErrors()` |
+| `deleteRange(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole. A region's retry-budget/store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
+| `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics. The pre-fan-out PD region enumeration can throw the base `TiKvException` |
+| `checksum(string, string)` | `ClientClosedException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Concurrent per-region checksums; idempotent. A region's retry-budget/store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
 | `ingest(array, ?int $ttl = null)` | `ClientClosedException`, `InvalidArgumentException`, `GrpcException`, `RegionException`, `InvalidStoreAddressException`, `StoreNotFoundException`, `BatchDeadlineExceededException`, `TiKvException` | SST import path; store mode switches fan out concurrently. `ingest()` has no `RetryExecutor`, so a missing store escapes directly and `RetryBudgetExhaustedException` is not thrown |
 | `getClusterId(): ?int` | — | Returns `null` when unknown; no exceptions documented |
 | `healthCheck(): ?int` | `ClientClosedException`, `HealthCheckException` | Wraps any PD failure into `HealthCheckException` |

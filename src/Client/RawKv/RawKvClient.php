@@ -45,11 +45,14 @@ use Psr\Log\NullLogger;
  *
  * ## Exceptions shared by region-resolved operations
  *
- * Every method that resolves a region or a store through PD can additionally
+ * A method that resolves a region or a store through PD can additionally
  * throw {@see PdException} (PD answered with an application-level error such
  * as NOT_BOOTSTRAPPED), {@see InvalidStoreAddressException} (PD returned a
  * store address outside the configured policy) and the base
- * {@see TiKvException} (a fail-closed internal error). A per-pair `KeyError`
+ * {@see TiKvException} (a fail-closed internal error). This applies to a
+ * resolution that runs before a batch fan-out; a resolution that runs inside
+ * {@see \CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor} reports its failure
+ * through {@see BatchPartialFailureException} instead. A per-pair `KeyError`
  * on a scan response (and on a multiplexed batch-get response) is raised as
  * {@see \CrazyGoat\TiKV\Client\Exception\KeyErrorException} (a TiKvException
  * subclass). With `options['apiVersion'] => 2`, every operation that sends or
@@ -72,7 +75,8 @@ use Psr\Log\NullLogger;
  * {@see \CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor}, which reports every
  * TiKvException — including a region's `RetryBudgetExhaustedException` or
  * `StoreNotFoundException` — inside {@see BatchPartialFailureException}. They
- * declare the wrapper; inspect `getRegionErrors()` for the cause. With
+ * declare the wrapper for those per-region failures; inspect
+ * `getRegionErrors()` for the cause. With
  * `options['batchCommands']` enabled, the multiplexed entry setup resolves
  * store addresses before that wrapper and can still throw
  * `StoreNotFoundException` directly.
@@ -1208,10 +1212,9 @@ final class RawKvClient
      *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
-     * @throws RegionException
-     * @throws GrpcException
-     * @throws BatchPartialFailureException A region whose retry loop exhausted
-     *     its budget contributes a `RetryBudgetExhaustedException` to
+     * @throws BatchPartialFailureException A per-range or per-region failure —
+     *     including a `RegionException`, a `GrpcException`, a region's
+     *     exhausted retry budget or a missing store — is reported inside
      *     `getRegionErrors()`; it is wrapped, not thrown directly
      * @throws BatchDeadlineExceededException When the range fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
@@ -1240,6 +1243,8 @@ final class RawKvClient
      *     `getRegionErrors()`; it is wrapped, not thrown directly
      * @throws BatchDeadlineExceededException When the range fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
+     * @throws TiKvException When the pre-fan-out PD region enumeration throws
+     *     the base type (for example from a custom `PdClientInterface`)
      */
     public function deleteRange(string $startKey, string $endKey): void
     {
@@ -1258,6 +1263,8 @@ final class RawKvClient
      *     `getRegionErrors()`; it is wrapped, not thrown directly
      * @throws BatchDeadlineExceededException When the range fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
+     * @throws TiKvException When the pre-fan-out PD region enumeration throws
+     *     the base type (for example from a custom `PdClientInterface`)
      */
     public function deletePrefix(string $prefix): void
     {
@@ -1286,6 +1293,8 @@ final class RawKvClient
      *     `getRegionErrors()`; it is wrapped, not thrown directly
      * @throws BatchDeadlineExceededException When the range fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
+     * @throws TiKvException When the pre-fan-out PD region enumeration throws
+     *     the base type (for example from a custom `PdClientInterface`)
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
