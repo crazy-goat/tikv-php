@@ -411,8 +411,9 @@ The remaining gap was the missing `wait_timeout` and the missing knob.
 
 ## Retry closures must re-resolve the region inside the loop — scans resolve on the sub-range start, reverse scans on the sub-range end
 
-`RetryExecutor` invalidates the region cache and switches leader hints on
-`NotLeader`/`EpochNotMatch`, but those updates only take effect if the
+`RetryExecutor` invalidates the region cache on routing errors
+(`NotLeader`/`EpochNotMatch`/`RegionNotFound`/`StoreNotMatch`/…) and switches
+leader hints on `NotLeader`, but those updates only take effect if the
 retried closure asks `RegionResolver::getRegionInfo()` again on every
 attempt. Scan closures (issue #267, GRPC-08) used to capture the
 `RegionInfo` resolved before the loop, so every retry re-sent the same
@@ -456,6 +457,22 @@ scan fix, the retry does not re-clip or re-group: after a split the
 re-resolved region may not cover the whole key group and the server
 keeps erroring until the budget is exhausted (documented limitation,
 same as the #500 lock path).
+
+## `RegionErrorHandler::check()` uses the same routing table but its own metric prefix
+
+`RegionErrorHandler::check()` is a second drop path beside the retry
+executor: TxnKV call sites pass their `$cache` and `$regionId`, so `check()`
+invalidates before the `RegionException` reaches `RetryExecutor`. Since
+issue #245 both paths gate the drop on the same
+`RetryExecutor::invalidatesRoutingKind()` table, so
+`ServerIsBusy`/`DiskFull`/`IsWitness`/`RecoveryInProgress` keep the cached
+entry there too. `check()` builds the `RegionException` first because the
+typed `ErrorKind` lives on it. The handler keeps its own reason prefix —
+`region_error:<kind>`, and plain `region_error` for an unclassified error —
+rather than `retry_region_error:<kind>`: the latter means "RetryExecutor
+dropped the entry before scheduling another attempt", while `check()` may run
+outside any retry executor. Do not collapse the two labels, and do not
+assume the executor owns every drop.
 
 ## PHPStan `ternary.alwaysFalse` fires for by-ref bool flags mutated in a sibling closure — sequence mocks instead
 

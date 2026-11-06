@@ -169,7 +169,7 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn($this->region());
         $this->regionCache->expects($this->once())
             ->method('invalidate')
-            ->with(1, 'retry_region_error');
+            ->with(1, 'retry_region_error:epoch_not_match');
 
         $future = CheckedGrpcFuture::fromRetryableDispatch($dispatch, $this->createRetryExecutor(), 'k1');
 

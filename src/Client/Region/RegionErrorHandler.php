@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Region;
 
+use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
@@ -13,6 +14,8 @@ use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 
 final class RegionErrorHandler
@@ -35,8 +38,14 @@ final class RegionErrorHandler
      * silently accepted response.
      *
      * When a $cache and $regionId are provided, the region is invalidated
-     * from the cache before the exception is thrown. This is the consistent
-     * behaviour expected by Transaction and LockResolver callers.
+     * from the cache before the exception is thrown when the region error is
+     * a ROUTING error (EpochNotMatch, RegionNotFound, KeyNotInRegion,
+     * StoreNotMatch, RegionNotInitialized) or carries no typed kind. A
+     * non-routing error (ServerIsBusy, DiskFull, IsWitness,
+     * RecoveryInProgress, …) reached the region that owns the key, so the
+     * cached entry stays — the same routing table RetryExecutor uses
+     * (issue #245). This is the consistent behaviour expected by Transaction
+     * and LockResolver callers.
      *
      * NotLeader ownership depends on where check() runs:
      *
@@ -67,15 +76,31 @@ final class RegionErrorHandler
         if (method_exists($response, 'getRegionError')) {
             $regionError = $response->getRegionError();
             if ($regionError !== null) {
-                $isNotLeader = $regionError->getNotLeader() !== null;
-                if (
-                    (!$isNotLeader || !$notLeaderOwnedByRetryExecutor)
-                    && $cache instanceof \CrazyGoat\TiKV\Client\Cache\RegionCacheInterface
-                    && $regionId !== null
-                ) {
-                    $cache->invalidate($regionId, $isNotLeader ? 'not_leader' : 'region_error');
+                // Build the exception first: the typed ErrorKind lives on it
+                // and decides whether the cached region is still correct.
+                $exception = RegionException::fromRegionError($regionError);
+                $isNotLeader = $exception->notLeader instanceof NotLeader;
+
+                if ($cache instanceof RegionCacheInterface && $regionId !== null) {
+                    if ($isNotLeader) {
+                        // A valid-hint switch belongs to RetryExecutor's
+                        // handleNotLeader(); only a non-executor site drops.
+                        if (!$notLeaderOwnedByRetryExecutor) {
+                            $cache->invalidate($regionId, 'not_leader');
+                        }
+                    } else {
+                        $kind = $exception->errorKind;
+                        // An unclassified region error invalidates
+                        // conservatively, exactly as before. A classified
+                        // non-routing kind means the request reached the
+                        // region that owns the key, so keep the entry.
+                        if (!$kind instanceof ErrorKind || RetryExecutor::invalidatesRoutingKind($kind)) {
+                            $cache->invalidate($regionId, self::regionInvalidationReason($exception));
+                        }
+                    }
                 }
-                throw RegionException::fromRegionError($regionError);
+
+                throw $exception;
             }
         }
 
@@ -123,6 +148,22 @@ final class RegionErrorHandler
                 ));
             }
         }
+    }
+
+    /**
+     * Metric reason for a regionInvalidated() drop owned by check().
+     *
+     * The handler is a separate drop path from RetryExecutor's pre-retry
+     * invalidation, so it keeps its own 'region_error' prefix rather than
+     * 'retry_region_error'. The kind is still tagged the same way:
+     * 'region_error:epoch_not_match'. An unclassified error keeps the
+     * historical 'region_error' label.
+     */
+    private static function regionInvalidationReason(RegionException $e): string
+    {
+        $kind = $e->errorKind;
+
+        return $kind instanceof ErrorKind ? 'region_error:' . $kind->value : 'region_error';
     }
 
     /**
