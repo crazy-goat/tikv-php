@@ -739,7 +739,15 @@ final readonly class LockResolver
             return 0;
         }
 
-        return (int) (microtime(true) * 1000) + $remainingDeadlineMs;
+        $nowMs = (int) (microtime(true) * 1000);
+
+        // Saturate instead of overflowing: retryDeadlineMs is user-facing and
+        // only validated as >= 0, so PHP_INT_MAX must not turn the addition
+        // into a float and throw a TypeError from the int return type
+        // (issue #569, N7).
+        return $remainingDeadlineMs > \PHP_INT_MAX - $nowMs
+            ? \PHP_INT_MAX
+            : $nowMs + $remainingDeadlineMs;
     }
 
     /**

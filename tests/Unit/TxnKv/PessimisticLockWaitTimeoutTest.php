@@ -322,6 +322,26 @@ class PessimisticLockWaitTimeoutTest extends TestCase
         $this->assertNotContains('KvResolveLock', $this->methods);
     }
 
+    public function testTenMillisecondBudgetSkipsLockResolutionAtTheBoundary(): void
+    {
+        $this->alwaysConflicting();
+
+        // 10 ms is still below the floor: a 10 ms KvCheckTxnStatus deadline
+        // can fail with DEADLINE_EXCEEDED, which must not escape as
+        // GrpcException instead of LockWaitTimeoutException (issue #569, N4).
+        $txn = $this->createTransaction(['maxBackoffMs' => 10]);
+
+        try {
+            $txn->set('key', 'value');
+            $this->fail('Expected LockWaitTimeoutException was not thrown');
+        } catch (LockWaitTimeoutException) {
+            // Expected: the loop's own lock-timeout path, not a resolver RPC.
+        }
+
+        $this->assertNotContains('KvCheckTxnStatus', $this->methods);
+        $this->assertNotContains('KvResolveLock', $this->methods);
+    }
+
     public function testANegativeWaitTimeoutIsRejected(): void
     {
         // A negative wait_timeout means "do not wait at all" in TiKV, so it

@@ -150,9 +150,10 @@ final readonly class TwoPhaseCommitter
      * existing `LockWaitTimeoutException` path runs instead: a 1–10 ms gRPC
      * deadline is almost certain to fail with `DEADLINE_EXCEEDED`, which
      * would escape as `GrpcException` rather than the #219 lock timeout
-     * (issue #569, N4).
+     * (issue #569, N4). The comparison is inclusive, so exactly 10 ms is
+     * already too short; 11 is the first budget that may attempt resolution.
      */
-    private const MIN_LOCK_RESOLUTION_BUDGET_MS = 10;
+    private const MIN_LOCK_RESOLUTION_BUDGET_MS = 11;
 
     /**
      * Default pessimistic-lock wait timeout handed to TiKV

@@ -867,6 +867,31 @@ class LockResolverTest extends TestCase
     }
 
     /**
+     * Issue #569 (N7): a user-facing `retryDeadlineMs` of PHP_INT_MAX must
+     * saturate the absolute deadline instead of overflowing the int return
+     * type. The configured lock-resolution timeout still applies.
+     */
+    public function testResolveLockWithMaximumRemainingDeadlineKeepsConfiguredTimeout(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 1),
+        );
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), \PHP_INT_MAX);
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvResolveLock'], $this->callSequence);
+        foreach ($this->callTimeouts as $call) {
+            $this->assertSame(
+                TimeoutConfig::DEFAULT_LOCK_RESOLVE_TIMEOUT_MS,
+                $call['timeoutMs'],
+            );
+        }
+    }
+
+    /**
      * Issue #569: without a deadline (standalone resolver, no enclosing
      * `RetryExecutor`), the configured `lockResolveTimeoutMs` applies and a
      * live lock keeps raising the retryable exception — the historical
