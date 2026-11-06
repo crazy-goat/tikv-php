@@ -1458,6 +1458,18 @@ Two different failure modes share one issue, and they get two different defaults
    limit still forms its own batch so the server rejects it instead of the client silently
    dropping it.
 
+## Reversed RawKV ranges are rejected before any RPC (#343)
+
+`scan()`, `scanIterator()`, `batchScan()`, `deleteRange()` and `checksum()` take
+`[startKey, endKey)`; `reverseScan()` takes `[upper bound, lower bound)`. A reversed range is
+rejected with `InvalidArgumentException` before PD or a store is contacted instead of being
+clipped to an empty result. Clipping was silent for `reverseScan()` (the old docs advertised the
+empty result) and undefined for the forward operations, so the most common mistake looked like
+"no rows". `startKey == endKey` with a non-empty end key stays a valid empty range. An empty end
+key is the +infinity sentinel for forward operations (`scan('', '')` covers the whole keyspace)
+and the keyspace start for `reverseScan()`, so `reverseScan('', '')` is empty.
+`deleteRange('', '')` keeps its explicit no-op guard rather than deleting the whole keyspace.
+
 ## Rollback KeyErrors fail closed; only `txn_not_found` / `txn_lock_not_found` are success (#559)
 
 `TwoPhaseCommitter::handleRollbackError()` is shared by `batchRollback()` and

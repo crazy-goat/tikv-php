@@ -1022,8 +1022,10 @@ final class RawKvClient
     /**
      * @throws ClientClosedException
      * @throws InvalidArgumentException When batchSize is below 1 or above
-     *         MAX_SCAN_LIMIT. The scan RPCs run during iteration; the
-     *         exceptions they raise are documented on {@see ScanIterator}.
+     *         MAX_SCAN_LIMIT, or when the range is reversed (`$startKey` sorts
+     *         after a non-empty `$endKey`). The scan RPCs run during
+     *         iteration; the exceptions they raise are documented on
+     *         {@see ScanIterator}.
      */
     public function scanIterator(
         string $startKey,
@@ -1091,7 +1093,8 @@ final class RawKvClient
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When the limit is invalid or the range
+     *         is reversed (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchDeadlineExceededException When a page fanned out across
@@ -1187,7 +1190,8 @@ final class RawKvClient
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When the limit is invalid or the range
+     *         is reversed (`$startKey` sorts before a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws KeyErrorException When the response carries a per-pair key error
@@ -1216,7 +1220,8 @@ final class RawKvClient
      * @return array<array<array{key: string, value: ?string}>>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When `eachLimit` is invalid or a range
+     *         is reversed (`$startKey` sorts after a non-empty `$endKey`)
      * @throws BatchPartialFailureException A per-range or per-region failure —
      *     including a `RegionException`, a `GrpcException`, a region's
      *     exhausted retry budget or a missing store — is reported inside
@@ -1241,6 +1246,8 @@ final class RawKvClient
 
     /**
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When the range is reversed
+     *         (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted
@@ -1291,6 +1298,8 @@ final class RawKvClient
 
     /**
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When the range is reversed
+     *         (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted
