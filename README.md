@@ -692,7 +692,9 @@ The gRPC transport behind a client is **long-lived and shared**: it keeps one
 open channel per address, and that cache only pays off when the same
 transport serves many requests. Create the client once (at the start of a
 worker, or in a container) and reuse it — a client per request throws the
-cache away and pays a reconnect every time.
+region cache and the PHP-side channel handles away and starts cold, though
+ext-grpc may still reuse the underlying connection (see
+[Connection lifecycle and process model](docs/operations.md#connection-lifecycle-and-process-model)).
 
 Closing is the mirror image of creating:
 
