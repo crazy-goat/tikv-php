@@ -183,7 +183,8 @@ of the contract.
   `TxnKv\RollbackRegroupSignal`, `TxnKv\ResolvedTxnStatusCache`;
 - `Retry\` — except `Retry\RetryBudgetExhaustedException` and
   `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
-  `Retry\BackoffType`, `Retry\ErrorClassifier` and `Retry\RetryExecutor`;
+  `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget` and
+  `Retry\RetryExecutor`;
 - the generated protobuf and gRPC classes under `src/Proto/` — except
   `Errorpb\NotLeader`, which the promise covers.
 
