@@ -51,7 +51,7 @@ final readonly class ResourceControl
     /** Maximum resource-group-name length accepted by PD. */
     public const MAX_RESOURCE_GROUP_NAME_LENGTH = 64;
 
-    private const RESOURCE_GROUP_NAME_PATTERN = '/\A[A-Za-z0-9_-]{1,64}\z/';
+    private const RESOURCE_GROUP_NAME_PATTERN_TEMPLATE = '/\A[A-Za-z0-9_-]{1,%d}\z/';
 
     public function __construct(
         private ?string $groupName = null,
@@ -165,7 +165,8 @@ final readonly class ResourceControl
 
     private function assertGroupName(string $groupName): void
     {
-        if (preg_match(self::RESOURCE_GROUP_NAME_PATTERN, $groupName) !== 1) {
+        $pattern = sprintf(self::RESOURCE_GROUP_NAME_PATTERN_TEMPLATE, self::MAX_RESOURCE_GROUP_NAME_LENGTH);
+        if (preg_match($pattern, $groupName) !== 1) {
             throw new InvalidArgumentException(sprintf(
                 'Resource group name must be 1-%d characters of letters, digits, underscores or hyphens, got %s',
                 self::MAX_RESOURCE_GROUP_NAME_LENGTH,

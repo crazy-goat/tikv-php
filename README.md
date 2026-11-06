@@ -1195,7 +1195,6 @@ the issue is still open.
 
 - ⬜ **The remaining gRPC channel parameters** — compression, the HTTP/2 initial window size and `keepalive_permit_without_calls` are still hard-coded (the message sizes and the keepalive times are configurable already) ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
-- ⬜ **Resource control and resource groups** — per-request resource-group tags ([#427](https://github.com/crazy-goat/tikv-php/issues/427))
 - ⬜ **Background region-cache refresh and region preloading** ([#425](https://github.com/crazy-goat/tikv-php/issues/425))
 - ⬜ **Store health checking and failover to healthy replicas** ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))

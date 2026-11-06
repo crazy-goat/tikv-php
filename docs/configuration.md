@@ -1556,8 +1556,9 @@ so flow control remains entirely server-side (a larger follow-on, not part of
 the current option).
 
 Group names are validated locally against PD's naming rule; the tag is
-forwarded as opaque bytes. The client does not verify that the group exists —
-a name the cluster does not know is reported by TiKV/PD, not by this client.
+forwarded as opaque bytes. The client does not verify that the group exists:
+the cluster decides what happens to an unknown name — TiKV normally falls
+back to the default/uncontrolled behaviour rather than returning an error.
 
 ## Retry and Backoff
 
