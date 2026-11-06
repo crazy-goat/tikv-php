@@ -220,11 +220,20 @@ $client->batchDelete(['key1', 'key2', 'key3']);
 $oldSessions = ['session:abc', 'session:def', 'session:ghi'];
 $client->batchDelete($oldSessions);
 
-// Delete by pattern (using scan + batch delete)
-$results = $client->scanPrefix('temp:');
-$keysToDelete = array_column($results, 'key');
-if (!empty($keysToDelete)) {
-    $client->batchDelete($keysToDelete);
+// Delete by pattern: collect keys through the lazy iterator and delete in
+// batches, so memory stays flat. A bare scanPrefix('temp:') would buffer the
+// whole prefix and throw ScanLimitExceededException past
+// options['maxScanRows'] (default 100000).
+$batch = [];
+foreach ($client->scanPrefixIterator('temp:') as $key => $_) {
+    $batch[] = $key;
+    if (count($batch) >= 500) {
+        $client->batchDelete($batch);
+        $batch = [];
+    }
+}
+if ($batch !== []) {
+    $client->batchDelete($batch);
 }
 ```
 
@@ -396,7 +405,8 @@ equals the limit may be truncated.
 **Example:**
 
 ```php
-// Get the whole prefix into memory (limit: 0 is the default)
+// Get the whole prefix into memory (limit: 0 is the default; the result is
+// buffered and capped by options['maxScanRows'], default 100000)
 $users = $client->scanPrefix('user:');
 
 // Get all products in a category
