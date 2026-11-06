@@ -23,8 +23,6 @@ use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
-use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
-use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -76,13 +74,7 @@ final readonly class TxnReader
         private RegionCacheInterface $regionCache,
         /** Read preference for reads (issue #421); commits always target the leader. */
         private ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
-        private int $maxBackoffMs = 20000,
-        private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
-        private int $serverBusyBudgetMs = 60000,
-        private MetricsInterface $metrics = new NoOpMetrics(),
         private LoggerInterface $logger = new NullLogger(),
-        private ?RetryExecutor $retryExecutor = null,
-        private ?\Closure $classifier = null,
         /**
          * Kvrpcpb CommandPri carried on every read request's Context
          * (issue #336). Normal (0) is the proto3 default and is not
@@ -180,6 +172,15 @@ final readonly class TxnReader
     /**
      * Batch-read multiple keys.
      *
+     * Every per-region `KvBatchGet` dispatch+wait cycle runs under the
+     * transaction's retry executor, with the same classifier as `get()` and
+     * `scan()`: a region error (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`,
+     * …) invalidates or switches the cached region and the region is
+     * re-resolved before the retry (issue #222). The first attempt of every
+     * region is still dispatched eagerly, before any response is awaited, so
+     * the client-side fan-out of issue #291 is preserved; the retries run
+     * inside {@see RetryExecutor::execute()}.
+     *
      * The returned map inherits PHP's array-key semantics: a canonical
      * decimal-integer key is returned under its `int` form, every other key
      * form stays a `string` key — including a canonical decimal that overflows
@@ -200,6 +201,8 @@ final readonly class TxnReader
     public function batchGet(
         array $keys,
         TransactionState $state,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
     ): array {
         $keys = $this->normalizeKeysToStrings($keys, 'batchGet');
 
@@ -214,7 +217,7 @@ final readonly class TxnReader
         }
 
         if ($remaining !== []) {
-            $remoteResults = $this->batchGetFromTiKV($remaining, $state);
+            $remoteResults = $this->batchGetFromTiKV($remaining, $state, $retryExecutor, $classifier);
             // Do not use array_merge(): it renumbers integer keys, which
             // silently drops numeric-string key results ("12345" is stored
             // as int key 12345 and would move to index 0).
@@ -423,6 +426,8 @@ final readonly class TxnReader
     private function batchGetFromTiKV(
         array $keys,
         TransactionState $state,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
     ): array {
         $results = [];
         $resolved = $this->regionResolver->batchResolveRegions($keys);
@@ -451,6 +456,8 @@ final readonly class TxnReader
 
             $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetForRegionWithRetry(
                 $regionKeys,
+                $retryExecutor,
+                $classifier,
             );
         }
 
@@ -486,25 +493,25 @@ final readonly class TxnReader
 
     /**
      * Eagerly dispatch the first regional request and retry its wait phase
-     * when response-borne errors require lock resolution (issue #210).
+     * when response-borne errors require lock resolution (issue #210) or a
+     * retryable region error (issue #222).
+     *
+     * `fromRetryableDispatch()` is the fan-out-preserving form of
+     * {@see RetryExecutor::execute()}: the first attempt is sent during the
+     * dispatch phase so every region's RPC overlaps, while the wait phase
+     * runs the dispatch+wait cycle inside the executor. That is why the
+     * per-region call is not wrapped in a blocking `execute()` here — doing
+     * so would serialise the regions and undo issue #291.
      *
      * @param string[] $regionKeys
+     * @param callable(TiKvException): ?BackoffType $classifier
      */
     private function batchGetForRegionWithRetry(
         array $regionKeys,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
     ): CheckedGrpcFuture {
         $firstKey = $regionKeys[0] ?? '';
-        $retryExecutor = $this->retryExecutor ?? new RetryExecutor(
-            $this->maxBackoffMs,
-            $this->serverBusyBudgetMs,
-            $this->regionCache,
-            $this->grpc,
-            $this->regionResolver,
-            $this->logger,
-            deadlineMs: $this->retryDeadlineMs,
-            metrics: $this->metrics,
-        );
-        $classifier = $this->classifier ?? static fn (TiKvException $e): ?BackoffType => null;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             fn (): CheckedGrpcFuture => $this->batchGetForRegionAsync(

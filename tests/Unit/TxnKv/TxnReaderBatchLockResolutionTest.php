@@ -97,8 +97,15 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
             new TimeoutConfig(),
             new LockResolver($this->grpc, $this->regionResolver, $this->regionCache, $this->pdClient, 1000),
             $this->regionCache,
-            classifier: static fn(\Throwable $e): ?BackoffType => null,
         );
+    }
+
+    /**
+     * @return callable(\CrazyGoat\TiKV\Client\Exception\TiKvException): ?BackoffType
+     */
+    private function classifier(): callable
+    {
+        return static fn (): ?BackoffType => null;
     }
 
     private function executor(): RetryExecutor
@@ -185,7 +192,12 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         $this->readResponse = $response;
 
         try {
-            $this->reader()->batchGet(['k1', 'k2', 'k3'], new TransactionState());
+            $this->reader()->batchGet(
+                ['k1', 'k2', 'k3'],
+                new TransactionState(),
+                $this->executor(),
+                $this->classifier(),
+            );
             $this->fail('Expected a retry request');
         } catch (TxnRetryableException $e) {
             $this->assertSame(BackoffType::TxnLock, $e->backoffType);
@@ -216,7 +228,12 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
 
         $this->expectException(TxnRetryableException::class);
         try {
-            $this->reader()->batchGet(['k0', 'k1', 'k2'], new TransactionState());
+            $this->reader()->batchGet(
+                ['k0', 'k1', 'k2'],
+                new TransactionState(),
+                $this->executor(),
+                $this->classifier(),
+            );
         } finally {
             $this->assertSame(['k1', 'k2'], $this->resolvedKeys());
         }

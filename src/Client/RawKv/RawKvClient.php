@@ -13,13 +13,18 @@ use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
+use CrazyGoat\TiKV\Client\Exception\PdException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcBatchCommandsTransport;
@@ -30,10 +35,56 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
+/**
+ * RawKV client.
+ *
+ * ## Exceptions shared by region-resolved operations
+ *
+ * A method that resolves a region or a store through PD can additionally
+ * throw {@see PdException} (PD answered with an application-level error such
+ * as NOT_BOOTSTRAPPED), {@see InvalidStoreAddressException} (PD returned a
+ * store address outside the configured policy) and the base
+ * {@see TiKvException} (a fail-closed internal error). This applies to a
+ * resolution that runs before a batch fan-out; a resolution that runs inside
+ * {@see \CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor} reports its failure
+ * through {@see BatchPartialFailureException} instead. A per-pair `KeyError`
+ * on a scan response (and on a multiplexed batch-get response) is raised as
+ * {@see \CrazyGoat\TiKV\Client\Exception\KeyErrorException} (a TiKvException
+ * subclass). With `options['apiVersion'] => 2`, every operation that sends or
+ * decodes a key can also throw
+ * {@see \CrazyGoat\TiKV\Client\Exception\KeyOutOfBoundsException} when the
+ * key is outside the configured keyspace. Those types are not repeated on
+ * every method below.
+ *
+ * ## Retry budget and missing stores
+ *
+ * A method that runs its operation directly through the internal
+ * {@see RetryExecutor} declares {@see RetryBudgetExhaustedException} (the
+ * attempt cap or the wall-clock deadline was exhausted) and
+ * {@see StoreNotFoundException} (PD no longer knows the store backing the
+ * region).
+ *
+ * The fanned-out batch and range operations (`batchGet()`, `batchPut()`,
+ * `batchDelete()`, `batchScan()`, `deleteRange()`, `deletePrefix()` and
+ * `checksum()`) run their per-region retrying futures through
+ * {@see \CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor}, which reports every
+ * TiKvException — including a region's `RetryBudgetExhaustedException` or
+ * `StoreNotFoundException` — inside {@see BatchPartialFailureException}. They
+ * declare the wrapper for those per-region failures; inspect
+ * `getRegionErrors()` for the cause. With
+ * `options['batchCommands']` enabled, the multiplexed entry setup resolves
+ * store addresses before that wrapper and can still throw
+ * `StoreNotFoundException` directly.
+ *
+ * `ingest()` is the exception: {@see SstIngestor} has no RetryExecutor, so a
+ * `StoreNotFoundException` escapes directly and
+ * `RetryBudgetExhaustedException` is not reachable at all.
+ */
 final class RawKvClient
 {
     public const MAX_SCAN_LIMIT = 10240;
@@ -183,7 +234,13 @@ final class RawKvClient
      *        built by the application — the client uses it and never closes
      *        it, so one transport can be shared with other clients).
      *
-     * @throws InvalidArgumentException if PD endpoints array is empty
+     * @throws InvalidArgumentException if PD endpoints array is empty or an
+     *         option value is invalid
+     * @throws PdException When the API V2 keyspace lookup gets a PD
+     *         application-level error
+     * @throws GrpcException When the API V2 keyspace lookup fails at the
+     *         transport level
+     * @throws TiKvException When the API V2 keyspace lookup fails closed
      */
     public static function create(
         array $pdEndpoints,
@@ -221,6 +278,10 @@ final class RawKvClient
         );
     }
 
+    /**
+     * @throws InvalidArgumentException When retryDeadlineMs, maxConcurrency or
+     *         maxScanRows is out of range
+     */
     public function __construct(
         private readonly PdClientInterface $pdClient,
         private readonly GrpcClientInterface $grpc,
@@ -636,6 +697,12 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
      */
     public function get(string $key): ?string
     {
@@ -651,6 +718,12 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
      */
     public function put(string $key, string $value, int $ttl = 0): void
     {
@@ -667,6 +740,12 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
      */
     public function delete(string $key): void
     {
@@ -682,6 +761,12 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
      */
     public function getKeyTTL(string $key): ?int
     {
@@ -714,6 +799,12 @@ final class RawKvClient
      * @throws RegionException
      * @throws GrpcException NOT retried — transport errors leave the result
      *                       indeterminate for this non-idempotent operation
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
      */
     public function compareAndSwap(string $key, ?string $expectedValue, string $newValue, int $ttl = 0): CasResult
     {
@@ -754,6 +845,12 @@ final class RawKvClient
      * @throws RegionException
      * @throws GrpcException NOT retried — transport errors leave the result
      *                       indeterminate for this non-idempotent operation
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
      */
     public function putIfAbsent(string $key, string $value, int $ttl = 0): ?string
     {
@@ -788,7 +885,18 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
-     * @throws BatchPartialFailureException
+     * @throws BatchPartialFailureException A region whose retry loop exhausted
+     *     its budget contributes a `RetryBudgetExhaustedException` to
+     *     `getRegionErrors()`; it is wrapped, not thrown directly
+     * @throws BatchDeadlineExceededException When the batch fan-out exceeds
+     *     `options['timeout']['batchDeadlineMs']`
+     * @throws KeyErrorException With `options['batchCommands']` enabled, a
+     *     per-pair key error on the multiplexed response escapes directly; on
+     *     the default unary path it is wrapped in `BatchPartialFailureException`
+     * @throws StoreNotFoundException With `options['batchCommands']` enabled,
+     *     the multiplexed entry setup resolves store addresses outside the
+     *     per-region retry wrapper. On the default unary path a missing store
+     *     is reported inside `BatchPartialFailureException`
      * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
      *     the call transmits nothing rather than applying a subset of the batch
      *     (issue #187).
@@ -828,7 +936,15 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
-     * @throws BatchPartialFailureException
+     * @throws BatchPartialFailureException A region whose retry loop exhausted
+     *     its budget contributes a `RetryBudgetExhaustedException` to
+     *     `getRegionErrors()`; it is wrapped, not thrown directly
+     * @throws BatchDeadlineExceededException When the batch fan-out exceeds
+     *     `options['timeout']['batchDeadlineMs']`
+     * @throws StoreNotFoundException With `options['batchCommands']` enabled,
+     *     the multiplexed entry setup resolves store addresses outside the
+     *     per-region retry wrapper. On the default unary path a missing store
+     *     is reported inside `BatchPartialFailureException`
      * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
      *     the call transmits nothing rather than applying a subset of the batch
      *     (issue #187).
@@ -868,7 +984,15 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
-     * @throws BatchPartialFailureException
+     * @throws BatchPartialFailureException A region whose retry loop exhausted
+     *     its budget contributes a `RetryBudgetExhaustedException` to
+     *     `getRegionErrors()`; it is wrapped, not thrown directly
+     * @throws BatchDeadlineExceededException When the batch fan-out exceeds
+     *     `options['timeout']['batchDeadlineMs']`
+     * @throws StoreNotFoundException With `options['batchCommands']` enabled,
+     *     the multiplexed entry setup resolves store addresses outside the
+     *     per-region retry wrapper. On the default unary path a missing store
+     *     is reported inside `BatchPartialFailureException`
      * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
      *     the call transmits nothing rather than applying a subset of the batch
      *     (issue #187).
@@ -897,6 +1021,9 @@ final class RawKvClient
 
     /**
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When batchSize is below 1 or above
+     *         MAX_SCAN_LIMIT. The scan RPCs run during iteration; the
+     *         exceptions they raise are documented on {@see ScanIterator}.
      */
     public function scanIterator(
         string $startKey,
@@ -918,6 +1045,9 @@ final class RawKvClient
 
     /**
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When batchSize is below 1 or above
+     *         MAX_SCAN_LIMIT. The scan RPCs run during iteration; the
+     *         exceptions they raise are documented on {@see ScanIterator}.
      */
     public function scanPrefixIterator(string $prefix, int $batchSize = 1024, bool $keyOnly = false): ScanIterator
     {
@@ -964,6 +1094,15 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws BatchDeadlineExceededException When a page fanned out across
+     *         several regions exceeds `options['timeout']['batchDeadlineMs']`
+     * @throws KeyErrorException When the response carries a per-pair key error
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for a key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs a region
+     * @throws RetryBudgetExhaustedException When a region's retry attempt cap
+     *         or wall-clock deadline is exhausted
      * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
      *         limit is 0 and more than `options['maxScanRows']` rows match
      */
@@ -1000,6 +1139,15 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws BatchDeadlineExceededException When a page fanned out across
+     *         several regions exceeds `options['timeout']['batchDeadlineMs']`
+     * @throws KeyErrorException When the response carries a per-pair key error
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for a key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs a region
+     * @throws RetryBudgetExhaustedException When a region's retry attempt cap
+     *         or wall-clock deadline is exhausted
      * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
      *         limit is 0 and more than `options['maxScanRows']` rows match
      */
@@ -1042,6 +1190,13 @@ final class RawKvClient
      * @throws InvalidArgumentException
      * @throws RegionException
      * @throws GrpcException
+     * @throws KeyErrorException When the response carries a per-pair key error
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for a key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs a region
+     * @throws RetryBudgetExhaustedException When a region's retry attempt cap
+     *         or wall-clock deadline is exhausted
      * @throws \CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException When
      *         limit is 0 and more than `options['maxScanRows']` rows match
      */
@@ -1062,8 +1217,12 @@ final class RawKvClient
      *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
-     * @throws RegionException
-     * @throws GrpcException
+     * @throws BatchPartialFailureException A per-range or per-region failure —
+     *     including a `RegionException`, a `GrpcException`, a region's
+     *     exhausted retry budget or a missing store — is reported inside
+     *     `getRegionErrors()`; it is wrapped, not thrown directly
+     * @throws BatchDeadlineExceededException When the range fan-out exceeds
+     *     `options['timeout']['batchDeadlineMs']`
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly = false): array
     {
@@ -1084,6 +1243,13 @@ final class RawKvClient
      * @throws ClientClosedException
      * @throws RegionException
      * @throws GrpcException
+     * @throws BatchPartialFailureException A region whose retry loop exhausted
+     *     its budget contributes a `RetryBudgetExhaustedException` to
+     *     `getRegionErrors()`; it is wrapped, not thrown directly
+     * @throws BatchDeadlineExceededException When the range fan-out exceeds
+     *     `options['timeout']['batchDeadlineMs']`
+     * @throws TiKvException When the pre-fan-out PD region enumeration throws
+     *     the base type (for example from a custom `PdClientInterface`)
      */
     public function deleteRange(string $startKey, string $endKey): void
     {
@@ -1095,6 +1261,15 @@ final class RawKvClient
     /**
      * @throws ClientClosedException
      * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws BatchPartialFailureException A region whose retry loop exhausted
+     *     its budget contributes a `RetryBudgetExhaustedException` to
+     *     `getRegionErrors()`; it is wrapped, not thrown directly
+     * @throws BatchDeadlineExceededException When the range fan-out exceeds
+     *     `options['timeout']['batchDeadlineMs']`
+     * @throws TiKvException When the pre-fan-out PD region enumeration throws
+     *     the base type (for example from a custom `PdClientInterface`)
      */
     public function deletePrefix(string $prefix): void
     {
@@ -1118,6 +1293,13 @@ final class RawKvClient
      * @throws ClientClosedException
      * @throws RegionException
      * @throws GrpcException
+     * @throws BatchPartialFailureException A region whose retry loop exhausted
+     *     its budget contributes a `RetryBudgetExhaustedException` to
+     *     `getRegionErrors()`; it is wrapped, not thrown directly
+     * @throws BatchDeadlineExceededException When the range fan-out exceeds
+     *     `options['timeout']['batchDeadlineMs']`
+     * @throws TiKvException When the pre-fan-out PD region enumeration throws
+     *     the base type (for example from a custom `PdClientInterface`)
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
@@ -1153,8 +1335,17 @@ final class RawKvClient
      * @param int|null $ttl Time-to-live in seconds (null = no TTL)
      *
      * @throws ClientClosedException
+     * @throws InvalidArgumentException When a key is empty or a key/value
+     *         exceeds the configured size limit
      * @throws GrpcException
      * @throws RegionException
+     * @throws InvalidStoreAddressException When PD returns a store address
+     *         that fails validation (malformed or outside the allowed set)
+     * @throws StoreNotFoundException When PD no longer knows a store that must
+     *         receive an SST. `ingest()` has no RetryExecutor, so this escapes
+     *         directly
+     * @throws BatchDeadlineExceededException When the store-mode fan-out
+     *         exceeds `options['timeout']['batchDeadlineMs']`
      * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
      *     the call transmits nothing rather than applying a subset of the pairs
      *     (issue #187).

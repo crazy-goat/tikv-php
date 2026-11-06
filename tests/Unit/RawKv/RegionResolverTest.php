@@ -11,6 +11,7 @@ use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -196,7 +197,7 @@ class RegionResolverTest extends TestCase
         $this->regionCache->expects($this->once())->method('put')->with($region);
 
         $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('"61" (1 bytes)');
+        $this->expectExceptionMessage(KeyRedactor::redact('a'));
         $this->resolver->batchResolveRegions(['a', 'b', 'x', 'z']);
     }
 

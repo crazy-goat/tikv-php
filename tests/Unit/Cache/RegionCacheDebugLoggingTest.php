@@ -11,6 +11,7 @@ use CrazyGoat\TiKV\Tests\Unit\Support\BrokenLevelLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\DebugRecordingNullLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\DiscardingNullLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\IntLevelLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\KeyRedactorState;
 use CrazyGoat\TiKV\Tests\Unit\Support\LevelFilteredLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\LogRecordingNullLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\SpyRedactor;
@@ -38,11 +39,18 @@ use Psr\Log\NullLogger;
  */
 class RegionCacheDebugLoggingTest extends TestCase
 {
+    protected function setUp(): void
+    {
+        // setRedactor() and setSalt() are one-shot: clear the process-global
+        // state so a test can install its own redactor.
+        KeyRedactorState::reset();
+    }
+
     protected function tearDown(): void
     {
         // The redactor is process-global: restore the default one so the
         // rest of the suite sees the standard redaction.
-        KeyRedactor::setRedactor(null);
+        KeyRedactorState::reset();
     }
 
     public function testGetByKeyDoesNotRedactTheKeyWhenDebugLoggingIsOff(): void

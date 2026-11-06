@@ -1811,21 +1811,23 @@ must never parse keys out of `getMessage()`. A guard test
 key-bearing message (`for key`) but whose arguments lack a
 `KeyRedactor::redact()` invocation, so the pattern cannot silently return.
 
-## `KeyRedactor::redact()` output already contains quotes — pass it to an unquoted `%s`, and anchor key-redaction guards to the `sprintf()` argument list
+## `KeyRedactor::redact()` output is unquoted for non-empty keys — pass it to an unquoted `%s`, and anchor key-redaction guards to the `sprintf()` argument list
 
-Two lessons from the #269 (GRPC-10) review:
+Two lessons from the #269 (GRPC-10) review, updated for the keyed-hash format
+of #309 (SEC-06):
 
-1. **Doubled quotes in exception messages.** `KeyRedactor::redact()` already
-   starts with `"` and, for short keys (up to 8 bytes), also ends with `"`:
-   `"6b65795f61" (5 bytes)` vs `"757365725f656d61... (28 bytes)`. A template that also
-   quotes the placeholder (`for key "%s"`) renders
-   `... for key ""757365725f656d61... (28 bytes)"`. Pass the redacted value to an
+1. **Do not quote the redacted value a second time.** `KeyRedactor::redact()`
+   returns `#<16 hex chars> (<n> bytes)` for a non-empty key
+   (`#3c469e9d6c5875d3 (5 bytes)`) and `"" (0 bytes)` for an empty one. A
+   template that quotes the placeholder (`for key "%s"`) renders
+   `... for key "#3c469e9d6c5875d3 (5 bytes)"`; pass the redacted value to an
    *unquoted* `%s` (`for key %s`). Do not change `KeyRedactor`'s own output —
    log contexts store the value unwrapped and depend on the current shape.
-   The user-facing description of the whole redaction contract (the default
-   format, the places the redactor is applied, the process-global nature of
-   `setRedactor()` and the fact that values are never logged at all) lives
-   in [`configuration.md`](../configuration.md#log-redaction) (#400).
+   The user-facing description of the whole redaction contract (the keyed-hash
+   format, the process-scoped salt, the places the redactor is applied, the
+   one-shot `setRedactor()`/`setSalt()` setters and the fact that values are
+   never logged at all) lives in
+   [`configuration.md`](../configuration.md#log-redaction) (#400, #309).
 2. **Guard tests must scan the `sprintf()` argument list, not raw text.** The
    first cut matched the raw form with a text regex keyed off a positional
    bare `$key`; it stayed green only because the raw key was passed as the

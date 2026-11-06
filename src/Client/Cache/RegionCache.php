@@ -38,14 +38,14 @@ class RegionCache implements RegionCacheInterface
      * Whether this cache emits its debug records at all.
      *
      * The debug lines of the lookup paths carry a redacted key, and
-     * building that redaction costs a `substr` + `bin2hex` + `sprintf` per
-     * lookup — work the cache used to do on every hit even when the logger
-     * discarded the record (issue #300). The decision is taken once, at
-     * construction: {@see DebugLogging} asks the logger whether it handles
-     * the debug level at all, so neither a `NullLogger` nor a
-     * level-filtered logger (a Monolog logger at `INFO`, the "production"
-     * recipe in `docs/configuration.md`) pays for a context that is
-     * discarded.
+     * building that redaction costs a `hash_hmac` + `substr` + `sprintf` per
+     * lookup (plus the lazy salt on first use) — work the cache used to do on
+     * every hit even when the logger discarded the record (issue #300). The
+     * decision is taken once, at construction: {@see DebugLogging} asks the
+     * logger whether it handles the debug level at all, so neither a
+     * `NullLogger` nor a level-filtered logger (a Monolog logger at `INFO`,
+     * the "production" recipe in `docs/configuration.md`) pays for a context
+     * that is discarded.
      *
      * The answer is frozen with the flag: the logger is `readonly`, so it
      * cannot be swapped, but its *level* can change at runtime and the
