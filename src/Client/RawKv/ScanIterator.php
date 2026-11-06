@@ -35,8 +35,15 @@ final class ScanIterator implements Iterator
 
     private readonly \Closure $scanFn;
 
+    /** @var (\Closure(): void)|null */
+    private readonly ?\Closure $guard;
+
     /**
      * @param callable(string, string, int, bool, string): array<array{key: string, value: ?string}> $scanFn
+     * @param (callable(): void)|null $guard Invoked before every page fetch. RawKvClient
+     *        passes its ensureOpen() check so an iterator created by a client that has
+     *        since been closed fails with ClientClosedException instead of issuing an
+     *        RPC on a closed channel.
      */
     public function __construct(
         callable $scanFn,
@@ -45,8 +52,10 @@ final class ScanIterator implements Iterator
         private readonly int $batchSize = 1024,
         private readonly bool $keyOnly = false,
         private readonly string $columnFamily = '',
+        ?callable $guard = null,
     ) {
         $this->scanFn = \Closure::fromCallable($scanFn);
+        $this->guard = $guard === null ? null : \Closure::fromCallable($guard);
 
         if ($batchSize <= 0) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException('batchSize must be greater than 0');
@@ -116,6 +125,12 @@ final class ScanIterator implements Iterator
             $this->buffer = [];
             $this->exhausted = true;
             return;
+        }
+
+        // Fail closed before the RPC: a client closed after this iterator was
+        // created must not keep scanning on closed channels (issue #344).
+        if ($this->guard instanceof \Closure) {
+            ($this->guard)();
         }
 
         $results = ($this->scanFn)(
