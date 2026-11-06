@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Connection;
 
+use CrazyGoat\Proto\Keyspacepb\LoadKeyspaceResponse;
+use CrazyGoat\Proto\Pdpb\ResponseHeader;
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionBundle;
@@ -12,7 +14,9 @@ use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
+use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -57,6 +61,42 @@ class ConnectionFactoryTest extends TestCase
         );
 
         $this->assertSame($codec, $bundle->codec);
+    }
+
+    public function testApiV2ProbeRejectsMismatchingExpectedClusterId(): void
+    {
+        // The API V2 probe is a separate PdClient built before the final one;
+        // it must enforce the option before the keyspace is resolved.
+        $header = new ResponseHeader();
+        $header->setClusterId(999);
+
+        $response = new LoadKeyspaceResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                '127.0.0.1:2379',
+                'keyspacepb.Keyspace',
+                'LoadKeyspace',
+                $this->anything(),
+                LoadKeyspaceResponse::class,
+            )
+            ->willReturn($response);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Cluster ID mismatch: expected 12345, server reported 999');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: [
+                'apiVersion' => 2,
+                'keyspace' => 'tenant-a',
+                'grpcClient' => $grpc,
+                'expectedClusterId' => 12345,
+            ],
+        );
     }
 
     // ========================================================================
@@ -173,6 +213,99 @@ class ConnectionFactoryTest extends TestCase
             ['127.0.0.1:2379'],
             options: ['tsoPoolSize' => TimestampOracle::MAX_TIMESTAMP_POOL_SIZE + 1],
         );
+    }
+
+    // ========================================================================
+    // options['expectedClusterId'] — cluster identity verification (issue #308)
+    // ========================================================================
+
+    public function testExpectedClusterIdDefaultsToNull(): void
+    {
+        $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        /** @var int|null $expected */
+        $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
+        $this->assertNull($expected);
+    }
+
+    public function testExpectedClusterIdIsThreadedThroughToPdClient(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => 12345],
+        );
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        /** @var int|null $expected */
+        $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
+        $this->assertSame(12345, $expected);
+    }
+
+    public function testExpectedClusterIdIsThreadedThroughToTimestampOracle(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => 12345],
+        );
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        $oracle = (new \ReflectionMethod(PdClient::class, 'oracle'))->invoke($pdClient);
+        $this->assertInstanceOf(TimestampOracle::class, $oracle);
+
+        /** @var int|null $expected */
+        $expected = (new \ReflectionProperty(TimestampOracle::class, 'expectedClusterId'))->getValue($oracle);
+        $this->assertSame(12345, $expected);
+    }
+
+    public function testExpectedClusterIdRejectsNonIntValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['expectedClusterId'] must be an int (cluster ID)");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => '12345'],
+        );
+    }
+
+    public function testExpectedClusterIdRejectsZero(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['expectedClusterId'] must be >= 1");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => 0],
+        );
+    }
+
+    public function testExpectedClusterIdRejectsNegative(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['expectedClusterId'] must be >= 1");
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => -1],
+        );
+    }
+
+    public function testExplicitNullExpectedClusterIdIsTreatedAsAbsent(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => null],
+        );
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        /** @var int|null $expected */
+        $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
+        $this->assertNull($expected);
     }
 
     // ========================================================================
