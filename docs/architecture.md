@@ -222,6 +222,14 @@ Optimistic Transaction                   Pessimistic Transaction
 └──────────────────────┘
 ```
 
+Pessimistic-lock requests are split by the same `maxTxnBatchSize` /
+`maxTxnBatchCount` limits as prewrite and commit (issue #430), so one region
+can require several lock requests. `PessimisticLockRequest.is_first_lock` is
+carried only by the batch whose mutations contain the transaction's primary
+key (issue #225); it is not tied to the first region or the first request, and
+a retry of that batch keeps the flag. TiKV uses it to decide whether the
+transaction can be skipped by the deadlock detector, so flagging a secondary
+batch would hide a real lock-wait cycle.
 **Rollback semantics**: `rollback()` is a best-effort cleanup that fails
 closed. `KvBatchRollback` and `KVPessimisticRollback` responses are inspected
 variant by variant, and structured variants take precedence over TiKV's
@@ -462,9 +470,23 @@ heap records.
 ```php
 class LockResolver
 {
-    public function resolveLock(string $primaryLock, LockInfo $lock, int $remainingDeadlineMs = 0): void;
+    public function resolveLock(
+        string $primaryLock,
+        LockInfo $lock,
+        int $remainingDeadlineMs = 0,
+        bool $notLeaderOwnedByRetryExecutor = true,
+    ): void;
 }
 ```
+
+The last flag is a property of the call site, not of the resolver: a
+`resolveLock()` running inside a `RetryExecutor::execute()` closure leaves
+NotLeader handling to `RetryExecutor::handleNotLeader()` (valid-hint leader
+switching), while a direct call site such as the pessimistic-lock loop passes
+`false` so `RegionErrorHandler::check()` self-invalidates with `'not_leader'`.
+The resolver threads the flag through every region-error check it performs —
+`KvCheckTxnStatus`, `KvCheckSecondaryLocks`, the batch `KvResolveLock`, and the
+async-commit finalization (`resolveAsyncCommitLocks()`, issue #568).
 
 **Lock Resolution Flow**:
 ```
@@ -481,11 +503,26 @@ Transaction encounters lock on key
     ┌────┴────┐
     │ Status? │
     ├─────────┤
-    │ Locked  │──Wait and retry
+    │ Locked  │──Throw TxnRetryableException (the caller's
+    │         │  RetryExecutor owns the backoff within the deadline)
     │ Committed│──ResolveLock with commitTs
     │ RolledBack│──ResolveLock (cleanup)
     └─────────┘
 ```
+
+`resolveLock()` never sleeps for a lock TTL (issue #206): a live lock raises a
+retryable `TxnRetryableException` and the caller's `RetryExecutor` owns the
+bounded backoff. When the call runs inside a retry loop, the operation's
+`RetryBudget` (shared by every `execute()` of a `beginOperation()` executor)
+exposes the live remaining wall-clock budget through
+`RetryBudget::remainingDeadlineMs()`. `resolveLock()` converts that value once
+into an absolute deadline and caps every nested lock-resolution RPC (and the
+TSO fetch) by the live time left until it, so the RPCs share one budget and
+none is given a deadline beyond the operation's `retryDeadlineMs` (issue
+#569). A live lock is still retryable; the executor's own deadline check
+raises `RetryBudgetExhaustedException` when the budget is spent. A deadline of
+`0` keeps the configured `lockResolveTimeoutMs`/`tsoTimeoutMs` and the
+historical behaviour.
 
 `TxnKvClient` keeps one cache, shared by every transaction, with the final outcomes (committed or rolled back) in a
 bounded FIFO cache keyed by lock start ts (`ResolvedTxnStatusCache`, 2048
@@ -545,6 +582,15 @@ enum BackoffType
 - **General**: 20 seconds total backoff
 - **ServerBusy**: 60 seconds separate budget
 - **Wall-clock deadline**: 30 seconds per operation (configurable via `options['retryDeadlineMs']`; issues #294, #237). Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget), so the worst case is ≈ deadline + the duration of the last in-flight RPC (bounded only by the gRPC timeout option, not by the retry deadline).
+
+**Fan-out and response-borne errors**: a fanned-out operation dispatches one
+request per region before awaiting any of them (`BatchAsyncExecutor`). When a
+retryable region error comes back *inside* a response rather than as a thrown
+gRPC error, `CheckedGrpcFuture::fromRetryableDispatch()` keeps the eager first
+dispatch and runs the remaining dispatch+await cycle under `RetryExecutor`
+during the wait phase, so the error is retried per region with cache
+invalidation / leader switching and backoff. The batch wrappers use it since
+#183 and `RawKvRangeOps` (`deleteRange()` / `checksum()`) since #566.
 
 ## Data Flow
 
@@ -700,6 +746,17 @@ enum BackoffType
 │  (preserve order)   │
 └─────────────────────┘
 ```
+
+An unbounded (`limit: 0`) `scan()` / `scanPrefix()` / `reverseScan()`
+executes the per-region sub-scans concurrently, in windows of at most
+`options['maxConcurrency']` regions (default 16): every send in a window is
+issued before the first wait, and the responses are merged in key order
+(descending for a reverse scan). A bounded scan (`limit > 0`) walks the
+regions sequentially. The reverse path enumerates the region chain
+bottom-up (PD's `ScanRegions` only enumerates forwards), walks it top-down,
+and concatenates the per-region rows in descending order. A region or
+transport error, or a region that split after enumeration, falls back to
+the sequential retrying path.
 
 ## Key Design Decisions
 

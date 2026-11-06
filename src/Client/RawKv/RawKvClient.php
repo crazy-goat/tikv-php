@@ -1208,7 +1208,9 @@ final class RawKvClient
      *
      * There is no reverse iterator, so for a very large reverse range raise
      * `maxScanRows` consciously or page it in the caller; the unbounded
-     * forward alternative is {@see RawKvClient::scanIterator()}.
+     * forward alternative is {@see RawKvClient::scanIterator()}. An unbounded
+     * reverse scan fans its per-region reads out concurrently in windows of
+     * at most `options['maxConcurrency']` regions (default 16).
      *
      * @param int $limit Maximum rows to return; 0 = the whole range
      *                   (paginated internally, guarded by maxScanRows). A
