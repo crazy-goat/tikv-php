@@ -539,7 +539,11 @@ the same underlying channel and the same TCP connection (see below).
 
 Sharing the transport shares the **channels** only. Every client keeps its own
 region cache and its own store-address cache, so the two clients do not warm
-each other's caches.
+each other's caches. Store addresses are cached for 600 s plus up to 60 s of
+jitter; a `StoreNotMatch` region error or a retryable transport failure against
+a store evicts that store's entry early, so a TiKV pod that was rescheduled to
+a new address is found again on the next attempt instead of after the TTL
+(issue #247).
 
 `options['metrics']` is a **client-side** option and is always applied: it
 backs the client-side counters (region cache, retries). The transport's own
@@ -731,12 +735,18 @@ $tlsConfig = $builder->build();
 $grpc = new GrpcClient($logger, $tlsConfig);
 // The store cache is the fourth argument of PdClient. It is mandatory: when
 // you omit it, PdClient creates a default StoreCache. Pass your own to set
-// the TTL, the size or the logger.
+// the TTL, the size or the logger. A StoreNotMatch region error or a
+// transport failure against a store drops that store's entry, so the next
+// request re-resolves the address through PD (issue #247).
 $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
 // The client closes the transport it was given in close() — pass
 // ownsGrpcClient: false to keep the ownership with the application.
-$client = new RawKvClient($pdClient, $grpc);
+// Pass the same storeCache, or a StoreNotMatch / transport failure cannot
+// drop the stale address: the client's resolver has no cache to invalidate
+// while PdClient keeps serving that entry. Omitting storeCache disables
+// early invalidation.
+$client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 ```
 
 > **Note:** the manual path above is for the rare case where the client has

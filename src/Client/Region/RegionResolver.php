@@ -10,6 +10,7 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
@@ -103,6 +104,11 @@ final readonly class RegionResolver
      *     means the boundaries are already in user-key space: API V2's
      *     ApiV2GrpcClient decodes every response region boundary before the
      *     error reaches this class.
+     * @param StoreCacheInterface|null $storeCache Store-address cache to
+     *     drop on evidence that a cached address is wrong (issue #247).
+     *     Optional so hand-built resolvers and tests stay valid; when null
+     *     the address is re-resolved only when PdClient itself invalidates
+     *     its cache.
      */
     public function __construct(
         private PdClientInterface $pdClient,
@@ -114,6 +120,7 @@ final readonly class RegionResolver
         private array $pdEndpoints = [],
         private ?array $allowedStorePorts = null,
         private ?CodecInterface $codec = null,
+        private ?StoreCacheInterface $storeCache = null,
     ) {
     }
 
@@ -555,6 +562,41 @@ final readonly class RegionResolver
         $this->validateStoreAddress($address, $storeId);
 
         return $address;
+    }
+
+    /**
+     * Drop a store from the address cache so the next
+     * {@see resolveStoreAddress()} asks PD for a fresh `GetStore` instead of
+     * reusing a stale address (issue #247, REG-16).
+     *
+     * A `StoreNotMatch` region error or a transport failure against a store
+     * proves the cached address may be wrong: a rescheduled TiKV pod keeps
+     * the same store ID but can come back at a different address. Without
+     * this drop the entry survives for its whole TTL (660 s with the
+     * defaults) and every retry closes the channel to the dead endpoint and
+     * immediately reopens one to the same endpoint.
+     *
+     * A store ID <= 0 is ignored: an unset protobuf field must not evict an
+     * unrelated entry. `$reason` is logged only after a real drop, so a
+     * hand-built resolver without a store cache (or an ID that is not cached)
+     * does not log an invalidation that did not happen. `$reason` matches the
+     * cause next to the region invalidation reason.
+     */
+    public function invalidateStore(int $storeId, string $reason): void
+    {
+        if ($storeId <= 0 || !$this->storeCache instanceof StoreCacheInterface) {
+            return;
+        }
+        if (!$this->storeCache->get($storeId) instanceof Store) {
+            return;
+        }
+
+        $this->storeCache->invalidate($storeId);
+
+        $this->logger->info('Invalidated store address cache', [
+            'storeId' => $storeId,
+            'reason' => $reason,
+        ]);
     }
 
     /**
