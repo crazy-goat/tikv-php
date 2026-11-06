@@ -1632,6 +1632,34 @@ class TransactionTest extends TestCase
     {
         $txn = $this->createTransaction(['pessimistic' => false]);
 
+        // A rejected limit must never reach the scan RPC (issue #310).
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->expects($this->never())->method('getStore');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $txn->scan('a', 'z', -1);
+    }
+
+    /**
+     * A pessimistic transaction refreshes its read timestamp (a PD TSO RPC)
+     * before the reader validates the limit, so "rejected before the scan
+     * RPC" — not "before any RPC" — is the contract. Pin the real ordering:
+     * exactly one getTimestamp, then no scan RPC (issue #310).
+     */
+    public function testPessimisticScanNegativeLimitSendsNoScanRpc(): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => true]);
+
+        $this->pdClient->expects($this->once())->method('getTimestamp')->willReturn(2000);
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->expects($this->never())->method('getStore');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+
         $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit must be 0 or greater');
 

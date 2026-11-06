@@ -434,7 +434,10 @@ final class Transaction
      *
      * @param int $limit Maximum rows to return; 0 = the whole range (capped
      *                   at {@see self::MAX_SCAN_LIMIT} rows, a larger range
-     *                   throws instead of truncating)
+     *                   throws instead of truncating). A negative value
+     *                   throws InvalidArgumentException before the scan RPC
+     *                   (a pessimistic transaction refreshes its read
+     *                   timestamp first)
      * @return array<array{key: string, value: ?string}>
      *
      * @throws InvalidArgumentException

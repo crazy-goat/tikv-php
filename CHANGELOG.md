@@ -25,7 +25,15 @@ policy now classifies as internal.
 
 ### Changed
 
-- `Transaction::batchGet()` now passes its retry executor and error classifier explicitly to `TxnReader::batchGet()` instead of relying on the reader's constructor-injected fallback, and the redundant executor/classifier/backoff/metrics constructor parameters are gone. The per-region `KvBatchGet` dispatch+wait cycle already ran under `RetryExecutor::execute()` via `CheckedGrpcFuture::fromRetryableDispatch()` since #210/#291; this makes the wiring explicit without changing the retry policy, the #291 fan-out or the #210 lock resolution. Removing the reader's bound `$this->classifyError(...)` closure also breaks a `Transaction` → `TxnReader` → `Closure` → `Transaction` reference cycle, so an abandoned transaction's destructor rollback now runs when its last reference goes out of scope instead of at the next garbage-collection cycle. (#222)
+- **[DOC-21]**: Monolog is now declared as a **dev-only** dependency of the examples. `README.md` states that the client itself only depends on `psr/log` and that any PSR-3 `LoggerInterface` works, and names `composer require monolog/monolog` for the snippets that use it; the Complete Example uses `NullLogger` instead, so it runs with the published package alone. `examples/logging.php` exits with an actionable message instead of `Class "Monolog\Logger" not found` when Monolog is not installed. (#387)
+
+### Fixed
+
+- `Transaction::batchGet()` now passes its retry executor and error classifier explicitly to `TxnReader::batchGet()` instead of relying on the reader's constructor-injected fallback, and the redundant executor/classifier/backoff/metrics constructor parameters are gone. The per-region `KvBatchGet` dispatch+wait cycle already ran under `RetryExecutor::execute()` via `CheckedGrpcFuture::fromRetryableDispatch()` since #210/#291, so this is not a new retry: the change makes the wiring explicit without changing the retry policy, the #291 fan-out or the #210 lock resolution. Removing the reader's bound `$this->classifyError(...)` closure also breaks a `Transaction` → `TxnReader` → `Closure` → `Transaction` reference cycle, so an abandoned transaction's destructor rollback now runs when its last reference goes out of scope instead of at the next garbage-collection cycle. (#222)
+
+### Tests
+
+- The negative-scan-limit guard is now pinned to reject the call before the **scan RPC**: `RawKvClient::scan()`, `reverseScan()` and `scanPrefix()` (and their `RawKvScanner` counterparts) throw `InvalidArgumentException` before any PD or store RPC, and `Transaction::scan()` throws before the transactional scan RPC (a pessimistic transaction refreshes its read timestamp first, which the new test pins). `scan(limit: 0)` is pinned to send `MAX_SCAN_LIMIT` (10240) as the per-page wire budget. No production behaviour changes — the guard shipped in v0.4.0 (#332); this adds the missing regression coverage for the rejection ordering. (#310)
 
 ## [v0.10.0] - 2026-11-06
 

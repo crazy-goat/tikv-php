@@ -135,6 +135,18 @@ class RawKvClientTest extends TestCase
         return $response;
     }
 
+    /**
+     * Pin that a rejected argument never reaches the wire: neither PD nor a
+     * store may be asked for anything (issue #310).
+     */
+    private function expectNoRpc(): void
+    {
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->expects($this->never())->method('getStore');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+    }
+
     // ========================================================================
     // Cluster ID
     // ========================================================================
@@ -913,6 +925,7 @@ class RawKvClientTest extends TestCase
     #[DataProvider('negativeScanLimitProvider')]
     public function testScanNegativeLimitThrows(int $limit): void
     {
+        $this->expectNoRpc();
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit must be 0 or greater');
 
@@ -921,6 +934,7 @@ class RawKvClientTest extends TestCase
 
     public function testReverseScanNegativeLimitThrows(): void
     {
+        $this->expectNoRpc();
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit must be 0 or greater');
 
@@ -929,6 +943,7 @@ class RawKvClientTest extends TestCase
 
     public function testScanPrefixNegativeLimitThrows(): void
     {
+        $this->expectNoRpc();
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit must be 0 or greater');
 
