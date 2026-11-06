@@ -1464,7 +1464,10 @@ and entry counts, so a transaction can be logged or exported as a metric
 without walking `getWriteSet()` / `getReadSet()`.
 
 Read-set tracking is **off by default**, so a transaction that only reads does
-not grow in memory. `get()` and `batchGet()` populate the read set only when
+not retain the read **values**. Memory can still grow slightly: a pessimistic
+transaction records one read timestamp per distinct key read
+(`readTsByKey`) until that key is written or the transaction ends.
+`get()` and `batchGet()` populate the read-set map only when
 `trackReadSet` is true; `scan()` never populates it, so a scan-heavy
 transaction is not covered by the read-set limits at all (scans are bounded by
 `Transaction::MAX_SCAN_LIMIT` instead). For a long-lived worker that opts in and

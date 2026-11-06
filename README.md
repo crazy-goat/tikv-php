@@ -498,7 +498,8 @@ $txn->getStatus();      // TransactionStatus::{Active, Committed, RolledBack, Un
 $txn->isPessimistic();  // bool
 $txn->getPriority();    // int
 $txn->getWriteSet();    // array<array-key, ?string>, buffered writes
-$txn->getReadSet();     // array<array-key, ?string>, resolved reads
+$txn->getReadSet();     // array<array-key, ?string>, resolved reads;
+                        // empty unless begin(['trackReadSet' => true])
 ```
 
 `getWriteSet()`, `getReadSet()` and `batchGet()` return a **map**, and PHP

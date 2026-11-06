@@ -142,7 +142,7 @@ final class RawKvClient
 - Heartbeat to extend lock TTL for long-running transactions (opportunistic for pessimistic transactions, explicit `heartbeat()` otherwise; see [Configuration](configuration.md#lock-ttls-and-the-primary-lock-keepalive-txnkv))
 
 **Key Design Patterns**:
-- **Unit of Work**: Transaction tracks write set and read set
+- **Unit of Work**: Transaction tracks the write set, the pessimistic per-key read timestamps, and an optional read set (`trackReadSet`)
 - **Two-Phase Commit**: Prewrite → Commit protocol
 - **Factory Pattern**: `TxnKvClient::begin()`, `beginOptimistic()` and `beginPessimistic()` create Transaction instances
 - **Strategy Pattern**: Optimistic vs pessimistic mode selection
