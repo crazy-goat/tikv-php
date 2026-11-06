@@ -1093,7 +1093,8 @@ final class RawKvClient
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When the limit is invalid or the range
+     *         is reversed (`$startKey` sorts after a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchDeadlineExceededException When a page fanned out across
@@ -1189,7 +1190,8 @@ final class RawKvClient
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When the limit is invalid or the range
+     *         is reversed (`$startKey` sorts before a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws KeyErrorException When the response carries a per-pair key error
@@ -1218,7 +1220,8 @@ final class RawKvClient
      * @return array<array<array{key: string, value: ?string}>>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException
+     * @throws InvalidArgumentException When `eachLimit` is invalid or a range
+     *         is reversed (`$startKey` sorts after a non-empty `$endKey`)
      * @throws BatchPartialFailureException A per-range or per-region failure —
      *     including a `RegionException`, a `GrpcException`, a region's
      *     exhausted retry budget or a missing store — is reported inside

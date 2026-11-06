@@ -13,8 +13,9 @@ use CrazyGoat\TiKV\Client\Util\KeyOrder;
  * region in an ordered region list, yielding (region, clippedStart, clippedEnd)
  * tuples with consistent half-open [start, end) semantics.
  *
- * Empty end-key is treated as +infinity. Sub-ranges that fall completely
- * outside a region are skipped.
+ * For forward clipping an empty end-key is +infinity; for reverse clipping it
+ * is the start of the keyspace. Sub-ranges that fall completely outside a
+ * region are skipped.
  *
  * This centralises the region-clipping logic that was duplicated across
  * RawKvScanner, RawKvRangeOps and Transaction, ensuring that boundary

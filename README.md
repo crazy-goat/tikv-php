@@ -219,7 +219,7 @@ $client->close();
 // Range scan [startKey, endKey). limit: 0 (the default) returns the whole
 // range: the client pages internally and buffers every row, guarded by
 // options['maxScanRows'] (default 100000).
-$results = $client->scan('start', 'end', limit: 100);
+$results = $client->scan('start', 'stop', limit: 100);
 // Returns: [['key' => 'k1', 'value' => 'v1'], ['key' => 'k2', 'value' => 'v2'], ...]
 
 // Prefix scanning (limit: 0 returns all matching keys, buffered)

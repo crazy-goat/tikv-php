@@ -329,7 +329,7 @@ even though PHP would compare the numeric strings in the other order.
 Range scan over keys:
 
 ```php
-$results = $client->scan('startKey', 'endKey', limit: 100, keyOnly: false);
+$results = $client->scan('startKey', 'stopKey', limit: 100, keyOnly: false);
 // Returns: [['key' => 'k1', 'value' => 'v1'], ['key' => 'k2', 'value' => 'v2'], ...]
 ```
 
@@ -611,7 +611,7 @@ foreach ($dailyLogs as $day => $logs) {
 Delete all keys in a range:
 
 ```php
-$client->deleteRange('startKey', 'endKey');
+$client->deleteRange('startKey', 'stopKey');
 ```
 
 **Parameters:**
@@ -986,7 +986,7 @@ Compute CRC64-XOR checksum over a key range:
 ```php
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 
-$checksum = $client->checksum('data:start', 'data:end');
+$checksum = $client->checksum('data:a', 'data:z');
 // Returns: ChecksumResult object
 ```
 
