@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -49,6 +50,8 @@ final readonly class RawKvRangeOps
         private MetricsInterface $metrics = new NoOpMetrics(),
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -217,6 +220,7 @@ final readonly class RawKvRangeOps
                 $request->setContext(RegionContextFactory::fromRegionInfo(
                     $region,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 ));
                 $request->setStartKey($startKey);
                 $request->setEndKey($endKey);
@@ -297,6 +301,7 @@ final readonly class RawKvRangeOps
                 $request->setContext(RegionContextFactory::fromRegionInfo(
                     $region,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 ));
                 $request->setAlgorithm(ChecksumAlgorithm::Crc64_Xor);
                 $request->setRanges([$range]);

@@ -381,6 +381,29 @@ This keeps application-facing components in user-key space and makes the
 keyspace contract a transport concern rather than a per-operation special
 case.
 
+### Resource control on the request Context
+
+Every region-addressed request carries a `kvrpcpb.Context`. Two optional
+resource-control fields live on it (issue #427, GAP-13):
+
+- `Context.resource_control_context.resource_group_name` — the TiKV resource
+  group the request belongs to, enforced by PD's resource manager;
+- `Context.resource_group_tag` — opaque bytes used for query attribution.
+
+`Region\ResourceControl` is the single value object holding the pair;
+`RegionContextFactory::fromRegionInfo()` and `resolveTarget()` apply it while
+building the context. The raw and transactional components receive the object
+from their client (`RawKvClient`, `TxnKvClient` → `Transaction` → `TxnReader`,
+`TwoPhaseCommitter`, `LockResolver`), so the same values reach every RPC
+built by those components. `TxnKvClient::begin()` layers per-transaction
+overrides over the client-wide defaults, field by field.
+
+Both fields are proto3 defaults when unset and the object is only applied
+when a value is configured: an unconfigured client never writes them, which
+keeps the serialized request bytes unchanged. The client does not parse
+`ExecDetailsV2`/`RUV2` responses, so Request Unit accounting remains a
+server-side concern (see [Configuration](configuration.md#resource-control-resource-groups)).
+
 ### 5. GrpcClient
 
 **Location**: `src/Client/Grpc/GrpcClient.php`

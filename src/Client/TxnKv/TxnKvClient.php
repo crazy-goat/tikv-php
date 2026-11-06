@@ -28,6 +28,7 @@ use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -66,6 +67,22 @@ final class TxnKvClient
      * the stale-read flag. Commits always target the leader.
      */
     public const OPT_REPLICA_READ = 'replicaRead';
+
+    /**
+     * options[] key for the client-wide resource group (issue #427). Every
+     * transaction begun by this client inherits it unless begin() overrides
+     * it. Sent as `Context.resource_control_context.resource_group_name`.
+     * Default: unset = no resource-control fields. The name must be 1 to 64
+     * characters of letters, digits, underscores or hyphens.
+     */
+    public const OPT_RESOURCE_GROUP = ResourceControl::OPTION_RESOURCE_GROUP;
+
+    /**
+     * options[] key for the client-wide opaque resource-group tag (issue
+     * #427), sent as `Context.resource_group_tag`. Default: unset = the
+     * field is not sent. Must be a non-empty string.
+     */
+    public const OPT_RESOURCE_GROUP_TAG = ResourceControl::OPTION_RESOURCE_GROUP_TAG;
 
     /**
      * options[] key for the optional `kvrpcpb.Context` control fields
@@ -316,6 +333,7 @@ final class TxnKvClient
             codec: $bundle->codec,
             storeCache: $bundle->storeCache,
             requestContext: self::resolveRequestContext($options),
+            resourceControl: ResourceControl::fromOptions($options),
         );
     }
 
@@ -383,6 +401,12 @@ final class TxnKvClient
          * transaction.
          */
         private readonly ?RequestContextOptions $requestContext = null,
+        /**
+         * Client-wide resource-control metadata (issue #427), inherited by
+         * every transaction and overridable per begin() call. Empty by
+         * default, which sends no resource-control field.
+         */
+        private readonly ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -511,6 +535,8 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
@@ -564,6 +590,9 @@ final class TxnKvClient
 
         $pessimistic = (bool) ($options['pessimistic'] ?? true);
         $priority = (int) ($options['priority'] ?? 0);
+        $resourceControl = $this->resourceControl->withOverrides(
+            ResourceControl::fromOptions($options, 'begin() options'),
+        );
         $requestContext = array_key_exists('requestContext', $options)
             ? $this->assertRequestContextOption($options['requestContext'])
             : $this->requestContext;
@@ -631,6 +660,7 @@ final class TxnKvClient
             logger: $this->logger,
             statusCache: $this->resolvedStatusCache,
             requestContext: $requestContext,
+            resourceControl: $resourceControl,
         );
 
         $transaction = new Transaction(
@@ -666,6 +696,7 @@ final class TxnKvClient
             maxReadSetTotalSize: $maxReadSetTotalSize,
             trackReadSet: $trackReadSet,
             requestContext: $requestContext,
+            resourceControl: $resourceControl,
         );
 
         $this->pruneFinishedTransactions();
@@ -693,6 +724,8 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
@@ -734,6 +767,8 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
@@ -766,6 +801,8 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,

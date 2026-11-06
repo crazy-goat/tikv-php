@@ -43,6 +43,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -252,6 +253,8 @@ final readonly class TwoPhaseCommitter
         private int $maxTxnBatchCount = self::DEFAULT_TXN_BATCH_COUNT,
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -280,6 +283,7 @@ final readonly class TwoPhaseCommitter
             $region,
             priority: $this->priority,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
     }
 

@@ -41,6 +41,7 @@ use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
@@ -220,6 +221,23 @@ final class RawKvClient
     public const OPT_BATCH_COMMANDS = 'batchCommands';
 
     /**
+     * options[] key for the resource group every request belongs to (issue
+     * #427). Set on `Context.resource_control_context.resource_group_name`.
+     * Default: unset = no resource-control fields are sent. The name must be
+     * 1 to 64 characters of letters, digits, underscores or hyphens.
+     *
+     * @see ResourceControl
+     */
+    public const OPT_RESOURCE_GROUP = ResourceControl::OPTION_RESOURCE_GROUP;
+
+    /**
+     * options[] key for an opaque resource-group tag (issue #427), carried on
+     * `Context.resource_group_tag` for query attribution. Default: unset =
+     * the field is not sent. Must be a non-empty string.
+     */
+    public const OPT_RESOURCE_GROUP_TAG = ResourceControl::OPTION_RESOURCE_GROUP_TAG;
+
+    /**
      * options[] key for the maximum payload bytes (keys plus values) of one
      * `ingest()` call (issue #297). `0` (the default) means unlimited.
      * Exceeding the limit throws
@@ -307,6 +325,7 @@ final class RawKvClient
             maxIngestSize: self::resolveMaxIngestSize($options),
             storeCache: $bundle->storeCache,
             requestContext: self::resolveRequestContext($options),
+            resourceControl: self::resolveResourceControl($options),
         );
     }
 
@@ -384,6 +403,13 @@ final class RawKvClient
          * byte-for-byte unchanged.
          */
         private readonly ?RequestContextOptions $requestContext = null,
+        /**
+         * Resource-control metadata applied to every request this client
+         * builds (issue #427). An empty instance (the default) leaves both
+         * resource-control fields unset and keeps the request bytes
+         * unchanged.
+         */
+        private readonly ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -428,6 +454,7 @@ final class RawKvClient
             $this->slowLogConfig,
             $this->replicaReadPolicy,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
         $this->atomic = $atomic ?? new RawKvAtomic(
             $grpc,
@@ -436,6 +463,7 @@ final class RawKvClient
             $this->logger,
             $this->slowLogConfig,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
         $this->batch = $batch ?? new RawKvBatch(
             $grpc,
@@ -452,6 +480,7 @@ final class RawKvClient
                 GrpcBatchCommandsTransport::forClient($grpc),
             ) : null,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
         $this->scanner = $scanner ?? new RawKvScanner(
             $pdClient,
@@ -469,6 +498,7 @@ final class RawKvClient
             $maxScanRows,
             metrics: $metrics,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -484,6 +514,7 @@ final class RawKvClient
             $this->maxConcurrency,
             metrics: $metrics,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
         $this->ingestor = new SstIngestor(
             $grpc,
@@ -494,6 +525,7 @@ final class RawKvClient
             $this->maxConcurrency,
             $this->maxIngestSize,
             $this->requestContext,
+            $this->resourceControl,
         );
     }
 
@@ -707,6 +739,19 @@ final class RawKvClient
         }
 
         return $maxScanRows;
+    }
+
+    /**
+     * Resolve options['resourceGroup'] and options['resourceGroupTag'] (see
+     * OPT_RESOURCE_GROUP / OPT_RESOURCE_GROUP_TAG) for create(): resource
+     * control metadata applied to every request (issue #427). Both default
+     * to unset, which writes no resource-control field at all.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveResourceControl(array $options): ResourceControl
+    {
+        return ResourceControl::fromOptions($options);
     }
 
     /**

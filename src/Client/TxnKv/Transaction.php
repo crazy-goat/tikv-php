@@ -19,6 +19,7 @@ use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
@@ -192,6 +193,13 @@ final class Transaction
          * the serialized Context unchanged.
          */
         private readonly ?RequestContextOptions $requestContext = null,
+        /**
+         * Resource-control metadata carried on every request of this
+         * transaction (issue #427): the client-wide default with the
+         * begin() overrides applied. An empty instance leaves both
+         * resource-control fields unset.
+         */
+        private readonly ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -263,6 +271,7 @@ final class Transaction
             logger: $this->logger,
             priority: $this->priority,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
 
         $this->committer = new TwoPhaseCommitter(
@@ -286,6 +295,7 @@ final class Transaction
             maxTxnBatchSize: $this->maxTxnBatchSize,
             maxTxnBatchCount: $this->maxTxnBatchCount,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
     }
 

@@ -1578,6 +1578,25 @@ original #559 branch checked `retryable` first, so a real `txn_lock_not_found`
 payload (which newer TiKV co-tags) threw a retryable exception instead of
 succeeding, and a real `conflict` payload was retried instead of failing.
 
+## Resource-control E2E observation limit (issue #427)
+
+The issue's E2E criterion asks for traffic attributed to a configured
+resource group. `tests/E2E/ResourceControlRawKvE2ETest.php` and
+`tests/E2E/ResourceControlTxnKvE2ETest.php` create a group through PD's
+resource-manager HTTP API, run grouped RawKV/TxnKV traffic with
+`resourceGroup`/`resourceGroupTag`, and read the group back.
+
+They assert that the group still exists in RU mode and that the grouped
+requests succeed — not that `ru_consumption` grew. Reason: PD's
+`ru_consumption` is filled from the resource-manager token-bucket stream,
+which a resource-manager client (TiDB) feeds; TiKV itself only consumes the
+request priority from `Context.resource_control_context` and a native TiKV
+client is not a resource-manager client. With the docker-compose cluster the
+field therefore stays empty even though the request carries the group. The
+wire-level assertion (both fields land on the `Context`) lives in the Unit
+suite, where the captured request is available. Do not "fix" this by
+asserting zero/empty RU: that would pin an unrelated server behaviour.
+
 ## A CAS transport failure is indeterminate only after the request is sent (issue #537)
 
 `CasIndeterminateException` is thrown at the `RawCompareAndSwap` call site, not

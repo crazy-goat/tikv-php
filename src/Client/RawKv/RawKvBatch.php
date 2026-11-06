@@ -28,6 +28,7 @@ use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
@@ -66,6 +67,8 @@ final readonly class RawKvBatch
         private ?BatchCommandsMultiplexer $batchCommands = null,
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -339,6 +342,7 @@ final readonly class RawKvBatch
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
         $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
@@ -376,7 +380,11 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -414,7 +422,11 @@ final readonly class RawKvBatch
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setKeys($keys);
         if ($forCas) {
             $request->setForCas(true);
@@ -554,6 +566,7 @@ final readonly class RawKvBatch
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
 
         $request = new RawBatchGetRequest();
@@ -581,7 +594,11 @@ final readonly class RawKvBatch
         string $columnFamily,
     ): BatchCommandsEntry {
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -611,7 +628,11 @@ final readonly class RawKvBatch
         string $columnFamily,
     ): BatchCommandsEntry {
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setKeys($keys);
         if ($forCas) {
             $request->setForCas(true);
