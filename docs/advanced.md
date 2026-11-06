@@ -686,7 +686,7 @@ The interface has six methods (full reference with emitted tag examples:
 | `retryAttempted()`     | A retryable error triggers another attempt                |
 | `regionCacheHit()`     | A region was served from the client's region cache        |
 | `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
-| `regionInvalidated()`  | A region was dropped from the cache (e.g. `region_error:epoch_not_match`, `retry_region_error:epoch_not_match`, `fatal_region_error`); non-routing errors keep the entry |
+| `regionInvalidated()`  | A region was dropped from the cache (e.g. `region_error:epoch_not_match`, `retry_region_error:epoch_not_match`, `fatal_region_error`); non-routing errors keep the entry, and a successful executor-side `EpochNotMatch` `current_regions` refresh is a superseding `put()` that emits nothing of its own (issue #246) |
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
 

@@ -7,7 +7,9 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -268,6 +270,7 @@ final class TxnKvClient
             replicaReadPolicy: self::resolveReplicaReadPolicy($options),
             metrics: $bundle->metrics,
             ownsGrpcClient: $bundle->ownsGrpcClient,
+            codec: $bundle->codec,
         );
     }
 
@@ -312,6 +315,15 @@ final class TxnKvClient
          * to every transaction. Test seam (issue #429); defaults to the wall clock.
          */
         private readonly ?Closure $clock = null,
+        /**
+         * Key codec supplied by the construction path. The derived
+         * EpochNotMatch payload codec (issue #246) is V1 TxnKV's
+         * memory-comparable codec. For API V2 this property is `CodecV2`,
+         * but the derived payload codec is null because `ApiV2GrpcClient`
+         * already decodes response region boundaries; applying the V2 codec
+         * again would fail or corrupt the cached range.
+         */
+        private readonly ?CodecInterface $codec = new CodecV1(Mode::Txn),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -328,6 +340,10 @@ final class TxnKvClient
             // cache in place — never rebind or clone it.
             $this->regionCache->attachMetricsIfAbsent($this->metrics);
         }
+        // ApiV2GrpcClient already decodes response region boundaries, so a
+        // V2 codec must not be applied to an EpochNotMatch payload a second
+        // time (issue #246).
+        $payloadCodec = $this->codec instanceof CodecV2 ? null : $this->codec;
         $this->regionResolver = $regionResolver
             ?? new RegionResolver(
                 $this->pdClient,
@@ -338,6 +354,7 @@ final class TxnKvClient
                 $this->logger,
                 $this->pdEndpoints,
                 $this->allowedStorePorts,
+                $payloadCodec,
             );
     }
 
