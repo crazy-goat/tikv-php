@@ -28,6 +28,7 @@ use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
@@ -66,6 +67,8 @@ final readonly class RawKvBatch
         private ?BatchCommandsMultiplexer $batchCommands = null,
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -339,6 +342,7 @@ final readonly class RawKvBatch
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
         $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
@@ -372,11 +376,17 @@ final readonly class RawKvBatch
         int|array $ttl,
         bool $forCas = false,
         string $columnFamily = '',
+        int &$targetStoreId = 0,
     ): GrpcFuture {
+        $targetStoreId = $region->leaderStoreId;
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -410,11 +420,17 @@ final readonly class RawKvBatch
         array $keys,
         bool $forCas = false,
         string $columnFamily = '',
+        int &$targetStoreId = 0,
     ): GrpcFuture {
+        $targetStoreId = $region->leaderStoreId;
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setKeys($keys);
         if ($forCas) {
             $request->setForCas(true);
@@ -554,6 +570,7 @@ final readonly class RawKvBatch
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
 
         $request = new RawBatchGetRequest();
@@ -581,7 +598,11 @@ final readonly class RawKvBatch
         string $columnFamily,
     ): BatchCommandsEntry {
         $request = new RawBatchPutRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setPairs($pairs);
         if (is_array($ttl)) {
             $request->setTtls($ttl);
@@ -611,7 +632,11 @@ final readonly class RawKvBatch
         string $columnFamily,
     ): BatchCommandsEntry {
         $request = new RawBatchDeleteRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setKeys($keys);
         if ($forCas) {
             $request->setForCas(true);
@@ -693,12 +718,16 @@ final readonly class RawKvBatch
                 }
 
                 $innerFutures = [];
+                $innerTargets = [];
                 foreach ($groups as $group) {
+                    $subTarget = 0;
                     $innerFutures[] = $this->executeBatchGetForRegionAsync(
                         $group['region'],
                         $group['keys'],
                         $columnFamily,
+                        $subTarget,
                     );
+                    $innerTargets[] = $subTarget;
                 }
 
                 // Cancellation limitation (pre-existing, tracked separately
@@ -708,9 +737,13 @@ final readonly class RawKvBatch
                 // by one sub-response's region error therefore leaves the
                 // other sub-futures in flight. Rare (multi-region recovery
                 // path only); do not restructure here.
-                $waiter = function () use ($innerFutures): Message {
+                $waiter = function () use ($innerFutures, $innerTargets, &$targetStoreId): Message {
                     $allPairs = [];
-                    foreach ($innerFutures as $future) {
+                    foreach ($innerFutures as $index => $future) {
+                        // Report the sub-future's own store before awaiting it
+                        // so a transport failure closes that channel, not the
+                        // first key's region leader (issue #248).
+                        $targetStoreId = $innerTargets[$index];
                         /** @var RawBatchGetResponse $response */
                         $response = $future->wait();
                         RegionErrorHandler::check($response);
@@ -718,6 +751,7 @@ final readonly class RawKvBatch
                             $allPairs[] = $pair;
                         }
                     }
+                    $targetStoreId = 0;
                     $merged = new RawBatchGetResponse();
                     $merged->setPairs($allPairs);
                     return $merged;
@@ -748,6 +782,7 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $firstKey = $pairs !== [] ? $pairs[0]->getKey() : '';
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
@@ -756,6 +791,7 @@ final readonly class RawKvBatch
                 $firstKey,
                 $forCas,
                 $columnFamily,
+                &$targetStoreId,
             ): CheckedGrpcFuture {
                 $fresh = $this->resolveRegion($firstKey);
 
@@ -769,11 +805,21 @@ final readonly class RawKvBatch
                 }
 
                 if ($allInRegion) {
-                    $inner = $this->executeBatchPutForRegionAsync($fresh, $pairs, $ttl, $forCas, $columnFamily);
+                    $inner = $this->executeBatchPutForRegionAsync(
+                        $fresh,
+                        $pairs,
+                        $ttl,
+                        $forCas,
+                        $columnFamily,
+                        $targetStoreId,
+                    );
                     return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $firstKey);
                 }
 
                 // Multi-region path: dispatch every sub-region's send up-front.
+                // A single target cannot describe the failed attempt; the
+                // executor falls back to the cached leader in that case.
+                $targetStoreId = 0;
                 $keys = array_map(fn(KvPair $p): string => $p->getKey(), $pairs);
                 $resolved = $this->regionResolver->batchResolveRegions($keys);
 
@@ -792,27 +838,34 @@ final readonly class RawKvBatch
                 }
 
                 $innerFutures = [];
+                $innerTargets = [];
                 foreach ($groups as $group) {
                     $batchTtls = $group['ttls'];
                     $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
+                    $subTarget = 0;
                     $innerFutures[] = $this->executeBatchPutForRegionAsync(
                         $group['region'],
                         $group['pairs'],
                         $batchTtl,
                         $forCas,
                         $columnFamily,
+                        $subTarget,
                     );
+                    $innerTargets[] = $subTarget;
                 }
 
                 // Cancellation limitation (pre-existing, tracked separately
                 // from #183): cancelAll() cannot reach the per-sub-region
                 // GrpcFutures merged by this synthetic waiter — see batchGet.
-                $waiter = function () use ($innerFutures): Message {
-                    foreach ($innerFutures as $future) {
+                $waiter = function () use ($innerFutures, $innerTargets, &$targetStoreId): Message {
+                    foreach ($innerFutures as $index => $future) {
+                        // See batchGet: report the failing sub-future's store.
+                        $targetStoreId = $innerTargets[$index];
                         /** @var RawBatchPutResponse $response */
                         $response = $future->wait();
                         RegionErrorHandler::check($response);
                     }
+                    $targetStoreId = 0;
                     return new RawBatchPutResponse();
                 };
                 return $this->wrapWithLogging(
@@ -823,6 +876,9 @@ final readonly class RawKvBatch
             },
             $retryExecutor,
             $firstKey,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -836,6 +892,7 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $key = $keys[0] ?? '';
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
@@ -843,6 +900,7 @@ final readonly class RawKvBatch
                 $key,
                 $forCas,
                 $columnFamily,
+                &$targetStoreId,
             ): CheckedGrpcFuture {
                 $fresh = $this->resolveRegion($key);
 
@@ -856,11 +914,20 @@ final readonly class RawKvBatch
                 }
 
                 if ($allInRegion) {
-                    $inner = $this->executeBatchDeleteForRegionAsync($fresh, $keys, $forCas, $columnFamily);
+                    $inner = $this->executeBatchDeleteForRegionAsync(
+                        $fresh,
+                        $keys,
+                        $forCas,
+                        $columnFamily,
+                        $targetStoreId,
+                    );
                     return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $key);
                 }
 
                 // Multi-region path: dispatch every sub-region's send up-front.
+                // A single target cannot describe the failed attempt; the
+                // executor falls back to the cached leader in that case.
+                $targetStoreId = 0;
                 $resolved = $this->regionResolver->batchResolveRegions($keys);
 
                 $groups = [];
@@ -873,24 +940,31 @@ final readonly class RawKvBatch
                 }
 
                 $innerFutures = [];
+                $innerTargets = [];
                 foreach ($groups as $group) {
+                    $subTarget = 0;
                     $innerFutures[] = $this->executeBatchDeleteForRegionAsync(
                         $group['region'],
                         $group['keys'],
                         $forCas,
                         $columnFamily,
+                        $subTarget,
                     );
+                    $innerTargets[] = $subTarget;
                 }
 
                 // Cancellation limitation (pre-existing, tracked separately
                 // from #183): cancelAll() cannot reach the per-sub-region
                 // GrpcFutures merged by this synthetic waiter — see batchGet.
-                $waiter = function () use ($innerFutures): Message {
-                    foreach ($innerFutures as $future) {
+                $waiter = function () use ($innerFutures, $innerTargets, &$targetStoreId): Message {
+                    foreach ($innerFutures as $index => $future) {
+                        // See batchGet: report the failing sub-future's store.
+                        $targetStoreId = $innerTargets[$index];
                         /** @var RawBatchDeleteResponse $response */
                         $response = $future->wait();
                         RegionErrorHandler::check($response);
                     }
+                    $targetStoreId = 0;
                     return new RawBatchDeleteResponse();
                 };
                 return $this->wrapWithLogging(
@@ -901,6 +975,9 @@ final readonly class RawKvBatch
             },
             $retryExecutor,
             $key,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 

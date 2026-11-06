@@ -27,6 +27,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -49,6 +50,8 @@ final readonly class RawKvRangeOps
         private MetricsInterface $metrics = new NoOpMetrics(),
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -205,18 +208,22 @@ final readonly class RawKvRangeOps
         string $endKey,
         string $columnFamily = '',
     ): CheckedGrpcFuture {
+        $targetStoreId = null;
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($startKey, $endKey, $columnFamily): CheckedGrpcFuture {
+            function () use ($startKey, $endKey, $columnFamily, &$targetStoreId): CheckedGrpcFuture {
                 // Resolve the region on every attempt so retries pick up cache
                 // invalidation and leader switching (issue #190).
                 $region = $this->regionResolver->getRegionInfo($startKey);
                 $this->assertRegionCoversRange($region, $startKey, $endKey);
+                $targetStoreId = $region->leaderStoreId;
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $request = new RawDeleteRangeRequest();
                 $request->setContext(RegionContextFactory::fromRegionInfo(
                     $region,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 ));
                 $request->setStartKey($startKey);
                 $request->setEndKey($endKey);
@@ -255,6 +262,9 @@ final readonly class RawKvRangeOps
             },
             $executor,
             $startKey,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -279,12 +289,15 @@ final readonly class RawKvRangeOps
         string $startKey,
         string $endKey,
     ): CheckedGrpcFuture {
+        $targetStoreId = null;
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($startKey, $endKey): CheckedGrpcFuture {
+            function () use ($startKey, $endKey, &$targetStoreId): CheckedGrpcFuture {
                 // Resolve the region on every attempt so retries pick up cache
                 // invalidation and leader switching (issue #190).
                 $region = $this->regionResolver->getRegionInfo($startKey);
                 $this->assertRegionCoversRange($region, $startKey, $endKey);
+                $targetStoreId = $region->leaderStoreId;
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $range = new KeyRange();
@@ -297,6 +310,7 @@ final readonly class RawKvRangeOps
                 $request->setContext(RegionContextFactory::fromRegionInfo(
                     $region,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 ));
                 $request->setAlgorithm(ChecksumAlgorithm::Crc64_Xor);
                 $request->setRanges([$range]);
@@ -332,6 +346,9 @@ final readonly class RawKvRangeOps
             },
             $executor,
             $startKey,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 

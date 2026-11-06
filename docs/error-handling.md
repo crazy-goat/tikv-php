@@ -725,6 +725,27 @@ Notes:
   keep the address, exactly as they keep the region (issue #245). The
   invalidation is logged with reason `store_not_match` or `transport_error`.
   (#247)
+- The channel a transport failure closes is the one of the store the failed
+  attempt actually targeted, not one re-derived from the region cache. Every
+  retrying RPC path — RawKV `get`/`getKeyTTL`/`put`/`delete`, `batchGet`/
+  `batchPut`/`batchDelete`, forward and reverse scans, `deleteRange` and
+  `checksum`, and TxnKV `get`/`batchGet`/`scan`, prewrite, secondary commit,
+  rollback, pessimistic rollback, heartbeat and lock resolution — reports its
+  target store to `RetryExecutor::execute()` or
+  `CheckedGrpcFuture::fromRetryableDispatch()`.
+  A follower chosen by a replica read therefore evicts and closes the
+  follower's channel, and a leader switch that happened after the attempt
+  cannot tear down the healthy new leader's channel (issue #248). A
+  `GrpcException` also carries the address the call was sent to, so a
+  transport failure inside a nested RPC — lock resolution runs against the
+  primary's region, which need not be the read's or write's region — closes
+  the channel that actually failed. Only a broken-connection status
+  (`UNAVAILABLE`) closes the channel; a `DEADLINE_EXCEEDED` on a slow but
+  healthy connection is still retried (and its store address re-resolved)
+  without a channel teardown. A multi-region fan-out records each sub-future's
+  store and reports it before awaiting that sub-future. A retried-and-succeeded
+  call closes only the channel of an attempt that actually failed, and a
+  non-routing retry closes none. (#248)
 - A fanned-out batch or range operation (`batchGet()`, `batchPut()`,
   `batchDelete()`, `batchScan()`, `deleteRange()`, `deletePrefix()`,
   `checksum()`) reports a region's `RetryBudgetExhaustedException` inside

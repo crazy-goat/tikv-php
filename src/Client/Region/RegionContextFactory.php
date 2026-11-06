@@ -57,6 +57,11 @@ final class RegionContextFactory
      *     fields (isolation level, not-fill-cache, max execution duration,
      *     request source, resource group) applied on top of the routing
      *     Context (issue #426). Null applies none of them.
+     * @param ResourceControl|null $resourceControl Resource-control metadata
+     *     (issue #427): the resource group and the resource-group tag. Null
+     *     (the default) writes neither field. Applied before
+     *     $requestContext, so a non-default field of the latter wins when
+     *     both name the same Context field.
      */
     public static function resolveTarget(
         RegionInfo $region,
@@ -66,10 +71,20 @@ final class RegionContextFactory
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
         ?RequestContextOptions $requestContext = null,
+        ?ResourceControl $resourceControl = null,
     ): ReplicaReadTarget {
         $leader = self::leaderPeer($region);
         $leaderTarget = new ReplicaReadTarget(
-            self::buildContext($region, $leader, false, $policy->staleRead, $codec, $priority, $requestContext),
+            self::buildContext(
+                $region,
+                $leader,
+                false,
+                $policy->staleRead,
+                $codec,
+                $priority,
+                $requestContext,
+                $resourceControl,
+            ),
             $region->leaderStoreId,
         );
 
@@ -115,6 +130,7 @@ final class RegionContextFactory
                 $codec,
                 $priority,
                 $requestContext,
+                $resourceControl,
             ),
             $peerInfo->storeId,
         );
@@ -129,12 +145,16 @@ final class RegionContextFactory
      *     wire bytes.
      * @param RequestContextOptions|null $requestContext Optional control
      *     fields applied on top of the routing Context (issue #426).
+     * @param ResourceControl|null $resourceControl Resource-control metadata
+     *     (issue #427); null writes neither resource-control field. Applied
+     *     before $requestContext, so the latter wins on overlapping fields.
      */
     public static function fromRegionInfo(
         RegionInfo $region,
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
         ?RequestContextOptions $requestContext = null,
+        ?ResourceControl $resourceControl = null,
     ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
@@ -149,6 +169,7 @@ final class RegionContextFactory
         $ctx->setRegionEpoch($epoch);
         $ctx->setPeer($peer);
         $ctx->setPriority($priority);
+        $resourceControl?->apply($ctx);
         self::applyCodec($ctx, $codec);
         self::applyRequestContext($ctx, $requestContext);
 
@@ -163,6 +184,7 @@ final class RegionContextFactory
         ?CodecInterface $codec = null,
         int $priority = CommandPri::Normal,
         ?RequestContextOptions $requestContext = null,
+        ?ResourceControl $resourceControl = null,
     ): Context {
         $epoch = new RegionEpoch();
         $epoch->setConfVer($region->epochConfVer);
@@ -175,6 +197,7 @@ final class RegionContextFactory
         $ctx->setReplicaRead($replicaRead);
         $ctx->setStaleRead($staleRead);
         $ctx->setPriority($priority);
+        $resourceControl?->apply($ctx);
         self::applyCodec($ctx, $codec);
         self::applyRequestContext($ctx, $requestContext);
 

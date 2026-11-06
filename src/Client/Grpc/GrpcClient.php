@@ -274,6 +274,7 @@ final class GrpcClient implements GrpcClientInterface
                 throw new GrpcException(
                     details: $status['details'],
                     grpcStatusCode: $status['code'],
+                    targetAddress: $address,
                 );
             }
 
@@ -350,6 +351,7 @@ final class GrpcClient implements GrpcClientInterface
                 throw new GrpcException(
                     details: $status['details'],
                     grpcStatusCode: $status['code'],
+                    targetAddress: $address,
                 );
             }
 
@@ -448,6 +450,7 @@ final class GrpcClient implements GrpcClientInterface
                 $this->releaseInFlight($channel);
                 $this->completeRpc($operation, $start, $success);
             },
+            targetAddress: $address,
         );
     }
 

@@ -3226,6 +3226,53 @@ class RawKvClientTest extends TestCase
         $client->get('key');
     }
 
+    /**
+     * Regression (issue #248, REG-17): the write path must report the store
+     * its failed attempt targeted. If the region cache's leader changes
+     * between the attempt and the catch block, closing the cached leader
+     * tears down a healthy channel and leaves the failing one open.
+     */
+    public function testPutClosesTheTargetStoreChannelNotAChangedCachedLeader(): void
+    {
+        $client = new RawKvClient($this->pdClient, $this->grpc, $this->regionCache, 20000, new NullLogger());
+
+        $firstAttemptRegion = $this->defaultRegion();
+        $changedCachedLeader = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 2,
+            epochConfVer: 1,
+            epochVersion: 1,
+        );
+        // getRegionInfo() for the attempt, the catch block's getByKey(), then
+        // the retry's getRegionInfo().
+        $this->regionCache->method('getByKey')
+            ->willReturnOnConsecutiveCalls($firstAttemptRegion, $changedCachedLeader, $firstAttemptRegion);
+        $this->regionCache->method('invalidate');
+        $this->regionCache->method('put');
+
+        $this->pdClient->method('getStore')->willReturnCallback(static function (int $storeId): Store {
+            $store = new Store();
+            $store->setId($storeId);
+            $store->setAddress($storeId === 2 ? 'tikv2:20160' : 'tikv1:20160');
+
+            return $store;
+        });
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls(
+                $this->throwException(new GrpcException('connection reset', 14)),
+                new RawPutResponse(),
+            );
+
+        $this->grpc->expects($this->once())
+            ->method('closeChannel')
+            ->with('tikv1:20160');
+
+        $client->put('key', 'value');
+    }
+
     // ========================================================================
     // NotLeader handling
     // ========================================================================

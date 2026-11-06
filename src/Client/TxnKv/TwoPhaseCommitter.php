@@ -43,6 +43,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -252,6 +253,8 @@ final readonly class TwoPhaseCommitter
         private int $maxTxnBatchCount = self::DEFAULT_TXN_BATCH_COUNT,
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -280,6 +283,7 @@ final readonly class TwoPhaseCommitter
             $region,
             priority: $this->priority,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
     }
 
@@ -779,8 +783,11 @@ final readonly class TwoPhaseCommitter
         callable $classifier,
         int $adviseLockTtlMs = 10000,
     ): int {
-        return $retryExecutor->execute($primary, function () use ($primary, $adviseLockTtlMs): int {
+        $targetStoreId = null;
+
+        return $retryExecutor->execute($primary, function () use ($primary, $adviseLockTtlMs, &$targetStoreId): int {
             $region = $this->regionResolver->getRegionInfo($primary);
+            $targetStoreId = $region->leaderStoreId;
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new TxnHeartBeatRequest();
@@ -817,7 +824,9 @@ final readonly class TwoPhaseCommitter
             }
 
             return (int) $response->getLockTtl();
-        }, $classifier);
+        }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+            return $targetStoreId;
+        });
     }
 
     /**
@@ -1083,6 +1092,7 @@ final readonly class TwoPhaseCommitter
         // budget; the prewrite's lock conflict reads the same object's live
         // remaining deadline (issue #569).
         $budget = $retryExecutor->currentBudget();
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
@@ -1095,8 +1105,10 @@ final readonly class TwoPhaseCommitter
                 $useAsyncCommit,
                 $secondaries,
                 $budget,
+                &$targetStoreId,
             ): CheckedGrpcFuture {
                 $region = $this->regionResolver->getRegionInfo($firstKey);
+                $targetStoreId = $region->leaderStoreId;
                 $keys = array_map(
                     static fn (Mutation $mutation): string => $mutation->getKey(),
                     $group['mutations'],
@@ -1110,6 +1122,10 @@ final readonly class TwoPhaseCommitter
                     // exclusive end into the request, which TiKV rejects with
                     // a KeyError. Re-group against the current layout and
                     // prewrite each region separately instead (issue #246).
+                    // Several stores are addressed by that path, so there is
+                    // no single target to report.
+                    $targetStoreId = 0;
+
                     return $this->prewriteSplitGroup(
                         $group['mutations'],
                         $group['isPrimary'],
@@ -1137,6 +1153,9 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -1633,11 +1652,20 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): CheckedGrpcFuture {
+        $targetStoreId = 0;
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            fn(): CheckedGrpcFuture => $this->commitForRegionAsync($region, $keys, $state),
+            function () use ($region, $keys, $state, &$targetStoreId): CheckedGrpcFuture {
+                $targetStoreId = $region->leaderStoreId;
+
+                return $this->commitForRegionAsync($region, $keys, $state);
+            },
             $retryExecutor,
             $firstKey,
             $classifier,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -1865,9 +1893,10 @@ final readonly class TwoPhaseCommitter
         // See prewriteWithRetry(): the rollback's lock-conflict path must
         // respect the same wall-clock deadline as the retry loop (issue #569).
         $budget = $retryExecutor->currentBudget();
+        $targetStoreId = null;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys, $budget): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, $budget, &$targetStoreId): CheckedGrpcFuture {
                 // Resolve the region on every attempt so cache
                 // invalidation and leader switching performed by the
                 // retry executor take effect (issue #502): a stale
@@ -1891,6 +1920,7 @@ final readonly class TwoPhaseCommitter
                         $firstKey,
                     );
                 }
+                $targetStoreId = $region->leaderStoreId;
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $request = new BatchRollbackRequest();
@@ -1933,6 +1963,9 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -2728,9 +2761,10 @@ final readonly class TwoPhaseCommitter
         // See prewriteWithRetry(): the rollback's lock-conflict path must
         // respect the same wall-clock deadline as the retry loop (issue #569).
         $budget = $retryExecutor->currentBudget();
+        $targetStoreId = null;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys, $forUpdateTs, $budget): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, $forUpdateTs, $budget, &$targetStoreId): CheckedGrpcFuture {
                 // Resolve the region on every attempt so cache
                 // invalidation and leader switching performed by the
                 // retry executor take effect (issue #502) — see
@@ -2744,6 +2778,7 @@ final readonly class TwoPhaseCommitter
                         $firstKey,
                     );
                 }
+                $targetStoreId = $region->leaderStoreId;
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $request = new PessimisticRollbackRequest();
@@ -2786,6 +2821,9 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 

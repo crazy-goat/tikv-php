@@ -381,6 +381,29 @@ This keeps application-facing components in user-key space and makes the
 keyspace contract a transport concern rather than a per-operation special
 case.
 
+### Resource control on the request Context
+
+Every region-addressed request carries a `kvrpcpb.Context`. Two optional
+resource-control fields live on it (issue #427, GAP-13):
+
+- `Context.resource_control_context.resource_group_name` — the TiKV resource
+  group the request belongs to, enforced by PD's resource manager;
+- `Context.resource_group_tag` — opaque bytes used for query attribution.
+
+`Region\ResourceControl` is the single value object holding the pair;
+`RegionContextFactory::fromRegionInfo()` and `resolveTarget()` apply it while
+building the context. The raw and transactional components receive the object
+from their client (`RawKvClient`, `TxnKvClient` → `Transaction` → `TxnReader`,
+`TwoPhaseCommitter`, `LockResolver`), so the same values reach every RPC
+built by those components. `TxnKvClient::begin()` layers per-transaction
+overrides over the client-wide defaults, field by field.
+
+Both fields are proto3 defaults when unset and the object is only applied
+when a value is configured: an unconfigured client never writes them, which
+keeps the serialized request bytes unchanged. The client does not parse
+`ExecDetailsV2`/`RUV2` responses, so Request Unit accounting remains a
+server-side concern (see [Configuration](configuration.md#resource-control-resource-groups)).
+
 ### 5. GrpcClient
 
 **Location**: `src/Client/Grpc/GrpcClient.php`
@@ -853,6 +876,14 @@ the sequential retrying path.
 - Drop the cached store address on a `StoreNotMatch` region error or a
   transport failure to that store, so the next attempt asks PD for a fresh
   `GetStore` instead of retrying a stale address (issue #247)
+- Close the channel of the store the failed attempt actually targeted, not
+  the cached leader's: every RPC path reports its target store to the retry
+  executor, so a replica-read follower or a store whose cached leader changed
+  during the attempt is the one torn down (issue #248). Only `UNAVAILABLE`
+  closes a channel; a `DEADLINE_EXCEEDED` on a slow but healthy connection is
+  retried without a re-handshake. The exception carries the address of the
+  failed call, so a nested lock-resolution RPC against another region also
+  closes its own channel
 
 **Trade-off**: refresh costs one PD `GetRegion` per cached region, which is
 why it is opt-in and throttled by `regionCacheRefreshMs` rather than running

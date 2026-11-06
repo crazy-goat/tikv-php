@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
@@ -227,15 +228,34 @@ final readonly class RetryExecutor
                             ]);
                         }
 
-                        if ($e instanceof GrpcException && $failedStoreId !== null) {
-                            // Resolve the channel address BEFORE dropping the
-                            // store entry: resolveStoreAddress() reads the
-                            // store cache, and invalidating first would force
-                            // a PD GetStore just to close a channel.
-                            try {
-                                $address = $this->regionResolver->resolveStoreAddress($failedStoreId);
-                                $this->grpc->closeChannel($address);
-                            } catch (StoreNotFoundException) {
+                        if (
+                            $e instanceof GrpcException
+                            && $this->indicatesBrokenConnection($e)
+                        ) {
+                            // The exception carries the address the failed
+                            // attempt was sent to (set by GrpcClient /
+                            // GrpcFuture at throw time). That is authoritative
+                            // even when the RPC was nested inside the retried
+                            // operation — lock resolution talks to the
+                            // primary's region, not the read's/write's region
+                            // (issue #248). Fall back to the provider/cached
+                            // leader only for exceptions that predate the
+                            // field or synthetic test failures.
+                            $failedAddress = $e->targetAddress;
+                            if ($failedAddress === null && $failedStoreId !== null) {
+                                // Resolve the channel address BEFORE dropping
+                                // the store entry: resolveStoreAddress() reads
+                                // the store cache, and invalidating first
+                                // would force a PD GetStore just to close a
+                                // channel.
+                                try {
+                                    $failedAddress = $this->regionResolver->resolveStoreAddress($failedStoreId);
+                                } catch (StoreNotFoundException) {
+                                }
+                            }
+
+                            if ($failedAddress !== null) {
+                                $this->grpc->closeChannel($failedAddress);
                             }
                         }
 
@@ -713,6 +733,24 @@ final readonly class RetryExecutor
         $storeId = $provider();
 
         return is_int($storeId) && $storeId > 0 ? $storeId : null;
+    }
+
+    /**
+     * Whether a gRPC failure is evidence that the channel itself is broken
+     * (issue #248, REG-17).
+     *
+     * A `DEADLINE_EXCEEDED` on a slow but healthy connection is a retryable
+     * transport failure (issue #240), but tearing the channel down for it
+     * forces a re-handshake on every slow scan and adds connection churn
+     * under load. Only UNAVAILABLE says the connection could not be used at
+     * all; the issue's acceptance criteria make that the only status that
+     * closes a channel. The store-address invalidation is deliberately not
+     * gated by this: a stale address is worth re-resolving even after a
+     * timeout.
+     */
+    private function indicatesBrokenConnection(GrpcException $e): bool
+    {
+        return $e->grpcStatusCode === GrpcStatusCode::Unavailable->value;
     }
 
     /**

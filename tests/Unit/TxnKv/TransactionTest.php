@@ -42,6 +42,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
@@ -108,6 +109,7 @@ class TransactionTest extends TestCase
      *     maxBackoffMs?: int,
      *     eagerPessimisticLocks?: bool,
      *     trackReadSet?: bool,
+     *     resourceControl?: ResourceControl,
      * } $options
      */
     private function createTransaction(array $options = []): Transaction
@@ -127,6 +129,7 @@ class TransactionTest extends TestCase
             // regressions opt in explicitly below.
             eagerPessimisticLocks: $options['eagerPessimisticLocks'] ?? false,
             trackReadSet: $options['trackReadSet'] ?? false,
+            resourceControl: $options['resourceControl'] ?? new ResourceControl(),
         );
     }
 
@@ -4906,6 +4909,88 @@ class TransactionTest extends TestCase
         $context = $capturedRequest->getContext();
         $this->assertNotNull($context);
         $this->assertSame(1, $context->getPriority());
+    }
+
+    public function testResourceControlIsCarriedOnEveryRequestContext(): void
+    {
+        // The transaction's resource group and tag must reach the Context of
+        // every request the transaction sends (issue #427, GAP-13).
+        $this->stubRegionAndStore();
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequests,
+            ): object {
+                if (in_array($method, ['KvGet', 'KvPrewrite', 'KvCommit'], true)) {
+                    if (
+                        !$request instanceof GetRequest
+                        && !$request instanceof PrewriteRequest
+                        && !$request instanceof CommitRequest
+                    ) {
+                        throw new \RuntimeException("Unexpected request for {$method}");
+                    }
+                    $capturedRequests[$method] = $request;
+                }
+                return match ($method) {
+                    'KvGet' => new GetResponse(),
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction([
+            'pessimistic' => false,
+            'resourceControl' => new ResourceControl('tenant-a', 'nightly-job'),
+        ]);
+        $txn->get('k1');
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $this->assertSame(['KvGet', 'KvPrewrite', 'KvCommit'], array_keys($capturedRequests));
+        foreach ($capturedRequests as $method => $request) {
+            $context = $request->getContext();
+            $this->assertNotNull($context, "no Context on {$method}");
+            $controlContext = $context->getResourceControlContext();
+            $this->assertNotNull($controlContext, "no resource control context on {$method}");
+            $this->assertSame('tenant-a', $controlContext->getResourceGroupName(), "wrong group on {$method}");
+            $this->assertSame('nightly-job', $context->getResourceGroupTag(), "wrong tag on {$method}");
+        }
+    }
+
+    public function testDefaultResourceControlLeavesTheContextUnchanged(): void
+    {
+        $this->stubRegionAndStore();
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvGet') {
+                    $capturedRequest = $request;
+                }
+                return new GetResponse();
+            });
+
+        $this->createTransaction(['pessimistic' => false])->get('k1');
+
+        $this->assertInstanceOf(GetRequest::class, $capturedRequest);
+        $context = $capturedRequest->getContext();
+        $this->assertNotNull($context);
+        $this->assertFalse($context->hasResourceControlContext());
+        $this->assertSame('', $context->getResourceGroupTag());
     }
 
     // ========================================================================

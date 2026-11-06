@@ -13,11 +13,12 @@ Complete guide to configuring the TiKV PHP Client for development and production
 7. [Batch Commands Multiplexing (Experimental)](#batch-commands-multiplexing-experimental)
 8. [Fast Commit Modes (TxnKV)](#fast-commit-modes-txnkv)
 9. [Transaction Priority (TxnKV)](#transaction-priority-txnkv)
-10. [Request Context Controls (issue #426, GAP-12)](#request-context-controls-issue-426-gap-12)
-11. [Retry and Backoff](#retry-and-backoff)
-12. [Caching](#caching)
-13. [Timeouts](#timeouts)
-14. [Production Configuration](#production-configuration)
+10. [Resource Control (Resource Groups)](#resource-control-resource-groups)
+11. [Request Context Controls (issue #426, GAP-12)](#request-context-controls-issue-426-gap-12)
+12. [Retry and Backoff](#retry-and-backoff)
+13. [Caching](#caching)
+14. [Timeouts](#timeouts)
+15. [Production Configuration](#production-configuration)
 
 ## Basic Configuration
 
@@ -141,6 +142,15 @@ $options = [
     // traffic; a forced refresh still works. Must be >= 0. See "Region Cache
     // Refresh and Preload" below.
     'regionCacheRefreshMs' => 60000,
+    // Resource control (issue #427): the TiKV resource group every request
+    // belongs to, and an opaque tag used for query attribution. Both are
+    // optional and default to unset, which sends neither field. The name
+    // must be 1-64 characters of letters, digits, underscores or hyphens;
+    // the tag must be a non-empty string. TxnKvClient::begin() accepts the
+    // same two keys per transaction and overrides them individually. See
+    // "Resource Control (Resource Groups)" below.
+    'resourceGroup' => 'tenant-a',
+    'resourceGroupTag' => 'nightly-job',
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
         'clientCertFile' => '/path/to/client.crt',
@@ -571,7 +581,11 @@ each other's caches. Store addresses are cached for 600 s plus up to 60 s of
 jitter; a `StoreNotMatch` region error or a retryable transport failure against
 a store evicts that store's entry early, so a TiKV pod that was rescheduled to
 a new address is found again on the next attempt instead of after the TTL
-(issue #247).
+(issue #247). The `closeChannel()` that follows a transport failure targets the
+store the failed attempt used — a replica-read follower, or the leader the
+attempt resolved — rather than whatever the region cache names as the leader
+when the error is handled, and it runs only for `UNAVAILABLE`, not for a
+`DEADLINE_EXCEEDED` on a slow but healthy connection (issue #248).
 
 `options['metrics']` is a **client-side** option and is always applied: it
 backs the client-side counters (region cache, retries). The transport's own
@@ -1641,6 +1655,63 @@ path uses the default or `'priority' => 2`.
 
 The value is forwarded to TiKV unchanged — it is not validated, so use one
 of the three values above.
+
+## Resource Control (Resource Groups)
+
+TiKV clusters can be split into **resource groups** through PD's resource
+manager: each group has its own Request Unit quota, and TiKV enforces it only
+for requests that carry the group name. The client participates with two
+option keys, on both `RawKvClient::create()` / `TxnKvClient::create()` and —
+for TxnKV — per transaction in `begin()`:
+
+```php
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+
+$raw = RawKvClient::create(['127.0.0.1:2379'], options: [
+    'resourceGroup' => 'tenant-a',
+    'resourceGroupTag' => 'nightly-job',
+]);
+
+$txn = TxnKvClient::create(['127.0.0.1:2379'], options: [
+    'resourceGroup' => 'tenant-a',
+])->begin([
+    'resourceGroup' => 'tenant-a-batch', // overrides the client default
+    'resourceGroupTag' => 'import-2026-11-06',
+]);
+```
+
+| Option | Wire field | Meaning |
+|---|---|---|
+| `resourceGroup` | `Context.resource_control_context.resource_group_name` | The resource group the request belongs to. 1–64 characters: letters, digits, `_` and `-`. |
+| `resourceGroupTag` | `Context.resource_group_tag` | Opaque bytes for query attribution (for example a job or statement identifier). Must be non-empty when set. |
+
+Both keys are optional. When they are unset, neither field is written to the
+`Context`, so the serialized request is byte-identical to a request from
+before this feature existed. Only the fields that are configured are set;
+`begin()` overrides each key independently, so a transaction can change its
+group while still inheriting the client-wide tag (and vice versa).
+
+The fields reach **every** RPC built by the client: RawKV reads, writes, CAS,
+batch operations, scans, range deletes/checksums and SST ingest; TxnKV reads,
+prewrite, pessimistic locks, commit, heartbeat, rollback and lock resolution.
+This gives attribution and server-side quota enforcement. It does **not**
+perform client-side Request Unit accounting: the client does not read
+`ExecDetailsV2`/`RUV2` from responses and does not feed a local token bucket,
+so flow control remains entirely server-side (a larger follow-on, not part of
+the current option).
+
+Group names are validated locally against PD's naming rule; the tag is
+forwarded as opaque bytes. The client does not verify that the group exists:
+the cluster decides what happens to an unknown name — TiKV normally falls
+back to the default/uncontrolled behaviour rather than returning an error.
+
+`options['requestContext']` (below) can also carry `resourceGroupTag` and
+`resourceGroupName`. The two option sets are independent and both reach the
+wire: `resourceGroup` / `resourceGroupTag` are applied first, and a
+non-default value of the same field in `requestContext` wins when both are
+set. A client that uses only `resourceGroup` / `resourceGroupTag` keeps the
+behaviour described above.
 
 ## Request Context Controls (issue #426, GAP-12)
 
