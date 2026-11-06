@@ -887,6 +887,20 @@ $result = $client->compareAndSwap('counter', '5', '6');
 - `swapped` (bool): True if swap succeeded
 - `previousValue` (?string): Previous value (null if key didn't exist)
 
+**Indeterminate outcome:** a transport failure on the CAS request itself
+(deadline exceeded, connection reset, `UNAVAILABLE`) throws
+`CasIndeterminateException` instead of a bare `GrpcException`: the swap may
+already have been applied and the client deliberately does not retry a
+non-idempotent write. The original `GrpcException` is preserved as
+`getPrevious()`. Re-read the key and decide from its current value; never
+treat this exception as "not swapped". Region errors are still retried
+automatically, and a failure that happens before the request is sent (for
+example PD unreachable during region resolution) stays a plain
+`GrpcException` and means the swap definitively did not happen. An
+application-level rejection of the request itself (`UNAUTHENTICATED`,
+`PERMISSION_DENIED`, `INVALID_ARGUMENT`, …) also stays a plain
+`GrpcException`: the server refused it, so no swap happened.
+
 **Example:**
 
 ```php
@@ -944,6 +958,11 @@ $existing = $client->putIfAbsent('lock:resource', 'owner-123');
 - `ttl` (int, optional): TTL for the value
 
 **Returns:** `?string` - null if inserted, existing value if key already exists
+
+An inserted value is confirmed only by a `null` return. A thrown
+`CasIndeterminateException` means the outcome is unknown — the value may have
+been stored — so a distributed-lock caller must not interpret it as "lock not
+acquired"; re-read the key first (see [Compare And Swap](#compare-and-swap-cas)).
 
 **Example:**
 
