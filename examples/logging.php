@@ -13,6 +13,13 @@ use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
 use Monolog\Formatter\LineFormatter;
 
+if (!class_exists(Logger::class)) {
+    fwrite(STDERR, "This example requires monolog/monolog, a dev-only dependency of this library.\n");
+    fwrite(STDERR, "Install it with: composer require monolog/monolog\n");
+    fwrite(STDERR, "Or pass any PSR-3 logger instead: the client itself only depends on psr/log.\n");
+    exit(1);
+}
+
 echo "TiKV PHP Client - PSR-3 Logging Example\n";
 echo "=======================================\n\n";
 
