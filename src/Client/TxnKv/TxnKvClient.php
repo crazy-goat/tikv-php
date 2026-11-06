@@ -197,6 +197,16 @@ final class TxnKvClient
     private readonly RegionResolver $regionResolver;
 
     /**
+     * Transactions begun by this client that have not been closed yet,
+     * tracked weakly so tracking does not extend their lifetime. close()
+     * rolls the still-active ones back before releasing the transport and
+     * PD client they depend on (issue #226, TXN-21).
+     *
+     * @var list<\WeakReference<Transaction>>
+     */
+    private array $liveTransactions = [];
+
+    /**
      * Final transaction outcomes shared by the LockResolver of every
      * transaction of this client (issue #428). Bounded, FIFO.
      */
@@ -527,7 +537,7 @@ final class TxnKvClient
             statusCache: $this->resolvedStatusCache,
         );
 
-        return new Transaction(
+        $transaction = new Transaction(
             txnId: $txnId,
             startTs: $startTs,
             pessimistic: $pessimistic,
@@ -557,6 +567,11 @@ final class TxnKvClient
             maxTxnBatchSize: $maxTxnBatchSize,
             maxTxnBatchCount: $maxTxnBatchCount,
         );
+
+        $this->pruneFinishedTransactions();
+        $this->liveTransactions[] = \WeakReference::create($transaction);
+
+        return $transaction;
     }
 
     /**
@@ -961,6 +976,19 @@ final class TxnKvClient
         $this->grpc->reapIdleChannels();
     }
 
+    /**
+     * Release the client's resources.
+     *
+     * Transactions this client began that are still active are rolled back
+     * first, while the transport and the PD client they depend on are still
+     * open (issue #226, TXN-21). A rollback failure is logged and does not
+     * abort the shutdown; the transaction keeps its destructor fallback.
+     * The region cache is then cleared, the owned transport is closed and the
+     * PD client is closed.
+     *
+     * Idempotent and never throws. The transaction rollback can perform
+     * network I/O and block while its retry loop runs.
+     */
     public function close(): void
     {
         if ($this->closed) {
@@ -968,6 +996,8 @@ final class TxnKvClient
         }
 
         $this->closed = true;
+
+        $this->rollbackLiveTransactions();
 
         try {
             $this->regionCache->clear();
@@ -991,6 +1021,64 @@ final class TxnKvClient
         } catch (\Throwable $e) {
             $this->logger->error('Failed to close PD client', ['exception' => $e]);
         }
+    }
+
+    /**
+     * Roll back every transaction this client began that is still active.
+     *
+     * Runs before the region cache, transport and PD client are released, so
+     * an abandoned transaction does not leave its locks behind until the TTL
+     * expires (issue #226, TXN-21). A failure is logged, not propagated:
+     * close() must never throw, and the transaction's own destructor keeps
+     * its rollback fallback.
+     */
+    private function rollbackLiveTransactions(): void
+    {
+        $references = $this->liveTransactions;
+        $this->liveTransactions = [];
+
+        foreach ($references as $reference) {
+            $transaction = $reference->get();
+            // A closed transaction always carries a terminal status, so the
+            // status check also excludes an already committed or rolled back
+            // one (see Transaction::__destruct()).
+            if (
+                !$transaction instanceof Transaction
+                || $transaction->getStatus() !== TransactionStatus::Active
+            ) {
+                continue;
+            }
+
+            try {
+                $transaction->rollback();
+            } catch (\Throwable $e) {
+                $this->logger->error('Transaction rollback failed during client close', [
+                    'txnId' => $transaction->getTxnId(),
+                    'exception' => $e,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Drop weak references whose transaction was destroyed or reached a
+     * terminal status, so the list only tracks transactions that can still
+     * be rolled back.
+     */
+    private function pruneFinishedTransactions(): void
+    {
+        $live = [];
+        foreach ($this->liveTransactions as $reference) {
+            $transaction = $reference->get();
+            if (
+                $transaction instanceof Transaction
+                && $transaction->getStatus() === TransactionStatus::Active
+            ) {
+                $live[] = $reference;
+            }
+        }
+
+        $this->liveTransactions = $live;
     }
 
     public function __destruct()

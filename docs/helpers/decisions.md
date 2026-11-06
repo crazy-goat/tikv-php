@@ -1079,6 +1079,35 @@ README ("Connection Lifetime and Transport Ownership") and
 manual-construction snippet). Keep them in sync — the contradiction #407 had to
 fix was a snippet sitting next to the rule and breaking it.
 
+## A client rolls back its live transactions before releasing the transport (issue #226)
+
+`TxnKvClient` tracks the transactions it began through `WeakReference` and, in
+`close()`, rolls back the ones still `Active` before it clears the region cache
+and closes the owned transport and the PD client. The order is the point: PHP
+does not guarantee destruction order, so relying on `Transaction::__destruct()`
+alone left the rollback racing a closed transport, and the locks lived until
+their TTL expired.
+
+Three decisions inside it:
+
+1. **Weak tracking, not ownership.** A strong list would keep an abandoned
+   transaction (and its write set) alive until the client itself died;
+   `WeakReference` only lets `close()` reach transactions the caller still
+   holds. References to finished transactions are pruned on `begin()`.
+2. **Rollback, not invalidation.** A committed or rolled back transaction is
+   skipped by its status; a live one goes through the public
+   `Transaction::rollback()`, so `close()` and the destructor share one
+   implementation and the existing error handling. `close()` does not invent a
+   second "client closed" state for transactions — a successful rollback closes
+   the transaction through its own state machine.
+3. **The shared-transport case is handled too.** A client that does not own the
+   transport (`options['grpcClient']`) still owns the transactions it began, so
+   it attempts the rollback before releasing its other resources; the transport
+   itself is still never closed by the client. Finishing transactions
+   explicitly stays the contract: a rollback failure inside `close()` is logged
+   (`close()` never throws), and with a shared transport the transaction can
+   still be used afterwards.
+
 ## The transaction mode is stated explicitly, but `begin()` keeps its pessimistic default (issue #439)
 
 Issue #439 (DIV-03) recorded the divergence from the official clients:
