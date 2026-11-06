@@ -28,6 +28,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -83,6 +84,8 @@ final readonly class RawKvScanner
         private MetricsInterface $metrics = new NoOpMetrics(),
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($this->maxScanRows < 1) {
             throw new InvalidArgumentException('maxScanRows must be >= 1');
@@ -1088,6 +1091,7 @@ final readonly class RawKvScanner
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -1221,6 +1225,7 @@ final readonly class RawKvScanner
                 $this->regionResolver->getStore(...),
                 excludedStoreId: $excludedStore,
                 requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
             );
             $excludedStore = null;
             $targetStoreId = $target->storeId;
@@ -1501,6 +1506,7 @@ final readonly class RawKvScanner
                 $this->replicaReadPolicy,
                 $this->regionResolver->getStore(...),
                 requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
             );
             $targetStoreId = $target->storeId;
             $address = $this->regionResolver->resolveStoreAddress($target->storeId);

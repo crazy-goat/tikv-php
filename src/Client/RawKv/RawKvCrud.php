@@ -21,6 +21,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
@@ -38,6 +39,8 @@ final readonly class RawKvCrud
         private ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -56,6 +59,7 @@ final readonly class RawKvCrud
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -129,6 +133,7 @@ final readonly class RawKvCrud
                 $request->setContext(RegionContextFactory::fromRegionInfo(
                     $region,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 ));
                 $request->setKey($key);
                 $request->setValue($value);
@@ -175,7 +180,11 @@ final readonly class RawKvCrud
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+            $request->setContext(RegionContextFactory::fromRegionInfo(
+                $region,
+                requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
+            ));
             $request->setKey($key);
             if ($forCas) {
                 $request->setForCas(true);
@@ -216,6 +225,7 @@ final readonly class RawKvCrud
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;

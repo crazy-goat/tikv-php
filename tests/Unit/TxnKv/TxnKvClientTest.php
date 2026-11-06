@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
@@ -607,6 +608,58 @@ class TxnKvClientTest extends TestCase
         $commitContext = $commitRequest->getContext();
         $this->assertNotNull($commitContext);
         $this->assertSame(CommandPri::High, $commitContext->getPriority(), 'priority missing on KvCommit');
+    }
+
+    public function testBeginResourceGroupOverridesTheClientDefault(): void
+    {
+        // begin() overrides one resource-control field without dropping the
+        // client-wide default for the other (issue #427).
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(4000);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $pdClient->method('getRegion')->willReturn($this->testRegion());
+        $pdClient->method('getStore')->willReturn($this->testStore());
+
+        $capturedRequest = null;
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $this->shimCallAsync($grpc);
+        $grpc->method('call')->willReturnCallback(
+            function (string $addr, string $service, string $method, mixed $request) use (&$capturedRequest): object {
+                if ($method === 'KvGet') {
+                    $capturedRequest = $request;
+                }
+
+                return new GetResponse();
+            },
+        );
+
+        $client = new TxnKvClient(
+            $pdClient,
+            $grpc,
+            resourceControl: new ResourceControl('client-group', 'client-tag'),
+        );
+        $txn = $client->begin(['pessimistic' => false, 'resourceGroup' => 'txn-group']);
+        $txn->get('k1');
+
+        $this->assertInstanceOf(GetRequest::class, $capturedRequest);
+        $context = $capturedRequest->getContext();
+        $this->assertNotNull($context);
+        $controlContext = $context->getResourceControlContext();
+        $this->assertNotNull($controlContext);
+        $this->assertSame('txn-group', $controlContext->getResourceGroupName());
+        $this->assertSame('client-tag', $context->getResourceGroupTag());
+    }
+
+    public function testBeginRejectsAnInvalidResourceGroup(): void
+    {
+        $client = new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("begin() options['resourceGroup'] must be a string");
+        $client->begin(['resourceGroup' => 42]); // @phpstan-ignore argument.type
     }
 
     private function testRegion(): RegionInfo

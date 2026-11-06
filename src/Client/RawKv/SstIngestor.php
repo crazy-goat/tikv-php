@@ -30,6 +30,7 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -67,6 +68,8 @@ final readonly class SstIngestor
         private int $maxIngestSize = 0,
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($maxIngestSize < 0) {
             throw new InvalidArgumentException('maxIngestSize must be >= 0');
@@ -409,6 +412,7 @@ final readonly class SstIngestor
         $ingestRequest->setContext(RegionContextFactory::fromRegionInfo(
             $region,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         ));
         $ingestRequest->setSst($sstMeta);
 

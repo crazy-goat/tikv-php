@@ -24,6 +24,7 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -51,6 +52,8 @@ final readonly class LockResolver
         private ResolvedTxnStatusCache $statusCache = new ResolvedTxnStatusCache(),
         /** Optional Context control fields applied to lock-resolution RPCs (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -337,7 +340,11 @@ final readonly class LockResolver
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new CheckTxnStatusRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setPrimaryKey($primaryKey);
         $request->setLockTs($lockTs);
         // Both fields must be PD TSO MVCC timestamps: a monotonic-clock value
@@ -475,7 +482,11 @@ final readonly class LockResolver
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new CheckSecondaryLocksRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+            $request->setContext(RegionContextFactory::fromRegionInfo(
+                $region,
+                requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
+            ));
             $request->setKeys($regionKeys);
             $request->setStartVersion((int) $lock->getLockVersion());
 
@@ -587,7 +598,11 @@ final readonly class LockResolver
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new ResolveLockRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+            $request->setContext(RegionContextFactory::fromRegionInfo(
+                $region,
+                requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
+            ));
             $request->setStartVersion($lockTs);
             $request->setCommitVersion($commitTs);
 
@@ -637,7 +652,11 @@ final readonly class LockResolver
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new ResolveLockRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+            $request->setContext(RegionContextFactory::fromRegionInfo(
+                $region,
+                requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
+            ));
             $request->setStartVersion($lockTs);
             $request->setCommitVersion($commitTs);
             $request->setKeys($regionData['keys']);
@@ -688,7 +707,11 @@ final readonly class LockResolver
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new ResolveLockRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setStartVersion($lockTs);
         $request->setCommitVersion($commitTs);
 
@@ -717,7 +740,11 @@ final readonly class LockResolver
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new ResolveLockRequest();
-        $request->setContext(RegionContextFactory::fromRegionInfo($region, requestContext: $this->requestContext));
+        $request->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        ));
         $request->setStartVersion($lockTs);
         $request->setCommitVersion(0);
 

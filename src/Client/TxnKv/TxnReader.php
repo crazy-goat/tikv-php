@@ -33,6 +33,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryBudget;
@@ -86,6 +87,8 @@ final readonly class TxnReader
         private int $priority = CommandPri::Normal,
         /** Optional Context control fields applied to every read (issue #426). */
         private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every read request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -128,6 +131,7 @@ final readonly class TxnReader
                     excludedStoreId: $excludedStore,
                     priority: $this->priority,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -579,6 +583,7 @@ final readonly class TxnReader
             $this->regionResolver->getStore(...),
             priority: $this->priority,
             requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
         $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
@@ -765,6 +770,7 @@ final readonly class TxnReader
                     excludedStoreId: $excludedStore,
                     priority: $this->priority,
                     requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;

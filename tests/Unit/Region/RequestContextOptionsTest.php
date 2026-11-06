@@ -11,6 +11,7 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadMode;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use PHPUnit\Framework\TestCase;
 
 class RequestContextOptionsTest extends TestCase
@@ -125,5 +126,48 @@ class RequestContextOptionsTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         new RequestContextOptions(busyThresholdMs: RequestContextOptions::MAX_DURATION_MS + 1);
+    }
+
+    public function testResourceControlAndRequestContextAreBothApplied(): void
+    {
+        // The two option objects cover overlapping Context fields (issue #426
+        // and #427). Both must reach the wire when a client uses both; the
+        // resource-control value is applied first, so a non-default value of
+        // the same field in requestContext wins.
+        $resourceControl = new ResourceControl('tenant-a', 'nightly-job');
+        $requestContext = new RequestContextOptions(
+            notFillCache: true,
+            requestSource: 'nightly-export',
+        );
+
+        $context = RegionContextFactory::fromRegionInfo(
+            $this->region(),
+            requestContext: $requestContext,
+            resourceControl: $resourceControl,
+        );
+
+        $this->assertTrue($context->getNotFillCache());
+        $this->assertSame('nightly-export', $context->getRequestSource());
+        $this->assertSame('nightly-job', $context->getResourceGroupTag());
+        $this->assertSame(
+            'tenant-a',
+            $context->getResourceControlContext()?->getResourceGroupName(),
+        );
+
+        $override = new RequestContextOptions(
+            resourceGroupTag: 'context-tag',
+            resourceGroupName: 'context-group',
+        );
+        $context = RegionContextFactory::fromRegionInfo(
+            $this->region(),
+            requestContext: $override,
+            resourceControl: $resourceControl,
+        );
+
+        $this->assertSame('context-tag', $context->getResourceGroupTag());
+        $this->assertSame(
+            'context-group',
+            $context->getResourceControlContext()?->getResourceGroupName(),
+        );
     }
 }
