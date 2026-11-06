@@ -85,6 +85,10 @@ final readonly class RawKvBatch
             return [];
         }
 
+        // One batchGet() call is one logical operation: every region and
+        // sub-batch shares one retry budget (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
@@ -159,6 +163,10 @@ final readonly class RawKvBatch
         if ($keyValuePairs === []) {
             return;
         }
+
+        // One batchPut() call is one logical operation: every region and
+        // sub-batch shares one retry budget (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
 
         if (is_array($ttl)) {
             $count = count($keyValuePairs);
@@ -264,6 +272,10 @@ final readonly class RawKvBatch
         if ($keys === []) {
             return;
         }
+
+        // One batchDelete() call is one logical operation: every region and
+        // sub-batch shares one retry budget (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
 
         $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
 

@@ -526,6 +526,11 @@ Built-in retry budgets (full reference incl. per-error backoff strategies:
 | ServerBusy sleep budget (`serverBusyBudgetMs`) | 60 000 ms (`RawKvClient::DEFAULT_SERVER_BUSY_BUDGET_MS`) | the original `TiKvException` | `RawKvClient` constructor argument (fixed at 60 s on the transactional API) |
 | Wall-clock deadline (`retryDeadlineMs`) | 30 000 ms, `0` disables (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`) | `RetryBudgetExhaustedException` | `options['retryDeadlineMs']` on `RawKvClient::create()` / `TxnKvClient::create()` |
 
+The three time/backoff budgets are scoped to **one logical operation**
+(issue #223): all regions and pages of one `scan()`, `batchGet()` or
+`commit()` share them, and a later operation starts from zero. The attempt
+cap is per retry loop (one region/page).
+
 What you should handle at the application level instead:
 
 ```php

@@ -103,6 +103,10 @@ final readonly class TxnReader
             return $state->getWriteSetValue($key);
         }
 
+        // One get() call is one logical operation: a fresh budget, never the
+        // one a previous read or the commit phase spent (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         $excludedStore = null;
 
         return $retryExecutor->execute(
@@ -206,6 +210,10 @@ final readonly class TxnReader
     ): array {
         $keys = $this->normalizeKeysToStrings($keys, 'batchGet');
 
+        // One batchGet() call is one logical operation: every region shares
+        // one retry budget (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         $results = [];
         $remaining = [];
         foreach ($keys as $key) {
@@ -268,6 +276,10 @@ final readonly class TxnReader
         callable $classifier,
         int $maxScanLimit = 10240,
     ): array {
+        // One scan() call is one logical operation: every page and region
+        // shares one retry budget (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         // `limit: 0` means "the whole range"; the scan budget is the cap and
         // a range that exceeds it must fail loudly instead of returning a
         // truncated result (issue #440).

@@ -744,7 +744,7 @@ Two decisions from #260 that should not be "simplified" away:
    the failure modes are: a hung metadata plane takes every region lookup and
    every transaction begin down **simultaneously** — one blackholed PD, the
    whole process pool — whereas a slow store is a per-region problem the
-   `RetryExecutor` already handles against a per-region budget. A shared
+   `RetryExecutor` already handles against an operation-scoped retry budget. A shared
    field would force one value that is simultaneously too tight for a large
    scan and too loose for a TSO fetch. The values are threaded at the call
    site, not in `callWithClusterIdRetry()`'s signature: one helper, ten call

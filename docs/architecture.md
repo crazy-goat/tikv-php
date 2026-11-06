@@ -532,6 +532,7 @@ enum BackoffType
 ```
 
 **Retry Budgets**:
+- **Scope**: one budget per logical operation (issue #223). `RetryExecutor::beginOperation()` returns an executor whose `execute()` calls share the same `maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline, and every client fan-out entry point (`scan()`/`reverseScan()`/`batchScan()`, the batch methods, transactional reads, `commit()`, `rollback()`, `deleteRange()`, `checksum()`) uses one for all its regions and pages. A later operation starts from zero, so a read-heavy transaction cannot starve its commit. The attempt cap stays per `execute()` call (one retry loop), so a wide fan-out does not exhaust it on one retry per region.
 - **General**: 20 seconds total backoff
 - **ServerBusy**: 60 seconds separate budget
 - **Wall-clock deadline**: 30 seconds per operation (configurable via `options['retryDeadlineMs']`; issues #294, #237). Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget), so the worst case is ≈ deadline + the duration of the last in-flight RPC (bounded only by the gRPC timeout option, not by the retry deadline).
