@@ -2870,7 +2870,55 @@ class TransactionTest extends TestCase
         $result = $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
 
         $this->assertSame(['k1' => 'v1'], $result);
+        // Issue #222: the first KvBatchGet failed with NotLeader and the
+        // second one (against the hinted leader) succeeded — exactly two RPCs.
+        $this->assertCount(2, $addresses, 'the NotLeader must be retried exactly once');
         $this->assertSame(['127.0.0.1:20161', '127.0.0.1:20162'], $addresses);
+    }
+
+    /**
+     * Issue #222: a fatal region error must surface without a retry. A
+     * `KeyNotInRegion` says the cached routing information is wrong, so the
+     * executor drops the region (issue #233) and rethrows instead of spending
+     * its retry budget on the same request.
+     */
+    public function testBatchGetDoesNotRetryFatalRegionError(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $keyNotInRegion = new \CrazyGoat\Proto\Errorpb\KeyNotInRegion();
+        $keyNotInRegion->setRegionId($this->testRegion->regionId);
+        $keyNotInRegion->setKey('k1');
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setKeyNotInRegion($keyNotInRegion);
+        $response = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $response->setRegionError($regionError);
+
+        $calls = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$calls, $response): object {
+                $calls++;
+                return match ($method) {
+                    'KvBatchGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        try {
+            $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+            $this->fail('Expected RegionException was not thrown');
+        } catch (RegionException $e) {
+            $this->assertSame(
+                \CrazyGoat\TiKV\Client\Retry\ErrorKind::KeyNotInRegion,
+                $e->errorKind,
+            );
+        }
+
+        $this->assertSame(1, $calls, 'a fatal region error must not be retried');
     }
 
     public function testBatchGetRejectsUnhandledPairKeyError(): void
