@@ -395,10 +395,12 @@ foreach ($client->scanPrefixIterator('user:') as $key => $value) {
 ### Iterating Large Ranges
 
 A bounded `scan()` / `scanPrefix()` / `reverseScan()` call accepts at most
-`RawKvClient::MAX_SCAN_LIMIT` (10240) rows per RPC. Passing `limit: 0` does
-**not** cap the result at 10240: the client pages internally (10240 rows per
-RPC) and returns the complete range. That is convenient, but the whole result
-is still buffered in one PHP array, so an unbounded scan is guarded by
+`RawKvClient::MAX_SCAN_LIMIT` (10240) rows per RPC. A negative limit is
+rejected with `InvalidArgumentException` before any RPC is sent. Passing
+`limit: 0` does **not** cap the result at 10240: the client pages internally
+(10240 rows per RPC) and returns the complete range. That is convenient, but
+the whole result is still buffered in one PHP array, so an unbounded scan is
+guarded by
 `options['maxScanRows']` (default `RawKvClient::DEFAULT_MAX_SCAN_ROWS` =
 100000) — exceeding it throws `ScanLimitExceededException` rather than
 silently truncating. The guard is evaluated per internally fetched page
@@ -1035,7 +1037,7 @@ The client enforces these limits. The constants are public on `RawKvClient`.
 | Maximum key size | 8 MiB (8388608 bytes) | `MAX_KEY_SIZE` | Client, before any RPC. Throws `InvalidArgumentException` |
 | Maximum value size | 4 MiB (4194304 bytes) | `MAX_VALUE_SIZE` | Client, before any RPC. Throws `InvalidArgumentException` |
 | Minimum key size | 1 byte | `MIN_KEY_SIZE` | An empty key throws `InvalidArgumentException` |
-| Maximum scan limit | 10240 rows per RPC | `MAX_SCAN_LIMIT` | Client. See [Scan](#scan) |
+| Maximum scan limit | 10240 rows per RPC | `MAX_SCAN_LIMIT` | Client, before any RPC. A negative limit throws `InvalidArgumentException`; `limit: 0` means the whole range, paged internally. See [Scan](#scan) |
 | Keys per batch RPC | 512 | `MAX_BATCH_LIMIT` | Automatic split. No error |
 | Bytes per batch RPC | 16384 bytes (16 KiB) | `MAX_BATCH_GET_SIZE`, `MAX_BATCH_PUT_SIZE`, `MAX_BATCH_DELETE_SIZE` | Automatic split. No error |
 | Batch fan-out deadline | 60000 ms | `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS` | Client, `batchDeadlineMs`. Throws `BatchDeadlineExceededException`. `0` disables it |
