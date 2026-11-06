@@ -315,6 +315,11 @@ class PessimisticLockWaitTimeoutTest extends TestCase
         }
 
         $this->assertSame([-1], $this->capturedWaitTimeouts());
+        // Below the floor the resolver is skipped, so a 1 ms gRPC deadline
+        // cannot escape as GrpcException instead of LockWaitTimeoutException
+        // (issue #569, N4).
+        $this->assertNotContains('KvCheckTxnStatus', $this->methods);
+        $this->assertNotContains('KvResolveLock', $this->methods);
     }
 
     public function testANegativeWaitTimeoutIsRejected(): void

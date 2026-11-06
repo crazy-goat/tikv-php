@@ -13,8 +13,12 @@ defaults to 5 s and the TSO fetch to 3 s), not a sleep. The seam is
 `RetryBudget`: `RetryExecutor::beginOperation()` returns an executor whose
 `execute()` calls share one budget, and `RetryExecutor::currentBudget()` exposes
 that same object. `RetryBudget::remainingDeadlineMs()` computes the live value
-at call time, and `TwoPhaseCommitter` passes it into
-`LockResolver::resolveLock()`. Do not reintroduce a sleep in `LockResolver`:
+at call time, and `TwoPhaseCommitter` / `TxnReader` pass it into
+`LockResolver::resolveLock()` / `resolveLocks()`. `LockResolver` converts that
+value once into an absolute deadline and recomputes the live remaining time
+before every nested RPC, so the TSO fetch, `CheckTxnStatus`,
+`CheckSecondaryLocks` and `ResolveLock` share one budget instead of each
+starting from the full snapshot. Do not reintroduce a sleep in `LockResolver`:
 it would break the #206 resolve-then-retry contract. The budget is the single
 source of truth for the deadline; do not add a second context object next to
 it. The live value is computed at call time, so time spent inside the current

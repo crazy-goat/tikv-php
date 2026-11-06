@@ -61,12 +61,15 @@ final readonly class LockResolver
      *                            If the lock has no primary info (e.g. pessimistic), pass the locked key itself.
      * @param LockInfo $lock The lock information from the error response.
      * @param int $remainingDeadlineMs Remaining wall-clock budget (ms) of the calling
-     *                                 operation's retry deadline. When > 0, every
-     *                                 lock-resolution RPC (and the TSO fetch) is
-     *                                 capped by it, so one resolution cannot outlive
-     *                                 the caller's deadline (issue #569). A live lock
-     *                                 still raises {@see TxnRetryableException} and the
-     *                                 caller's RetryExecutor owns the bounded backoff
+     *                                 operation's retry deadline. When > 0, it is
+     *                                 converted once into an absolute deadline and
+     *                                 every nested lock-resolution RPC (and the TSO
+     *                                 fetch) is capped by the time left until it, so
+     *                                 the nested RPCs share one live budget and none is
+     *                                 given a deadline beyond the caller's deadline
+     *                                 (issue #569). A live lock still raises
+     *                                 {@see TxnRetryableException} and the caller's
+     *                                 RetryExecutor owns the bounded backoff
      *                                 (issue #206); 0 means "no deadline" and applies
      *                                 the configured `lockResolveTimeoutMs`/`tsoTimeoutMs`
      *                                 unchanged.
@@ -88,6 +91,7 @@ final readonly class LockResolver
         bool $notLeaderOwnedByRetryExecutor = true,
     ): void {
         $lockTs = (int) $lock->getLockVersion();
+        $deadlineAtMs = $this->absoluteDeadlineMs($remainingDeadlineMs);
         $this->logger->debug('Resolving lock', [
             'key' => KeyRedactor::redact((string) $lock->getKey()),
             'lockTs' => $lockTs,
@@ -97,10 +101,10 @@ final readonly class LockResolver
             $primaryLock,
             $lockTs,
             $notLeaderOwnedByRetryExecutor,
-            $remainingDeadlineMs,
+            $deadlineAtMs,
         );
 
-        $this->resolveLockWithStatus($lock, $lockTs, $status, $remainingDeadlineMs, $notLeaderOwnedByRetryExecutor);
+        $this->resolveLockWithStatus($lock, $lockTs, $status, $deadlineAtMs, $notLeaderOwnedByRetryExecutor);
     }
 
     /**
@@ -116,6 +120,10 @@ final readonly class LockResolver
      * transactions keep the single-lock recovery path.
      *
      * @param list<LockInfo> $locks
+     * @param int $remainingDeadlineMs Remaining wall-clock budget of the
+     *        calling operation, converted once into an absolute deadline for
+     *        the whole batch; every transaction and region charges the same
+     *        live budget (see {@see resolveLock()}).
      * @param bool $notLeaderOwnedByRetryExecutor see {@see resolveLock()}
      */
     public function resolveLocks(
@@ -123,6 +131,11 @@ final readonly class LockResolver
         int $remainingDeadlineMs = 0,
         bool $notLeaderOwnedByRetryExecutor = true,
     ): void {
+        // One absolute deadline for the whole batch: every transaction and
+        // every region charges the same live budget instead of each getting
+        // the full remaining time (issue #569, N3).
+        $deadlineAtMs = $this->absoluteDeadlineMs($remainingDeadlineMs);
+
         /** @var array<int, list<LockInfo>> $byTxn */
         $byTxn = [];
         foreach ($locks as $lock) {
@@ -146,7 +159,7 @@ final readonly class LockResolver
                 $this->primaryOf($first),
                 $lockTs,
                 $notLeaderOwnedByRetryExecutor,
-                $remainingDeadlineMs,
+                $deadlineAtMs,
             );
             $commitTs = $status['commitTs'] ?? 0;
 
@@ -165,7 +178,7 @@ final readonly class LockResolver
                     $first,
                     $lockTs,
                     $status,
-                    $remainingDeadlineMs,
+                    $deadlineAtMs,
                     $notLeaderOwnedByRetryExecutor,
                 );
             } catch (TxnRetryableException $e) {
@@ -179,7 +192,7 @@ final readonly class LockResolver
                 $commitTsByTxn[$lockTs],
                 array_values(array_unique($keys)),
                 $notLeaderOwnedByRetryExecutor,
-                $remainingDeadlineMs,
+                $deadlineAtMs,
             );
         }
 
@@ -195,13 +208,13 @@ final readonly class LockResolver
         LockInfo $lock,
         int $lockTs,
         array $status,
-        int $remainingDeadlineMs,
+        int $deadlineAtMs,
         bool $notLeaderOwnedByRetryExecutor,
     ): void {
         $commitTs = $status['commitTs'] ?? null;
 
         if ($commitTs !== null && $commitTs > 0) {
-            $this->resolveLockCommitted($lock, $lockTs, $commitTs, $remainingDeadlineMs);
+            $this->resolveLockCommitted($lock, $lockTs, $commitTs, $deadlineAtMs);
         } elseif ($commitTs === 0 && !$status['final']) {
             // Async-commit lock (issue #419): the primary lock carries the
             // commit decision, so before spending the TTL wait ask the
@@ -209,7 +222,7 @@ final readonly class LockResolver
             /** @var list<string> $asyncSecondaries */
             $asyncSecondaries = iterator_to_array($lock->getSecondaries());
             $secondary = $lock->getUseAsyncCommit() && $asyncSecondaries !== []
-                ? $this->checkSecondaryLocks($lock, $notLeaderOwnedByRetryExecutor, $remainingDeadlineMs)
+                ? $this->checkSecondaryLocks($lock, $notLeaderOwnedByRetryExecutor, $deadlineAtMs)
                 : null;
 
             if ($secondary !== null) {
@@ -220,7 +233,7 @@ final readonly class LockResolver
                     $lockTs,
                     $secondary['commitTs'],
                     $asyncSecondaries,
-                    $remainingDeadlineMs,
+                    $deadlineAtMs,
                 );
                 $this->invalidateRegionFor((string) $lock->getKey());
                 return;
@@ -230,7 +243,7 @@ final readonly class LockResolver
             if ($ttl > 0) {
                 // Do not sleep here or resolve a still-live transaction's lock.
                 // The caller's RetryExecutor owns bounded backoff and will
-                // retry the original operation (issue #206). The remaining
+                // retry the original operation (issue #206). The absolute
                 // deadline passed above only caps the resolution RPCs; the
                 // executor's own deadline check stops the retry loop with
                 // RetryBudgetExhaustedException when the budget is spent
@@ -238,7 +251,7 @@ final readonly class LockResolver
                 $this->logger->debug('Lock still active, retrying operation', [
                     'key' => KeyRedactor::redact((string) $lock->getKey()),
                     'ttl' => $ttl,
-                    'remainingDeadlineMs' => $remainingDeadlineMs,
+                    'remainingDeadlineMs' => $this->remainingDeadlineMs($deadlineAtMs),
                 ]);
                 throw new TxnRetryableException(
                     'Lock is still active; retrying operation',
@@ -248,9 +261,9 @@ final readonly class LockResolver
 
             // The status check reported no commit and no live lock, so TiKV
             // has expired or rolled back the transaction and resolution is safe.
-            $this->resolveLockRolledBack($lock, $lockTs, $remainingDeadlineMs);
+            $this->resolveLockRolledBack($lock, $lockTs, $deadlineAtMs);
         } else {
-            $this->resolveLockRolledBack($lock, $lockTs, $remainingDeadlineMs);
+            $this->resolveLockRolledBack($lock, $lockTs, $deadlineAtMs);
         }
 
         $this->invalidateRegionFor((string) $lock->getKey());
@@ -283,7 +296,7 @@ final readonly class LockResolver
         string $primaryKey,
         int $lockTs,
         bool $notLeaderOwnedByRetryExecutor,
-        int $remainingDeadlineMs = 0,
+        int $deadlineAtMs = 0,
     ): array {
         $cached = $this->statusCache->get($lockTs);
         if ($cached !== null) {
@@ -298,7 +311,7 @@ final readonly class LockResolver
             $primaryKey,
             $lockTs,
             $notLeaderOwnedByRetryExecutor,
-            $remainingDeadlineMs,
+            $deadlineAtMs,
         );
         if ($status['final']) {
             $this->statusCache->put($lockTs, $status['commitTs'] ?? 0);
@@ -314,7 +327,7 @@ final readonly class LockResolver
         string $primaryKey,
         int $lockTs,
         bool $notLeaderOwnedByRetryExecutor = true,
-        int $remainingDeadlineMs = 0,
+        int $deadlineAtMs = 0,
     ): array {
         $region = $this->regionResolver->getRegionInfo($primaryKey);
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
@@ -331,9 +344,11 @@ final readonly class LockResolver
         // bound it reuses the cached TSO timestamp and saves a PD round
         // trip. Without a bound this is a fresh TSO fetch, unchanged.
         // The TSO fetch is part of the lock resolution, so it is bounded by
-        // the caller's remaining retry deadline too (issue #569).
+        // the caller's remaining retry deadline too (issue #569). The
+        // absolute deadline is shared with the KvCheckTxnStatus call below,
+        // so the second cap is smaller by the time the TSO fetch took.
         $request->setCurrentTs($this->pdClient->getLowResolutionTimestamp(
-            $this->capTimeoutMs($this->timeoutConfig->tsoTimeoutMs, $remainingDeadlineMs),
+            $this->capTimeoutMs($this->timeoutConfig->tsoTimeoutMs, $deadlineAtMs),
         ));
         $request->setRollbackIfNotExist(true);
 
@@ -349,7 +364,7 @@ final readonly class LockResolver
             'KvCheckTxnStatus',
             $request,
             CheckTxnStatusResponse::class,
-            $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $remainingDeadlineMs),
+            $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
         );
 
 
@@ -424,7 +439,7 @@ final readonly class LockResolver
     private function checkSecondaryLocks(
         LockInfo $lock,
         bool $notLeaderOwnedByRetryExecutor,
-        int $remainingDeadlineMs = 0,
+        int $deadlineAtMs = 0,
     ): ?array {
         /** @var list<string> $secondaries */
         $secondaries = array_map(
@@ -472,7 +487,7 @@ final readonly class LockResolver
                 'KvCheckSecondaryLocks',
                 $request,
                 CheckSecondaryLocksResponse::class,
-                $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $remainingDeadlineMs),
+                $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
             );
 
             RegionErrorHandler::check(
@@ -545,7 +560,7 @@ final readonly class LockResolver
         int $lockTs,
         int $commitTs,
         array $secondaries,
-        int $remainingDeadlineMs = 0,
+        int $deadlineAtMs = 0,
     ): void {
         $keys = [...$secondaries, (string) $lock->getKey()];
 
@@ -584,7 +599,7 @@ final readonly class LockResolver
                 'KvResolveLock',
                 $request,
                 ResolveLockResponse::class,
-                $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $remainingDeadlineMs),
+                $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
             );
 
             RegionErrorHandler::check(
@@ -607,7 +622,7 @@ final readonly class LockResolver
         int $commitTs,
         array $keys,
         bool $notLeaderOwnedByRetryExecutor,
-        int $remainingDeadlineMs = 0,
+        int $deadlineAtMs = 0,
     ): void {
         $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
 
@@ -635,7 +650,7 @@ final readonly class LockResolver
                 'KvResolveLock',
                 $request,
                 ResolveLockResponse::class,
-                $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $remainingDeadlineMs),
+                $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
             );
 
             RegionErrorHandler::check(
@@ -654,7 +669,7 @@ final readonly class LockResolver
         LockInfo $lock,
         int $lockTs,
         int $commitTs,
-        int $remainingDeadlineMs = 0,
+        int $deadlineAtMs = 0,
     ): void {
         $key = (string) $lock->getKey();
         $this->logger->debug('Resolving lock as committed', [
@@ -677,14 +692,14 @@ final readonly class LockResolver
             'KvResolveLock',
             $request,
             ResolveLockResponse::class,
-            $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $remainingDeadlineMs),
+            $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
         );
     }
 
     private function resolveLockRolledBack(
         LockInfo $lock,
         int $lockTs,
-        int $remainingDeadlineMs = 0,
+        int $deadlineAtMs = 0,
     ): void {
         $key = (string) $lock->getKey();
         $this->logger->debug('Resolving lock as rolled back', [
@@ -706,27 +721,61 @@ final readonly class LockResolver
             'KvResolveLock',
             $request,
             ResolveLockResponse::class,
-            $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $remainingDeadlineMs),
+            $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
         );
+    }
+
+    /**
+     * Convert the caller's remaining budget into an absolute deadline.
+     *
+     * `0` (and, defensively, a negative value) means "no deadline"; a
+     * positive value is converted once at the public entry, so every nested
+     * RPC charges the same live budget instead of each getting the full
+     * remaining time (issue #569, N3).
+     */
+    private function absoluteDeadlineMs(int $remainingDeadlineMs): int
+    {
+        if ($remainingDeadlineMs <= 0) {
+            return 0;
+        }
+
+        return (int) (microtime(true) * 1000) + $remainingDeadlineMs;
+    }
+
+    /**
+     * Live remaining time until an absolute deadline, or 0 when disabled.
+     * At exhaustion it returns 1, never 0, so a spent budget cannot be
+     * mistaken for "no deadline".
+     */
+    private function remainingDeadlineMs(int $deadlineAtMs): int
+    {
+        if ($deadlineAtMs <= 0) {
+            return 0;
+        }
+
+        return max(1, $deadlineAtMs - (int) (microtime(true) * 1000));
     }
 
     /**
      * Per-RPC deadline for one lock-resolution call.
      *
-     * A positive `$remainingDeadlineMs` is the enclosing RetryExecutor's
-     * remaining wall-clock budget; the call may never outlive it. When it is
-     * 0 (no deadline) the configured `TimeoutConfig` value applies unchanged.
-     * The result is at least 1 ms because the gRPC layer treats 0 as "no
-     * deadline" — which is exactly the unbounded behaviour this guard exists
-     * to prevent (issue #569).
+     * The second argument is the absolute deadline shared by every RPC of
+     * this resolution. Each call recomputes the live remaining time, so a
+     * slow earlier RPC (for example the TSO fetch) shrinks the deadline of
+     * the next one; no RPC is given more time than is left. When the
+     * deadline is disabled the configured `TimeoutConfig` value applies
+     * unchanged. The result is at least 1 ms because the gRPC layer treats 0
+     * as "no deadline" — which is exactly the unbounded behaviour this guard
+     * exists to prevent (issue #569).
      */
-    private function capTimeoutMs(int $configuredMs, int $remainingDeadlineMs): int
+    private function capTimeoutMs(int $configuredMs, int $deadlineAtMs): int
     {
-        if ($remainingDeadlineMs <= 0) {
+        $remainingMs = $this->remainingDeadlineMs($deadlineAtMs);
+        if ($remainingMs <= 0) {
             return $configuredMs;
         }
 
-        return max(1, min($configuredMs, $remainingDeadlineMs));
+        return max(1, min($configuredMs, $remainingMs));
     }
 
     private function invalidateRegionFor(string $key): void

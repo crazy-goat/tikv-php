@@ -483,13 +483,14 @@ retryable `TxnRetryableException` and the caller's `RetryExecutor` owns the
 bounded backoff. When the call runs inside a retry loop, the operation's
 `RetryBudget` (shared by every `execute()` of a `beginOperation()` executor)
 exposes the live remaining wall-clock budget through
-`RetryBudget::remainingDeadlineMs()`; `resolveLock()` caps every
-lock-resolution RPC (and the TSO fetch) by that budget, so one resolution
-cannot outlive the operation's `retryDeadlineMs` (issue #569). A live lock is
-still retryable; the executor's own deadline check raises
-`RetryBudgetExhaustedException` when the budget is spent. A deadline of `0`
-keeps the configured `lockResolveTimeoutMs`/`tsoTimeoutMs` and the historical
-behaviour.
+`RetryBudget::remainingDeadlineMs()`. `resolveLock()` converts that value once
+into an absolute deadline and caps every nested lock-resolution RPC (and the
+TSO fetch) by the live time left until it, so the RPCs share one budget and
+none is given a deadline beyond the operation's `retryDeadlineMs` (issue
+#569). A live lock is still retryable; the executor's own deadline check
+raises `RetryBudgetExhaustedException` when the budget is spent. A deadline of
+`0` keeps the configured `lockResolveTimeoutMs`/`tsoTimeoutMs` and the
+historical behaviour.
 
 `TxnKvClient` keeps one cache, shared by every transaction, with the final outcomes (committed or rolled back) in a
 bounded FIFO cache keyed by lock start ts (`ResolvedTxnStatusCache`, 2048

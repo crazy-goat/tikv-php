@@ -14,6 +14,7 @@ use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
@@ -40,9 +41,13 @@ final class PrewriteLockResolveDeadlineTest extends TestCase
 {
     private PdClientInterface&MockObject $pdClient;
 
+    /** @var list<int> Timeout passed to each PD TSO fetch */
+    private array $tsoTimeouts = [];
+
     protected function setUp(): void
     {
         $this->pdClient = $this->createMock(PdClientInterface::class);
+        $this->tsoTimeouts = [];
 
         $store = new Store();
         $store->setId(1);
@@ -52,7 +57,13 @@ final class PrewriteLockResolveDeadlineTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturn([$this->region()]);
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getTimestamp')->willReturn(9001);
-        $this->pdClient->method('getLowResolutionTimestamp')->willReturn(9002);
+        $this->pdClient->method('getLowResolutionTimestamp')->willReturnCallback(
+            function (int $timeoutMs): int {
+                $this->tsoTimeouts[] = $timeoutMs;
+
+                return 9002;
+            },
+        );
     }
 
     private function region(): RegionInfo
@@ -182,7 +193,7 @@ final class PrewriteLockResolveDeadlineTest extends TestCase
             },
         );
 
-        $txn = $this->createTransaction($grpc, retryDeadlineMs: 30000);
+        $txn = $this->createTransaction($grpc, retryDeadlineMs: 500);
         $txn->set('k1', 'v1');
         $txn->commit();
 
@@ -191,6 +202,32 @@ final class PrewriteLockResolveDeadlineTest extends TestCase
         self::assertContains('KvResolveLock', $methods);
         self::assertSame(1, $this->countMethod($methods, 'KvCheckTxnStatus'));
         self::assertSame(1, $this->countMethod($methods, 'KvResolveLock'));
+
+        // The nested resolution must use the prewrite loop's remaining
+        // deadline, not the configured 5 s lockResolveTimeoutMs (issue #569,
+        // N1). Without the budget in handlePrewriteErrors() these are 5000.
+        $nested = array_values(array_filter(
+            $grpc->callTimeouts,
+            static fn (array $call): bool => in_array(
+                $call['method'],
+                ['KvCheckTxnStatus', 'KvResolveLock'],
+                true,
+            ),
+        ));
+        self::assertCount(2, $nested);
+        foreach ($nested as $call) {
+            self::assertNotNull($call['timeoutMs']);
+            self::assertGreaterThan(0, $call['timeoutMs']);
+            self::assertLessThanOrEqual(500, $call['timeoutMs']);
+        }
+
+        // The PD TSO fetch performed by KvCheckTxnStatus shares the same
+        // budget (issue #569, N1).
+        self::assertNotEmpty($this->tsoTimeouts);
+        foreach ($this->tsoTimeouts as $timeoutMs) {
+            self::assertGreaterThan(0, $timeoutMs);
+            self::assertLessThanOrEqual(500, $timeoutMs);
+        }
     }
 
     /**
@@ -263,6 +300,18 @@ final class PrewriteLockResolveDeadlineTest extends TestCase
         } catch (TxnRetryableException) {
             self::assertSame(1, $prewriteCalls);
         }
+
+        // No deadline means no cap: the configured write timeout still
+        // applies to the outer KvPrewrite (issue #569, N5).
+        $prewrites = array_values(array_filter(
+            $grpc->callTimeouts,
+            static fn (array $call): bool => $call['method'] === 'KvPrewrite',
+        ));
+        self::assertNotEmpty($prewrites);
+        self::assertSame(
+            (new TimeoutConfig())->writeTimeoutMs,
+            $prewrites[0]['timeoutMs'] ?? null,
+        );
     }
 
     /**

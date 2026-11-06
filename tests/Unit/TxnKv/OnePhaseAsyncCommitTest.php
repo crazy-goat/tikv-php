@@ -386,6 +386,8 @@ class OnePhaseAsyncCommitTest extends TestCase
 
         /** @var list<CheckSecondaryLocksRequest> $captured */
         $captured = [];
+        /** @var array<string, ?int> $timeouts */
+        $timeouts = [];
         $queue = [
             ['method' => 'KvCheckTxnStatus', 'response' => $status],
             ['method' => 'KvCheckSecondaryLocks', 'response' => $secondary],
@@ -397,14 +399,18 @@ class OnePhaseAsyncCommitTest extends TestCase
             string $svc,
             string $method,
             ?object $request = null,
+            ?string $responseClass = null,
+            ?int $timeoutMs = null,
         ) use (
             &$captured,
+            &$timeouts,
             &$queue,
             &$index
 ): object {
             if ($request instanceof CheckSecondaryLocksRequest) {
                 $captured[] = $request;
             }
+            $timeouts[$method] = $timeoutMs;
             $call = $queue[$index++] ?? null;
             if ($call === null || $call['method'] !== $method) {
                 throw new \RuntimeException("Unexpected method at $index: $method");
@@ -419,11 +425,16 @@ class OnePhaseAsyncCommitTest extends TestCase
             $this->pdClient,
             self::START_TS,
         );
-        $resolver->resolveLock('p', $this->makeAsyncLock());
+        $resolver->resolveLock('p', $this->makeAsyncLock(), 500);
 
         $this->assertCount(1, $captured);
         $this->assertSame(['s2'], iterator_to_array($captured[0]->getKeys()));
         $this->assertSame(self::START_TS, (int) $captured[0]->getStartVersion());
+        // The async-commit secondary check shares the resolution deadline
+        // (issue #569, N1).
+        $this->assertNotNull($timeouts['KvCheckSecondaryLocks'] ?? null);
+        $this->assertGreaterThan(0, $timeouts['KvCheckSecondaryLocks']);
+        $this->assertLessThanOrEqual(500, $timeouts['KvCheckSecondaryLocks']);
     }
 
     public function testResolveAsyncCommitLockStillActiveHelpCommits(): void

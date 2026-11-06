@@ -84,12 +84,22 @@ class LockResolverTest extends TestCase
         );
     }
 
-    private function createResolver(int $callerStartTs = self::CALLER_START_TS): LockResolver
-    {
+    /**
+     * @param (callable(int): int)|null $tso Optional TSO fetch callback; the
+     *        default returns a fresh timestamp immediately.
+     */
+    private function createResolver(
+        int $callerStartTs = self::CALLER_START_TS,
+        ?callable $tso = null,
+    ): LockResolver {
         $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
         // Fresh TSO for every checkTxnStatus; individual tests override with expects().
-        $this->pdClient->method('getLowResolutionTimestamp')->willReturn(self::TSO_TIMESTAMP);
+        if ($tso !== null) {
+            $this->pdClient->method('getLowResolutionTimestamp')->willReturnCallback($tso);
+        } else {
+            $this->pdClient->method('getLowResolutionTimestamp')->willReturn(self::TSO_TIMESTAMP);
+        }
 
         return new LockResolver(
             $this->grpc,
@@ -810,6 +820,50 @@ class LockResolverTest extends TestCase
             $this->assertGreaterThan(0, $call['timeoutMs']);
             $this->assertLessThanOrEqual(250, $call['timeoutMs']);
         }
+    }
+
+    /**
+     * Issue #569 (N3): the remaining deadline is converted into one absolute
+     * deadline at the public entry. A slow TSO fetch must shrink the
+     * KvCheckTxnStatus timeout instead of letting each nested RPC start with
+     * the full remaining budget again.
+     */
+    public function testResolveLockSharesOneLiveDeadlineAcrossNestedRpcs(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 1),
+        );
+
+        $tsoTimeoutMs = null;
+        $resolver = $this->createResolver(
+            tso: function (int $timeoutMs) use (&$tsoTimeoutMs): int {
+                $tsoTimeoutMs = $timeoutMs;
+                usleep(50_000);
+
+                return self::TSO_TIMESTAMP;
+            },
+        );
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 250);
+
+        $checkTxnStatusTimeoutMs = null;
+        foreach ($this->callTimeouts as $call) {
+            if ($call['method'] === 'KvCheckTxnStatus') {
+                $checkTxnStatusTimeoutMs = $call['timeoutMs'];
+            }
+        }
+
+        $this->assertNotNull($tsoTimeoutMs);
+        $this->assertGreaterThan(0, $tsoTimeoutMs);
+        $this->assertLessThanOrEqual(250, $tsoTimeoutMs);
+        $this->assertNotNull($checkTxnStatusTimeoutMs);
+        $this->assertGreaterThan(0, $checkTxnStatusTimeoutMs);
+        $this->assertLessThan(
+            $tsoTimeoutMs,
+            $checkTxnStatusTimeoutMs,
+            'the RPC after the TSO fetch must see the time it spent',
+        );
     }
 
     /**

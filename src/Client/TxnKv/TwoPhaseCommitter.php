@@ -145,6 +145,16 @@ final readonly class TwoPhaseCommitter
     private const ROLLBACK_MAX_REGROUPS = 10;
 
     /**
+     * Minimum remaining local pessimistic-lock budget (ms) for attempting a
+     * lock resolution. Below it the resolution is skipped and the loop's
+     * existing `LockWaitTimeoutException` path runs instead: a 1–10 ms gRPC
+     * deadline is almost certain to fail with `DEADLINE_EXCEEDED`, which
+     * would escape as `GrpcException` rather than the #219 lock timeout
+     * (issue #569, N4).
+     */
+    private const MIN_LOCK_RESOLUTION_BUDGET_MS = 10;
+
+    /**
      * Default pessimistic-lock wait timeout handed to TiKV
      * (issue #443, DIV-07). It matches TiKV's own
      * `pessimistic-txn.wait-for-lock-timeout` default (1 s), so the default
@@ -2206,17 +2216,23 @@ final readonly class TwoPhaseCommitter
                                         // resolved; retry the request within this loop. The
                                         // remaining lock-wait budget also caps the resolver's
                                         // own RPCs, so lock resolution cannot outlive the loop
-                                        // (issue #569).
-                                        try {
-                                            $this->lockResolver->resolveLock(
-                                                $lockPrimary,
-                                                $locked,
-                                                max(1, $this->maxBackoffMs - $elapsedMs),
-                                                notLeaderOwnedByRetryExecutor: false,
-                                            );
-                                        } catch (TxnRetryableException $e) {
-                                            if ($e->backoffType !== BackoffType::TxnLock) {
-                                                throw $e;
+                                        // (issue #569). Below the floor, skip resolution
+                                        // entirely: a 1–10 ms gRPC deadline would surface as
+                                        // `GrpcException` instead of the loop's
+                                        // `LockWaitTimeoutException` (N4).
+                                        $remainingLockBudgetMs = $this->maxBackoffMs - $elapsedMs;
+                                        if ($remainingLockBudgetMs >= self::MIN_LOCK_RESOLUTION_BUDGET_MS) {
+                                            try {
+                                                $this->lockResolver->resolveLock(
+                                                    $lockPrimary,
+                                                    $locked,
+                                                    $remainingLockBudgetMs,
+                                                    notLeaderOwnedByRetryExecutor: false,
+                                                );
+                                            } catch (TxnRetryableException $e) {
+                                                if ($e->backoffType !== BackoffType::TxnLock) {
+                                                    throw $e;
+                                                }
                                             }
                                         }
                                         $needRetry = true;

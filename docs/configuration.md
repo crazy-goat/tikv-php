@@ -1518,11 +1518,14 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > Example: `retryDeadlineMs => 1000` with a gRPC call that runs 5 s ⇒ real
 > occupancy ≈ 6 s (the deadline is enforced when that RPC returns).
 
-> **Lock resolution (TxnKV):** a `KeyError.locked` conflict during prewrite or
-> rollback is resolved inside the retry loop, so its `KvCheckTxnStatus` (and the
-> PD TSO fetch it performs), `KvCheckSecondaryLocks` and `KvResolveLock` calls
-> are capped by the operation's **remaining** retry deadline; one resolution
-> cannot outlive the operation. A live lock is still reported as a retryable
+> **Lock resolution (TxnKV):** a `KeyError.locked` conflict during prewrite,
+> rollback or a transactional read is resolved inside the retry loop, so its
+> `KvCheckTxnStatus` (and the PD TSO fetch it performs),
+> `KvCheckSecondaryLocks` and `KvResolveLock` calls are capped by the
+> operation's **remaining** retry deadline. The resolver converts that
+> remaining budget into one absolute deadline at its entry, so the nested
+> RPCs share the same live budget and none is given a deadline beyond the
+> operation's `retryDeadlineMs`. A live lock is still reported as a retryable
 > error (the executor owns the backoff) and the resolver never sleeps for the
 > lock TTL; the executor's own deadline check raises
 > `RetryBudgetExhaustedException` when the budget is spent. With
