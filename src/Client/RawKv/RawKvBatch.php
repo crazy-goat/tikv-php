@@ -330,6 +330,7 @@ final readonly class RawKvBatch
         RegionInfo $region,
         array $keys,
         string $columnFamily = '',
+        int &$targetStoreId = 0,
     ): GrpcFuture {
         // Replica-read policy applies to batchGet only; batchPut/batchDelete
         // are writes and always target the leader (issue #421).
@@ -339,6 +340,7 @@ final readonly class RawKvBatch
             $this->regionResolver->getStore(...),
             requestContext: $this->requestContext,
         );
+        $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
         $request = new RawBatchGetRequest();
@@ -644,12 +646,14 @@ final readonly class RawKvBatch
         string $columnFamily = '',
     ): CheckedGrpcFuture {
         $key = $keys[0] ?? '';
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
                 $keys,
                 $key,
                 $columnFamily,
+                &$targetStoreId,
             ): CheckedGrpcFuture {
                 $fresh = $this->resolveRegion($key);
 
@@ -663,9 +667,15 @@ final readonly class RawKvBatch
                 }
 
                 if ($allInRegion) {
-                    $inner = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily);
+                    $inner = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily, $targetStoreId);
                     return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_read', $key);
                 }
+
+                // Multi-region recovery has several targets; a single
+                // target cannot describe the failed attempt, so leave it
+                // unknown and let the executor fall back to the cached
+                // leader.
+                $targetStoreId = 0;
 
                 // Multi-region path (rare error-recovery case after a split/merge):
                 // dispatch every sub-region's send up-front, then merge their
@@ -720,6 +730,9 @@ final readonly class RawKvBatch
             },
             $retryExecutor,
             $key,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 

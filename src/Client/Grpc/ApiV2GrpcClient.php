@@ -128,14 +128,18 @@ final readonly class ApiV2GrpcClient implements GrpcClientInterface
         string $address,
         string $service,
         string $method,
-        array $requests,
+        iterable $requests,
         string $responseClass,
         ?int $timeoutMs = null,
     ): Message {
-        $transformedRequests = [];
-        foreach ($requests as $request) {
-            $transformedRequests[] = $this->transformer->transformRequest($request, $service);
-        }
+        // Transform lazily: the inner transport consumes the generator one
+        // request at a time, so API V2 does not buffer a second full copy of
+        // the stream (issue #297).
+        $transformedRequests = (function () use ($requests, $service): \Generator {
+            foreach ($requests as $request) {
+                yield $this->transformer->transformRequest($request, $service);
+            }
+        })();
 
         $response = $this->inner->callStreaming(
             $address,

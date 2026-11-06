@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
+use CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
@@ -54,6 +56,106 @@ final class RawKvBatchDeadlineEnforcementTest extends TestCase
         $this->expectException(BatchDeadlineExceededException::class);
 
         $batch->batchGet(['a', 'b'], $this->retryExecutor());
+    }
+
+    /**
+     * A positive deadline is a ceiling, not a minimum: a batch that answers
+     * inside the budget returns its results unchanged.
+     */
+    public function testBatchGetWithAPositiveDeadlineThatFinishesInTimeIsUnaffected(): void
+    {
+        $this->grpc->method('callAsync')->willReturnCallback(
+            static fn(): GrpcFuture => GrpcFuture::fromWaiter(static function (): Message {
+                usleep(1_000);
+
+                return new RawBatchGetResponse();
+            }),
+        );
+
+        $batch = $this->batch($this->timeoutConfig(batchDeadlineMs: 5000));
+
+        self::assertSame(['a' => null, 'b' => null], $batch->batchGet(['a', 'b'], $this->retryExecutor()));
+    }
+
+    /**
+     * `batchPut` fans out through the same executor and must pass the
+     * configured deadline, not the executor default (issue #341).
+     */
+    public function testBatchPutEnforcesTheConfiguredBatchDeadline(): void
+    {
+        $this->grpc->method('callAsync')->willReturnOnConsecutiveCalls(
+            GrpcFuture::fromWaiter(static function (): Message {
+                usleep(500_000);
+
+                return new RawBatchPutResponse();
+            }),
+            GrpcFuture::fromWaiter(static fn(): Message => new RawBatchPutResponse()),
+        );
+
+        $batch = $this->batch($this->timeoutConfig(batchDeadlineMs: 200));
+
+        $this->expectException(BatchDeadlineExceededException::class);
+
+        $batch->batchPut(['a' => '1', 'b' => '2'], 0, $this->retryExecutor());
+    }
+
+    /**
+     * `batchDelete` fans out through the same executor and must pass the
+     * configured deadline, not the executor default (issue #341).
+     */
+    public function testBatchDeleteEnforcesTheConfiguredBatchDeadline(): void
+    {
+        $this->grpc->method('callAsync')->willReturnOnConsecutiveCalls(
+            GrpcFuture::fromWaiter(static function (): Message {
+                usleep(500_000);
+
+                return new RawBatchDeleteResponse();
+            }),
+            GrpcFuture::fromWaiter(static fn(): Message => new RawBatchDeleteResponse()),
+        );
+
+        $batch = $this->batch($this->timeoutConfig(batchDeadlineMs: 200));
+
+        $this->expectException(BatchDeadlineExceededException::class);
+
+        $batch->batchDelete(['a', 'b'], $this->retryExecutor());
+    }
+
+    /**
+     * A windowed write fan-out shares one budget: with three regions and a
+     * window size of two, the first window's wait exhausts the deadline and
+     * the third region's window is never dispatched (issue #341).
+     */
+    public function testWindowedBatchPutSharesTheDeadlineAcrossWindows(): void
+    {
+        $calls = 0;
+        $this->grpc->expects(self::exactly(2))->method('callAsync')->willReturnCallback(
+            static function () use (&$calls): GrpcFuture {
+                ++$calls;
+                if ($calls === 1) {
+                    return GrpcFuture::fromWaiter(static function (): Message {
+                        usleep(1_000_000);
+
+                        return new RawBatchPutResponse();
+                    });
+                }
+
+                return GrpcFuture::fromWaiter(static fn(): Message => new RawBatchPutResponse());
+            },
+        );
+
+        $batch = $this->batch($this->timeoutConfig(batchDeadlineMs: 500), maxConcurrency: 2);
+
+        try {
+            $batch->batchPut(['a' => '1', 'b' => '2', 'c' => '3'], 0, $this->retryExecutor());
+            self::fail('the deadline must stop the write fan-out between windows');
+        } catch (BatchDeadlineExceededException $e) {
+            self::assertSame(500, $e->getDeadlineMs());
+            self::assertGreaterThanOrEqual(500, $e->getElapsedMs());
+            self::assertSame([0, 1], $e->getContext()['dispatchedRegions']);
+            self::assertSame([0, 1, 2], $e->getContext()['pendingRegions']);
+            self::assertSame(2, $calls, 'the third region must not be dispatched');
+        }
     }
 
     public function testBatchGetWithTheDeadlineDisabledRunsEveryWindow(): void
@@ -193,14 +295,14 @@ final class RawKvBatchDeadlineEnforcementTest extends TestCase
         );
     }
 
-    private function batch(TimeoutConfig $timeoutConfig): RawKvBatch
+    private function batch(TimeoutConfig $timeoutConfig, int $maxConcurrency = 1): RawKvBatch
     {
         return new RawKvBatch(
             $this->grpc,
             $this->resolver(),
             $timeoutConfig,
             new NullLogger(),
-            maxConcurrency: 1,
+            maxConcurrency: $maxConcurrency,
         );
     }
 
@@ -230,7 +332,11 @@ final class RawKvBatchDeadlineEnforcementTest extends TestCase
 
     private function regionFor(string $key): RegionInfo
     {
-        $regionId = $key === 'a' ? 1 : 2;
+        $regionId = match ($key) {
+            'a' => 1,
+            'b' => 2,
+            default => 3,
+        };
 
         return new RegionInfo(
             regionId: $regionId,
@@ -238,8 +344,16 @@ final class RawKvBatchDeadlineEnforcementTest extends TestCase
             leaderStoreId: 1,
             epochConfVer: 1,
             epochVersion: 1,
-            startKey: $key === 'a' ? '' : 'b',
-            endKey: $key === 'a' ? 'b' : '',
+            startKey: match ($regionId) {
+                1 => '',
+                2 => 'b',
+                default => 'c',
+            },
+            endKey: match ($regionId) {
+                1 => 'b',
+                2 => 'c',
+                default => '',
+            },
         );
     }
 

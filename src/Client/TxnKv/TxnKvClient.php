@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
@@ -162,6 +163,32 @@ final class TxnKvClient
     public const OPT_MAX_TXN_TOTAL_SIZE = 'maxTxnTotalSize';
 
     /**
+     * begin() options[] key for the maximum number of entries in the
+     * transaction's read set (issue #297). 0 (default) = unlimited.
+     * Exceeding the limit throws
+     * {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
+     * from get()/batchGet() before the fetched value is retained.
+     */
+    public const OPT_MAX_READ_SET_ENTRIES = 'maxReadSetEntries';
+
+    /**
+     * begin() options[] key for the maximum bytes of the whole read set,
+     * measured as the sum of every entry's key plus value length (issue
+     * #297). 0 (default) = unlimited.
+     */
+    public const OPT_MAX_READ_SET_TOTAL_SIZE = 'maxReadSetTotalSize';
+
+    /**
+     * begin() options[] key for read-set tracking (issue #297). Defaults to
+     * false: `get()`/`batchGet()` do not retain values in `getReadSet()`,
+     * because nothing in the commit path consumes the read set and keeping it
+     * on the hot read path makes a long-lived transaction's memory grow
+     * without bound. Must be a bool. Passing true opts in to the map and to
+     * the `maxReadSetEntries` / `maxReadSetTotalSize` limits.
+     */
+    public const OPT_TRACK_READ_SET = 'trackReadSet';
+
+    /**
      * begin() options[] key for the maximum bytes of one prewrite/commit
      * request per region (issue #430). Default:
      * {@see TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE} (16384, client-go's
@@ -287,6 +314,7 @@ final class TxnKvClient
             metrics: $bundle->metrics,
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            storeCache: $bundle->storeCache,
             requestContext: self::resolveRequestContext($options),
         );
     }
@@ -342,6 +370,13 @@ final class TxnKvClient
          */
         private readonly ?CodecInterface $codec = new CodecV1(Mode::Txn),
         /**
+         * Store-address cache the retry executor drops when a StoreNotMatch
+         * or a transport failure proves the cached address wrong (issue
+         * #247). Null for a hand-built client: the resolver then has no
+         * store cache to invalidate.
+         */
+        private readonly ?StoreCacheInterface $storeCache = null,
+        /**
          * Optional Context control fields applied to every request of every
          * transaction (issue #426). Null (the default) leaves the serialized
          * Context byte-for-byte unchanged; begin() may replace it per
@@ -379,6 +414,7 @@ final class TxnKvClient
                 $this->pdEndpoints,
                 $this->allowedStorePorts,
                 $payloadCodec,
+                $this->storeCache,
             );
     }
 
@@ -484,6 +520,9 @@ final class TxnKvClient
      *     maxTxnEntryCount?: int,
      *     maxTxnEntrySize?: int,
      *     maxTxnTotalSize?: int,
+     *     maxReadSetEntries?: int,
+     *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      *     requestContext?: RequestContextOptions|null,
@@ -505,11 +544,15 @@ final class TxnKvClient
      *     lock automatically once half of the TTL has elapsed.
      *     `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` (each 0 =
      *     unlimited) bound the transaction's write set (issue #430);
+     *     `trackReadSet` (default false) opts in to read-set tracking;
+     *     `maxReadSetEntries` and `maxReadSetTotalSize` (each 0 = unlimited)
+     *     bound the tracked read set (issue #297);
      *     `maxTxnBatchSize` (default 16384 bytes) and `maxTxnBatchCount`
      *     (default 512) split each region's prewrite mutations and commit keys
-     *     into multiple requests. Exceeding a write-set limit throws
+     *     into multiple requests. Exceeding a size limit throws
      *     {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
-     *     from set()/delete() before any RPC is issued.
+     *     from set()/delete() before any RPC is issued, and from
+     *     get()/batchGet() before the fetched value is retained.
      *     `requestContext` replaces the client-level Context control fields
      *     (see {@see self::OPT_REQUEST_CONTEXT}) for this transaction only
      *     (issue #426). Omit it to inherit the client-level value; pass null
@@ -541,6 +584,9 @@ final class TxnKvClient
         $maxTxnEntryCount = $this->resolveIntOption($options, self::OPT_MAX_TXN_ENTRY_COUNT, 0, 0);
         $maxTxnEntrySize = $this->resolveIntOption($options, self::OPT_MAX_TXN_ENTRY_SIZE, 0, 0);
         $maxTxnTotalSize = $this->resolveIntOption($options, self::OPT_MAX_TXN_TOTAL_SIZE, 0, 0);
+        $trackReadSet = $this->resolveEnableFlag($options, self::OPT_TRACK_READ_SET);
+        $maxReadSetEntries = $this->resolveIntOption($options, self::OPT_MAX_READ_SET_ENTRIES, 0, 0);
+        $maxReadSetTotalSize = $this->resolveIntOption($options, self::OPT_MAX_READ_SET_TOTAL_SIZE, 0, 0);
         $maxTxnBatchSize = $this->resolveIntOption(
             $options,
             self::OPT_MAX_TXN_BATCH_SIZE,
@@ -616,6 +662,9 @@ final class TxnKvClient
             maxTxnTotalSize: $maxTxnTotalSize,
             maxTxnBatchSize: $maxTxnBatchSize,
             maxTxnBatchCount: $maxTxnBatchCount,
+            maxReadSetEntries: $maxReadSetEntries,
+            maxReadSetTotalSize: $maxReadSetTotalSize,
+            trackReadSet: $trackReadSet,
             requestContext: $requestContext,
         );
 
@@ -653,6 +702,9 @@ final class TxnKvClient
      *     maxTxnEntryCount?: int,
      *     maxTxnEntrySize?: int,
      *     maxTxnTotalSize?: int,
+     *     maxReadSetEntries?: int,
+     *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      *     requestContext?: RequestContextOptions|null,
@@ -691,6 +743,9 @@ final class TxnKvClient
      *     maxTxnEntryCount?: int,
      *     maxTxnEntrySize?: int,
      *     maxTxnTotalSize?: int,
+     *     maxReadSetEntries?: int,
+     *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      *     requestContext?: RequestContextOptions|null,
@@ -720,6 +775,9 @@ final class TxnKvClient
      *     maxTxnEntryCount?: int,
      *     maxTxnEntrySize?: int,
      *     maxTxnTotalSize?: int,
+     *     maxReadSetEntries?: int,
+     *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      *     requestContext?: RequestContextOptions|null,
@@ -742,8 +800,9 @@ final class TxnKvClient
     }
 
     /**
-     * Resolve a boolean begin() option (enable1Pc / enableAsyncCommit,
-     * issue #419). Defaults to false; a non-bool value is rejected.
+     * Resolve a boolean begin() option (enable1Pc / enableAsyncCommit, issue
+     * #419, and trackReadSet, issue #297). Defaults to false; a non-bool
+     * value is rejected.
      *
      * @param array<string, mixed> $options
      */

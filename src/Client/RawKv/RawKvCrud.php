@@ -44,10 +44,11 @@ final readonly class RawKvCrud
     public function get(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): ?string
     {
         $excludedStore = null;
+        $targetStoreId = null;
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $columnFamily, &$excludedStore): ?string {
+            function () use ($key, $columnFamily, &$excludedStore, &$targetStoreId): ?string {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
@@ -57,6 +58,7 @@ final readonly class RawKvCrud
                     requestContext: $this->requestContext,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
                 $request = new RawGetRequest();
@@ -92,7 +94,10 @@ final readonly class RawKvCrud
                 }
 
                 return $response->getValue();
-            }
+            },
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -175,10 +180,11 @@ final readonly class RawKvCrud
     public function getKeyTTL(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): ?int
     {
         $excludedStore = null;
+        $targetStoreId = null;
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $columnFamily, &$excludedStore): ?int {
+            function () use ($key, $columnFamily, &$excludedStore, &$targetStoreId): ?int {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
@@ -188,6 +194,7 @@ final readonly class RawKvCrud
                     requestContext: $this->requestContext,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
                 $request = new RawGetKeyTTLRequest();
@@ -226,7 +233,10 @@ final readonly class RawKvCrud
 
                 $ttl = (int) $response->getTtl();
                 return $ttl > 0 ? $ttl : null;
-            }
+            },
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
