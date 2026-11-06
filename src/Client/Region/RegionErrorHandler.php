@@ -84,12 +84,14 @@ final class RegionErrorHandler
                 // Capture the stale entry before invalidating it: an
                 // EpochNotMatch payload carries no leader, and the retry
                 // needs the stale cached entry's leader store in order to
-                // cache the new regions without asking PD (issue #246).
+                // cache the new regions without asking PD (issue #246). A
+                // StoreNotMatch needs it too, as the fallback when the
+                // payload does not name the requested store (issue #247).
                 $cachedRegion = null;
                 if (
                     $cache instanceof RegionCacheInterface
                     && $regionId !== null
-                    && $regionError->hasEpochNotMatch()
+                    && ($regionError->hasEpochNotMatch() || $regionError->hasStoreNotMatch())
                 ) {
                     $cachedRegion = $cache->getById($regionId);
                 }

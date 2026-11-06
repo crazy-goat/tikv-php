@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
@@ -297,6 +298,7 @@ final class TxnKvClient
             metrics: $bundle->metrics,
             ownsGrpcClient: $bundle->ownsGrpcClient,
             codec: $bundle->codec,
+            storeCache: $bundle->storeCache,
         );
     }
 
@@ -350,6 +352,13 @@ final class TxnKvClient
          * again would fail or corrupt the cached range.
          */
         private readonly ?CodecInterface $codec = new CodecV1(Mode::Txn),
+        /**
+         * Store-address cache the retry executor drops when a StoreNotMatch
+         * or a transport failure proves the cached address wrong (issue
+         * #247). Null for a hand-built client: the resolver then has no
+         * store cache to invalidate.
+         */
+        private readonly ?StoreCacheInterface $storeCache = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -381,6 +390,7 @@ final class TxnKvClient
                 $this->pdEndpoints,
                 $this->allowedStorePorts,
                 $payloadCodec,
+                $this->storeCache,
             );
     }
 
