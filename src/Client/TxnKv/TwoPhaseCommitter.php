@@ -42,6 +42,7 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -80,9 +81,17 @@ use Psr\Log\NullLogger;
  * primary lock once the elapsed time reaches half of the computed TTL (the
  * window resets after each heartbeat). One-phase commits are exempt: 1PC
  * leaves no lock, so a heartbeat would fail an already-committed transaction.
- * A lock can only be heartbeated between region prewrites — a single prewrite
- * RPC that by itself outlives the TTL cannot be kept alive (PHP has no timer);
- * the scaled TTL only narrows that window. Application-level long
+ * A lock can only be heartbeated at the points where control returns to PHP:
+ * after the primary region's prewrite and after the parallel secondary
+ * fan-out completes (plus the pessimistic pre-commit heartbeat); in a
+ * multi-region async commit the primary is prewritten last, so those two
+ * prewrite checks coincide. A single
+ * prewrite or commit RPC that by itself outlives the TTL cannot be kept alive
+ * (PHP has no timer), and neither can a slow commit phase after the last
+ * heartbeat; the scaled TTL only narrows that window. Keep
+ * {@see TimeoutConfig::$writeTimeoutMs} below the base lock TTL (or raise the
+ * TTL), see the "Lock TTLs and the Primary Lock Keepalive" section of
+ * docs/configuration.md. Application-level long
  * transactions — anything that keeps a transaction open between operations
  * — must call {@see \CrazyGoat\TiKV\Client\TxnKv\Transaction::heartbeat()}
  * themselves before the granted TTL elapses. Every lock TTL and every
@@ -241,6 +250,8 @@ final readonly class TwoPhaseCommitter
         private int $maxTxnBatchSize = self::DEFAULT_TXN_BATCH_SIZE,
         /** Maximum mutations/keys of one prewrite/commit request per region (issue #430). */
         private int $maxTxnBatchCount = self::DEFAULT_TXN_BATCH_COUNT,
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
     ) {
     }
 
@@ -265,7 +276,11 @@ final readonly class TwoPhaseCommitter
      */
     private function buildContext(RegionInfo $region): Context
     {
-        return RegionContextFactory::fromRegionInfo($region, priority: $this->priority);
+        return RegionContextFactory::fromRegionInfo(
+            $region,
+            priority: $this->priority,
+            requestContext: $this->requestContext,
+        );
     }
 
     private function nowMs(): int

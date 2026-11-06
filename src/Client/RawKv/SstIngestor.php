@@ -20,6 +20,8 @@ use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\IngestTooLargeException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -27,6 +29,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -40,6 +43,14 @@ final readonly class SstIngestor
     private const IMPORT_SST_SERVICE = 'import_sstpb.ImportSST';
     private const INGEST_CHUNK_SIZE = 1024;
 
+    /**
+     * Maximum key-plus-value bytes of one data chunk. The pair-count cap
+     * alone is not a memory bound: 1024 large values could otherwise copy a
+     * whole 100 MB payload into one chunk. A single pair larger than this
+     * still forms its own chunk (issue #297).
+     */
+    private const INGEST_CHUNK_BYTES = 4 * 1024 * 1024;
+
     public function __construct(
         private GrpcClientInterface $grpc,
         private PdClientInterface $pdClient,
@@ -47,7 +58,19 @@ final readonly class SstIngestor
         private TimeoutConfig $timeoutConfig,
         private LoggerInterface $logger,
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
+        /**
+         * Maximum payload bytes (keys plus values) of one ingest() call;
+         * 0 = unlimited (issue #297). The guard runs before any RPC, so an
+         * oversized import is rejected instead of buffered into protobuf
+         * messages and run out of memory mid-stream.
+         */
+        private int $maxIngestSize = 0,
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
     ) {
+        if ($maxIngestSize < 0) {
+            throw new InvalidArgumentException('maxIngestSize must be >= 0');
+        }
     }
 
     /**
@@ -60,6 +83,8 @@ final readonly class SstIngestor
      * @throws RegionException On region error
      * @throws InvalidStoreAddressException When PD returns a store address
      *     that fails validation (malformed or outside the allowed set)
+     * @throws IngestTooLargeException when the payload exceeds
+     *     `maxIngestSize`, before any RPC is issued (issue #297)
      * @throws \CrazyGoat\TiKV\Client\Exception\TiKvException when a key's
      *     region cannot be resolved. Fail-closed: `ingest()` returns void, so
      *     it transmits nothing rather than importing a subset of the pairs
@@ -70,6 +95,11 @@ final readonly class SstIngestor
         if ($keyValuePairs === []) {
             return;
         }
+
+        // 0. Reject an oversized payload before buffering anything. The
+        //    guard is opt-in (0 = unlimited), like the transaction limits of
+        //    issue #430.
+        $this->assertPayloadWithinLimit($keyValuePairs);
 
         // 1. Sort input key-value pairs by key (SST requires sorted input).
         ksort($keyValuePairs, SORT_STRING);
@@ -83,22 +113,47 @@ final readonly class SstIngestor
         try {
             $this->switchStoresMode($stores, SwitchMode::Import);
 
-            // 4. Group sorted KV pairs by region.
-            $pairs = $this->buildPairs($keyValuePairs);
-            $grouped = $this->groupPairsByRegion($pairs);
+            // 4. Group sorted keys by region. Only keys are materialised
+            //    here; the values stay in the caller's array and the Pair
+            //    messages are built one chunk at a time while streaming
+            //    (issue #297).
+            $grouped = $this->groupKeysByRegion($keyValuePairs);
 
-            // 5. For each region: build SST, write, and ingest.
+            // 5. For each region: build SST, stream the write, and ingest.
             foreach ($grouped as $group) {
                 /** @var \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo $region */
                 $region = $group['region'];
-                /** @var Pair[] $regionPairs */
-                $regionPairs = $group['pairs'];
+                /** @var string[] $regionKeys */
+                $regionKeys = $group['keys'];
 
-                $this->ingestRegionPairs($region, $regionPairs, $ttl);
+                $this->ingestRegionKeys($region, $regionKeys, $keyValuePairs, $ttl);
             }
         } finally {
             // 6. Always switch stores back to normal mode, even on failure.
             $this->switchStoresMode($stores, SwitchMode::Normal);
+        }
+    }
+
+    /**
+     * @param array<string, string> $keyValuePairs
+     *
+     * @throws IngestTooLargeException
+     */
+    private function assertPayloadWithinLimit(array $keyValuePairs): void
+    {
+        if ($this->maxIngestSize <= 0) {
+            return;
+        }
+
+        $bytes = 0;
+        foreach ($keyValuePairs as $key => $value) {
+            // PHP coerces integer-like string keys ("12345", "0") to int
+            // array keys (issue #322).
+            $bytes += strlen((string) $key) + strlen($value);
+        }
+
+        if ($bytes > $this->maxIngestSize) {
+            throw IngestTooLargeException::payloadSize($bytes, $this->maxIngestSize);
         }
     }
 
@@ -220,71 +275,57 @@ final readonly class SstIngestor
     }
 
     /**
-     * Convert key-value pairs to proto Pair messages.
+     * Group sorted keys by region using batch resolution. Only the keys are
+     * copied; the values stay in the caller's map and are read lazily while
+     * streaming (issue #297).
      *
      * @param array<string, string> $keyValuePairs
-     * @return Pair[]
+     * @return array<int, array{region: \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo, keys: string[]}>
      */
-    private function buildPairs(array $keyValuePairs): array
+    private function groupKeysByRegion(array $keyValuePairs): array
     {
-        $pairs = [];
-        foreach ($keyValuePairs as $key => $value) {
-            $pair = new Pair();
-            // PHP coerces integer-like string keys ("12345", "0") to int
-            // array keys; string-cast before passing to the proto setter
-            // (issue #322).
-            $pair->setKey((string) $key);
-            $pair->setValue($value);
-            $pair->setOp(Pair\OP::Put);
-            $pairs[] = $pair;
-        }
-
-        return $pairs;
-    }
-
-    /**
-     * Group pairs by region using batch resolution.
-     *
-     * @param Pair[] $pairs
-     * @return array<int, array{region: \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo, pairs: Pair[]}>
-     */
-    private function groupPairsByRegion(array $pairs): array
-    {
-        // Extract keys from pairs for region resolution.
         $keys = [];
-        foreach ($pairs as $pair) {
-            $keys[] = $pair->getKey();
+        foreach ($keyValuePairs as $key => $_) {
+            // PHP coerces integer-like string keys ("12345", "0") to int
+            // array keys; string-cast before passing to the resolver and the
+            // proto setter (issue #322).
+            $keys[] = (string) $key;
         }
 
         $resolvedRegions = $this->regionResolver->batchResolveRegions($keys);
 
         $grouped = [];
-        foreach ($pairs as $pair) {
-            $key = $pair->getKey();
+        foreach ($keys as $key) {
             // Fails closed rather than skipping: ingest() returns void, so
-            // dropping a pair would report a successful bulk import that
-            // never wrote the key (issue #187).
+            // dropping a key would report a successful bulk import that
+            // never wrote it (issue #187).
             $region = RegionGrouper::resolvedRegion($resolvedRegions, $key);
 
             $regionId = $region->regionId;
-            $grouped[$regionId] ??= ['region' => $region, 'pairs' => []];
-            $grouped[$regionId]['pairs'][] = $pair;
+            $grouped[$regionId] ??= ['region' => $region, 'keys' => []];
+            $grouped[$regionId]['keys'][] = $key;
         }
 
         return $grouped;
     }
 
     /**
-     * Write pairs for a single region via SST Write RPC and ingest.
+     * Write the keys of a single region via SST Write RPC and ingest.
      *
-     * @param Pair[] $pairs
+     * The data chunks are yielded on demand from a generator, so at most one
+     * chunk's `Pair` messages exist at a time instead of a full copy of the
+     * payload (issue #297).
+     *
+     * @param string[] $keys
+     * @param array<string, string> $keyValuePairs
      *
      * @throws GrpcException
      * @throws RegionException
      */
-    private function ingestRegionPairs(
+    private function ingestRegionKeys(
         \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo $region,
-        array $pairs,
+        array $keys,
+        array $keyValuePairs,
         ?int $ttl,
     ): void {
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
@@ -292,20 +333,16 @@ final readonly class SstIngestor
         // Build the SST metadata.
         $uuid = $this->generateUuid();
         $range = new Range();
-        $firstKey = $pairs[0]->getKey();
-        $lastPair = end($pairs);
-        /** @var Pair $lastPair */
-        $lastKey = $lastPair->getKey();
-        $range->setStart($firstKey);
-        $range->setEnd($lastKey);
+        $range->setStart($keys[0]);
+        $range->setEnd($keys[count($keys) - 1]);
 
         $regionEpoch = new \CrazyGoat\Proto\Metapb\RegionEpoch();
         $regionEpoch->setConfVer($region->epochConfVer);
         $regionEpoch->setVersion($region->epochVersion);
 
         $totalBytes = 0;
-        foreach ($pairs as $pair) {
-            $totalBytes += strlen($pair->getKey()) + strlen($pair->getValue());
+        foreach ($keys as $key) {
+            $totalBytes += strlen($key) + strlen($keyValuePairs[$key]);
         }
 
         $sstMeta = new SSTMeta();
@@ -315,31 +352,13 @@ final readonly class SstIngestor
         $sstMeta->setRegionId($region->regionId);
         $sstMeta->setRegionEpoch($regionEpoch);
         $sstMeta->setEndKeyExclusive(false);
-        $sstMeta->setTotalKvs(count($pairs));
+        $sstMeta->setTotalKvs(count($keys));
         $sstMeta->setTotalBytes($totalBytes);
-        $sstMeta->setCrc32($this->computePairsCrc32($pairs));
+        $sstMeta->setCrc32($this->computeCrc32($keys, $keyValuePairs));
 
-        // Build the streaming requests: first a meta request, then batched data.
-        $requests = [];
-
-        // First chunk: SST metadata.
-        $metaRequest = new RawWriteRequest();
-        $metaRequest->setMeta($sstMeta);
-        $requests[] = $metaRequest;
-
-        // Subsequent chunks: data batches.
-        $chunkPairs = array_chunk($pairs, self::INGEST_CHUNK_SIZE);
-        foreach ($chunkPairs as $chunk) {
-            $batch = new RawWriteBatch();
-            $batch->setPairs($chunk);
-            if ($ttl !== null && $ttl > 0) {
-                $batch->setTtl($ttl);
-            }
-
-            $batchRequest = new RawWriteRequest();
-            $batchRequest->setBatch($batch);
-            $requests[] = $batchRequest;
-        }
+        // First request: SST metadata. Subsequent requests are built as the
+        // stream consumes the generator, one chunk at a time.
+        $requests = $this->buildStreamingRequests($sstMeta, $keys, $keyValuePairs, $ttl);
 
         // Send via client-streaming RPC.
         /** @var RawWriteResponse $writeResponse */
@@ -387,7 +406,10 @@ final readonly class SstIngestor
         SSTMeta $sstMeta,
     ): void {
         $ingestRequest = new IngestRequest();
-        $ingestRequest->setContext(RegionContextFactory::fromRegionInfo($region));
+        $ingestRequest->setContext(RegionContextFactory::fromRegionInfo(
+            $region,
+            requestContext: $this->requestContext,
+        ));
         $ingestRequest->setSst($sstMeta);
 
         /** @var IngestResponse $ingestResponse */
@@ -418,16 +440,86 @@ final readonly class SstIngestor
     }
 
     /**
-     * Compute CRC32 checksum of the pairs.
+     * Build the RawWrite request stream lazily.
      *
-     * @param Pair[] $pairs
+     * The generator yields the metadata request first, then one data batch
+     * per {@see self::INGEST_CHUNK_SIZE} keys or {@see self::INGEST_CHUNK_BYTES}
+     * payload bytes, whichever comes first. Each chunk's `Pair` messages are
+     * released as soon as the stream asks for the next request, so the payload
+     * is not held as a full `Pair[]` array and a full request array at the
+     * same time (issue #297).
+     *
+     * @param string[] $keys
+     * @param array<string, string> $keyValuePairs
+     * @return \Generator<int, RawWriteRequest>
      */
-    private function computePairsCrc32(array $pairs): int
+    private function buildStreamingRequests(
+        SSTMeta $sstMeta,
+        array $keys,
+        array $keyValuePairs,
+        ?int $ttl,
+    ): \Generator {
+        $metaRequest = new RawWriteRequest();
+        $metaRequest->setMeta($sstMeta);
+        yield $metaRequest;
+
+        /** @var list<Pair> $pairs */
+        $pairs = [];
+        $chunkBytes = 0;
+        foreach ($keys as $key) {
+            $value = $keyValuePairs[$key];
+            $entryBytes = strlen($key) + strlen($value);
+
+            $chunkIsFull = count($pairs) >= self::INGEST_CHUNK_SIZE
+                || $chunkBytes + $entryBytes > self::INGEST_CHUNK_BYTES;
+            if ($pairs !== [] && $chunkIsFull) {
+                yield $this->buildBatchRequest($pairs, $ttl);
+                $pairs = [];
+                $chunkBytes = 0;
+            }
+
+            $pair = new Pair();
+            $pair->setKey($key);
+            $pair->setValue($value);
+            $pair->setOp(Pair\OP::Put);
+            $pairs[] = $pair;
+            $chunkBytes += $entryBytes;
+        }
+
+        if ($pairs !== []) {
+            yield $this->buildBatchRequest($pairs, $ttl);
+        }
+    }
+
+    /**
+     * @param list<Pair> $pairs
+     */
+    private function buildBatchRequest(array $pairs, ?int $ttl): RawWriteRequest
+    {
+        $batch = new RawWriteBatch();
+        $batch->setPairs($pairs);
+        if ($ttl !== null && $ttl > 0) {
+            $batch->setTtl($ttl);
+        }
+
+        $request = new RawWriteRequest();
+        $request->setBatch($batch);
+
+        return $request;
+    }
+
+    /**
+     * Compute CRC32 checksum over the region's keys and values in order.
+     *
+     * @param string[] $keys
+     * @param array<string, string> $keyValuePairs
+     */
+    private function computeCrc32(array $keys, array $keyValuePairs): int
     {
         $ctx = hash_init('crc32b');
-        foreach ($pairs as $pair) {
-            hash_update($ctx, $pair->getKey());
-            hash_update($ctx, $pair->getValue());
+        foreach ($keys as $key) {
+            hash_update($ctx, $key);
+            hash_update($ctx, $keyValuePairs[$key]);
         }
 
         return (int) hash_final($ctx);

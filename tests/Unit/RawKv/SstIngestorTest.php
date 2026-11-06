@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\ImportSstpb\IngestResponse;
 use CrazyGoat\Proto\ImportSstpb\Pair;
+use CrazyGoat\Proto\ImportSstpb\RawWriteRequest;
 use CrazyGoat\Proto\ImportSstpb\RawWriteResponse;
 use CrazyGoat\Proto\ImportSstpb\SSTMeta;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
@@ -15,6 +16,7 @@ use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\IngestTooLargeException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -143,6 +145,169 @@ class SstIngestorTest extends TestCase
         $this->grpc->expects($this->never())->method('call');
 
         $this->ingestor->ingest([]);
+    }
+
+    public function testIngestAcceptsPayloadExactlyAtMaxIngestSize(): void
+    {
+        $store = $this->defaultStore();
+        $region = $this->defaultRegion();
+        $this->setupStandardPdMocks($region, $store);
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->expects($this->once())->method('callStreaming')->willReturn($writeResponse);
+
+        // "ab" + "cde" = 5 bytes, exactly the limit.
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            maxIngestSize: 5,
+        );
+
+        $ingestor->ingest(['ab' => 'cde']);
+    }
+
+    public function testIngestRejectsPayloadOverMaxIngestSizeBeforeAnyRpc(): void
+    {
+        $this->pdClient->expects($this->never())->method('getAllStores');
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->grpc->expects($this->never())->method('callAsync');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callStreaming');
+
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            maxIngestSize: 5,
+        );
+
+        try {
+            $ingestor->ingest(['ab' => 'cdef']);
+            self::fail('The payload guard did not reject the ingest');
+        } catch (IngestTooLargeException $e) {
+            self::assertSame('maxIngestSize', $e->getLimitName());
+            self::assertSame(5, $e->getLimit());
+            self::assertSame(6, $e->getActual());
+            self::assertStringContainsString('maxIngestSize of 5 bytes', $e->getMessage());
+        }
+    }
+
+    public function testIngestStreamsRequestsLazily(): void
+    {
+        $store = $this->defaultStore();
+        $region = $this->defaultRegion();
+        $this->setupStandardPdMocks($region, $store);
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+
+        $captured = null;
+        $this->grpc->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                iterable $requests,
+            ) use (
+                $writeResponse,
+                &$captured
+): Message {
+                $captured = $requests;
+                return $writeResponse;
+            });
+
+        $pairs = [];
+        for ($i = 0; $i < 2500; $i++) {
+            $pairs[sprintf('key-%05d', $i)] = str_repeat('v', 32);
+        }
+
+        $this->ingestor->ingest($pairs);
+
+        self::assertInstanceOf(\Generator::class, $captured, 'The stream must be lazy, not a pre-built array');
+        $requests = iterator_to_array($captured, false);
+        // One metadata message plus ceil(2500 / 1024) data chunks.
+        self::assertCount(1 + (int) ceil(2500 / 1024), $requests);
+        $first = $requests[0];
+        self::assertInstanceOf(RawWriteRequest::class, $first);
+        $meta = $first->getMeta();
+        self::assertNotNull($meta);
+        self::assertSame(2500, $meta->getTotalKvs());
+        self::assertSame(2500 * (9 + 32), $meta->getTotalBytes());
+        self::assertNull($first->getBatch());
+
+        $second = $requests[1];
+        self::assertInstanceOf(RawWriteRequest::class, $second);
+        $batch = $second->getBatch();
+        self::assertNotNull($batch);
+        self::assertCount(1024, iterator_to_array($batch->getPairs(), false));
+        $last = $requests[count($requests) - 1];
+        self::assertInstanceOf(RawWriteRequest::class, $last);
+        $lastBatch = $last->getBatch();
+        self::assertNotNull($lastBatch);
+        self::assertCount(2500 - 2 * 1024, iterator_to_array($lastBatch->getPairs(), false));
+    }
+
+    public function testIngestBoundsAChunkByPayloadBytesNotOnlyPairCount(): void
+    {
+        $region = $this->defaultRegion();
+        $store = $this->defaultStore();
+        $this->setupStandardPdMocks($region, $store);
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+
+        $captured = null;
+        $this->grpc->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                iterable $requests,
+            ) use (
+                $writeResponse,
+                &$captured
+): Message {
+                $captured = $requests;
+                return $writeResponse;
+            });
+
+        $value = str_repeat('v', 1024 * 1024);
+        $pairs = [];
+        for ($i = 0; $i < 6; $i++) {
+            $pairs[sprintf('key-%03d', $i)] = $value;
+        }
+
+        $this->ingestor->ingest($pairs);
+
+        self::assertInstanceOf(\Generator::class, $captured);
+        $requests = iterator_to_array($captured, false);
+        self::assertCount(3, $requests);
+
+        // Three 1 MiB values plus their keys fit in the 4 MiB chunk budget;
+        // the fourth would exceed it by 28 bytes, so the generator starts a
+        // second chunk instead of copying all six values into one.
+        foreach ([1 => 3, 2 => 3] as $index => $expectedPairs) {
+            $request = $requests[$index];
+            self::assertInstanceOf(RawWriteRequest::class, $request);
+            $batch = $request->getBatch();
+            self::assertNotNull($batch);
+            self::assertCount($expectedPairs, iterator_to_array($batch->getPairs(), false));
+        }
     }
 
     // ========================================================================
@@ -315,7 +480,7 @@ class SstIngestorTest extends TestCase
                 string $address,
                 string $service,
                 string $method,
-                array $requests,
+                iterable $requests,
             ) use (
                 $writeResponse,
                 &$capturedRequests
@@ -328,6 +493,10 @@ class SstIngestorTest extends TestCase
 
         // The second request should be a batch with TTL set.
         $this->assertNotNull($capturedRequests);
+        // The stream is lazy; materialise it here only for the assertion.
+        $capturedRequests = is_array($capturedRequests)
+            ? $capturedRequests
+            : iterator_to_array($capturedRequests, false);
         $this->assertGreaterThanOrEqual(2, count($capturedRequests));
 
         $batchRequest = $capturedRequests[1];
@@ -355,7 +524,7 @@ class SstIngestorTest extends TestCase
                 string $address,
                 string $service,
                 string $method,
-                array $requests,
+                iterable $requests,
             ) use (
                 $writeResponse,
                 &$capturedRequests
@@ -377,6 +546,10 @@ class SstIngestorTest extends TestCase
 
         // requests[0] is the SST meta chunk; the data batch carries the pairs.
         $this->assertNotNull($capturedRequests);
+        // The stream is lazy; materialise it here only for the assertion.
+        $capturedRequests = is_array($capturedRequests)
+            ? $capturedRequests
+            : iterator_to_array($capturedRequests, false);
         $this->assertGreaterThanOrEqual(2, count($capturedRequests));
         $keys = array_map(
             static fn(Pair $pair): string => $pair->getKey(),

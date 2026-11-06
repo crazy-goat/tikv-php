@@ -171,7 +171,7 @@ final class TxnReaderArrayKeyTest extends TestCase
     {
         $this->stubBatchGet();
 
-        $state = new TransactionState();
+        $state = new TransactionState(trackReadSet: true);
         $results = $this->createReader()->batchGet(
             ['1000', '01000', '1e3', '-5', '0', 'user:7'],
             $state,

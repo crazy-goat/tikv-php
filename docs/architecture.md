@@ -140,9 +140,15 @@ final class RawKvClient
 - Pessimistic and optimistic transaction modes
 - Lock resolution for concurrent conflicts
 - Heartbeat to extend lock TTL for long-running transactions (opportunistic for pessimistic transactions, explicit `heartbeat()` otherwise; see [Configuration](configuration.md#lock-ttls-and-the-primary-lock-keepalive-txnkv))
+  - The prewrite heartbeat is checked only after the primary region's prewrite
+    and after the parallel secondary fan-out (in a multi-region async commit
+    the primary is prewritten after the fan-out, so those two checks coincide).
+    A single `KvPrewrite` or `KvCommit` RPC that outlives the lock TTL cannot
+    be heartbeated mid-flight, so keep `TimeoutConfig::$writeTimeoutMs` below
+    the lock TTL or raise the TTL (see [A single prewrite or commit RPC can outlive the lock TTL](configuration.md#a-single-prewrite-or-commit-rpc-can-outlive-the-lock-ttl))
 
 **Key Design Patterns**:
-- **Unit of Work**: Transaction tracks write set and read set
+- **Unit of Work**: Transaction tracks the write set, the pessimistic per-key read timestamps, and an optional read set (`trackReadSet`)
 - **Two-Phase Commit**: Prewrite → Commit protocol
 - **Factory Pattern**: `TxnKvClient::begin()`, `beginOptimistic()` and `beginPessimistic()` create Transaction instances
 - **Strategy Pattern**: Optimistic vs pessimistic mode selection
@@ -154,7 +160,7 @@ final class TxnKvClient
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self;
     
     // Transaction lifecycle
-    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int), optimisticLockTtlMs (int), pessimisticLockTtlMs (int)
+    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int), optimisticLockTtlMs (int), pessimisticLockTtlMs (int), requestContext (?RequestContextOptions)
     public function beginOptimistic(array $options = []): Transaction;   // begin() with pessimistic = false
     public function beginPessimistic(array $options = []): Transaction;  // begin() with pessimistic = true
     public function close(): void;
@@ -236,6 +242,27 @@ is retried; every other `KeyError` (including an empty payload) throws the
 base `TiKvException`, so the write set is not cleared and the transaction is
 not reported `RolledBack`; it stays active-but-unwritable so the caller (or
 the destructor) can retry the cleanup (issue #559).
+
+**Memory bounds**: the write set grows in the PHP worker for the whole
+transaction and is opt-in bounded on `begin()` (`0` = unlimited) by
+`maxTxnEntryCount` / `maxTxnEntrySize` / `maxTxnTotalSize`. Exceeding a limit
+throws `TransactionTooLargeException` before the write is buffered. The
+prewrite and commit requests are independently split per region by
+`maxTxnBatchSize` and `maxTxnBatchCount` (issue #430).
+
+Read-set tracking is **off by default** (`trackReadSet`): only `get()` and
+`batchGet()` would populate it, `scan()` never does, and nothing in the
+commit path consumes it. Opting in enables the public `getReadSet()` map and
+the `maxReadSetEntries` / `maxReadSetTotalSize` bounds; an oversized read is
+rejected before the fetched value is retained, but the RPC has already
+returned, and a whole `KvBatchGet` response is materialised before the check.
+A long-lived tracked transaction can call `Transaction::clearReadSet()`.
+`RawKvClient::ingest()`
+streams its SST payload instead of buffering a second full copy: it copies
+only the keys, groups them by region, and builds each `import_sstpb.Pair`
+chunk on demand from a generator consumed by the gRPC transport. Its opt-in
+`maxIngestSize` cap bounds the caller's payload before the cluster enters
+import mode and before any RPC (issue #297).
 
 ### 3. TimestampOracle
 
@@ -823,6 +850,9 @@ the sequential retrying path.
 - Update on NotLeader hint
 - Offer an opt-in tick (`refreshRegionCache()`) and an explicit boot-time
   preload (`preloadRegions()`) for long-lived workers (issue #425)
+- Drop the cached store address on a `StoreNotMatch` region error or a
+  transport failure to that store, so the next attempt asks PD for a fresh
+  `GetStore` instead of retrying a stale address (issue #247)
 
 **Trade-off**: refresh costs one PD `GetRegion` per cached region, which is
 why it is opt-in and throttled by `regionCacheRefreshMs` rather than running
@@ -898,7 +928,7 @@ $client->batchGet($keys);  // 3 concurrent sends, responses collected in order
 - Group keys by region (sub-batched under the per-region RawKV caps)
 - Issue sends via `executeBatch*ForRegionAsync()`, returning un-waited `GrpcFuture` objects wrapped in `CheckedGrpcFuture`
 - `BatchAsyncExecutor::executeParallel()` invokes every per-region callable in the dispatch phase, then awaits responses in the wait phase
-- A `$deadlineMs` argument (finite by default, `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`; `0` disables it) caps the wall-clock time for dispatch + wait; on overrun the executor raises `BatchDeadlineExceededException` and cancels any still-unfinished futures
+- A `$deadlineMs` argument (finite by default, `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`; `0` disables it) caps the wall-clock time for dispatch + wait; on overrun the executor raises `BatchDeadlineExceededException` and cancels any still-unfinished futures. One budget covers every window of the fan-out, and it is checked before each dispatch and before each wait, never inside one blocking wait
 - On the first wait-phase failure, remaining futures are cancelled to prevent gRPC channel/completion-queue leaks
 - The rare split/merge slow path re-dispatches every sub-region's send during the dispatch phase and merges responses in the wait phase
 
