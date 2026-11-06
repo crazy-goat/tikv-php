@@ -20,6 +20,7 @@ use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
+use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
@@ -1085,6 +1086,123 @@ class TransactionTest extends TestCase
         $this->assertSame(2, $scanCalls);
         $this->assertSame(['KvScan', 'KvCheckTxnStatus', 'KvResolveLock', 'KvScan'], $methods);
         $this->assertNotSame('', $result[0]['key']);
+    }
+
+    /**
+     * A lock can also arrive as the response-level KeyError instead of a
+     * per-pair one; the scan must resolve it, ask the retry executor to
+     * reissue the same KvScan, and return the complete result set.
+     */
+    public function testScanEncounteringLockResolvesItAndRescans(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $lock = new LockInfo();
+        $lock->setKey('k2');
+        $lock->setPrimaryLock('primary');
+        $lock->setLockVersion(900);
+
+        $keyError = new KeyError();
+        $keyError->setLocked($lock);
+        $scanFail = new ScanResponse();
+        $scanFail->setError($keyError);
+
+        $scanOk = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
+        $statusResponse = new CheckTxnStatusResponse();
+        $statusResponse->setCommitVersion(3000);
+
+        $methods = [];
+        $scanCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+        ) use (
+            &$methods,
+            &$scanCalls,
+            $scanFail,
+            $scanOk,
+            $statusResponse,
+        ): object {
+            $methods[] = $method;
+            return match ($method) {
+                'KvScan' => ++$scanCalls === 1 ? $scanFail : $scanOk,
+                'KvCheckTxnStatus' => $statusResponse,
+                'KvResolveLock' => new ResolveLockResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            };
+        });
+
+        $result = $this->createTransaction(['pessimistic' => false])->scan('', '', 0);
+
+        $this->assertSame([
+            ['key' => 'k1', 'value' => 'v1'],
+            ['key' => 'k2', 'value' => 'v2'],
+        ], $result);
+        $this->assertContains('KvResolveLock', $methods);
+        $this->assertSame(2, $scanCalls, 'the scan must be reissued after the lock is resolved');
+        $this->assertSame(['KvScan', 'KvCheckTxnStatus', 'KvResolveLock', 'KvScan'], $methods);
+    }
+
+    /**
+     * A failing lock-resolution RPC is fatal: the original exception must
+     * surface instead of the scan being reissued against the same lock.
+     */
+    public function testScanLockResolutionFailurePropagates(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $lock = new LockInfo();
+        $lock->setKey('k2');
+        $lock->setPrimaryLock('primary');
+        $lock->setLockVersion(900);
+
+        $keyError = new KeyError();
+        $keyError->setLocked($lock);
+        $scanFail = new ScanResponse();
+        $scanFail->setError($keyError);
+
+        $methods = [];
+        $scanCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+        ) use (
+            &$methods,
+            &$scanCalls,
+            $scanFail,
+        ): object {
+            $methods[] = $method;
+            return match ($method) {
+                'KvScan' => ++$scanCalls === 1
+                    ? $scanFail
+                    : throw new \RuntimeException('the scan must not be reissued'),
+                'KvCheckTxnStatus' => throw new TiKvException('status check failed'),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            };
+        });
+
+        try {
+            $this->createTransaction(['pessimistic' => false])->scan('', '', 0);
+            self::fail('Expected the lock-resolution failure to surface');
+        } catch (TiKvException $e) {
+            $this->assertSame('status check failed', $e->getMessage());
+        }
+
+        $this->assertSame(1, $scanCalls);
+        $this->assertSame(['KvScan', 'KvCheckTxnStatus'], $methods);
     }
 
     public function testScanWithLimitZeroUsesMaxScanLimit(): void
@@ -2283,6 +2401,87 @@ class TransactionTest extends TestCase
             ['KvBatchGet', 'KvCheckTxnStatus', 'KvResolveLock', 'KvBatchGet'],
             $methods,
         );
+    }
+
+    /**
+     * A per-pair Locked error may omit LockInfo::key; the reader must fall
+     * back to the key it asked for so the lock can still be resolved (the
+     * `$locked->setKey($fallbackKey)` branch), then retry the batch read.
+     */
+    public function testBatchGetLockedPairWithoutKeyResolvesUsingTheRequestKey(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $lock = new LockInfo();
+        $lock->setPrimaryLock('primary');
+        $lock->setLockVersion(900);
+        $keyError = new KeyError();
+        $keyError->setLocked($lock);
+        $errorPair = new KvPair();
+        $errorPair->setError($keyError);
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $errorResponse->setPairs([$errorPair]);
+
+        $successPair = new KvPair();
+        $successPair->setKey('k1');
+        $successPair->setValue('after-lock');
+        $successResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $successResponse->setPairs([$successPair]);
+
+        $statusResponse = new CheckTxnStatusResponse();
+        $statusResponse->setCommitVersion(3000);
+
+        $methods = [];
+        $batchCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+            mixed $request,
+        ) use (
+            &$methods,
+            &$batchCalls,
+            $errorResponse,
+            $successResponse,
+            $statusResponse,
+        ): object {
+            $methods[] = $method;
+            return match ($method) {
+                'KvBatchGet' => ++$batchCalls === 1 ? $errorResponse : $successResponse,
+                'KvCheckTxnStatus' => $statusResponse,
+                'KvResolveLock' => $this->resolveLockResponse($request, ['k1']),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            };
+        });
+
+        $result = $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+
+        $this->assertSame(['k1' => 'after-lock'], $result);
+        $this->assertSame(2, $batchCalls);
+        $this->assertSame(
+            ['KvBatchGet', 'KvCheckTxnStatus', 'KvResolveLock', 'KvBatchGet'],
+            $methods,
+        );
+    }
+
+    /**
+     * @param list<string> $expectedKeys
+     */
+    private function resolveLockResponse(mixed $request, array $expectedKeys): ResolveLockResponse
+    {
+        $this->assertInstanceOf(ResolveLockRequest::class, $request);
+        $this->assertSame($expectedKeys, array_map(
+            static fn (string $key): string => $key,
+            iterator_to_array($request->getKeys()),
+        ));
+
+        return new ResolveLockResponse();
     }
 
     public function testBatchGetLockedResponseErrorResolvesLockAndRetries(): void
