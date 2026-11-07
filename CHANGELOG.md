@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `RawKvClient::getClusterId()` now calls `ensureOpen()`, so a closed client throws `ClientClosedException` like the other cluster operations instead of returning the cache the closed PD client has reset (issue #203, RAW-18). This is the last handle that outlived the client: `scanIterator()` and `scanPrefixIterator()` already fail closed before every page fetch (issue #344), and both iterator factories plus `getClusterId()` are now covered by the closed-client test provider.
+
 ### Security
 
 - Every GitHub Actions reference in `.github/workflows/ci.yml`, `mutation.yml` and `release.yaml` is now pinned to a full 40-character commit SHA with a trailing version comment (issue #316, SEC-13), so a force-moved major tag or branch cannot run unreviewed code on the runner. `actions/checkout` is pinned at `v7.0.1`, `actions/cache` at `v6.1.0`, `actions/upload-artifact` at `v7.0.2` (and `v4.6.2` in the nightly mutation workflow), `shivammathur/setup-php` at `2.40.0`, and the two `crazy-goat/.github` reusable workflows at the `main` commit. The top-level `permissions: contents: read` block and the `github-actions` Dependabot configuration already existed; Dependabot now rewrites the SHA and its version comment together. No CI behaviour change.
