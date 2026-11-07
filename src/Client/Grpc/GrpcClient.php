@@ -234,6 +234,11 @@ final class GrpcClient implements GrpcClientInterface
      * @param (\Closure(): float)|null $clock Source of the current time in seconds
      *                                         (default `microtime(true)`). Tests inject
      *                                         a fake clock to age channels without sleeping.
+     * @param (\Closure(Channel, string, Timeval): Call)|null $callFactory
+     *                                         Factory for `Grpc\Call` objects (default
+     *                                         `new Call(...)`). Internal testing seam:
+     *                                         it lets a test drive the send loop with a
+     *                                         mock call, without a server.
      */
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
@@ -250,6 +255,7 @@ final class GrpcClient implements GrpcClientInterface
         private readonly string $compression = self::DEFAULT_COMPRESSION,
         private readonly int $initialWindowSizeBytes = self::DEFAULT_INITIAL_WINDOW_SIZE_BYTES,
         private readonly ?\Closure $clock = null,
+        private readonly ?\Closure $callFactory = null,
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -317,11 +323,7 @@ final class GrpcClient implements GrpcClientInterface
 
             $deadline = $this->deadline($timeout);
 
-            $call = new Call(
-                $channel,
-                "/{$service}/{$method}",
-                $deadline,
-            );
+            $call = $this->createCall($channel, "/{$service}/{$method}", $deadline);
 
             $call->startBatch([
                 \Grpc\OP_SEND_INITIAL_METADATA => [],
@@ -376,16 +378,13 @@ final class GrpcClient implements GrpcClientInterface
         $this->startRpc($operation);
         $start = hrtime(true);
         $success = false;
+        $call = null;
         try {
             $channel = $this->getChannel($address);
 
             $deadline = $this->deadline($timeout);
 
-            $call = new Call(
-                $channel,
-                "/{$service}/{$method}",
-                $deadline,
-            );
+            $call = $this->createCall($channel, "/{$service}/{$method}", $deadline);
 
             // Send initial metadata first.
             $call->startBatch([
@@ -393,7 +392,8 @@ final class GrpcClient implements GrpcClientInterface
             ]);
 
             // Send each request message in its own batch (gRPC PHP extension
-            // limitation: one OP_SEND_MESSAGE per batch).
+            // limitation: one OP_SEND_MESSAGE per batch). The iterable may be
+            // a generator, so it is consumed exactly once, in order.
             foreach ($requests as $request) {
                 $call->startBatch([
                     \Grpc\OP_SEND_MESSAGE => ['message' => $request->serializeToString()],
@@ -426,9 +426,53 @@ final class GrpcClient implements GrpcClientInterface
             $success = true;
 
             return $response;
+        } catch (\Throwable $e) {
+            // The call is abandoned mid-stream (a send failed, the response
+            // status was an error, or the receive failed): cancel it so both
+            // sides release the stream promptly instead of waiting for the
+            // server-side deadline. The original failure must win over any
+            // throwable from cancel() (issue #286, GRPC-27).
+            $this->cancelCall($call);
+
+            throw $e;
         } finally {
             $this->completeRpc($operation, $start, $success);
         }
+    }
+
+    /**
+     * Cancel a call the client is abandoning.
+     *
+     * A throwable from `cancel()` is swallowed: it must never replace the
+     * original transport exception that is propagating, the same discipline
+     * {@see GrpcFuture::cancel()} applies (issue #286, GRPC-27).
+     */
+    private function cancelCall(?Call $call): void
+    {
+        if (!$call instanceof \Grpc\Call) {
+            return;
+        }
+
+        try {
+            $call->cancel();
+        } catch (\Throwable) {
+        }
+    }
+
+    /**
+     * Build a gRPC call through the configured factory.
+     *
+     * The factory is an internal testing seam: production always takes the
+     * `new Call(...)` branch (issue #286).
+     */
+    private function createCall(Channel $channel, string $path, Timeval $deadline): Call
+    {
+        $factory = $this->callFactory;
+        if ($factory instanceof \Closure) {
+            return $factory($channel, $path, $deadline);
+        }
+
+        return new Call($channel, $path, $deadline);
     }
 
     /**
@@ -483,11 +527,7 @@ final class GrpcClient implements GrpcClientInterface
 
             $deadline = $this->deadline($timeout);
 
-            $call = new Call(
-                $channel,
-                "/{$service}/{$method}",
-                $deadline,
-            );
+            $call = $this->createCall($channel, "/{$service}/{$method}", $deadline);
 
             $call->startBatch([
                 \Grpc\OP_SEND_INITIAL_METADATA => [],
