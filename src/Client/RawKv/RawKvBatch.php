@@ -32,6 +32,7 @@ use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Google\Protobuf\Internal\Message;
 use Psr\Log\LoggerInterface;
 
@@ -196,6 +197,20 @@ final readonly class RawKvBatch
             }
             if (array_is_list($ttl)) {
                 $ttl = array_combine(array_keys($keyValuePairs), $ttl);
+            } else {
+                // An associative TTL map must name every pair. PHP canonicalises
+                // array keys identically on both sides, so a mismatched key
+                // shows up as a pair key absent from $ttl (issue #200). Reject
+                // it here instead of letting the lookup below emit a warning
+                // and a null TTL that fails later inside setTtls().
+                $missing = array_diff_key($keyValuePairs, $ttl);
+                if ($missing !== []) {
+                    throw new InvalidArgumentException(sprintf(
+                        'TTL array is missing entries for %d key(s), first: %s',
+                        count($missing),
+                        KeyRedactor::redact(strval(array_key_first($missing))),
+                    ));
+                }
             }
         }
 

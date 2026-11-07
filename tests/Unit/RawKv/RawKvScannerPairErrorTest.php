@@ -18,9 +18,11 @@ use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 
 /**
- * The parallel scan paths (scanSegmentsInParallel, batchScan) wait on the raw
- * response without RegionErrorHandler::check(); parseScanPairs() is where a
- * per-pair KeyError must be rejected (issue #281).
+ * The per-range `RawScan` path (the parallel segment scan and the batchScan
+ * fallback) parses a RawScanResponse through parseScanPairs(); a per-pair
+ * KeyError must be rejected there (issue #281). The RawBatchScan region path
+ * does not use this parser: sendBatchScanAsync() runs
+ * RegionErrorHandler::check() on the response instead.
  */
 class RawKvScannerPairErrorTest extends TestCase
 {

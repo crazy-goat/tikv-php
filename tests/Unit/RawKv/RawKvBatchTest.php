@@ -95,6 +95,27 @@ class RawKvBatchTest extends TestCase
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], [60], $retryExecutor);
     }
 
+    public function testBatchPutThrowsWhenAssociativeTtlKeysDoNotMatchPairs(): void
+    {
+        // Issue #200: a same-sized TTL map with different keys must fail before
+        // any region lookup or RPC instead of warning and sending a null TTL.
+        $this->grpc->expects($this->never())->method('callAsync');
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->regionCache->expects($this->never())->method('getByKey');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf(
+            'TTL array is missing entries for 1 key(s), first: %s',
+            KeyRedactor::redact('b'),
+        ));
+
+        $this->batch->batchPut(
+            ['a' => '1', 'b' => '2'],
+            ['a' => 60, 'c' => 120],
+            $this->createRetryExecutor(),
+        );
+    }
+
     public function testBatchGetEmptyReturnsEmpty(): void
     {
         $retryExecutor = $this->createRetryExecutor();
@@ -176,6 +197,36 @@ class RawKvBatchTest extends TestCase
         $retryExecutor = $this->createRetryExecutor(1);
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], ['k1' => 60, 'k2' => 120], $retryExecutor);
         $this->addToAssertionCount(1);
+    }
+
+    public function testBatchPutAcceptsAssociativeTtlArrayWithNumericKeys(): void
+    {
+        // Issue #200 (RAW-07): PHP coerces a numeric-string key to int in both
+        // arrays, so a TTL map keyed by "12345" must keep lining up with the
+        // pair key instead of being rejected as missing.
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->grpc->expects($this->once())->method('callAsync')->with(
+            $this->anything(),
+            'tikvpb.Tikv',
+            'RawBatchPut',
+            $this->callback(static fn(RawBatchPutRequest $request): bool => count($request->getTtls()) === 2
+                && $request->getTtls()[0] === 60
+                && $request->getTtls()[1] === 120),
+            RawBatchPutResponse::class,
+            $this->greaterThan(0),
+        )->willReturn(GrpcFuture::fromWaiter(
+            static fn(): Message => new RawBatchPutResponse(),
+            static function (): void {
+            },
+        ));
+
+        $this->batch->batchPut(
+            $this->stringKeyedPairs('12345', 'v1') + $this->stringKeyedPairs('k2', 'v2'),
+            ['12345' => 60, 'k2' => 120],
+            $this->createRetryExecutor(1),
+        );
     }
 
     public function testScalarTtlExpandsToMatchPairCountOnRequest(): void

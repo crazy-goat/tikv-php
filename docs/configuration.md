@@ -755,8 +755,11 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 `caCertBaseDir` and `clientCertBaseDir` are optional and restrict **where the
 certificate files may live**. The path is canonicalized with `realpath()`
 before the comparison, so `..` segments and symlinks are resolved first, and
-the canonicalized path has to start with the canonicalized base directory — a
-path that does not is rejected with `InvalidArgumentException` ("TLS file path
+the canonicalized path must be the canonicalized base directory itself or lie
+beneath it — the check compares whole path components, not a string prefix, so
+a sibling directory whose name merely starts with the base name (for example
+`/etc/tikv-attacker` against a base of `/etc/tikv`) is rejected. A path outside
+the base directory is rejected with `InvalidArgumentException` ("TLS file path
 is outside the allowed base directory"). That is what stops a certificate path
 — or a symlink planted in the certificate directory — from loading a file you
 did not intend.
@@ -840,8 +843,9 @@ $grpc = new GrpcClient($logger, $tlsConfig);
 // request re-resolves the address through PD (issue #247).
 $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
-// The client closes the transport it was given in close() — pass
-// ownsGrpcClient: false to keep the ownership with the application.
+// The client does not own the transport or the PD client it is given:
+// close() and the destructor leave both open. Pass ownsGrpcClient: true
+// and/or ownsPdClient: true to transfer ownership.
 // Pass the same storeCache, or a StoreNotMatch / transport failure cannot
 // drop the stale address: the client's resolver has no cache to invalidate
 // while PdClient keeps serving that entry. Omitting storeCache disables
@@ -855,24 +859,30 @@ $client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 > client for you, and accept the same TLS options through
 > `options['tls']` — see [Basic Configuration](#basic-configuration).
 
-**Who closes the transport on the manual path.** The rule of
+**Who closes the connections on the manual path.** The rule of
 [Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
-is "the transport belongs to whoever created it", and it holds for the factory
-path. A client assembled by hand is *given* a transport it did not create and
-still closes it: `close()` (and the destructor) closes `$grpc`, exactly like a
-client built by `create()` closes the transport it built. If the application
-keeps the transport — to share it with a second client, or to close it later —
-say so explicitly:
+is "the connections belong to whoever created them", and it holds for the
+factory path. A client assembled by hand is *given* a transport and a PD
+client it did not create, so it does not own them: `close()` and the
+destructor leave both open (issue #204). That makes sharing safe — destroying
+one client cannot close the channels another one still uses. The client still
+clears its own region cache.
+
+If the application wants to hand ownership over instead, say so explicitly:
 
 ```php
-$client = new RawKvClient($pdClient, $grpc, ownsGrpcClient: false);
+$client = new RawKvClient(
+    $pdClient,
+    $grpc,
+    ownsGrpcClient: true,
+    ownsPdClient: true,
+);
 ```
 
-With `ownsGrpcClient: false` the client never closes the transport and the
-application stays its owner. The flag defaults to `true` today; issue #204
-tracks the change (a client should close only what it owns), so pass the flag
-explicitly whenever the ownership matters. `TxnKvClient` takes the same
-parameter.
+With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
+matching dependency in `close()`; the defaults are `false` for a
+hand-assembled `RawKvClient`. `TxnKvClient` has the same `ownsGrpcClient`
+parameter but still defaults to `true`.
 
 ### Security: Fail-Closed TLS
 
