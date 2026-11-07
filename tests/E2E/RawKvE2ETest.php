@@ -1932,6 +1932,51 @@ class RawKvE2ETest extends TestCase
         $this->assertNull($ttl, 'Expired key should return null from getKeyTTL');
     }
 
+    public function testGetKeyTtlResultMissingKey(): void
+    {
+        $result = $this->testClient->getKeyTTLResult('ttl-result-nonexistent-' . uniqid());
+
+        $this->assertFalse($result->exists, 'Missing key should report exists: false');
+        $this->assertNull($result->ttlSeconds, 'Missing key should have no TTL');
+    }
+
+    public function testGetKeyTtlResultWithoutTtl(): void
+    {
+        $this->putOneAndTrack('ttl-result-none', 'permanent');
+
+        $result = $this->testClient->getKeyTTLResult('ttl-result-none');
+
+        $this->assertTrue($result->exists, 'A key without TTL should still exist');
+        $this->assertNull($result->ttlSeconds, 'A key without TTL should have no TTL');
+    }
+
+    public function testGetKeyTtlResultWithTtl(): void
+    {
+        $this->testClient->put('ttl-result-remaining', 'value', 60);
+        $this->keysToCleanup[] = 'ttl-result-remaining';
+
+        $result = $this->testClient->getKeyTTLResult('ttl-result-remaining');
+
+        $this->assertTrue($result->exists);
+        $this->assertNotNull($result->ttlSeconds);
+        $this->assertGreaterThan(0, $result->ttlSeconds);
+        $this->assertLessThanOrEqual(60, $result->ttlSeconds);
+    }
+
+    public function testGetKeyTtlResultAfterExpiration(): void
+    {
+        $this->testClient->put('ttl-result-expired', 'temp', 2);
+        $this->keysToCleanup[] = 'ttl-result-expired';
+
+        // Wait for expiration
+        sleep(3);
+
+        $result = $this->testClient->getKeyTTLResult('ttl-result-expired');
+
+        $this->assertFalse($result->exists, 'Expired key should report exists: false');
+        $this->assertNull($result->ttlSeconds, 'Expired key should have no TTL');
+    }
+
     public function testPutWithTtlOverwriteRefreshesTtl(): void
     {
         // Put with short TTL

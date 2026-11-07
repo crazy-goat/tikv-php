@@ -95,7 +95,10 @@ time. See [Worktree-safe repositories](#worktree-safe-repositories).
 - Make the smallest correct change that satisfies the Definition of done.
 - Add or update tests. A bug fix starts with a test that fails.
 - Run the checks from `AGENTS.md` until they pass.
-- Update `CHANGELOG.md` under `[Unreleased]` and the docs.
+- Update `CHANGELOG.md` under `[Unreleased]` and the docs. Append the entry under the
+  existing heading that matches the change (`### Added`, `### Changed`, `### Fixed`, …);
+  do not start a second heading of the same type. `ChangelogStructureGuardTest` fails on a
+  repeated or out-of-order heading.
 - **Commit** with [Conventional Commits](https://www.conventionalcommits.org/)
   (`fix: handle empty response (#42)`). **Do not push.**
 - On a second or later round, first read `review.md` and fix every open point.
@@ -157,6 +160,16 @@ gh pr update-branch            # merges the default branch into the PR branch
 
 On a conflict, merge or rebase the default branch into the worktree branch, resolve the
 conflicts, run the checks, push, and go back to **step 5**.
+
+When the branch is checked out in a linked worktree, the canonical
+`gh pr merge --squash --delete-branch` merges but fails at its local
+branch-deletion step with
+`fatal: '<branch>' is already used by worktree at '<path>'`. The merge has
+landed; delete the remote branch manually, and let step 8 remove the local one:
+
+```bash
+git push origin --delete <branch>
+```
 
 Then check that the issue was closed (`gh issue view <N> --json state`). When the merge
 empties the milestone, go to [release-workflow.md](release-workflow.md) after step 8.

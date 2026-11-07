@@ -100,7 +100,7 @@ server) after enabling the extension.
 The library is **pre-1.0**. It follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), but before `1.0.0`
 a breaking change bumps the **minor** version — so a `0.x` release may break
-your code, and `0.11.0 → 0.12.0` is not a safe upgrade on its own.
+your code, and `0.12.0 → 0.13.0` is not a safe upgrade on its own.
 
 [`CHANGELOG.md`](CHANGELOG.md) marks every breaking change of the public API
 below with a **BREAKING** prefix and a migration note. A change that breaks a
@@ -109,23 +109,23 @@ migration note and needs no version bump of its own.
 
 ### Which version to require
 
-The current release is **v0.11.0**. Require the exact version, or allow patch
+The current release is **v0.12.0**. Require the exact version, or allow patch
 releases inside the current minor line only:
 
 ```json
 {
     "require": {
-        "crazy-goat/tikv-client": "~0.11.0"
+        "crazy-goat/tikv-client": "~0.12.0"
     }
 }
 ```
 
-`~0.11.0` (equivalently `^0.11.0` or `0.11.*`) resolves to `>=0.11.0 <0.12.0`, so
-it never pulls `0.12.0` — and therefore never pulls a breaking change. Use
-`"0.11.0"` instead when you want a reproducible build.
+`~0.12.0` (equivalently `^0.12.0` or `0.12.*`) resolves to `>=0.12.0 <0.13.0`, so
+it never pulls `0.13.0` — and therefore never pulls a breaking change. Use
+`"0.12.0"` instead when you want a reproducible build.
 
 Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
-`~0.11` all resolve to a range that includes `0.12.0` and every later release.
+`~0.12` all resolve to a range that includes `0.13.0` and every later release.
 
 The versions above follow the releases: every one of them is updated in the
 same pull request as the changelog section of the release, because the guard
@@ -255,7 +255,13 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // to a key to make the upper bound inclusive of that key.
 $results = $client->reverseScan('log;', 'log:', limit: 100);
 
-// Scan multiple non-contiguous ranges
+// Scan multiple non-contiguous ranges. This is a client-side loop of
+// per-range RawScan requests, not the RawBatchScan RPC: the RPC count is
+// linear in the number of ranges and the regions they cover (each range
+// resolves its own regions), although the per-range sends are fanned out
+// concurrently up to options['maxConcurrency']. eachLimit is required and
+// must be > 0. Returns one list per range: a list input keeps its order,
+// while non-sequential keys are re-indexed in ascending key order.
 $results = $client->batchScan([['a:', 'a;'], ['b:', 'b;']], eachLimit: 50);
 ```
 
@@ -292,8 +298,15 @@ Requires `enable-ttl=true` in tikv.toml configuration.
 // Store with expiration (TTL in seconds)
 $client->put('session', 'data', ttl: 3600);        // expires in 1 hour
 
-// Get remaining TTL
-$remaining = $client->getKeyTTL('session');          // seconds remaining, or null if not found/no TTL
+// getKeyTTL() returns ?int and collapses two cases: null means either that
+// the key does not exist or that it exists without an expiry.
+$remaining = $client->getKeyTTL('session');
+
+// getKeyTTLResult() keeps the cases apart:
+//   missing key       -> exists: false, ttlSeconds: null
+//   present, no TTL   -> exists: true,  ttlSeconds: null
+//   present, with TTL -> exists: true,  ttlSeconds: int > 0
+$result = $client->getKeyTTLResult('session');
 ```
 
 ### Atomic Operations
@@ -890,9 +903,16 @@ try {
     }
     echo "Total users: $userCount\n";
     
-    // Check TTL
-    $ttl = $client->getKeyTTL('user:123');
-    echo "TTL remaining: $ttl seconds\n";
+    // Check TTL. getKeyTTLResult() tells a missing key apart from a key
+    // without an expiry; getKeyTTL() returns null for both.
+    $ttl = $client->getKeyTTLResult('user:123');
+    if (!$ttl->exists) {
+        echo "TTL: key not found\n";
+    } elseif ($ttl->ttlSeconds === null) {
+        echo "TTL: no expiry\n";
+    } else {
+        echo "TTL remaining: {$ttl->ttlSeconds} seconds\n";
+    }
     
     // Enable atomic mode for CAS operations
     $client->setAtomicForCAS(true);
@@ -1182,7 +1202,7 @@ $options = [
     // disables that one operation type.
     // See docs/configuration.md#slow-operation-logging.
     'slowLog' => [
-        'readThresholdMs'        => 100,  // default 100  (get, getKeyTTL)
+        'readThresholdMs'        => 100,  // default 100  (get, getKeyTTL, getKeyTTLResult)
         'writeThresholdMs'       => 200,  // default 200  (put, delete, CAS)
         'batchReadThresholdMs'   => 500,  // default 500  (batchGet)
         'batchWriteThresholdMs'  => 500,  // default 500  (batchPut, batchDelete)
@@ -1252,6 +1272,8 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Cluster identity verification** — `options['expectedClusterId']` pins the PD cluster ID on the PD and TSO paths
 - ✅ **Store-cache invalidation and operation-scoped retry budget** — the cached store is dropped on `StoreNotMatch` and transport failures, and one retry budget covers a whole logical operation
 - ✅ **Configurable gRPC channel parameters** — message sizes, keepalive, `keepalivePermitWithoutCalls`, compression and the HTTP/2 initial window size ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
+- ✅ **Store health tracking and failover** — a per-store circuit breaker with cooldown, half-open probing, `StoreUnavailableException` and replica-read exclusion ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
+- ✅ **PD connection reuse** — `TxnKvClient::pdClient()` exposes the client's own `PdClientInterface` for cluster inspection and tests ([#515](https://github.com/crazy-goat/tikv-php/issues/515))
 
 ### Planned
 
@@ -1264,7 +1286,6 @@ feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
-- ⬜ **Store health checking and failover to healthy replicas** ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ⬜ **`RawBatchScan` RPC for multi-range scans** — `batchScan()` is a client-side loop today ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
 - ⬜ **Explicit key-locking API for pessimistic transactions** ([#436](https://github.com/crazy-goat/tikv-php/issues/436))

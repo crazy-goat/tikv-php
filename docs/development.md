@@ -670,6 +670,35 @@ the script passes that mode itself). It writes the Clover report to `coverage.xm
 `DEFAULT_COVERAGE_FLOOR` in that script. CI runs the same two commands in the `grpc-unit-tests`
 job and uploads the Clover report as the `coverage-clover` artifact.
 
+#### Installing a coverage driver
+
+Neither driver is a project dependency, and PHPUnit 11 does not support `phpdbg`, so a fresh
+environment has none of them and the script stops with "No code coverage driver available".
+Install PCOV — the driver CI uses and the faster of the two:
+
+```bash
+# Debian/Ubuntu (the package tracks the default PHP version; use php8.x-pcov
+# if you run a different one)
+sudo apt-get install php-pcov
+
+# macOS/Homebrew, or any platform with phpize and a compiler
+pecl install pcov
+```
+
+`pecl install` prints the `extension=pcov.so` line to add to `php.ini`. Verify with:
+
+```bash
+php -m | grep pcov
+```
+
+Xdebug works too: load it with `zend_extension=xdebug.so` and leave `xdebug.mode` alone —
+`composer test:coverage` passes `-d xdebug.mode=coverage` itself. A bare
+`vendor/bin/phpunit --coverage-*` run needs `XDEBUG_MODE=coverage` in the environment instead.
+
+`composer test:coverage` also passes `-d memory_limit=-1`: the combined run loads ~2,900 tests
+with generated mock classes and PCOV's own structures, and the common 128M `php.ini` default is
+not enough for it.
+
 Coverage is opt-in on the command line: `phpunit.xml` configures no coverage report, so an
 ordinary `vendor/bin/phpunit` run — and every composer test script that does not request a
 report — neither asks for a coverage driver nor writes `coverage.xml` / `coverage-html/`. The
