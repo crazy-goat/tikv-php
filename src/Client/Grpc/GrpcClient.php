@@ -893,7 +893,7 @@ final class GrpcClient implements GrpcClientInterface
             'inFlight' => $entry['inFlight'],
         ];
 
-        $this->logger->debug('Channel close deferred until in-flight calls settle', [
+        SafeLogging::log($this->logger, 'debug', 'Channel close deferred until in-flight calls settle', [
             'address' => $address,
             'inFlight' => $entry['inFlight'],
         ]);

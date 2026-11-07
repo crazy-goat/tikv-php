@@ -1009,6 +1009,14 @@ own `log()` and `debug()` implementations: psr/log does not declare that
 class `final`, so a subclass that overrides either method may record what
 it receives.
 
+The answer is taken **once**, when the client is built, and it is not
+re-examined afterwards. A logger that is reconfigured at runtime — a Monolog
+handler whose level is lowered to `DEBUG`, say — keeps the answer the client
+was given: the cache stays quiet, and a logger that was at `DEBUG` and is
+raised to `INFO` keeps building a context that is discarded. Configure the
+logger's level and handlers **before** you create the client, and create a
+new client after you change them.
+
 ### Shutdown and destructors
 
 Logging from a destructor is best-effort. PHP releases objects in an order
@@ -1027,13 +1035,13 @@ an immediate release must `commit()` or `rollback()` explicitly, or call
 `close()` before shutdown. An explicit `close()` outside shutdown still rolls
 back the live transactions before it releases the transport.
 
-The answer is taken **once**, when the client is built, and it is not
-re-examined afterwards. A logger that is reconfigured at runtime — a Monolog
-handler whose level is lowered to `DEBUG`, say — keeps the answer the client
-was given: the cache stays quiet, and a logger that was at `DEBUG` and is
-raised to `INFO` keeps building a context that is discarded. Configure the
-logger's level and handlers **before** you create the client, and create a
-new client after you change them.
+The flag is set by a callback registered with `register_shutdown_function()`,
+and shutdown callbacks run in registration order. An object released by a
+shutdown callback that was registered **before** the client was created —
+a bootstrap cleanup function, say — is therefore destroyed before the flag
+is set and keeps the normal destructor behaviour (including the rollback
+RPC). Register the client's cleanup after the bootstrap callbacks, or call
+`close()` explicitly, if that ordering matters.
 
 ### What Gets Logged
 
