@@ -1419,12 +1419,13 @@ instance through `RawKvClient::create()`"): 6911928 (#368) had already added
 `metrics: $bundle->metrics` to both `create()` methods and the region cache,
 retry executors and transactions. The acceptance criterion still open was the
 behavioural regression test — `getMetrics()` returning the injected instance
-does not prove the counters fire, because a factory that drops the argument
-still returns a (NoOp) backend. `MetricsWiringTest` drives one operation
-through each factory with `allowInsecure: false`, which fails closed in
-`getChannel()` right after `rpcStarted()`, and asserts the transport's
-`rpcStarted()` / `rpcCompleted()` for both factories plus the client-side
-`regionCacheMiss` on the RawKV path.
+proves the client property but not that the collaborators and the transport
+received the backend: a `GrpcClient` or resolver built with `NoOpMetrics`
+still passes the identity assertions while every counter goes nowhere.
+`MetricsWiringTest` drives one operation through each factory with
+`allowInsecure: false`, which fails closed in `getChannel()` right after
+`rpcStarted()`, and asserts the transport's `rpcStarted()` / `rpcCompleted()`
+for both factories plus the client-side `regionCacheMiss` on the RawKV path.
 
 ## A stray Markdown fence can become a legitimate closer — render the file before deleting it
 

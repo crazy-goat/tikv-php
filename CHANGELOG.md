@@ -25,7 +25,7 @@ policy now classifies as internal.
 
 ### Tests
 
-- `MetricsWiringTest` pins the SEC-17 wiring (issue #320): a metrics backend passed through `options['metrics']` to `RawKvClient::create()` / `TxnKvClient::create()` is returned by `getMetrics()` and actually receives events — the region-cache miss emitted by a RawKV point read and the transport-level `rpcStarted()` / `rpcCompleted()` of the PD `GetRegion` / `Tso` call each operation makes. The production fix shipped with #368; the existing tests only asserted the injected instance's identity, which stays green if a factory drops `metrics: $bundle->metrics` and every counter silently goes to `NoOpMetrics`. No production change. (#320)
+- `MetricsWiringTest` pins the SEC-17 wiring (issue #320): a metrics backend passed through `options['metrics']` to `RawKvClient::create()` / `TxnKvClient::create()` is returned by `getMetrics()` and actually receives events — the region-cache miss emitted by a RawKV point read and the transport-level `rpcStarted()` / `rpcCompleted()` of the PD `GetRegion` / `Tso` call each operation makes. The production fix shipped with #368; the existing tests assert only that `getMetrics()` returns the injected instance, which proves the client property but not that the collaborators and the transport received the backend — a `GrpcClient` or resolver built with `NoOpMetrics` still passes them. No production change. (#320)
 
 ## [v0.12.0] - 2026-11-07
 

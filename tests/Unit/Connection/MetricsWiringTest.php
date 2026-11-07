@@ -16,11 +16,15 @@ use PHPUnit\Framework\TestCase;
  * builds, so the counters the operator configured are actually incremented.
  *
  * The production fix shipped with #368. The earlier tests only pinned that
- * `getMetrics()` returns the injected instance — which stays true even when
- * the client-side collaborators and the transport keep a `NoOpMetrics`.
- * These tests drive one operation through each factory and assert the events
- * themselves, so dropping `metrics: $bundle->metrics` from either `create()`
- * fails here.
+ * `getMetrics()` returns the injected instance, which proves the client
+ * property but not that the collaborators and the transport the factory
+ * builds received the backend — a `GrpcClient` or resolver built with
+ * `NoOpMetrics` still passes them. These tests drive one operation through
+ * each factory and assert the events themselves, so dropping the
+ * client-constructor `metrics:` argument (via `getMetrics()`) or building
+ * the transport with `NoOpMetrics` (via `rpcStarted()`) fails here. The
+ * `RegionCache` occurrence inside `RawKvClient::create()` is not pinned:
+ * the constructor's `attachMetricsIfAbsent()` re-attaches the backend.
  *
  * `allowInsecure: false` makes the first PD call fail closed in
  * `getChannel()` right after `rpcStarted()`, before any channel is created.
