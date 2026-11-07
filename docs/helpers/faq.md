@@ -297,6 +297,12 @@ Two traps when measuring coverage:
    reason. `ext-grpc` is required too: the `Grpc` suite mocks `\Grpc\Call`, which is a hard error
    (not a skip) without the extension.
 
+`phpunit.xml` configures no coverage report on purpose (issue #556): a report block there makes
+every bare `vendor/bin/phpunit` run request a driver, so on the documented local setup
+(`xdebug.mode=debug`) it exits 1 with the warning above although every test passed, and with a
+driver in coverage mode it leaves `coverage.xml` / `coverage-html/` behind. The report is requested
+on the command line by `composer test:coverage` and the CI coverage job.
+
 ## Every TiKV `*_ts` protobuf field must be a PD TSO timestamp, never a monotonic-clock value
 
 TiKV interprets every timestamp protobuf field (`caller_start_ts`,
@@ -1147,10 +1153,13 @@ consecutive-return stub needs one more value. The truncation probe is
 re-asked too: a transient empty probe would otherwise make `scan(limit: 0)`
 return a truncated range silently.
 
-E2E note: `docker-compose run --rm php-test …` recreates the tikv
+E2E note: `docker compose run --rm php-test …` recreates the tikv
 containers it depends on; if the cluster was just (re)started the run
 container's DNS can fail with "Name does not resolve tikv1:20160" and the
-whole suite errors — wait ~20 s after `make up` before running E2E.
+whole suite errors. `scripts/test-e2e.sh` now waits until all four service
+containers are running and PD reports all three stores `Up` before the first
+test (issue #514), so the flake is gone from the full run; a manual `make up`
+followed by a per-mode script still needs ~20 s.
 
 ## `git log master..HEAD --oneline` is the definitive "what's in this PR" check
 
@@ -1329,6 +1338,15 @@ so compute the attempt count from the exponential sequence (2+4=6 ≤ 6 allows
 two retries; 6+8=14 > 6 aborts the third), and an operation that "fails twice
 then succeeds" needs a per-call failure counter (a shared `$calls % 3`
 pattern silently gives the second execute() zero retries).
+
+The same premise expiry closed issue #296 (audit PERF-09, jitter for
+`NotLeader` / `RegionMiss` / `StaleCmd`): 54036f8 (issue #242) had already
+made `BackoffType::equalJitter()` return `true` for every type, so the
+deterministic 2, 4, 8, ... ms schedule the audit describes no longer existed,
+and `BackoffTest` already asserted both the `[expo/2, expo]` range and
+non-constant values for all types. The #296 change adds only a
+NotLeader-specific pin and this note; no production code changed. Close such
+an audit import as a duplicate instead of re-implementing the jitter.
 
 ## Equal-jitter randomness can collapse the separating boundary in budget assertions — assert `<=` over more iterations, never strict `<`
 

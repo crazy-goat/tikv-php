@@ -11,6 +11,10 @@
 #
 #   . "$(dirname "$0")/lib/compose.sh"
 #   "${COMPOSE[@]}" up -d pd tikv1 tikv2 tikv3
+#
+# A script that needs extra compose files or profiles defines its own
+# `compose` wrapper after sourcing this file; the default below covers the
+# plain case.
 
 # shellcheck disable=SC2034 # COMPOSE is read by the script that sources this file
 if docker compose version >/dev/null 2>&1; then
@@ -22,3 +26,17 @@ else
     echo "Install Docker Compose and run this script again." >&2
     exit 1
 fi
+
+# shellcheck disable=SC2329 # invoked by the script that sources this file
+compose() {
+    "${COMPOSE[@]}" "$@"
+}
+
+# Lists the services that have a running container. `ps --format` is a v2-only
+# option (v1's `ps` knows only -q/--services/--filter), so this uses the
+# options both versions support. A non-zero exit means "cannot tell", which
+# the readiness gate treats as not ready.
+# shellcheck disable=SC2329 # invoked by the script that sources this file
+compose_running_services() {
+    compose ps --services --filter status=running
+}
