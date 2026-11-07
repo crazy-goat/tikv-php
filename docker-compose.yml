@@ -71,7 +71,15 @@ services:
         condition: service_healthy
 
   php-client:
-    build: .
+    # The image runs as an unprivileged user that must own the bind-mounted
+    # checkout, so build it with the host owner's IDs. The Makefile and the
+    # E2E scripts set these automatically; override them only when the
+    # checkout belongs to another user.
+    build:
+      context: .
+      args:
+        APP_UID: "${HOST_UID:-1000}"
+        APP_GID: "${HOST_GID:-1000}"
     volumes:
       - .:/app
     depends_on:
@@ -85,7 +93,11 @@ services:
     command: php examples/basic.php
 
   php-test:
-    build: .
+    build:
+      context: .
+      args:
+        APP_UID: "${HOST_UID:-1000}"
+        APP_GID: "${HOST_GID:-1000}"
     volumes:
       - .:/app
     depends_on:

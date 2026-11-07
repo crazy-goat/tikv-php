@@ -16,6 +16,13 @@
 # `compose` wrapper after sourcing this file; the default below covers the
 # plain case.
 
+# The php-client/php-test images run as an unprivileged user and bind-mount
+# the checkout, so their UID/GID must match the host owner (docker-compose.yml
+# reads HOST_UID/HOST_GID as build args). Exporting them here keeps every
+# compose call in the runner scripts consistent; an explicit value wins.
+export HOST_UID="${HOST_UID:-$(id -u)}"
+export HOST_GID="${HOST_GID:-$(id -g)}"
+
 # shellcheck disable=SC2034 # COMPOSE is read by the script that sources this file
 if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose)
