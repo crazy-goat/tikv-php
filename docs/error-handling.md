@@ -323,7 +323,7 @@ only the timing it produces differs.
 | `RawKvClient::setAtomicForCAS()`, `RawKvClient::isAtomicForCAS()` | Yes | Yes | Client-local flag; no cluster state is touched |
 | `RawKvClient::setColumnFamily()`, `RawKvClient::getColumnFamily()` | Yes | Yes | Client-local setting; no cluster state is touched |
 | `RawKvClient::create()`, `RawKvClient::close()` | Yes | Yes | `create()` validates the options (`InvalidArgumentException` on a bad option) and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent — a second call does nothing |
-| `RawKvClient::getClusterId()`, `RawKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
+| `RawKvClient::getClusterId()`, `RawKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched. Both throw `ClientClosedException` after `close()` |
 | `RawKvClient::getMetrics()` | Yes | Yes | Pure accessor |
 | `RawKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 | `RawKvClient::refreshRegionCache()`, `RawKvClient::preloadRegions()` | Yes | Yes | Cache warming only: re-reads region metadata from PD and stores it; no user data is touched. A PD failure is logged and the old cache entry is kept (nothing is thrown for it); both are no-ops after `close()` |
@@ -558,7 +558,7 @@ an earlier group already landed (issue #197).
 | `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics. The pre-fan-out PD region enumeration can throw the base `TiKvException` |
 | `checksum(string, string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | A reversed range is rejected before any RPC. Concurrent per-region checksums; idempotent. A retry-budget or store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
 | `ingest(array, ?int $ttl = null)` | `ClientClosedException`, `InvalidArgumentException`, `GrpcException`, `RegionException`, `InvalidStoreAddressException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `IngestPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | SST import path; store mode switches fan out concurrently. Each region group is retried against a freshly resolved region. A permanent failure with no applied group rethrows the original exception; once a group has landed it is wrapped in `IngestPartialFailureException` (issue #197) |
-| `getClusterId(): ?int` | — | Returns `null` when unknown; no exceptions documented |
+| `getClusterId(): ?int` | `ClientClosedException` | Returns `null` when unknown; throws after `close()` |
 | `healthCheck(): ?int` | `ClientClosedException`, `HealthCheckException` | Wraps any PD failure into `HealthCheckException` |
 | `getMetrics(): MetricsInterface` | — | Pure accessor |
 | `close(): void` | — | Swallows and logs shutdown errors |
