@@ -491,8 +491,18 @@ Keepalive pings (sent every `keepaliveTimeMs`, even without in-flight calls
 when `keepalivePermitWithoutCalls` is true) keep idle connections alive behind
 stateful firewalls / NAT gateways — which typically drop idle flows after
 ~5 minutes — so a dead connection is detected rather than blocking until TCP
-retransmission gives up. Lowering `maxReceiveMessageBytes` is a valid
-hardening choice when you know your values are small.
+retransmission gives up.
+
+`maxReceiveMessageBytes` is enforced by grpc-core as the
+`grpc.max_receive_message_length` channel argument, so an oversized response
+frame is rejected **before** its payload is materialised as a PHP string. That
+is the control which bounds response memory; the client-side size check in
+`GrpcResponseParser` runs only after the string exists and therefore cannot
+prevent that allocation (SEC-16, issue #319). The 64 MB default is deliberately
+larger than the gRPC core's 4 MB: full-limit scans and batch reads exceed 4 MB
+and would fail with `RESOURCE_EXHAUSTED` (issue #265). Lowering
+`maxReceiveMessageBytes` is a valid hardening choice when you know your values
+are small.
 
 Compression is off by default and applies to the **outgoing** side:
 `'gzip'` or `'deflate'` sets `grpc.default_compression_algorithm` on every

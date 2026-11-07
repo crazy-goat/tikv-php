@@ -43,9 +43,14 @@ class GrpcClientTest extends TestCase
 
     public function testCloseIsIdempotent(): void
     {
+        $channel = $this->createMock(\Grpc\Channel::class);
+        $channel->expects($this->once())->method('close');
+        $this->injectChannels(['addr:1' => $channel]);
+
         $this->client->close();
         $this->client->close();
-        $this->expectNotToPerformAssertions();
+
+        $this->assertSame([], $this->readChannels());
     }
 
     public function testCallAfterCloseThrowsInvalidStateException(): void
@@ -164,6 +169,8 @@ class GrpcClientTest extends TestCase
 
         $this->client->close();
         $this->client->close();
+
+        $this->assertSame([], $this->readChannels());
     }
 
     public function testDefaultMaxChannels(): void
