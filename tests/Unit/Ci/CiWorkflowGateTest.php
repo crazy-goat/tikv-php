@@ -24,11 +24,14 @@ use PHPUnit\Framework\TestCase;
  * green on the pull requests it skips. These checks make that a failing
  * test instead:
  *
- *  1. the workflow has no `paths:` / `paths-ignore:` trigger filter;
- *  2. every heavy job is gated on `needs.changes.outputs.code`, not on a
- *     narrower output of the `changes` job;
- *  3. the required `ci-ok` check needs every heavy job and treats a skipped
- *     one as a failure for a code change;
+ *  1. the workflow has no `paths:` / `paths-ignore:` trigger filter, in
+ *     either the block or the flow style;
+ *  2. every heavy job is gated on exactly `needs.changes.outputs.code ==
+ *     'true'` — an appended condition (`&& github.event_name == ...`)
+ *     narrows the gate just as a different output would;
+ *  3. the required `ci-ok` check runs unconditionally (`if: always()`),
+ *     needs every heavy job, and fails for a code change unless every one
+ *     of them reports `success`;
  *  4. a change under `tests/Unit/**` (or `src/**`, or `tests/E2E/**`) is
  *     not classified as documentation-only by the `docs-regex`, so it does
  *     reach the E2E jobs.
@@ -59,9 +62,22 @@ final class CiWorkflowGateTest extends TestCase
     ];
 
     /**
-     * The condition every heavy job has to carry.
+     * The condition every heavy job has to carry, as a whole line: a gate
+     * that merely starts with this condition can still append a second one
+     * (`&& github.event_name == 'pull_request'`) and skip a push to master.
      */
-    private const CODE_GATE = "if: needs.changes.outputs.code == 'true'";
+    private const CODE_GATE_PATTERN = '/^\s{4}if:\s*needs\.changes\.outputs\.code == \'true\'\s*$/m';
+
+    /**
+     * The exact lines of the `ci-ok` script that make a skipped or failed
+     * job block the merge. A substring check would accept `|| true` or
+     * `[ "$CODE" = "yes" ]`, which both leave the required check green.
+     */
+    private const CODE_OK_CONDITION = '/^\s*if \[ "\$CODE" = "true" \]; then\s*$/m';
+
+    private const EVERY_RESULT_SUCCESS = '/^\s*\[ "\$r" = "success" \] \|\| exit 1\s*$/m';
+
+    private const ALWAYS_RUN = '/^\s{4}if: always\(\)\s*$/m';
 
     /**
      * Changed paths that must reach the E2E jobs: a unit test, production
@@ -79,10 +95,10 @@ final class CiWorkflowGateTest extends TestCase
     {
         self::assertSame(
             0,
-            preg_match('/^\s+paths(?:-ignore)?:/m', $this->workflow()),
-            'The CI workflow has a paths/paths-ignore trigger filter, so a pull request outside '
-            . 'the filter gets no CI signal at all. The heavy jobs are gated on the shared '
-            . '"code" output instead (issue #365).',
+            preg_match('/\bpaths(?:-ignore)?\s*:/', $this->workflow()),
+            'The CI workflow has a paths/paths-ignore trigger filter, in block or flow style, '
+            . 'so a pull request outside the filter gets no CI signal at all. The heavy jobs '
+            . 'are gated on the shared "code" output instead (issue #365).',
         );
     }
 
@@ -93,13 +109,15 @@ final class CiWorkflowGateTest extends TestCase
         foreach (self::CODE_GATED_JOBS as $job) {
             self::assertArrayHasKey($job, $jobs, sprintf('The CI workflow has no "%s" job', $job));
 
-            self::assertStringContainsString(
-                self::CODE_GATE,
-                $jobs[$job],
+            self::assertSame(
+                1,
+                preg_match(self::CODE_GATE_PATTERN, $jobs[$job]),
                 sprintf(
-                    'The "%s" job is not gated on the shared "code" output. A narrower gate '
-                    . '(for example "needs.changes.outputs.e2e") means a pull request that '
-                    . 'touches only tests/Unit/** gets no signal from this job (issue #365).',
+                    'The "%s" job is not gated on exactly "needs.changes.outputs.code == '
+                    . '\'true\'". A narrower gate (for example "needs.changes.outputs.e2e" or '
+                    . 'an appended "&& github.event_name == \'pull_request\'") means a pull '
+                    . 'request that touches only tests/Unit/** gets no signal from this job, '
+                    . 'or a push to master skips it (issue #365).',
                     $job,
                 ),
             );
@@ -139,11 +157,27 @@ final class CiWorkflowGateTest extends TestCase
             );
         }
 
-        self::assertStringContainsString(
-            '[ "$r" = "success" ]',
-            $jobs['ci-ok'],
-            'The "ci-ok" job no longer requires every needed job to be "success" for a code '
-            . 'change, so a skipped E2E job would still report green (issue #365).',
+        self::assertSame(
+            1,
+            preg_match(self::ALWAYS_RUN, $jobs['ci-ok']),
+            'The "ci-ok" job no longer runs with "if: always()", so GitHub skips it when a '
+            . 'needed job fails or is skipped and the required check is never reported '
+            . '(issue #365).',
+        );
+
+        self::assertSame(
+            1,
+            preg_match(self::CODE_OK_CONDITION, $jobs['ci-ok']),
+            'The "ci-ok" job no longer checks that the change is a code change with '
+            . '`if [ "$CODE" = "true" ]; then`, so the success loop can be skipped while the '
+            . 'job still reports green (issue #365).',
+        );
+
+        self::assertSame(
+            1,
+            preg_match(self::EVERY_RESULT_SUCCESS, $jobs['ci-ok']),
+            'The "ci-ok" job no longer fails with `[ "$r" = "success" ] || exit 1` for a code '
+            . 'change, so a failed or skipped E2E job would still report green (issue #365).',
         );
     }
 
