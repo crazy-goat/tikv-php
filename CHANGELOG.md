@@ -23,6 +23,11 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `reverseScan('', $lower)` with a non-empty lower bound now fails with an `InvalidArgumentException` that names the empty upper bound, instead of the generic "start key must not sort before end key" text. Reverse scan has no +infinity sentinel (TiKV's reverse `RawScan` seeks for the largest key not greater than the empty `start_key` and finds nothing), so the call was already rejected by the reversed-range check from #343; `docs/operations.md` now states the restriction explicitly and an E2E test pins the rejection. `reverseScan('', '')` remains the documented empty range. (#194)
+- SST ingest now sends the true CRC32 of the region payload in `SSTMeta.crc32` (issue #196). `SstIngestor` computed the `crc32b` digest correctly but cast the hexadecimal string returned by `hash_final()` straight to `int`, which stops at the first non-digit: `"352441c2"` became `352441` and a digest starting with a letter became `0`. The digest is now decoded with `hexdec()` before the cast. The target TiKV version does not validate this field on the `RawWrite` path (it builds the SST server-side and `Ingest` checks only the API version), so no behaviour changes today, but the field no longer carries a value that is not the checksum of anything. (#196)
+
 ### Tests
 
 - The transactional `get()` path is now pinned to fail closed on a response-level `KeyError` variant it does not handle (issue #221, TXN-16). `TransactionTest::testGetRejectsUnhandledResponseKeyError()` answers `KvGet` with `KeyError.txn_not_found` and asserts that `get()` throws the base `TiKvException` (`Get failed: TxnNotFound`) instead of returning `""`, that the error is not retried, and that the failed read is not cached in the read set. No production behaviour changes — `TxnReader::handleReadKeyError()` has thrown for every unhandled variant since #263; this adds the `get()` regression coverage the audit issue asked for. (#221)

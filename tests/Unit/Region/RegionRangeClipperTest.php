@@ -73,6 +73,7 @@ final class RegionRangeClipperTest extends TestCase
     {
         yield 'ordinary' => ['z', 'a'];
         yield 'empty range' => ['a', 'a'];
+        yield 'both bounds empty' => ['', ''];
         yield 'unbounded lower bound' => ['a', ''];
         yield 'byte order, not numeric order' => ['20', '100'];
     }
@@ -90,8 +91,21 @@ final class RegionRangeClipperTest extends TestCase
     public static function reversedReverseRanges(): iterable
     {
         yield 'ordinary' => ['a', 'z'];
-        yield 'empty upper bound' => ['', 'a'];
         yield 'byte order, not numeric order' => ['100', '20'];
+    }
+
+    public function testAssertReverseRangeOrderRejectsAnEmptyUpperBoundWithASpecificMessage(): void
+    {
+        // Reverse scan has no +infinity upper-bound sentinel: '' sorts before
+        // every non-empty lower bound, so the range is reversed. The error
+        // names the empty upper bound instead of the generic ordering text
+        // (RAW-09, issue #194).
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'Invalid range in reverseScan: an empty start key is not a valid upper bound',
+        );
+
+        RegionRangeClipper::assertReverseRangeOrder('', 'a', 'reverseScan');
     }
 
     // ========================================================================
