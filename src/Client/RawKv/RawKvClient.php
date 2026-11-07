@@ -89,9 +89,13 @@ use Psr\Log\NullLogger;
  * store addresses before that wrapper and can still throw
  * `StoreNotFoundException` directly.
  *
- * `ingest()` is the exception: {@see SstIngestor} has no RetryExecutor, so a
- * `StoreNotFoundException` escapes directly and
- * `RetryBudgetExhaustedException` is not reachable at all.
+ * `ingest()` runs each region group through {@see RetryExecutor} with a fresh
+ * budget per group, so it can throw {@see RetryBudgetExhaustedException}
+ * directly (when no region group had been applied yet) or wrap a failure in
+ * {@see \CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException} once
+ * at least one group has landed. The store-mode switch fan-out still reports
+ * its failures through {@see BatchPartialFailureException}; a missing store
+ * during region resolution is retried and, when fatal, escapes directly.
  */
 final class RawKvClient
 {
@@ -557,10 +561,15 @@ final class RawKvClient
             $regionResolver,
             $timeoutConfig,
             $this->logger,
+            $regionCache,
             $this->maxConcurrency,
             $this->maxIngestSize,
             $this->requestContext,
             $this->resourceControl,
+            maxBackoffMs: $maxBackoffMs,
+            serverBusyBudgetMs: $serverBusyBudgetMs,
+            retryDeadlineMs: $this->retryDeadlineMs,
+            metrics: $metrics,
         );
     }
 
@@ -1604,7 +1613,20 @@ final class RawKvClient
      * The key-value pairs are sorted by key, grouped by region, and written
      * as SST files via the TiKV ImportSST service. All TiKV stores are
      * switched to import mode during the operation and switched back to
-     * normal mode on completion (even on failure).
+     * normal mode on completion, including on any exception. Process death
+     * (OOM kill, deploy restart, `kill -9`) bypasses that `finally` and
+     * leaves every store in import mode; see the operations guide for the
+     * manual recovery.
+     *
+     * Each region group is retried on retryable region errors (`NotLeader`,
+     * `EpochNotMatch`, `ServerIsBusy`, …) against a freshly resolved region,
+     * with a fresh retry budget per group (a long import is not capped by
+     * `retryDeadlineMs`).
+     * The import is still **not atomic across regions**: when a later group
+     * fails permanently, the earlier groups keep their data and the failure
+     * is reported as {@see \CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException},
+     * which lists the applied region IDs. Re-running the same key-value pairs
+     * is the recommended recovery (it is idempotent; a TTL restarts).
      *
      * Keys inherit PHP's array-key semantics: only canonical decimal-integer
      * strings (`'12345'`, `'0'`) are coerced to int array keys, while
@@ -1626,8 +1648,15 @@ final class RawKvClient
      * @throws InvalidStoreAddressException When PD returns a store address
      *         that fails validation (malformed or outside the allowed set)
      * @throws StoreNotFoundException When PD no longer knows a store that must
-     *         receive an SST. `ingest()` has no RetryExecutor, so this escapes
-     *         directly
+     *         receive an SST. Region resolution is retried; this is the fatal
+     *         verdict the retry executor rethrows
+     * @throws RetryBudgetExhaustedException When a region's retry loop
+     *         exhausts its attempt cap or wall-clock deadline before any region
+     *         group was applied (issue #197)
+     * @throws \CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException
+     *         When at least one region group was already ingested and a later
+     *         one failed permanently; the exception lists the applied region
+     *         IDs (issue #197)
      * @throws BatchDeadlineExceededException When the store-mode fan-out
      *         exceeds `options['timeout']['batchDeadlineMs']`
      * @throws TiKvException when a key's region cannot be resolved. Fail-closed:

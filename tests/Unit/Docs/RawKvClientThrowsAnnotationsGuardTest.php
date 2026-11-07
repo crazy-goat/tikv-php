@@ -33,10 +33,9 @@ use PHPUnit\Framework\TestCase;
  *  - the lazy iterator factories return a `ScanIterator`; their RPCs run
  *    during iteration, so the retry exceptions belong on
  *    `ScanIterator::next()` / `valid()`, not on the factory;
- *  - `ingest()` is not classified as retrying because `SstIngestor` has no
- *    `RetryExecutor`. `StoreNotFoundException` still escapes directly from
- *    its store-address resolution, which is why it is annotated there without
- *    a retry-budget line.
+ *  - `ingest()` is classified as retrying since issue #197: `SstIngestor`
+ *    runs each region group through a `RetryExecutor`, so both the retry
+ *    budget and `StoreNotFoundException` are part of its contract.
  */
 class RawKvClientThrowsAnnotationsGuardTest extends TestCase
 {
@@ -194,16 +193,11 @@ class RawKvClientThrowsAnnotationsGuardTest extends TestCase
         }
     }
 
-    public function testIngestDoesNotClaimARetryBudgetItDoesNotUse(): void
+    public function testIngestDocumentsItsRetryExecutorExceptions(): void
     {
         $doc = $this->methodSource(RawKvClient::class, 'ingest')['doc'];
 
-        self::assertStringNotContainsString(
-            '@throws ' . self::RETRY_BUDGET,
-            $doc,
-            'ingest() has no RetryExecutor (SstIngestor does not use one); a retry-budget '
-            . 'annotation here would be speculative.',
-        );
+        $this->assertDocblockDocuments('RawKvClient::ingest()', $doc, self::RETRY_BUDGET);
         $this->assertDocblockDocuments('RawKvClient::ingest()', $doc, self::STORE_NOT_FOUND);
     }
 
