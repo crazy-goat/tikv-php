@@ -76,6 +76,20 @@ no fresh budget after an earlier one spent it), while two calls to
 per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
 on ordinary one-retry-per-region traffic.
 
+## Store-health invalidation runs after the retry invalidation, so only sibling regions remain
+
+Issue #424 records a transport failure at the end of `RetryExecutor`'s catch,
+after the existing routing invalidation has already dropped the region the
+failed attempt was routed through. `RegionResolver::recordStoreFailure()`
+therefore invalidates the *other* cached regions whose leader is the same
+store, with reason `store_unhealthy`; the failing region is already gone under
+`retry_region_error` (or `fatal_region_error`). A test that asserts one
+`store_unhealthy` emission must cache a second region on the same store.
+Success recording is skipped when the caller supplied no target-store provider
+and no failure state is tracked, so the common success path does not pay an
+extra cache lookup; once a failure is recorded, the leader lookup runs so a
+success can reset the counter.
+
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
 A test like `try { $executor->execute($k, fn () => throw …); $this->fail(...); } catch (TiKvException) {}`

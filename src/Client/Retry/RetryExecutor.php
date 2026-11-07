@@ -10,6 +10,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
+use CrazyGoat\TiKV\Client\Exception\StoreUnavailableException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
@@ -137,10 +138,16 @@ final readonly class RetryExecutor
             }
 
             try {
-                return $operation();
+                $result = $operation();
+                $this->recordStoreSuccess($key, $targetStoreId);
+
+                return $result;
             } catch (TiKvException $e) {
                 $lastError = $e;
                 $attemptBeforeInspection = $attempt;
+                $failedStoreIdAtFailure = $e instanceof GrpcException
+                    ? $this->failedStoreIdFor($key, $targetStoreId)
+                    : null;
 
                 $backoffType = $this->handleNotLeader($e, $key);
 
@@ -179,6 +186,7 @@ final readonly class RetryExecutor
                             'key' => KeyRedactor::redact($key),
                             'error' => $e->getMessage(),
                         ]);
+                        $this->recordStoreFailure($e, $failedStoreIdAtFailure);
                         throw $e;
                     }
 
@@ -250,7 +258,7 @@ final readonly class RetryExecutor
                                 // channel.
                                 try {
                                     $failedAddress = $this->regionResolver->resolveStoreAddress($failedStoreId);
-                                } catch (StoreNotFoundException) {
+                                } catch (StoreNotFoundException | StoreUnavailableException) {
                                 }
                             }
 
@@ -281,6 +289,8 @@ final readonly class RetryExecutor
                         );
                     }
                 }
+
+                $this->recordStoreFailure($e, $failedStoreIdAtFailure);
 
                 $sleepMs = $backoffType->sleepMs($attemptBeforeInspection);
 
@@ -567,6 +577,14 @@ final readonly class RetryExecutor
      */
     public static function invalidatesRoutingOnRetry(TiKvException $e): bool
     {
+        // A store in its health cooldown is not evidence that the cached
+        // region is wrong: the region is intact, the store is simply not
+        // routable until the cooldown ends (issue #424). Dropping the entry
+        // would force a PD round trip on every probe attempt.
+        if ($e instanceof StoreUnavailableException) {
+            return false;
+        }
+
         if (!$e instanceof RegionException) {
             return true;
         }
@@ -716,6 +734,79 @@ final readonly class RetryExecutor
                 $this->regionResolver->invalidateStore($storeId, 'transport_error');
             }
         }
+    }
+
+    /**
+     * Record a successful attempt against the store it was routed to
+     * (issue #424, GAP-10).
+     *
+     * The provider is authoritative for reads that may target a follower;
+     * the cached region's leader is the fallback for leader-only operations.
+     * A null answer (no region cached, no provider) records nothing.
+     *
+     * @param (callable(): ?int)|null $targetStoreId
+     */
+    private function recordStoreSuccess(string $key, ?callable $targetStoreId): void
+    {
+        if ($targetStoreId === null && !$this->regionResolver->hasTrackedStoreFailures()) {
+            return;
+        }
+
+        $storeId = $this->failedStoreIdFor($key, $targetStoreId);
+        if ($storeId !== null) {
+            $this->regionResolver->recordStoreSuccess($storeId);
+        }
+    }
+
+    /**
+     * Record a failed attempt against the store it was routed to
+     * (issue #424, GAP-10).
+     *
+     * Only a `GrpcException` with a status that reflects the store's
+     * reachability is evidence about store health — `UNAVAILABLE` (the
+     * connection failed) or `DEADLINE_EXCEEDED` (no answer in time). A region
+     * error means the request reached the store, a `StoreNotMatch` means the
+     * address was wrong, and a fatal status such as `UNAUTHENTICATED` is a
+     * client or request problem, not a dead store. The store ID comes from
+     * the caller's target provider when it has one, otherwise from the cached
+     * region's leader.
+     */
+    private function recordStoreFailure(TiKvException $e, ?int $storeId): void
+    {
+        if (!$e instanceof GrpcException || $storeId === null || $storeId <= 0) {
+            return;
+        }
+
+        // Only statuses that say something about the store's reachability:
+        // UNAVAILABLE (the connection failed) and DEADLINE_EXCEEDED (the
+        // store did not answer in time). A fatal status such as
+        // UNAUTHENTICATED or a ServerBusy-style RESOURCE_EXHAUSTED is about
+        // the request or the client configuration, not the store's health,
+        // and must not demote it.
+        $status = GrpcStatusCode::tryFrom($e->grpcStatusCode);
+        if ($status !== GrpcStatusCode::Unavailable && $status !== GrpcStatusCode::DeadlineExceeded) {
+            return;
+        }
+
+        $this->regionResolver->recordStoreFailure($storeId);
+    }
+
+    /**
+     * The store the last attempt was addressed to, from the caller's provider
+     * or the cached region's leader.
+     *
+     * @param (callable(): ?int)|null $targetStoreId
+     */
+    private function failedStoreIdFor(string $key, ?callable $targetStoreId): ?int
+    {
+        $storeId = $this->targetStoreIdOf($targetStoreId);
+        if ($storeId !== null) {
+            return $storeId;
+        }
+
+        $cached = $this->regionCache->getByKey($key);
+
+        return $cached instanceof RegionInfo ? $cached->leaderStoreId : null;
     }
 
     /**

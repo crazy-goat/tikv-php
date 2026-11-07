@@ -11,12 +11,14 @@ use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreHealthTracker;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
+use CrazyGoat\TiKV\Client\Exception\StoreUnavailableException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
@@ -30,6 +32,12 @@ use Psr\Log\NullLogger;
 
 final readonly class RegionResolver
 {
+    /**
+     * Per-store circuit-breaker state shared by every retry executor that
+     * routes through this resolver (issue #424, GAP-10).
+     */
+    private StoreHealthTracker $storeHealth;
+
     /**
      * Host names that grpc-core interprets as URI schemes when they appear
      * as the host part of a channel target (unix:20160 is a socket target,
@@ -122,7 +130,15 @@ final readonly class RegionResolver
         private ?array $allowedStorePorts = null,
         private ?CodecInterface $codec = null,
         private ?StoreCacheInterface $storeCache = null,
+        /**
+         * Per-store health state. Null builds a tracker that reports to this
+         * resolver's metrics backend; callers that share a resolver across a
+         * client's components get one tracker per resolver, which is exactly
+         * the scope of one client's routing decisions (issue #424, GAP-10).
+         */
+        ?StoreHealthTracker $storeHealth = null,
     ) {
+        $this->storeHealth = $storeHealth ?? new StoreHealthTracker(metrics: $this->metrics);
     }
 
     public function getRegionInfo(string $key): RegionInfo
@@ -590,6 +606,15 @@ final readonly class RegionResolver
 
     public function resolveStoreAddress(int $storeId): string
     {
+        if (!$this->storeHealth->isAvailable($storeId)) {
+            $this->logger->warning('Store is unhealthy, refusing to route', [
+                'storeId' => $storeId,
+                'unhealthyUntilMs' => $this->storeHealth->getUnhealthyUntilMs($storeId),
+            ]);
+
+            throw new StoreUnavailableException($storeId);
+        }
+
         $store = $this->pdClient->getStore($storeId);
         if (!$store instanceof Store) {
             throw new StoreNotFoundException($storeId);
@@ -603,6 +628,77 @@ final readonly class RegionResolver
         $this->validateStoreAddress($address, $storeId);
 
         return $address;
+    }
+
+    /**
+     * Record a successful RPC against a store (issue #424, GAP-10).
+     *
+     * A success clears the store's consecutive-failure counter. When the
+     * store was unhealthy — the normal half-open probe after its cooldown —
+     * it also emits the recovery transition and makes the store routable
+     * again.
+     */
+    public function recordStoreSuccess(int $storeId): void
+    {
+        if ($storeId <= 0) {
+            return;
+        }
+
+        $this->storeHealth->recordSuccess($storeId);
+    }
+
+    /**
+     * Record a failed RPC against a store (issue #424, GAP-10).
+     *
+     * The first failure that crosses the threshold marks the store unhealthy
+     * and drops every cached region whose leader is on that store, so the
+     * next resolution asks PD for a region with a different leader instead of
+     * retrying the dead one. Later failures during the cooldown only extend
+     * it; the invalidation runs once per healthy-to-unhealthy transition.
+     */
+    public function recordStoreFailure(int $storeId): void
+    {
+        if ($storeId <= 0) {
+            return;
+        }
+
+        if (!$this->storeHealth->recordFailure($storeId)) {
+            return;
+        }
+
+        $invalidatedRegionIds = [];
+        foreach ($this->regionCache->getCachedRegions() as $region) {
+            if ($region->leaderStoreId !== $storeId) {
+                continue;
+            }
+
+            $this->regionCache->invalidate($region->regionId, 'store_unhealthy');
+            $invalidatedRegionIds[] = $region->regionId;
+        }
+
+        $this->logger->warning('Store marked unhealthy, invalidated its leader regions', [
+            'storeId' => $storeId,
+            'invalidatedRegionIds' => $invalidatedRegionIds,
+        ]);
+    }
+
+    /**
+     * Whether a request may be routed to the store now (issue #424, GAP-10).
+     */
+    public function isStoreAvailable(int $storeId): bool
+    {
+        return $storeId <= 0 || $this->storeHealth->isAvailable($storeId);
+    }
+
+    /**
+     * Whether any store has a failure recorded since its last success.
+     *
+     * The retry executor uses this to avoid resolving a store ID on the
+     * common success path when there is no failure state to reset.
+     */
+    public function hasTrackedStoreFailures(): bool
+    {
+        return $this->storeHealth->hasTrackedFailures();
     }
 
     /**

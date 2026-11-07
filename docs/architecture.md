@@ -887,6 +887,15 @@ the sequential retrying path.
   retried without a re-handshake. The exception carries the address of the
   failed call, so a nested lock-resolution RPC against another region also
   closes its own channel
+- Track per-store health as a circuit breaker (issue #424): after three
+  consecutive `UNAVAILABLE` or `DEADLINE_EXCEEDED` transport failures a store
+  is unavailable for a one-second cooldown, its cached leader regions are
+  invalidated with the `store_unhealthy` reason, and `resolveStoreAddress()`
+  throws the retryable `StoreUnavailableException` before any RPC. After the
+  cooldown the next request is a half-open probe: a success recovers the
+  store, a failure restarts the cooldown. Fatal statuses such as
+  `UNAUTHENTICATED` and server-busy responses do not demote a store. The
+  state is reported through `MetricsInterface::storeHealthChanged()`
 
 **Trade-off**: refresh costs one PD `GetRegion` per cached region, which is
 why it is opt-in and throttled by `regionCacheRefreshMs` rather than running
