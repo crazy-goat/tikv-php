@@ -76,6 +76,36 @@ no fresh budget after an earlier one spent it), while two calls to
 per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
 on ordinary one-retry-per-region traffic.
 
+## Store-health invalidation runs after the retry invalidation, so only sibling regions remain
+
+Issue #424 records a transport failure at the end of `RetryExecutor`'s catch,
+after the existing routing invalidation has already dropped the region the
+failed attempt was routed through. `RegionResolver::recordStoreFailure()`
+therefore invalidates the *other* cached regions whose leader is the same
+store, with reason `store_unhealthy`; the failing region is already gone under
+`retry_region_error` (or `fatal_region_error`). A test that asserts one
+`store_unhealthy` emission must cache a second region on the same store.
+Success recording is skipped when the caller supplied no target-store provider
+and no failure state is tracked, so the common success path does not pay an
+extra cache lookup; once a failure is recorded, the leader lookup runs so a
+success can reset the counter.
+
+Failure recording uses the exception's own `targetAddress`, resolved through
+`RegionResolver`'s address-to-store index, not the outer operation's provider.
+That is what keeps a PD outage (`pd:2379` is a configured PD endpoint and is
+never in the index) and a nested lock-resolution RPC against store B from
+demoting store A. An address that was never validated through
+`RegionResolver::validateStoreAddress()` is deliberately not guessed: a
+synthetic or direct `GrpcClient` address records nothing. `CasIndeterminateException`
+is unwrapped to its underlying `GrpcException` before this check.
+
+The consecutive-failure counter expires after `DEFAULT_FAILURE_WINDOW_MS`
+(60 s), so isolated failures spread over time never accumulate into a
+demotion. An unhealthy store does **not** become healthy when its cooldown
+expires: it is half-open and routable, but `isHealthy()` and a gauge fed from
+`storeHealthChanged()` stay false until a probe actually succeeds. This is
+intentional — the cooldown is not evidence of recovery.
+
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
 A test like `try { $executor->execute($k, fn () => throw …); $this->fail(...); } catch (TiKvException) {}`

@@ -9,6 +9,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\StoreUnavailableException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
@@ -34,6 +35,13 @@ final class ErrorClassifier
         // rejection as retryable and hide it behind up to 30 retries.
         if ($e instanceof InvalidStoreAddressException) {
             return null;
+        }
+
+        // A store in its health cooldown is a transport-level transient
+        // condition, not a routing error: wait it out through the normal RPC
+        // backoff so the next attempt is a half-open probe (issue #424).
+        if ($e instanceof StoreUnavailableException) {
+            return BackoffType::TiKvRpc;
         }
 
         // A per-pair KeyError is not a region error and must never be retried

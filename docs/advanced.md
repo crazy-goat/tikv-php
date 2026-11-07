@@ -831,6 +831,15 @@ the write path is degraded even though the cluster is reachable. Monitor the
 write path through your application's own traffic and the counters exposed by
 `getMetrics()`.
 
+The data path also tracks per-store health internally (issue #424): after three
+consecutive `UNAVAILABLE` or `DEADLINE_EXCEEDED` failures within a 60-second
+window a store is skipped for a one-second cooldown and then probed again.
+Failures are attributed to the store the failing RPC actually targeted, so a PD
+outage or a nested RPC against another store does not demote the outer store,
+and replica reads skip a store in cooldown. `healthCheck()` does not report that
+state — it is visible through `MetricsInterface::storeHealthChanged()` when a
+metrics backend is configured.
+
 See [Operations → Cluster and lifecycle](operations.md#cluster-and-lifecycle)
 for the signatures, return values and exceptions.
 
