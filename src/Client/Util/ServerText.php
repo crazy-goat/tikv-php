@@ -17,20 +17,22 @@ namespace CrazyGoat\TiKV\Client\Util;
  *
  * {@see self::sanitise()} removes complete ANSI control sequences and the
  * remaining C0 control characters (including `\n`, `\r`, `\t` and `ESC`) and
- * DEL, then caps the result at {@see self::DEFAULT_MAX_LENGTH} bytes. The
- * replacement is byte-oriented, so it never mangles a multibyte UTF-8
- * sequence the way a `/u` pattern would when the server sends invalid UTF-8.
+ * DEL, then keeps at most {@see self::DEFAULT_MAX_LENGTH} bytes and appends
+ * `...` when it truncates. Removal is byte-oriented so invalid UTF-8 from a
+ * hostile server is not silently discarded; for valid UTF-8 the cut backs off
+ * to a codepoint boundary, so the result stays valid UTF-8.
  *
  * The sanitised text is for exception messages only. A caller that needs the
- * raw server string for protocol decisions must keep using the original
- * value, exactly as {@see \CrazyGoat\TiKV\Client\Exception\PdException} keeps
- * `pdErrorMessage` alongside its sanitised message.
+ * raw server string for protocol decisions must keep using the original value,
+ * the way {@see \CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException}
+ * keeps `rawKey` out of its message and exposes it only through
+ * `getRawKey()`.
  */
 final class ServerText
 {
     /**
-     * Maximum number of bytes kept from a server-supplied string. Long
-     * enough for a real TiKV error, short enough that a hostile server
+     * Maximum number of bytes of server text kept before the `...` marker.
+     * Long enough for a real TiKV error, short enough that a hostile server
      * cannot flood the log sink through one exception.
      */
     public const DEFAULT_MAX_LENGTH = 512;
@@ -45,8 +47,9 @@ final class ServerText
      * so the printable tail of a colour code does not survive as ordinary
      * text. Every remaining C0 control character and DEL is then removed,
      * which also covers ESC sequences the CSI pattern does not match (OSC,
-     * single-character escapes, ...). The result is truncated on a byte
-     * boundary and marked with an ellipsis when it exceeds $maxLength.
+     * single-character escapes, ...). When the result exceeds $maxLength it is
+     * cut to at most $maxLength bytes, backed off to a UTF-8 codepoint
+     * boundary for valid input, and marked with an ellipsis.
      */
     public static function sanitise(string $text, int $maxLength = self::DEFAULT_MAX_LENGTH): string
     {
@@ -63,6 +66,18 @@ final class ServerText
             return $clean;
         }
 
-        return substr($clean, 0, $maxLength) . self::TRUNCATION_SUFFIX;
+        $truncated = substr($clean, 0, $maxLength);
+
+        // A byte cut can land inside a multibyte UTF-8 codepoint, which would
+        // leave an invalid sequence in the log record. For valid UTF-8 back
+        // off by at most three bytes; invalid UTF-8 keeps the byte cut so its
+        // bytes are not silently dropped.
+        if (preg_match('//u', $clean) === 1) {
+            while ($truncated !== '' && preg_match('//u', $truncated) !== 1) {
+                $truncated = substr($truncated, 0, -1);
+            }
+        }
+
+        return $truncated . self::TRUNCATION_SUFFIX;
     }
 }

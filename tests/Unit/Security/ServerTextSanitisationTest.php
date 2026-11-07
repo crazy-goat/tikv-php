@@ -121,6 +121,39 @@ class ServerTextSanitisationTest extends TestCase
         self::assertStringNotContainsString('TAIL', $clean);
     }
 
+    public function testTruncationDoesNotSplitAThreeByteCodepoint(): void
+    {
+        $clean = ServerText::sanitise(str_repeat("\u{20AC}", 200));
+
+        self::assertSame(1, preg_match('//u', $clean));
+        self::assertNotFalse(json_encode($clean));
+        self::assertStringEndsWith('...', $clean);
+        // 170 complete 3-byte codepoints (510 bytes) plus the 3-byte marker.
+        self::assertSame(513, strlen($clean));
+        self::assertSame(170, substr_count($clean, "\u{20AC}"));
+    }
+
+    public function testTruncationBacksOffAThreeBytePartialCodepoint(): void
+    {
+        $clean = ServerText::sanitise('a' . str_repeat("\u{1F600}", 200));
+
+        self::assertSame(1, preg_match('//u', $clean));
+        self::assertNotFalse(json_encode($clean));
+        self::assertStringEndsWith('...', $clean);
+        // 1 ASCII byte + 127 complete 4-byte codepoints + the 3-byte marker.
+        self::assertSame(512, strlen($clean));
+        self::assertSame(127, substr_count($clean, "\u{1F600}"));
+    }
+
+    public function testLongInvalidUtf8KeepsTheByteCut(): void
+    {
+        $clean = ServerText::sanitise(str_repeat("\xFF", ServerText::DEFAULT_MAX_LENGTH + 10));
+
+        self::assertSame(ServerText::DEFAULT_MAX_LENGTH + 3, strlen($clean));
+        self::assertStringEndsWith('...', $clean);
+        self::assertSame(ServerText::DEFAULT_MAX_LENGTH, substr_count($clean, "\xFF"));
+    }
+
     public function testShortCleanTextIsReturnedUnchanged(): void
     {
         self::assertSame('server is busy', ServerText::sanitise('server is busy'));

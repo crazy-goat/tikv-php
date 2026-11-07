@@ -343,7 +343,10 @@ and
 
 The message template is `<operation> failed: <server error>`, e.g.
 `RawGetKeyTTL failed: ...`, `RegionError failed: ...`. The server-side part
-is passed through verbatim; there are more kinds than listed above.
+is sanitised — control characters and ANSI escape sequences are removed, and
+the text is truncated to 512 bytes and marked with `...` (see
+[Log Redaction](configuration.md#log-redaction)) — but it is not redacted;
+there are more kinds than listed above.
 
 ### Key Errors
 
@@ -556,7 +559,11 @@ both RawKV-with-TTL and TxnKV.
 ```
 TransactionConflictException: Write conflict during prewrite
 ```
-Also thrown from the commit and pessimistic-lock paths (`Write conflict during pessimistic lock`); when TiKV returns its own retryable/abort strings they are passed through verbatim.
+Also thrown from the commit and pessimistic-lock paths
+(`Write conflict during pessimistic lock`); when TiKV returns its own
+retryable/abort strings they are sanitised like every other server-supplied
+message (control characters and ANSI escapes removed, truncated to 512 bytes
+and marked with `...`) but not redacted.
 
 **What it means:** Another transaction committed a write to one of this
 transaction's keys between our read (snapshot start ts) and our write.
