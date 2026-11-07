@@ -1607,7 +1607,9 @@ positive integer).
    built on demand and released when the next chunk is requested, so the
    payload is not held as a full `Pair[]` array plus a full request array plus
    the serialised messages. The resulting SST is committed with the
-   **`Ingest`** RPC.
+   **`Ingest`** RPC. If the stream fails while it is being sent, the transport
+   cancels the RPC so the store stops working on the abandoned import instead
+   of waiting for its own deadline (issue #286).
 
 This bypasses the normal Raft write path and writes pre-sorted data directly
 into regions, giving far higher throughput than `batchPut()` on large loads.
