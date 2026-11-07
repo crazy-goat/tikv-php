@@ -200,7 +200,8 @@ final class TxnKvClient
      * transaction's read set (issue #297). 0 (default) = unlimited.
      * Exceeding the limit throws
      * {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
-     * from get()/batchGet() before the fetched value is retained.
+     * from get()/batchGet()/getForUpdate() before the fetched value is
+     * retained.
      */
     public const OPT_MAX_READ_SET_ENTRIES = 'maxReadSetEntries';
 
@@ -213,11 +214,11 @@ final class TxnKvClient
 
     /**
      * begin() options[] key for read-set tracking (issue #297). Defaults to
-     * false: `get()`/`batchGet()` do not retain values in `getReadSet()`,
-     * because nothing in the commit path consumes the read set and keeping it
-     * on the hot read path makes a long-lived transaction's memory grow
-     * without bound. Must be a bool. Passing true opts in to the map and to
-     * the `maxReadSetEntries` / `maxReadSetTotalSize` limits.
+     * false: `get()`/`batchGet()`/`getForUpdate()` do not retain values in
+     * `getReadSet()`, because nothing in the commit path consumes the read set
+     * and keeping it on the hot read path makes a long-lived transaction's
+     * memory grow without bound. Must be a bool. Passing true opts in to the
+     * map and to the `maxReadSetEntries` / `maxReadSetTotalSize` limits.
      */
     public const OPT_TRACK_READ_SET = 'trackReadSet';
 
@@ -647,7 +648,8 @@ final class TxnKvClient
      *     into multiple requests. Exceeding a size limit throws
      *     {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
      *     from set()/delete() before any RPC is issued, and from
-     *     get()/batchGet() before the fetched value is retained.
+     *     get()/batchGet()/getForUpdate() before the fetched value is
+     *     retained.
      *     `requestContext` replaces the client-level Context control fields
      *     (see {@see self::OPT_REQUEST_CONTEXT}) for this transaction only
      *     (issue #426). Omit it to inherit the client-level value; pass null

@@ -553,7 +553,8 @@ on servers that use the newer wake-up mode, from the per-key `results` field.
 If a server populates neither, `getForUpdate()` falls back to a snapshot
 `get()`, which costs a second round trip and returns the `startTs` value.
 With `trackReadSet`, the consumed value (or `null` for a missing key) is
-recorded in the transaction's read set, exactly like a `get()`.
+recorded in the transaction's read set like a `get()` — but it is the
+for-update read at `for_update_ts`, not the `startTs` snapshot.
 
 #### Isolation, timestamps and status
 

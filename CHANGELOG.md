@@ -25,7 +25,7 @@ policy now classifies as internal.
 
 ### Fixed
 
-- `Transaction::getForUpdate()` now records the value it consumes from the `KvPessimisticLock` response in the transaction's tracked read set (issue #228, TXN-23). With `trackReadSet: true`, a `SELECT ... FOR UPDATE` read appears in `getReadSet()` exactly like a `get()` — a missing key is recorded as `null` — and counts against `maxReadSetEntries` / `maxReadSetTotalSize`. The `return_values` request flag remains `false` on every other lock path (eager `set()`/`delete()`, explicit `lockKeys()` and the deferred commit locks), so no discarded values are requested or transferred. Documented in `README.md`, `docs/configuration.md`, `docs/architecture.md` and `docs/error-handling.md`. (#228)
+- `Transaction::getForUpdate()` now records the value it consumes from the `KvPessimisticLock` response in the transaction's tracked read set (issue #228, TXN-23). With `trackReadSet: true`, a `SELECT ... FOR UPDATE` read appears in `getReadSet()` exactly like a `get()` — a missing key is recorded as `null` — and counts against `maxReadSetEntries` / `maxReadSetTotalSize`. The `return_values` request flag remains `false` on every other lock path (eager `set()`/`delete()`, explicit `lockKeys()`, the deferred commit locks, and a deferred-mode `getForUpdate()` whose key already has a buffered write), so no discarded values are requested or transferred. Documented in `README.md`, `docs/configuration.md`, `docs/architecture.md` and `docs/error-handling.md`. (#228)
 
 ## [v0.13.0] - 2026-11-07
 

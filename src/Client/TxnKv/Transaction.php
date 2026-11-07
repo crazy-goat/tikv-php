@@ -801,7 +801,10 @@ final class Transaction
                 $this->state,
                 $this->pdClient->getTimestamp(),
                 $primary,
-                true,
+                // A buffered write wins over the response value, so in
+                // deferred mode (no lock yet) only the lock is needed; asking
+                // for values would transfer and discard them (issue #228).
+                !$this->state->hasWriteSetKey($key),
                 $this->retryExecutor()->beginOperation(),
             );
         } catch (\Throwable $failure) {

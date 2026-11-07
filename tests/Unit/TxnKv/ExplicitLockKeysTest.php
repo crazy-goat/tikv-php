@@ -415,6 +415,18 @@ class ExplicitLockKeysTest extends TestCase
         $this->assertFalse($this->lockRequests[0]->getReturnValues());
     }
 
+    public function testDeferredGetForUpdateOnABufferedWriteDoesNotRequestReturnValues(): void
+    {
+        $this->stubLockResponse(new PessimisticLockResponse());
+
+        $txn = $this->createTransaction(['eagerPessimisticLocks' => false]);
+        $txn->set('key', 'buffered');
+
+        $this->assertSame('buffered', $txn->getForUpdate('key'));
+        $this->assertCount(1, $this->lockRequests, 'deferred mode still acquires the lock');
+        $this->assertFalse($this->lockRequests[0]->getReturnValues());
+    }
+
     public function testGetForUpdateReturnsNullForAMissingKey(): void
     {
         $lockResponse = new PessimisticLockResponse();
