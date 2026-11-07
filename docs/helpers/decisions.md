@@ -1675,3 +1675,20 @@ A split that shrinks a group's region below the group's last key is still not
 re-grouped (the retry only re-resolves the first key and fails closed once the
 budget is exhausted). That limitation is deliberate for this issue; fixing it
 means re-grouping the remaining keys inside the retried closure.
+
+## gRPC receive limit defaults to 64 MB, not the core's 4 MB (SEC-16, issue #319)
+
+`GrpcClient` sets `grpc.max_receive_message_length` on every channel from
+`options['grpc']['maxReceiveMessageBytes']`, default **64 MB**. The security
+audit's SEC-16 suggested defaulting to 4 MB, but 4 MB is the gRPC core default
+that made full-limit scans and batch reads fail deterministically with
+`RESOURCE_EXHAUSTED` (issue #265). Keep 64 MB unless the workload is known to
+return smaller values; lowering it is a hardening choice, not a requirement.
+
+The limit is enforced by grpc-core in the channel arguments, so an oversized
+frame is rejected **before** its payload is materialised as a PHP string. Do
+not treat `GrpcResponseParser::setMaxMessageSize()` as the primary control: it
+runs after the string exists and cannot prevent that allocation. It remains
+only as a post-allocation defence-in-depth assertion (it can skip the second,
+larger allocation performed by protobuf decoding when set tighter than the
+transport limit).
