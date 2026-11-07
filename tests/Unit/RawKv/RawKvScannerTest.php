@@ -1077,6 +1077,19 @@ class RawKvScannerTest extends TestCase
         $this->assertSame([], $this->scanner->reverseScan('', '', 100, false));
     }
 
+    public function testReverseScanWithAnEmptyStartKeyAndNonEmptyEndKeyThrowsBeforeRpc(): void
+    {
+        // Reverse scan has no +infinity upper-bound sentinel: an empty start
+        // key is the keyspace minimum, so '' sorts before every non-empty
+        // lower bound and the range is reversed. Reject it instead of issuing
+        // a RawScan whose empty start_key returns nothing (RAW-09, #194).
+        $this->expectNoRpc();
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('an empty start key is not a valid upper bound');
+
+        $this->scanner->reverseScan('', 'a', 100, false);
+    }
+
     // ========================================================================
     // scan() – limit spanning three regions
     // ========================================================================
