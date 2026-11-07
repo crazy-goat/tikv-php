@@ -498,6 +498,20 @@ and shrinks as the budget is consumed. When the budget runs out the
 transaction fails with `LockWaitTimeoutException` instead of committing
 without the lock. See [Configuration](docs/configuration.md#pessimistic-lock-wait-timeout-txnkv).
 
+A pessimistic transaction can also take a lock explicitly, without writing a
+value:
+
+```php
+$txn->lockKeys('account:1', 'account:2');   // lock now, no value written
+$current = $txn->getForUpdate('account:1'); // lock + read in one round trip
+```
+
+`getForUpdate()` is the `SELECT ... FOR UPDATE` primitive: it returns the
+latest committed value at the lock's `for_update_ts` (not the snapshot value),
+and a missing key returns `null`. Both methods are pessimistic-only; an
+optimistic transaction throws `InvalidStateException`. The locks are released
+by `commit()` or `rollback()`.
+
 #### Isolation, timestamps and status
 
 Snapshot isolation at `startTs`, a timestamp from PD's TSO. A transaction sees

@@ -578,28 +578,7 @@ final class Transaction
             try {
                 $this->committer->lockKeys([$key], $this->state, $forUpdateTs, $key);
             } catch (\Throwable $failure) {
-                // A failed eager statement makes the transaction unusable;
-                // otherwise a later write could inherit a primary key that
-                // was never locked. Best-effort rollback also releases a
-                // lock whose response may have been lost in transport.
-                $this->state->markPessimisticWriteFailed();
-                try {
-                    $this->committer->rollback(
-                        $this->state,
-                        $this->retryExecutor(),
-                        $this->classifyError(...),
-                    );
-                } catch (\Throwable $cleanupFailure) {
-                    // Keep the transaction active-but-unwritable so the
-                    // caller (or the destructor) can retry rollback; do
-                    // not claim cleanup succeeded when the RPC failed.
-                    $this->logger->error('Pessimistic lock failure cleanup failed', [
-                        'txnId' => $this->txnId,
-                        'exception' => $cleanupFailure,
-                    ]);
-                }
-
-                throw $failure;
+                $this->failPessimisticStatement($failure);
             }
             if ($this->state->getPrimaryLockExpiresAtMs() === null) {
                 $this->state->setPrimaryLockExpiresAtMs($this->state->getStartedAtMs() + $lockTtlMs);
@@ -610,6 +589,44 @@ final class Transaction
         }
 
         unset($this->readTsByKey[$key]);
+    }
+
+    /**
+     * A failed eager pessimistic statement makes the transaction unusable;
+     * otherwise a later write could inherit a primary key that was never
+     * locked. Best-effort rollback also releases a lock whose response may
+     * have been lost in transport (issue #436).
+     */
+    private function failPessimisticStatement(\Throwable $failure): never
+    {
+        $this->state->markPessimisticWriteFailed();
+        try {
+            $this->committer->rollback(
+                $this->state,
+                $this->retryExecutor(),
+                $this->classifyError(...),
+            );
+        } catch (\Throwable $cleanupFailure) {
+            // Keep the transaction active-but-unwritable so the caller (or
+            // the destructor) can retry rollback; do not claim cleanup
+            // succeeded when the RPC failed.
+            $this->logger->error('Pessimistic lock failure cleanup failed', [
+                'txnId' => $this->txnId,
+                'exception' => $cleanupFailure,
+            ]);
+        }
+
+        throw $failure;
+    }
+
+    private function assertPessimistic(string $method): void
+    {
+        if (!$this->pessimistic) {
+            throw new InvalidStateException(sprintf(
+                '%s() is only available in a pessimistic transaction',
+                $method,
+            ));
+        }
     }
 
     /**
@@ -648,6 +665,123 @@ final class Transaction
         $this->keepPrimaryLockAlive();
         $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, null);
+    }
+
+    /**
+     * Acquire pessimistic locks on the given keys without writing values
+     * (issue #436, GAP-22).
+     *
+     * This is the explicit read-for-update primitive: a key locked here stays
+     * locked until the transaction commits or rolls back, so a concurrent
+     * writer blocks (or fails) at its own lock attempt instead of at commit.
+     * The call sends one `KvPessimisticLock` request per region batch and
+     * returns once every lock is acknowledged.
+     *
+     * A key already locked by this transaction is skipped, so calling this
+     * method twice is safe. The lock is acquired immediately even when the
+     * transaction was begun with `eagerPessimisticLocks: false`: that option
+     * defers the implicit locks of `set()` / `delete()`, not an explicit
+     * request.
+     *
+     * @throws InvalidStateException when the transaction is optimistic, not
+     *         active, or already unusable after a failed lock statement
+     * @throws TransactionConflictException
+     * @throws DeadlockException
+     * @throws LockWaitTimeoutException
+     * @throws TiKvException
+     * @throws RegionException
+     * @throws GrpcException
+     */
+    public function lockKeys(string ...$keys): void
+    {
+        $this->state->ensureWritable();
+        $this->assertPessimistic('lockKeys');
+
+        $keys = array_values(array_filter(
+            array_values(array_unique($keys)),
+            fn (string $key): bool => !$this->state->hasPessimisticLock($key),
+        ));
+        if ($keys === []) {
+            return;
+        }
+
+        $this->keepPrimaryLockAlive();
+        $primary = $this->state->getPessimisticPrimaryKey() ?? $keys[0];
+        $this->state->setPessimisticPrimaryKey($primary);
+        // Measure the TTL before the RPC, exactly like the implicit eager
+        // lock: the tracked expiry must never be later than the real one.
+        $lockTtlMs = $this->committer->ttlWithUptimeMs($this->state, $this->pessimisticLockTtlMs);
+        try {
+            $this->committer->lockKeys($keys, $this->state, $this->pdClient->getTimestamp(), $primary);
+        } catch (\Throwable $failure) {
+            $this->failPessimisticStatement($failure);
+        }
+        if ($this->state->getPrimaryLockExpiresAtMs() === null) {
+            $this->state->setPrimaryLockExpiresAtMs($this->state->getStartedAtMs() + $lockTtlMs);
+        }
+    }
+
+    /**
+     * Acquire a pessimistic lock on one key and return its current value
+     * (issue #436, GAP-22).
+     *
+     * This is the `SELECT ... FOR UPDATE` primitive: the lock and the read
+     * happen in one `KvPessimisticLock` round trip, and the value is the
+     * latest committed one at the request's `for_update_ts`, not the
+     * transaction snapshot's. A missing key returns `null`; a key with a
+     * buffered `set()` / `delete()` returns the buffered value
+     * (read-your-writes).
+     *
+     * The value comes from the response's `values` / `not_founds` fields
+     * (`return_values` is set on every lock request). A server that does not
+     * populate them makes this method fall back to a snapshot `get()`, which
+     * costs a second round trip and returns the `startTs` value.
+     *
+     * @throws InvalidStateException when the transaction is optimistic, not
+     *         active, or already unusable after a failed lock statement
+     * @throws TransactionConflictException
+     * @throws DeadlockException
+     * @throws LockWaitTimeoutException
+     * @throws TiKvException
+     * @throws RegionException
+     * @throws GrpcException
+     */
+    public function getForUpdate(string $key): ?string
+    {
+        $this->state->ensureWritable();
+        $this->assertPessimistic('getForUpdate');
+        $this->keepPrimaryLockAlive();
+
+        $primary = $this->state->getPessimisticPrimaryKey() ?? $key;
+        $this->state->setPessimisticPrimaryKey($primary);
+        $lockTtlMs = $this->committer->ttlWithUptimeMs($this->state, $this->pessimisticLockTtlMs);
+        try {
+            $values = $this->committer->lockKeys(
+                [$key],
+                $this->state,
+                $this->pdClient->getTimestamp(),
+                $primary,
+            );
+        } catch (\Throwable $failure) {
+            $this->failPessimisticStatement($failure);
+        }
+        if ($this->state->getPrimaryLockExpiresAtMs() === null) {
+            $this->state->setPrimaryLockExpiresAtMs($this->state->getStartedAtMs() + $lockTtlMs);
+        }
+
+        if ($this->state->hasWriteSetKey($key)) {
+            return $this->state->getWriteSetValue($key);
+        }
+        if (array_key_exists($key, $values)) {
+            return $values[$key];
+        }
+
+        return $this->reader->get(
+            $key,
+            $this->state,
+            $this->retryExecutor(),
+            $this->classifyError(...),
+        );
     }
 
     // ---------------------------------------------------------------

@@ -2192,31 +2192,36 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Acquire pessimistic locks for an eager write operation.
+     * Acquire pessimistic locks for an eager write or an explicit lock
+     * request.
      *
      * This is intentionally synchronous: Transaction::set()/delete() call it
-     * before staging the value, so lock conflicts surface at the write call.
-     * The lower-level region fan-out and wait loop remains shared with the
+     * before staging the value, and Transaction::lockKeys()/getForUpdate()
+     * call it directly, so lock conflicts surface at the call. The
+     * lower-level region fan-out and wait loop remains shared with the
      * deferred commit path.
      *
      * @param string[] $keys
+     * @return array<array-key, ?string> Values TiKV returned for the locked
+     *         keys (issue #436); empty when the server returned none. A
+     *         missing key is `null`.
      */
     public function lockKeys(
         array $keys,
         TransactionState $state,
         int $forUpdateTs,
         string $primary,
-    ): void {
+    ): array {
         $keys = array_values(array_unique($keys));
         if ($keys === []) {
-            return;
+            return [];
         }
 
         $primary = $state->getPessimisticPrimaryKey() ?? $primary;
         $state->setPessimisticPrimaryKey($primary);
         $state->updateMaxForUpdateTs($forUpdateTs);
         try {
-            $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs);
+            return $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs);
         } catch (\Throwable $failure) {
             $state->markPessimisticWriteFailed();
             throw $failure;
@@ -2255,13 +2260,15 @@ final readonly class TwoPhaseCommitter
 
     /**
      * @param string[] $keys
+     * @return array<array-key, ?string> Values returned for the locked keys
      */
     private function lockKeysInternal(
         array $keys,
         TransactionState $state,
         string $primary,
         int $forUpdateTs,
-    ): void {
+    ): array {
+        $valuesByKey = [];
         foreach ($keys as $key) {
             $state->addPessimisticLockAttempt($key);
         }
@@ -2325,6 +2332,7 @@ final readonly class TwoPhaseCommitter
                     $needRetry = false;
                     $lastRegionError = null;
                     $regroup = false;
+                    $response = null;
                     do {
                         $attempt++;
                         // First attempt uses the region already supplied by
@@ -2585,6 +2593,17 @@ final readonly class TwoPhaseCommitter
                     }
 
                     $state->markPessimisticLocksAcquired($regionKeys);
+                    if ($response instanceof PessimisticLockResponse) {
+                        $values = $response->getValues();
+                        $notFounds = $response->getNotFounds();
+                        foreach ($regionKeys as $index => $key) {
+                            if (isset($values[$index])) {
+                                $valuesByKey[$key] = isset($notFounds[$index]) && $notFounds[$index]
+                                    ? null
+                                    : $values[$index];
+                            }
+                        }
+                    }
                 }
             } catch (\Throwable $e) {
                 // A failed lock pass leaves the transaction without a
@@ -2604,6 +2623,8 @@ final readonly class TwoPhaseCommitter
                 throw $e;
             }
         }
+
+        return $valuesByKey;
     }
 
     /**

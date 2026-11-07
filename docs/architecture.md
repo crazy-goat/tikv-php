@@ -177,6 +177,10 @@ final class Transaction
     public function set(string $key, string $value): void;
     public function delete(string $key): void;
     
+    // Explicit pessimistic locking (pessimistic transactions only)
+    public function lockKeys(string ...$keys): void;  // lock without writing
+    public function getForUpdate(string $key): ?string; // lock + read in one RPC
+    
     // Transaction control
     public function commit(): void;           // 2PC: prewrite + commit
     public function rollback(): void;
