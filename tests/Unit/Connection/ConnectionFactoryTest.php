@@ -175,6 +175,35 @@ class ConnectionFactoryTest extends TestCase
         $this->assertSame(1000, $this->grpcProperty($grpc, 'keepaliveTimeoutMs'));
     }
 
+    public function testGrpcReceiveLimitReachesTheChannelArguments(): void
+    {
+        // SEC-16 (issue #319): the receive bound has to be enforced by
+        // grpc-core in the channel arguments, before the response payload is
+        // materialised as a PHP string — not by the post-allocation guard in
+        // GrpcResponseParser.
+        $grpc = $this->grpcFromFactory(['127.0.0.1:2379'], [
+            'grpc' => ['maxReceiveMessageBytes' => 8 * 1024 * 1024],
+        ]);
+
+        $args = $this->channelArgsOf($grpc);
+
+        $this->assertArrayHasKey('grpc.max_receive_message_length', $args);
+        $this->assertSame(8 * 1024 * 1024, $args['grpc.max_receive_message_length']);
+    }
+
+    public function testGrpcReceiveLimitDefaultsToTheExplicitFiniteValue(): void
+    {
+        $grpc = $this->grpcFromFactory(['127.0.0.1:2379']);
+
+        $args = $this->channelArgsOf($grpc);
+
+        $this->assertArrayHasKey('grpc.max_receive_message_length', $args);
+        $this->assertSame(
+            GrpcClient::DEFAULT_MAX_RECEIVE_MESSAGE_BYTES,
+            $args['grpc.max_receive_message_length'],
+        );
+    }
+
     public function testGrpcOptionsRejectNonIntValue(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -867,6 +896,15 @@ class ConnectionFactoryTest extends TestCase
     {
         /** @var int */
         return (new \ReflectionProperty(GrpcClient::class, $property))->getValue($grpc);
+    }
+
+    /**
+     * @return array<string, int|string|bool>
+     */
+    private function channelArgsOf(GrpcClient $grpc): array
+    {
+        /** @var array<string, int|string|bool> */
+        return (new \ReflectionMethod(GrpcClient::class, 'channelArgs'))->invoke($grpc);
     }
 
     private function grpcBoolProperty(GrpcClient $grpc, string $property): bool
