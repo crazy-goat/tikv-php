@@ -4,20 +4,25 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\KeyNotInRegion;
 use CrazyGoat\Proto\ImportSstpb\Error as ImportSstError;
+use CrazyGoat\Proto\ImportSstpb\IngestRequest;
 use CrazyGoat\Proto\ImportSstpb\IngestResponse;
 use CrazyGoat\Proto\ImportSstpb\Pair;
 use CrazyGoat\Proto\ImportSstpb\RawWriteRequest;
 use CrazyGoat\Proto\ImportSstpb\RawWriteResponse;
 use CrazyGoat\Proto\ImportSstpb\SSTMeta;
+use CrazyGoat\Proto\ImportSstpb\SwitchMode;
+use CrazyGoat\Proto\ImportSstpb\SwitchModeRequest;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\IngestTooLargeException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
@@ -26,6 +31,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\SstIngestor;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -73,6 +79,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            regionCache: $this->regionCache,
         );
     }
 
@@ -169,6 +176,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
             maxIngestSize: 5,
         );
 
@@ -189,6 +197,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
             maxIngestSize: 5,
         );
 
@@ -426,6 +435,22 @@ class SstIngestorTest extends TestCase
         $region = $this->defaultRegion();
 
         $this->setupStandardPdMocks($region, $store);
+        // The retried closure re-resolves the region after the write error.
+        // Return a real RegionInfo explicitly: PHPUnit cannot auto-generate
+        // one because RegionInfo is final.
+        $this->pdClient->method('getRegion')->willReturn($region);
+
+        // Keep the retryable write error from driving a long backoff loop;
+        // the test only asserts that normal mode is restored.
+        $this->ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            maxBackoffMs: 1,
+        );
 
         // SwitchMode goes through callAsync since issue #295.
         $switchModeAddresses = [];
@@ -480,6 +505,396 @@ class SstIngestorTest extends TestCase
         $this->expectException(RegionException::class);
 
         $this->ingestor->ingest(['key1' => 'value1']);
+    }
+
+    // ========================================================================
+    // Retry and partial failure (issue #197)
+    // ========================================================================
+
+    public function testIngestRetriesEpochNotMatchOnTheSecondRegion(): void
+    {
+        $store = $this->defaultStore();
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+        // The retry re-resolves the region through PD after the stale cache
+        // entry is invalidated; the fresh epoch is what makes the second
+        // attempt succeed.
+        $freshRegion2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getAllStores')->willReturn([$store]);
+        $this->pdClient->method('getRegion')->willReturn($freshRegion2);
+
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->method('callStreaming')->willReturn($writeResponse);
+
+        /** @var list<int> $ingestRegionIds */
+        $ingestRegionIds = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                \Google\Protobuf\Internal\Message $request,
+            ) use (&$ingestRegionIds): Message {
+                if ($method === 'SwitchMode') {
+                    return new SwitchModeResponse();
+                }
+
+                self::assertInstanceOf(IngestRequest::class, $request);
+                $context = $request->getContext();
+                self::assertNotNull($context);
+                $regionId = (int) $context->getRegionId();
+                $ingestRegionIds[] = $regionId;
+
+                $region2Attempts = count(array_filter(
+                    $ingestRegionIds,
+                    static fn(int $id): bool => $id === 2,
+                ));
+                if ($regionId === 2 && $region2Attempts === 1) {
+                    $error = new Error();
+                    $error->setMessage('epoch not match');
+                    $error->setEpochNotMatch(new EpochNotMatch());
+                    $response = new IngestResponse();
+                    $response->setError($error);
+
+                    return $response;
+                }
+
+                return new IngestResponse();
+            });
+
+        $this->ingestor->ingest(['a' => 'value1', 'z' => 'value2']);
+
+        // Region 1 once, region 2 twice: the EpochNotMatch was retried.
+        self::assertSame([1, 2, 2], $ingestRegionIds);
+    }
+
+    public function testIngestReportsRegionsActuallyIngestedAfterARetryReResolution(): void
+    {
+        $store = $this->defaultStore();
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 't',
+        );
+        // The retry re-resolves key "n" after the region-2 cache entry is
+        // invalidated; the group now lives in region 3.
+        $freshRegion3 = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'm',
+            endKey: 't',
+        );
+        $region4 = new RegionInfo(
+            regionId: 4,
+            leaderPeerId: 4,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 't',
+            endKey: '',
+        );
+
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2, $region4]);
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getAllStores')->willReturn([$store]);
+        $this->pdClient->method('getRegion')->willReturn($freshRegion3);
+
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->method('callStreaming')->willReturn($writeResponse);
+
+        /** @var array<int, int> $attemptsByRegion */
+        $attemptsByRegion = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                \Google\Protobuf\Internal\Message $request,
+            ) use (&$attemptsByRegion): Message {
+                if ($method === 'SwitchMode') {
+                    return new SwitchModeResponse();
+                }
+
+                self::assertInstanceOf(IngestRequest::class, $request);
+                $context = $request->getContext();
+                self::assertNotNull($context);
+                $regionId = (int) $context->getRegionId();
+                $attemptsByRegion[$regionId] = ($attemptsByRegion[$regionId] ?? 0) + 1;
+
+                if ($regionId === 2) {
+                    $error = new Error();
+                    $error->setMessage('epoch not match');
+                    $error->setEpochNotMatch(new EpochNotMatch());
+                    $response = new IngestResponse();
+                    $response->setError($error);
+
+                    return $response;
+                }
+
+                if ($regionId === 4) {
+                    // No typed ErrorKind and no classifier keyword: fatal.
+                    $error = new Error();
+                    $error->setMessage('permanent ingest failure');
+                    $response = new IngestResponse();
+                    $response->setError($error);
+
+                    return $response;
+                }
+
+                return new IngestResponse();
+            });
+
+        try {
+            $this->ingestor->ingest(['a' => 'value1', 'n' => 'value2', 'z' => 'value3']);
+            self::fail('The ingest did not fail');
+        } catch (IngestPartialFailureException $e) {
+            // Region 1 was applied, region 3 (not the grouping-time region 2)
+            // was applied after the retry, and region 4 failed.
+            self::assertSame([1, 3], $e->getAppliedRegionIds());
+            self::assertSame(4, $e->getFailedRegionId());
+            self::assertInstanceOf(RegionException::class, $e->getPrevious());
+        }
+
+        self::assertSame(1, $attemptsByRegion[2] ?? 0);
+        self::assertSame(1, $attemptsByRegion[3] ?? 0);
+    }
+
+    public function testIngestGivesEachRegionGroupAFreshRetryBudget(): void
+    {
+        $store = $this->defaultStore();
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getAllStores')->willReturn([$store]);
+
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->method('callStreaming')->willReturn($writeResponse);
+
+        /** @var list<int> $ingestRegionIds */
+        $ingestRegionIds = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                \Google\Protobuf\Internal\Message $request,
+            ) use (&$ingestRegionIds): Message {
+                if ($method === 'SwitchMode') {
+                    return new SwitchModeResponse();
+                }
+
+                self::assertInstanceOf(IngestRequest::class, $request);
+                $context = $request->getContext();
+                self::assertNotNull($context);
+                $regionId = (int) $context->getRegionId();
+                $ingestRegionIds[] = $regionId;
+
+                // A slow but successful first group must not consume the
+                // second group's retry budget.
+                if ($regionId === 1) {
+                    usleep(50000);
+                }
+
+                return new IngestResponse();
+            });
+
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            retryDeadlineMs: 20,
+        );
+
+        $ingestor->ingest(['a' => 'value1', 'z' => 'value2']);
+
+        self::assertSame([1, 2], $ingestRegionIds);
+    }
+
+    public function testIngestRethrowsRetryBudgetExhaustionWhenNoGroupWasApplied(): void
+    {
+        $store = $this->defaultStore();
+        $region = $this->defaultRegion();
+
+        $this->setupStandardPdMocks($region, $store);
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->method('callStreaming')->willReturn($writeResponse);
+
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                \Google\Protobuf\Internal\Message $request,
+            ): Message {
+                if ($method === 'SwitchMode') {
+                    return new SwitchModeResponse();
+                }
+
+                $error = new Error();
+                $error->setMessage('epoch not match');
+                $error->setEpochNotMatch(new EpochNotMatch());
+                $response = new IngestResponse();
+                $response->setError($error);
+
+                return $response;
+            });
+
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            retryDeadlineMs: 1,
+        );
+
+        try {
+            $ingestor->ingest(['key1' => 'value1']);
+            self::fail('The ingest did not fail');
+        } catch (RetryBudgetExhaustedException $e) {
+            self::assertStringContainsString('Retry deadline (1 ms) exhausted', $e->getMessage());
+        } catch (IngestPartialFailureException) {
+            self::fail('A first-group failure must not be reported as a partial ingest');
+        }
+    }
+
+    public function testIngestFailingPermanentlyRestoresEveryStoreToNormalMode(): void
+    {
+        $store1 = new Store();
+        $store1->setId(1);
+        $store1->setAddress('tikv1:20160');
+
+        $store2 = new Store();
+        $store2->setId(2);
+        $store2->setAddress('tikv2:20160');
+
+        $region = $this->defaultRegion();
+
+        $this->pdClient->method('getAllStores')->willReturn([$store1, $store2]);
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($store1);
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->method('callStreaming')->willReturn($writeResponse);
+
+        $error = new Error();
+        $error->setMessage('permanent ingest failure');
+        $ingestResponse = new IngestResponse();
+        $ingestResponse->setError($error);
+        $this->grpc->method('call')->willReturn($ingestResponse);
+
+        /** @var array<string, list<int>> $modesByAddress */
+        $modesByAddress = [];
+        $this->grpc->method('callAsync')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                \Google\Protobuf\Internal\Message $request,
+            ) use (&$modesByAddress): GrpcFuture {
+                if ($method === 'SwitchMode' && $request instanceof SwitchModeRequest) {
+                    $modesByAddress[$address][] = $request->getMode();
+                }
+
+                return GrpcFuture::completed(new SwitchModeResponse());
+            });
+
+        try {
+            $this->ingestor->ingest(['key1' => 'value1']);
+            self::fail('The ingest did not fail');
+        } catch (RegionException) {
+            // Expected: the single region failed before anything was applied.
+        }
+
+        foreach (['tikv1:20160', 'tikv2:20160'] as $address) {
+            self::assertSame(
+                [SwitchMode::Import, SwitchMode::Normal],
+                $modesByAddress[$address] ?? [],
+                sprintf('Store %s was not restored to normal mode', $address),
+            );
+        }
     }
 
     // ========================================================================
@@ -778,6 +1193,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
         );
 
         $this->expectException(InvalidStoreAddressException::class);
@@ -808,6 +1224,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
         );
 
         $this->expectException(InvalidStoreAddressException::class);

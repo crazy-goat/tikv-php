@@ -17,20 +17,26 @@ use CrazyGoat\Proto\ImportSstpb\SwitchModeRequest;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
+use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\IngestTooLargeException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -58,6 +64,12 @@ final readonly class SstIngestor
         private RegionResolver $regionResolver,
         private TimeoutConfig $timeoutConfig,
         private LoggerInterface $logger,
+        /**
+         * Region cache the retry executor invalidates when a retryable region
+         * error proves the cached entry stale (issue #197). Required so the
+         * executor cannot invalidate a cache the resolver never reads.
+         */
+        private RegionCacheInterface $regionCache,
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
         /**
          * Maximum payload bytes (keys plus values) of one ingest() call;
@@ -70,6 +82,13 @@ final readonly class SstIngestor
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
+        /** Cumulative backoff budget (ms) for one region group's retry loop. */
+        private int $maxBackoffMs = 20000,
+        /** ServerBusy backoff budget (ms) for one region group's retry loop. */
+        private int $serverBusyBudgetMs = 60000,
+        /** Wall-clock deadline (ms) for one region group's retry loop. */
+        private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
+        private MetricsInterface $metrics = new NoOpMetrics(),
     ) {
         if ($maxIngestSize < 0) {
             throw new InvalidArgumentException('maxIngestSize must be >= 0');
@@ -92,6 +111,12 @@ final readonly class SstIngestor
      *     region cannot be resolved. Fail-closed: `ingest()` returns void, so
      *     it transmits nothing rather than importing a subset of the pairs
      *     and reporting success (issue #187).
+     * @throws IngestPartialFailureException when at least one region group was
+     *     already ingested and a later one failed permanently or exhausted its
+     *     retry budget (issue #197)
+     * @throws \CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException when a
+     *     region's retry loop exhausted its attempt cap or deadline before any
+     *     region group was applied (issue #197)
      */
     public function ingest(array $keyValuePairs, ?int $ttl = null): void
     {
@@ -110,6 +135,14 @@ final readonly class SstIngestor
         // 2. Get all TiKV stores from PD.
         $stores = $this->pdClient->getAllStores();
 
+        // Each region group gets a fresh retry budget (issue #197). A bulk
+        // ingest legitimately runs for minutes, so a budget shared across the
+        // sequential groups would make retryDeadlineMs a wall-clock cap on the
+        // whole import and fail a group that has not retried once.
+        $executor = $this->createRetryExecutor();
+        /** @var list<int> $appliedRegionIds */
+        $appliedRegionIds = [];
+
         // 3. Switch all stores to import mode, then do the work.
         //    The try/finally ensures stores are always switched back to normal
         //    mode, even if switching to import mode partially fails.
@@ -123,13 +156,34 @@ final readonly class SstIngestor
             $grouped = $this->groupKeysByRegion($keyValuePairs);
 
             // 5. For each region: build SST, stream the write, and ingest.
+            //    A retryable region error is retried against a freshly
+            //    resolved region; the group order is preserved so a permanent
+            //    failure reports exactly the groups already applied.
             foreach ($grouped as $group) {
                 /** @var \CrazyGoat\TiKV\Client\Region\Dto\RegionInfo $region */
                 $region = $group['region'];
                 /** @var string[] $regionKeys */
                 $regionKeys = $group['keys'];
 
-                $this->ingestRegionKeys($region, $regionKeys, $keyValuePairs, $ttl);
+                // Best available ID until the retried closure resolves the
+                // region; a retry may move the group to a different region
+                // (split/merge), so the last resolved ID is reported.
+                $failedRegionId = $region->regionId;
+                try {
+                    $appliedRegionIds[] = $this->ingestRegionKeysWithRetry(
+                        $executor,
+                        $regionKeys,
+                        $keyValuePairs,
+                        $ttl,
+                        $failedRegionId,
+                    );
+                } catch (TiKvException $e) {
+                    if ($appliedRegionIds === []) {
+                        throw $e;
+                    }
+
+                    throw new IngestPartialFailureException($appliedRegionIds, $failedRegionId, $e);
+                }
             }
         } finally {
             // 6. Always switch stores back to normal mode, even on failure.
@@ -277,6 +331,20 @@ final readonly class SstIngestor
         return new BatchAsyncExecutor($this->logger);
     }
 
+    private function createRetryExecutor(): RetryExecutor
+    {
+        return new RetryExecutor(
+            $this->maxBackoffMs,
+            $this->serverBusyBudgetMs,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            $this->logger,
+            deadlineMs: $this->retryDeadlineMs,
+            metrics: $this->metrics,
+        );
+    }
+
     /**
      * Group sorted keys by region using batch resolution. Only the keys are
      * copied; the values stay in the caller's map and are read lazily while
@@ -310,6 +378,54 @@ final readonly class SstIngestor
         }
 
         return $grouped;
+    }
+
+    /**
+     * Ingest one region group, retrying retryable region errors.
+     *
+     * The region is resolved inside the retried closure, so a `NotLeader`
+     * switches to the hinted leader and an `EpochNotMatch` picks up the
+     * refreshed region (and its new epoch) before the SST is rebuilt
+     * (issue #197).
+     *
+     * @param string[] $keys
+     * @param array<string, string> $keyValuePairs
+     * @param int $lastResolvedRegionId Set to the region ID of the last
+     *     resolution attempt, so a failure reports the region that actually
+     *     rejected the SST rather than the grouping-time one
+     * @return int The region ID the successful attempt ingested into
+     *
+     * @throws TiKvException
+     */
+    private function ingestRegionKeysWithRetry(
+        RetryExecutor $executor,
+        array $keys,
+        array $keyValuePairs,
+        ?int $ttl,
+        int &$lastResolvedRegionId,
+    ): int {
+        $targetStoreId = null;
+
+        return $executor->execute(
+            $keys[0],
+            function () use ($keys, $keyValuePairs, $ttl, &$targetStoreId, &$lastResolvedRegionId): int {
+                // Reset per attempt: a failure inside getRegionInfo() must
+                // not report the previous attempt's store (issue #197).
+                $targetStoreId = null;
+
+                // Re-resolve on every attempt: a retry must use the region
+                // that owns the key now, not the one that failed.
+                $region = $this->regionResolver->getRegionInfo($keys[0]);
+                $targetStoreId = $region->leaderStoreId;
+                $lastResolvedRegionId = $region->regionId;
+                $this->ingestRegionKeys($region, $keys, $keyValuePairs, $ttl);
+
+                return $region->regionId;
+            },
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
+        );
     }
 
     /**
