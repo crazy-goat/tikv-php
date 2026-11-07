@@ -491,8 +491,18 @@ Keepalive pings (sent every `keepaliveTimeMs`, even without in-flight calls
 when `keepalivePermitWithoutCalls` is true) keep idle connections alive behind
 stateful firewalls / NAT gateways — which typically drop idle flows after
 ~5 minutes — so a dead connection is detected rather than blocking until TCP
-retransmission gives up. Lowering `maxReceiveMessageBytes` is a valid
-hardening choice when you know your values are small.
+retransmission gives up.
+
+`maxReceiveMessageBytes` is enforced by grpc-core as the
+`grpc.max_receive_message_length` channel argument, so an oversized response
+frame is rejected **before** its payload is materialised as a PHP string. That
+is the control which bounds response memory; the client-side size check in
+`GrpcResponseParser` runs only after the string exists and therefore cannot
+prevent that allocation (SEC-16, issue #319). The 64 MB default is deliberately
+larger than the gRPC core's 4 MB: full-limit scans and batch reads exceed 4 MB
+and would fail with `RESOURCE_EXHAUSTED` (issue #265). Lowering
+`maxReceiveMessageBytes` is a valid hardening choice when you know your values
+are small.
 
 Compression is off by default and applies to the **outgoing** side:
 `'gzip'` or `'deflate'` sets `grpc.default_compression_algorithm` on every
@@ -1873,13 +1883,18 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > `retryDeadlineMs => 0` the configured `lockResolveTimeoutMs` / `tsoTimeoutMs`
 > apply unchanged.
 
-> **Worker occupancy note:** `serverBusyBudgetMs` is effectively a
-> worker-occupancy setting — it caps how long ONE operation may block a PHP
-> process in `usleep()` while TiKV reports `ServerIsBusy`. The default of
-> 60 seconds suits request-driven runtimes such as PHP-FPM. Long-running CLI
-> workers that prefer to wait out long overload episodes can raise the budget
-> (and/or disable the retry deadline with `'retryDeadlineMs' => 0`) via the
-> `RawKvClient` constructor arguments.
+> **Worker occupancy note:** `serverBusyBudgetMs` is a worker-occupancy
+> setting — it caps how long ONE operation may block a PHP process in
+> `usleep()` while TiKV reports `ServerIsBusy`. It is **not** the binding
+> bound under the defaults: the 30 s deadline is reached first, because the
+> budget sits far enough above it (see
+> [ServerBusy Budget vs Retry Deadline](#serverbusy-budget-vs-retry-deadline)).
+> The default of 60 seconds suits request-driven runtimes such as PHP-FPM.
+> Long-running CLI workers that prefer to wait out long overload episodes
+> must raise `serverBusyBudgetMs` **as well**: raising or disabling only
+> `retryDeadlineMs` still caps the wait at the 60 s budget. Keep the
+> deadline above the new budget (or disable it with
+> `'retryDeadlineMs' => 0`) so the deadline does not bind first.
 
 ### GC Safe Points (TxnKV)
 
@@ -1907,16 +1922,43 @@ cluster-wide `gc_life_time`.
 
 ### Retry Behavior
 
-The client retries on these errors:
+`ErrorClassifier` maps each retryable error to a real `BackoffType` case
+(`src/Client/Retry/BackoffType.php`). The case name is what the retry log
+records under `backoffType` and what `MetricsInterface::retryAttempted()`
+receives, so a metrics adapter can label retries by backoff type (the
+Prometheus example in [Metrics Collection](advanced.md#metrics-collection) uses
+`retries_total{backoff_type}`).
 
-| Error Type | Backoff Strategy | Description |
-|------------|------------------|-------------|
-| `EpochNotMatch` | Jittered (2–500 ms) | Region epoch mismatch, small backoff (like client-go's `BoEpochNotMatch`) |
-| `NotLeader` | Fast | Leader changed, quick retry |
-| `ServerIsBusy` | Progressive | Server overloaded, increasing delays |
-| `RegionNotFound` | Medium | Region not found, moderate delay |
-| `StaleCommand` | Fast | Stale command, quick retry |
-| gRPC errors | Progressive | Network issues, increasing delays |
+For attempt *n*, `BackoffType::sleepMs()` computes
+`min(cap, base × 2^n)` and then applies **equal jitter**: the actual sleep is
+uniformly random in `[delay/2, delay]` (issue #242). Every case is jittered;
+`None` is the only case without a sleep. The ranges below are the exponential
+envelope before jitter, in milliseconds.
+
+| `BackoffType` | Base → cap (ms) | Jitter | Retried error / condition |
+|---------------|-----------------|--------|---------------------------|
+| `None` | 0 (no sleep) | none (no sleep) | `DataIsNotReady` — replica lag on a follower or stale read |
+| `EpochNotMatch` | 2 → 500 | equal | `EpochNotMatch` — stale region epoch |
+| `ServerBusy` | 2000 → 10000 | equal | `ServerIsBusy`; gRPC `RESOURCE_EXHAUSTED`. Charged to the separate 60 s ServerBusy budget |
+| `StaleCmd` | 2 → 1000 | equal | `StaleCommand` |
+| `RegionMiss` | 2 → 500 | equal | `RegionNotFound`, `StoreNotMatch`, `MismatchPeerId`, `BucketVersionNotMatch`, `UndeterminedResult` |
+| `TiKvRpc` | 100 → 2000 | equal | gRPC `UNAVAILABLE`, `ABORTED`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`; a store in health cooldown (`StoreUnavailableException`) |
+| `NotLeader` | 2 → 500 | equal | `NotLeader` — leader transfer |
+| `DiskFull` | 500 → 5000 | equal | `DiskFull` |
+| `RegionNotInitialized` | 2 → 1000 | equal | `RegionNotInitialized` |
+| `ReadIndexNotReady` | 2 → 500 | equal | `ReadIndexNotReady` |
+| `ProposalInMergingMode` | 2 → 500 | equal | `ProposalInMergingMode` |
+| `RecoveryInProgress` | 100 → 10000 | equal | `RecoveryInProgress` |
+| `IsWitness` | 1000 → 10000 | equal | `IsWitness` |
+| `MaxTimestampNotSynced` | 2 → 500 | equal | `MaxTimestampNotSynced` |
+| `TxnLock` | 200 → 3000 | equal | A `KeyError.locked` conflict (or `TxnLockNotFound`) during a TxnKV prewrite, rollback or read; chosen by the lock-resolution paths, not by `ErrorClassifier` |
+
+The mapping lives in `ErrorClassifier::classifyByKind()` (the typed `ErrorKind`
+carried by `RegionException`), `ErrorClassifier::classifyGrpcStatus()` (gRPC
+status codes) and the message-text fallback in
+`ErrorClassifier::classifyToBackoffType()` for exceptions without a typed kind.
+See [Retry Strategies](advanced.md#retry-strategies) for the retry budgets and
+why an application-level retry loop on top of the client is counterproductive.
 
 ### Non-Retryable Errors
 
@@ -1925,6 +1967,11 @@ These errors are not retried:
 - `KeyNotInRegion` - Key outside region range
 - `RaftEntryTooLarge` - Value too large
 - `FlashbackInProgress` - Region in flashback mode
+- `FlashbackNotPrepared` - Region not prepared for flashback
+- Any other gRPC status code: `CANCELLED`, `INVALID_ARGUMENT`, `NOT_FOUND`,
+  `PERMISSION_DENIED`, `UNAUTHENTICATED`, `UNIMPLEMENTED`,
+  `FAILED_PRECONDITION`, `ALREADY_EXISTS`, `OUT_OF_RANGE`, `DATA_LOSS`, and
+  any unrecognised code (fail closed)
 
 ### Retry Bounds
 
@@ -1955,6 +2002,44 @@ transaction cannot starve its commit, while a single operation's fan-out is
 bounded by one budget instead of one per region. `maxAttempts` stays per
 retry loop (one region/page), so a wide fan-out does not exhaust it on
 ordinary one-retry-per-region traffic.
+
+### ServerBusy Budget vs Retry Deadline
+
+`RetryExecutor` enforces two independent stop conditions for a
+`ServerIsBusy` storm: the cumulative ServerBusy sleep budget
+(`serverBusyBudgetMs`, 60 s by default) and the wall-clock retry deadline
+(`retryDeadlineMs`, 30 s by default). They do not have equal weight.
+
+The deadline is checked before every attempt **and** before every backoff
+sleep, and the sleep is clamped to the remaining deadline. A ServerBusy
+backoff therefore cannot push an operation past its deadline. The budget,
+however, is charged from the scheduled backoff **before** that clamp, so
+the accumulator can exceed the wall clock by up to one maximum ServerBusy
+sleep. With the defaults (30 s deadline, 60 s budget) the accumulated
+charge is bounded by roughly `deadline + 10 s` ≈ 40 s, still below the
+60 s budget: the deadline always binds first and the budget never fires —
+raising it alone changes nothing.
+
+The deadline is guaranteed to bind first only while the budget is at least
+one maximum ServerBusy backoff (~10 s) above it, as with the defaults. When
+the two are within ~10 s of each other, either can bind; when the budget is
+below the deadline, the budget usually binds first. The budget check runs
+before `usleep()`, so an over-budget charge throws without sleeping.
+
+The exhaustion paths also differ, which matters when reading logs or
+`catch` blocks:
+
+| Bound reached first | Exception | `getPrevious()` |
+|---|---|---|
+| Retry deadline (the default) | `RetryBudgetExhaustedException` (`Retry deadline (...) exhausted`) | the original `ServerIsBusy` error |
+| ServerBusy budget | the original `TiKvException` (not wrapped) | — |
+
+A sustained `ServerIsBusy` episode under the default configuration therefore
+surfaces as `RetryBudgetExhaustedException`, not as the raw region error;
+the `ServerIsBusy` error is available through `getPrevious()`. A
+configuration where the budget binds first yields the original
+`ServerIsBusy` exception instead. Both budgets are scoped to one logical
+operation (issue #223), like the other time budgets.
 
 ### Custom Retry (Advanced)
 

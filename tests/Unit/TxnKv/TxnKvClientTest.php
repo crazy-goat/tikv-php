@@ -460,13 +460,26 @@ class TxnKvClientTest extends TestCase
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(1000);
         $pdClient->method('getClusterId')->willReturn(null);
-        $pdClient->expects($this->once())->method('close');
+        $pdCloses = 0;
+        $pdClient->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+            });
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('close');
+        $grpcCloses = 0;
+        $grpc->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+            });
 
         $client = new TxnKvClient($pdClient, $grpc);
         $client->close();
+
+        $this->assertSame(1, $grpcCloses);
+        $this->assertSame(1, $pdCloses);
     }
 
     public function testReapIdleChannelsForwardsToTheTransport(): void
@@ -500,14 +513,27 @@ class TxnKvClientTest extends TestCase
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(1000);
         $pdClient->method('getClusterId')->willReturn(null);
-        $pdClient->expects($this->once())->method('close');
+        $pdCloses = 0;
+        $pdClient->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+            });
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('close');
+        $grpcCloses = 0;
+        $grpc->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+            });
 
         $client = new TxnKvClient($pdClient, $grpc);
         $client->close();
         $client->close(); // second close must not throw or call close again
+
+        $this->assertSame(1, $grpcCloses, 'the gRPC transport must be closed exactly once');
+        $this->assertSame(1, $pdCloses, 'the PD client must be closed exactly once');
     }
 
     public function testCloseContinuesWhenGrpcCloseThrows(): void
@@ -515,15 +541,27 @@ class TxnKvClientTest extends TestCase
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(1000);
         $pdClient->method('getClusterId')->willReturn(null);
-        $pdClient->expects($this->once())->method('close');
+        $pdCloses = 0;
+        $pdClient->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+            });
 
         $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpcCloses = 0;
         $grpc->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('grpc boom'));
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+                throw new \RuntimeException('grpc boom');
+            });
 
         $client = new TxnKvClient($pdClient, $grpc);
         $client->close();
+
+        $this->assertSame(1, $grpcCloses);
+        $this->assertSame(1, $pdCloses, 'a throwing gRPC close must not skip the PD close');
     }
 
     public function testCloseContinuesWhenPdCloseThrows(): void
@@ -531,15 +569,27 @@ class TxnKvClientTest extends TestCase
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(1000);
         $pdClient->method('getClusterId')->willReturn(null);
+        $pdCloses = 0;
         $pdClient->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('pd boom'));
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+                throw new \RuntimeException('pd boom');
+            });
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('close');
+        $grpcCloses = 0;
+        $grpc->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+            });
 
         $client = new TxnKvClient($pdClient, $grpc);
         $client->close();
+
+        $this->assertSame(1, $grpcCloses, 'a throwing PD close must not undo the gRPC close');
+        $this->assertSame(1, $pdCloses);
     }
 
     public function testCloseSwallowsBothSubCloseExceptions(): void
@@ -547,17 +597,28 @@ class TxnKvClientTest extends TestCase
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(1000);
         $pdClient->method('getClusterId')->willReturn(null);
+        $pdCloses = 0;
         $pdClient->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('pd boom'));
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+                throw new \RuntimeException('pd boom');
+            });
 
         $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpcCloses = 0;
         $grpc->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('grpc boom'));
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+                throw new \RuntimeException('grpc boom');
+            });
 
         $client = new TxnKvClient($pdClient, $grpc);
         $client->close();
+
+        $this->assertSame(1, $grpcCloses);
+        $this->assertSame(1, $pdCloses);
     }
 
     // ========================================================================
