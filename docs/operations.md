@@ -1361,8 +1361,9 @@ These methods report on the cluster the client is connected to and configure the
 client instance. None of them touches user data. `healthCheck()` is the only one
 that sends an RPC and the only one that can throw a library exception; the rest
 are local accessors and setters that throw nothing. `TxnKvClient` has
-the same three cluster-level methods (`healthCheck()`, `getClusterId()` and
-`getMetrics()`); the column-family and atomic-mode settings are RawKV-only.
+the same cluster-level methods (`healthCheck()`, `getClusterId()` and
+`getMetrics()`) plus `pdClient()`, which exposes the PD connection it owns; the
+column-family and atomic-mode settings are RawKV-only.
 
 ### Health and cluster identity
 
@@ -1372,6 +1373,7 @@ the same three cluster-level methods (`healthCheck()`, `getClusterId()` and
 public function healthCheck(): ?int;
 public function getClusterId(): ?int;
 public function getMetrics(): MetricsInterface;
+public function pdClient(): PdClientInterface;
 ```
 
 **`healthCheck()`** issues a PD `GetMembers` RPC through
@@ -1443,6 +1445,15 @@ closing the PD client resets the cache.
 configured. It is that same object, not a copy, so an `InMemoryMetrics` instance
 can be inspected after operations. It sends no RPC, throws nothing, and remains
 callable after `close()`.
+
+**`pdClient()`** returns the `PdClientInterface` the TxnKV client uses for
+region discovery and timestamps. It is the same object, not a second
+connection: a consumer that also needs PD — for example to register a service
+GC safe point or to inspect the cluster — reuses this one instead of calling
+`ConnectionFactory::create()` again, which would open another PD connection and
+a second TSO stream. The client owns the object and closes it in `close()`, so
+do not close it yourself and treat the reference as stale afterwards.
+`pdClient()` itself sends no RPC and throws nothing.
 
 ### Column family and atomic mode
 

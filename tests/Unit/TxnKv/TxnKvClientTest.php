@@ -58,6 +58,22 @@ class TxnKvClientTest extends TestCase
         $this->assertSame($metrics, $client->getMetrics());
     }
 
+    public function testPdClientReturnsTheInstanceUsedForTimestamps(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->expects($this->once())
+            ->method('getTimestamp')
+            ->willReturn(1000);
+        $client = new TxnKvClient($pdClient, $this->createMock(GrpcClientInterface::class));
+
+        $this->assertSame($pdClient, $client->pdClient());
+
+        // The accessor hands out the very client begin() uses, so a caller
+        // reusing it for extra PD calls does not open a second connection.
+        $txn = $client->begin();
+        $txn->rollback();
+    }
+
     public function testCreatePassesMetricsOptionToClient(): void
     {
         $metrics = new InMemoryMetrics();
