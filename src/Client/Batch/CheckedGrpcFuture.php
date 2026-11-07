@@ -8,6 +8,7 @@ use Closure;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use Google\Protobuf\Internal\Message;
 
 /**
@@ -118,10 +119,11 @@ final readonly class CheckedGrpcFuture
      *
      * @param callable(): self $dispatch Issues exactly one fresh attempt
      *        (re-resolving the region) and returns its checked future.
-     * @param callable|null $classifier Optional retry classifier forwarded to
-     *        the executor (issue #291): the TxnKv prewrite/commit paths rely
-     *        on a caller-provided classifier for TxnRetryableException —
-     *        without it the default classification treats them as fatal.
+     * @param (callable(TiKvException): RetryVerdict)|null $classifier Optional
+     *        retry classifier forwarded to the executor (issue #291): the TxnKv
+     *        prewrite/commit paths rely on a caller-provided classifier for
+     *        TxnRetryableException — without it the default classification
+     *        treats them as fatal. See {@see RetryVerdict} (issue #534).
      * @param (callable(): ?int)|null $targetStoreId Provider of the store the
      *        failed attempt was addressed to (replica reads). Forwarded to
      *        {@see RetryExecutor::execute()} so a transport failure closes
