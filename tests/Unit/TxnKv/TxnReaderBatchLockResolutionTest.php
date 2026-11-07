@@ -22,6 +22,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
@@ -125,11 +126,11 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
     }
 
     /**
-     * @return callable(\CrazyGoat\TiKV\Client\Exception\TiKvException): ?BackoffType
+     * @return callable(\CrazyGoat\TiKV\Client\Exception\TiKvException): RetryVerdict
      */
     private function classifier(): callable
     {
-        return static fn (): ?BackoffType => null;
+        return RetryVerdict::pass(...);
     }
 
     private function executor(int $deadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS): RetryExecutor
@@ -147,7 +148,14 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
 
     private function scanAll(): void
     {
-        $this->reader()->scan('k0', 'k9', 10, new TransactionState(), $this->executor(), static fn (): null => null);
+        $this->reader()->scan(
+            'k0',
+            'k9',
+            10,
+            new TransactionState(),
+            $this->executor(),
+            static fn (): RetryVerdict => RetryVerdict::pass(),
+        );
     }
 
     private function lockedPair(string $key, int $ts = 2000): KvPair
@@ -307,7 +315,7 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
                 10,
                 new TransactionState(),
                 $this->executor(500),
-                static fn (): null => null,
+                static fn (): RetryVerdict => RetryVerdict::pass(),
             );
         } catch (TxnRetryableException) {
             // Expected: the lock was resolved and the read must be retried.

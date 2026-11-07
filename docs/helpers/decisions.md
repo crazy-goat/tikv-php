@@ -1634,9 +1634,11 @@ not be told.
 
 Four consequences to keep:
 
-1. **The classifier still rethrows a bare `GrpcException`.** That path is now
-   only reachable for pre-write failures; it preserves the "not retried"
-   behaviour of #239 and keeps the definitive failure typed as it was.
+1. **The classifier returns `RetryVerdict::fatal()` for a bare `GrpcException`.**
+   That path is now only reachable for pre-write failures; it preserves the
+   "not retried" behaviour of #239 and keeps the definitive failure typed as it
+   was. Since #534 the fatal verdict runs the executor's fatal path, so a
+   broken channel is closed; the old throw-from-classifier trick is gone.
 2. **The typed exception carries the original as `previous`.** It extends
    `TiKvException`, not `GrpcException` (`GrpcException` is `final`), so
    `getGrpcStatusCode()` is the accessor for the status code; callers that need

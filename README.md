@@ -144,7 +144,7 @@ that keeps existing, correct code working.
 | `RawKv\RawKvClient` | every public method — the RawKV entry point |
 | `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `reapIdleChannels()`, `refreshRegionCache()`, `preloadRegions()`, `close()` — the TxnKV entry point |
 | `TxnKv\Transaction` | every public method — the transaction handle |
-| `RawKv\CasResult`, `RawKv\ChecksumResult` | the result DTOs of `compareAndSwap()` and `checksum()` |
+| `RawKv\CasResult`, `RawKv\ChecksumResult`, `RawKv\KeyTtl` | the result DTOs of `compareAndSwap()`, `checksum()` and `getKeyTTLResult()` |
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
 | `TxnKv\TransactionStatus` | the enum returned by `Transaction::getStatus()` |
 | `Exception\*` | `TiKvException` and every subclass, plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
@@ -183,13 +183,14 @@ of the contract.
   `TxnKv\RollbackRegroupSignal`, `TxnKv\ResolvedTxnStatusCache`;
 - `Retry\` — except `Retry\RetryBudgetExhaustedException` and
   `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
-  `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget` and
-  `Retry\RetryExecutor`;
+  `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget`,
+  `Retry\RetryExecutor` and `Retry\RetryVerdict`;
 - the generated protobuf and gRPC classes under `src/Proto/` — except
   `Errorpb\NotLeader`, which the promise covers.
 
-The advanced extension points — `Retry\RetryExecutor` and `Retry\BackoffType`
-in [Custom Retry (Advanced)](docs/configuration.md#custom-retry-advanced), and
+The advanced extension points — `Retry\RetryExecutor`,
+`Retry\RetryVerdict` and `Retry\BackoffType` in
+[Custom Retry (Advanced)](docs/configuration.md#custom-retry-advanced), and
 `Tls\TlsConfigBuilder` — are documented, but they are internal like the
 rest: they change whenever the internals they wrap change.
 ## Usage
@@ -974,7 +975,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `batchCommands` | RawKV experimental RPC multiplexing over the `BatchCommands` stream |
 | `resourceGroup` / `resourceGroupTag` | Resource-control attribution — the resource group and opaque tag sent on every request's `Context` ([Resource Control](docs/configuration.md#resource-control-resource-groups)) |
 | `apiVersion` / `keyspace` | API V2 with a named keyspace |
-| `grpc` | gRPC channel arguments (keepalive, message sizes) |
+| `grpc` | gRPC channel arguments — message sizes, keepalive, compression and the HTTP/2 window size |
 | `maxChannels` / `idleTtlMs` | The channel pool — how many gRPC channels the transport keeps open and after how long an unused one is evicted ([Channel Pool](docs/configuration.md#channel-pool-maxchannels-idlettlms)) |
 | `grpcClient` | A transport the application built — the client uses it as it is and never closes it ([Sharing One Transport](docs/configuration.md#sharing-one-transport-between-clients)) |
 | `tsoPoolSize` / `lowResTimestampMaxStalenessMs` | TSO batching and the low-resolution timestamp cache of the TxnKV timestamp oracle |
@@ -1229,6 +1230,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Typed CAS outcome** — `CasIndeterminateException` for a compare-and-swap whose outcome cannot be determined, never retried
 - ✅ **Cluster identity verification** — `options['expectedClusterId']` pins the PD cluster ID on the PD and TSO paths
 - ✅ **Store-cache invalidation and operation-scoped retry budget** — the cached store is dropped on `StoreNotMatch` and transport failures, and one retry budget covers a whole logical operation
+- ✅ **Configurable gRPC channel parameters** — message sizes, keepalive, `keepalivePermitWithoutCalls`, compression and the HTTP/2 initial window size ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
 
 ### Planned
 
@@ -1240,7 +1242,6 @@ are tracked in their own issues and are not part of the roadmap. A
 feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
-- ⬜ **The remaining gRPC channel parameters** — compression, the HTTP/2 initial window size and `keepalive_permit_without_calls` are still hard-coded (the message sizes and the keepalive times are configurable already) ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ⬜ **Store health checking and failover to healthy replicas** ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))

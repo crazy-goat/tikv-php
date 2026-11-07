@@ -10,15 +10,33 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\StoreUnavailableException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class ErrorClassifierTest extends TestCase
 {
+    /**
+     * A null backoff means the built-in classifier's fatal verdict; any other
+     * value must be carried by a retry verdict (issue #534).
+     */
+    private function assertVerdict(?BackoffType $expected, RetryVerdict $verdict): void
+    {
+        if (!$expected instanceof BackoffType) {
+            $this->assertTrue($verdict->isFatal(), 'a null backoff means a fatal verdict');
+
+            return;
+        }
+
+        $this->assertTrue($verdict->isRetry(), 'a non-null backoff means a retry verdict');
+        $this->assertSame($expected, $verdict->backoffType());
+    }
+
     // ========================================================================
     // Typed path: classifyByKind() — the primary classification method
     // ========================================================================
@@ -83,7 +101,7 @@ class ErrorClassifierTest extends TestCase
         $error->$setter(new ($this->errorClassForKind($kind))());
 
         $exception = RegionException::fromRegionError($error);
-        $this->assertSame($expected, ErrorClassifier::classify($exception));
+        $this->assertVerdict($expected, ErrorClassifier::classify($exception));
     }
 
     /**
@@ -194,67 +212,70 @@ class ErrorClassifierTest extends TestCase
 
     public function testRaftEntryTooLargeIsFatalViaMessage(): void
     {
-        $this->assertNull(ErrorClassifier::classify(new TiKvException('RaftEntryTooLarge')));
+        $this->assertVerdict(null, ErrorClassifier::classify(new TiKvException('RaftEntryTooLarge')));
     }
 
     public function testKeyNotInRegionIsFatalViaMessage(): void
     {
-        $this->assertNull(ErrorClassifier::classify(new TiKvException('KeyNotInRegion')));
+        $this->assertVerdict(null, ErrorClassifier::classify(new TiKvException('KeyNotInRegion')));
     }
 
     public function testFlashbackInProgressIsFatalViaMessage(): void
     {
-        $this->assertNull(ErrorClassifier::classify(new TiKvException('FlashbackInProgress')));
+        $this->assertVerdict(null, ErrorClassifier::classify(new TiKvException('FlashbackInProgress')));
     }
 
     public function testFlashbackNotPreparedIsFatalViaMessage(): void
     {
-        $this->assertNull(ErrorClassifier::classify(new TiKvException('FlashbackNotPrepared')));
+        $this->assertVerdict(null, ErrorClassifier::classify(new TiKvException('FlashbackNotPrepared')));
     }
 
     public function testEpochNotMatchReturnsEpochNotMatchViaMessage(): void
     {
-        $this->assertSame(BackoffType::EpochNotMatch, ErrorClassifier::classify(new TiKvException('EpochNotMatch')));
+        $this->assertVerdict(BackoffType::EpochNotMatch, ErrorClassifier::classify(new TiKvException('EpochNotMatch')));
     }
 
     public function testEpochNotMatchLowercaseReturnsEpochNotMatchViaMessage(): void
     {
-        $this->assertSame(BackoffType::EpochNotMatch, ErrorClassifier::classify(new TiKvException('epoch not match')));
+        $this->assertVerdict(
+            BackoffType::EpochNotMatch,
+            ErrorClassifier::classify(new TiKvException('epoch not match')),
+        );
     }
 
     public function testDataIsNotReadyStaysNoneViaMessage(): void
     {
-        $this->assertSame(BackoffType::None, ErrorClassifier::classify(new TiKvException('DataIsNotReady')));
+        $this->assertVerdict(BackoffType::None, ErrorClassifier::classify(new TiKvException('DataIsNotReady')));
     }
 
     public function testServerIsBusyReturnsServerBusyViaMessage(): void
     {
-        $this->assertSame(BackoffType::ServerBusy, ErrorClassifier::classify(new TiKvException('ServerIsBusy')));
+        $this->assertVerdict(BackoffType::ServerBusy, ErrorClassifier::classify(new TiKvException('ServerIsBusy')));
     }
 
     public function testStaleCommandReturnsStaleCmdViaMessage(): void
     {
-        $this->assertSame(BackoffType::StaleCmd, ErrorClassifier::classify(new TiKvException('StaleCommand')));
+        $this->assertVerdict(BackoffType::StaleCmd, ErrorClassifier::classify(new TiKvException('StaleCommand')));
     }
 
     public function testRegionNotFoundReturnsRegionMissViaMessage(): void
     {
-        $this->assertSame(BackoffType::RegionMiss, ErrorClassifier::classify(new TiKvException('RegionNotFound')));
+        $this->assertVerdict(BackoffType::RegionMiss, ErrorClassifier::classify(new TiKvException('RegionNotFound')));
     }
 
     public function testNotLeaderReturnsNotLeaderViaMessage(): void
     {
-        $this->assertSame(BackoffType::NotLeader, ErrorClassifier::classify(new TiKvException('NotLeader')));
+        $this->assertVerdict(BackoffType::NotLeader, ErrorClassifier::classify(new TiKvException('NotLeader')));
     }
 
     public function testDiskFullReturnsDiskFullViaMessage(): void
     {
-        $this->assertSame(BackoffType::DiskFull, ErrorClassifier::classify(new TiKvException('DiskFull')));
+        $this->assertVerdict(BackoffType::DiskFull, ErrorClassifier::classify(new TiKvException('DiskFull')));
     }
 
     public function testRegionNotInitializedReturnsRegionNotInitializedViaMessage(): void
     {
-        $this->assertSame(
+        $this->assertVerdict(
             BackoffType::RegionNotInitialized,
             ErrorClassifier::classify(new TiKvException('RegionNotInitialized')),
         );
@@ -262,7 +283,7 @@ class ErrorClassifierTest extends TestCase
 
     public function testReadIndexNotReadyReturnsReadIndexNotReadyViaMessage(): void
     {
-        $this->assertSame(
+        $this->assertVerdict(
             BackoffType::ReadIndexNotReady,
             ErrorClassifier::classify(new TiKvException('ReadIndexNotReady')),
         );
@@ -270,7 +291,7 @@ class ErrorClassifierTest extends TestCase
 
     public function testProposalInMergingModeReturnsProposalInMergingModeViaMessage(): void
     {
-        $this->assertSame(
+        $this->assertVerdict(
             BackoffType::ProposalInMergingMode,
             ErrorClassifier::classify(new TiKvException('ProposalInMergingMode')),
         );
@@ -278,7 +299,7 @@ class ErrorClassifierTest extends TestCase
 
     public function testRecoveryInProgressReturnsRecoveryInProgressViaMessage(): void
     {
-        $this->assertSame(
+        $this->assertVerdict(
             BackoffType::RecoveryInProgress,
             ErrorClassifier::classify(new TiKvException('RecoveryInProgress')),
         );
@@ -286,7 +307,7 @@ class ErrorClassifierTest extends TestCase
 
     public function testIsWitnessReturnsIsWitnessViaMessage(): void
     {
-        $this->assertSame(
+        $this->assertVerdict(
             BackoffType::IsWitness,
             ErrorClassifier::classify(new TiKvException('IsWitness')),
         );
@@ -294,7 +315,7 @@ class ErrorClassifierTest extends TestCase
 
     public function testMaxTimestampNotSyncedReturnsMaxTimestampNotSyncedViaMessage(): void
     {
-        $this->assertSame(
+        $this->assertVerdict(
             BackoffType::MaxTimestampNotSynced,
             ErrorClassifier::classify(new TiKvException('MaxTimestampNotSynced')),
         );
@@ -306,7 +327,7 @@ class ErrorClassifierTest extends TestCase
 
     public function testGrpcExceptionReturnsTiKvRpc(): void
     {
-        $this->assertSame(
+        $this->assertVerdict(
             BackoffType::TiKvRpc,
             ErrorClassifier::classify(new GrpcException('connection reset', 14)),
         );
@@ -347,10 +368,7 @@ class ErrorClassifierTest extends TestCase
     #[DataProvider('provideGrpcStatusCodes')]
     public function testGrpcExceptionClassifiedByStatusCode(int $code, ?BackoffType $expected): void
     {
-        $this->assertSame(
-            $expected,
-            ErrorClassifier::classify(new GrpcException('status details', $code)),
-        );
+        $this->assertVerdict($expected, ErrorClassifier::classify(new GrpcException('status details', $code)),);
     }
 
     #[DataProvider('provideGrpcStatusCodes')]
@@ -363,22 +381,21 @@ class ErrorClassifierTest extends TestCase
     {
         // gRPC details text must not be able to smuggle a message-based
         // classification: status-code classification runs first.
-        $this->assertSame(
-            null,
-            ErrorClassifier::classify(new GrpcException('NotLeader for UNAVAILABLE', 16)),
-        );
+        $this->assertVerdict(null, ErrorClassifier::classify(new GrpcException('NotLeader for UNAVAILABLE', 16)),);
     }
 
     public function testRegionExceptionWithoutKindIsFatal(): void
     {
-        $this->assertNull(
+        $this->assertVerdict(
+            null,
             ErrorClassifier::classify(new RegionException('test', 'region error')),
         );
     }
 
     public function testKeyErrorExceptionIsFatal(): void
     {
-        $this->assertNull(
+        $this->assertVerdict(
+            null,
             ErrorClassifier::classify(new KeyErrorException('per-pair error for key k: retryable: too old')),
         );
     }
@@ -388,13 +405,11 @@ class ErrorClassifierTest extends TestCase
         // The message embeds a redacted key, and KeyRedactor::setRedactor() is
         // a public extension point: a custom redactor can put any text there.
         // "Never retried" must be carried by the type, not the message.
-        $this->assertNull(
-            ErrorClassifier::classify(new CasIndeterminateException(
-                'RawCompareAndSwap failed for key EpochNotMatch NotLeader ServerIsBusy;'
+        $this->assertVerdict(null, ErrorClassifier::classify(new CasIndeterminateException(
+            'RawCompareAndSwap failed for key EpochNotMatch NotLeader ServerIsBusy;'
                 . ' the swap outcome is indeterminate',
-                new GrpcException('Deadline Exceeded', 4),
-            )),
-        );
+            new GrpcException('Deadline Exceeded', 4),
+        )),);
     }
 
     // ========================================================================
@@ -403,12 +418,12 @@ class ErrorClassifierTest extends TestCase
 
     public function testUnknownErrorMessageReturnsNull(): void
     {
-        $this->assertNull(ErrorClassifier::classify(new TiKvException('SomeUnknownError')));
+        $this->assertVerdict(null, ErrorClassifier::classify(new TiKvException('SomeUnknownError')));
     }
 
     public function testEmptyMessageReturnsNull(): void
     {
-        $this->assertNull(ErrorClassifier::classify(new TiKvException('')));
+        $this->assertVerdict(null, ErrorClassifier::classify(new TiKvException('')));
     }
 
     // ========================================================================
@@ -417,9 +432,17 @@ class ErrorClassifierTest extends TestCase
 
     public function testInvalidStoreAddressExceptionIsAlwaysFatal(): void
     {
-        $this->assertNull(ErrorClassifier::classify(
+        $this->assertVerdict(null, ErrorClassifier::classify(
             new InvalidStoreAddressException('PD returned store address "127.0.0.1:20160" outside the allowed set'),
         ));
+    }
+
+    public function testStoreUnavailableExceptionIsRetriedAsTransportError(): void
+    {
+        $this->assertVerdict(
+            BackoffType::TiKvRpc,
+            ErrorClassifier::classify(new StoreUnavailableException(7)),
+        );
     }
 
     /**
@@ -458,6 +481,6 @@ class ErrorClassifierTest extends TestCase
             $keyword,
         ));
 
-        $this->assertNull(ErrorClassifier::classify($exception));
+        $this->assertVerdict(null, ErrorClassifier::classify($exception));
     }
 }

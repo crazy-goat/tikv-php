@@ -248,4 +248,42 @@ class ReplicaReadTargetResolutionTest extends TestCase
 
         self::assertSame(3, $target->storeId);
     }
+
+    public function testFollowerModeSkipsAnUnhealthyReplica(): void
+    {
+        $target = RegionContextFactory::resolveTarget(
+            $this->region(),
+            new ReplicaReadPolicy(mode: ReplicaReadMode::Follower),
+            $this->storeLookup(),
+            storeAvailable: static fn (int $storeId): bool => $storeId !== 4,
+        );
+
+        self::assertSame(5, $target->storeId);
+    }
+
+    public function testFollowerModeFallsBackToLeaderWhenEveryReplicaIsUnhealthy(): void
+    {
+        $target = RegionContextFactory::resolveTarget(
+            $this->region(),
+            new ReplicaReadPolicy(mode: ReplicaReadMode::Follower),
+            $this->storeLookup(),
+            storeAvailable: static fn (int $storeId): bool => $storeId === 3,
+        );
+
+        // No healthy replica exists: degrade to the leader, which is still
+        // the best available target (and will fail fast if it is unhealthy).
+        self::assertSame(3, $target->storeId);
+    }
+
+    public function testPreferLeaderFallsBackToAReplicaWhenTheLeaderIsUnhealthy(): void
+    {
+        $target = RegionContextFactory::resolveTarget(
+            $this->region(),
+            new ReplicaReadPolicy(mode: ReplicaReadMode::PreferLeader),
+            $this->storeLookup(),
+            storeAvailable: static fn (int $storeId): bool => $storeId !== 3,
+        );
+
+        self::assertContains($target->storeId, [4, 5]);
+    }
 }
