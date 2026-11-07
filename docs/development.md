@@ -60,7 +60,7 @@ Main entry point. Located at `src/Client/RawKv/RawKvClient.php`.
 - `get()` / `put()` / `delete()` / … - Public operations, each building a `RetryExecutor` via `createRetryExecutor()` and delegating to a `RawKv*` collaborator
 
 The retry loop lives in `RetryExecutor::execute()` (`src/Client/Retry/RetryExecutor.php`). Batch routing and prefix scans are delegated to dedicated collaborators:
-- `RegionGrouper::groupKeysByRegion()` - Batch operation routing
+- `RegionGrouper::groupKeysByRegionBatch()` - Batch operation routing
 - `RawKvSplitter::calculatePrefixEndKey()` - Prefix scan helper
 
 ### PdClient
@@ -152,9 +152,11 @@ make proto-generate
 
 Proto generation creates these automatically in `src/Proto/Kvrpcpb/`.
 
-#### 4. Implement in RawKvClient
+#### 4. Implement the Operation
 
-Add public method:
+`RawKvClient` validates the input and delegates to a collaborator in
+`src/Client/RawKv/` — the client itself holds no region resolver. Add the
+public method to `RawKvClient`:
 
 ```php
 /**
@@ -166,16 +168,34 @@ Add public method:
 public function myOperation(string $key): MyResult
 {
     $this->ensureOpen();
+    $this->validateKeyNotEmpty($key, 'myOperation');
 
-    return $this->createRetryExecutor()->execute(
+    return $this->crud->myOperation($key, $this->createRetryExecutor(), $this->columnFamily);
+}
+```
+
+Then implement it in `RawKvCrud` (`src/Client/RawKv/RawKvCrud.php`), which
+holds the region resolver, the gRPC transport and the timeout configuration:
+
+```php
+public function myOperation(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): MyResult
+{
+    return $retryExecutor->execute(
         $key,
-        function () use ($key): MyResult {
+        function () use ($key, $columnFamily): MyResult {
             $region = $this->regionResolver->getRegionInfo($key);
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawMyOperationRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo(
+                $region,
+                requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
+            ));
             $request->setKey($key);
+            if ($columnFamily !== '') {
+                $request->setCf($columnFamily);
+            }
 
             /** @var RawMyOperationResponse $response */
             $response = $this->grpc->call(
@@ -184,7 +204,7 @@ public function myOperation(string $key): MyResult
                 'RawMyOperation',
                 $request,
                 RawMyOperationResponse::class,
-                $this->timeoutConfig->readTimeoutMs,
+                $this->timeoutMs('read'),
             );
 
             RegionErrorHandler::check($response);
@@ -253,25 +273,64 @@ class MyOperationTest extends TestCase
 
 #### 7. Add E2E Tests
 
+The E2E suite has no shared trait: each class creates a client in
+`setUpBeforeClass()` from `PD_ENDPOINTS` and cleans up the keys it created.
+`ClusterProbe::assertPdReachable()` (used by the existing E2E classes) fails
+with an actionable message when no cluster answers at those endpoints.
+
 ```php
 <?php
+
+declare(strict_types=1);
+
 namespace CrazyGoat\TiKV\Tests\E2E;
+
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use PHPUnit\Framework\TestCase;
 
 class MyOperationE2ETest extends TestCase
 {
-    use TiKvTestTrait;
-    
+    private static RawKvClient $client;
+    private array $keysToCleanup = [];
+
+    public static function setUpBeforeClass(): void
+    {
+        $endpoints = getenv('PD_ENDPOINTS');
+        $endpoints = $endpoints === false ? ['pd:2379'] : explode(',', $endpoints);
+
+        ClusterProbe::assertPdReachable($endpoints);
+        self::$client = RawKvClient::create($endpoints);
+    }
+
+    public static function tearDownAfterClass(): void
+    {
+        if (isset(self::$client)) {
+            self::$client->close();
+        }
+    }
+
+    protected function tearDown(): void
+    {
+        foreach ($this->keysToCleanup as $key) {
+            try {
+                self::$client->delete($key);
+            } catch (\Exception) {
+                // Ignore cleanup errors.
+            }
+        }
+    }
+
     public function testMyOperation(): void
     {
         $key = 'test:my-op:' . uniqid();
-        $this->trackKey($key);
-        
+        $this->keysToCleanup[] = $key;
+
         // Setup
         self::$client->put($key, 'value');
-        
+
         // Execute
         $result = self::$client->myOperation($key);
-        
+
         // Verify
         $this->assertNotNull($result);
     }
@@ -309,38 +368,37 @@ Any special considerations...
 
 ### Pattern: Batch Operations
 
-For batch operations, implement parallel execution:
+For batch operations, implement parallel execution in the batch collaborator
+(`RawKvBatch`), which owns the region resolver and the logger:
 
 ```php
 public function batchMyOperation(array $keys): array
 {
-    $this->ensureOpen();
-    
     if ($keys === []) {
         return [];
     }
-    
-    // Group by region
-    $keysByRegion = $this->groupKeysByRegion($keys);
-    
+
+    // Group by region through the same helper the library uses.
+    $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
+
     // Create async calls for each region
     $regionCalls = [];
     foreach ($keysByRegion as $regionId => $regionData) {
-        $regionCalls[$regionId] = fn(): GrpcFuture => 
-            $this->executeMyOperationForRegionAsync($regionData['region'], $regionData['keys']);
+        $regionCalls[$regionId] = fn(): GrpcFuture
+            => $this->executeMyOperationForRegionAsync($regionData['region'], $regionData['keys']);
     }
-    
+
     // Execute in parallel
     $executor = new BatchAsyncExecutor($this->logger);
     $regionResults = $executor->executeParallel($regionCalls);
-    
+
     // Merge results
     $results = [];
     foreach ($regionResults as $response) {
         // Extract data from response
         $results[] = ...;
     }
-    
+
     return $results;
 }
 ```
@@ -479,38 +537,59 @@ $grpc->method('call')
 
 **Mocking Region Info:**
 
+`RegionInfo` is a `readonly` DTO, so build it through its constructor. The
+epoch is flattened into `epochConfVer` / `epochVersion`; there is no
+`regionEpoch` argument:
+
 ```php
 private function createMockRegion(): RegionInfo
 {
     return new RegionInfo(
         regionId: 1,
+        leaderPeerId: 1,
+        leaderStoreId: 1,
+        epochConfVer: 1,
+        epochVersion: 1,
         startKey: '',
         endKey: '',
-        leaderStoreId: 1,
-        regionEpoch: new RegionEpoch(1, 1)
     );
 }
 ```
 
 **Testing Retry Logic:**
 
+The client resolves the region and the store through PD before the first
+gRPC call, so a retry test mocks both. `RegionException` takes the operation
+name first, then the message:
+
 ```php
 public function testRetryOnEpochNotMatch(): void
 {
+    $pdClient = $this->createMock(PdClientInterface::class);
+    $pdClient->method('getRegion')->willReturn($this->createMockRegion());
+
+    $store = new Store();
+    $store->setId(1);
+    $store->setAddress('127.0.0.1:20160');
+    $pdClient->method('getStore')->willReturn($store);
+
+    $mockSuccessResponse = new RawGetResponse();
+    $mockSuccessResponse->setValue('value');
+
     $grpc = $this->createMock(GrpcClientInterface::class);
-    
-    // First call fails
+
+    // First call fails, second succeeds.
     $grpc->method('call')
         ->willReturnOnConsecutiveCalls(
-            $this->throwException(new RegionException('EpochNotMatch')),
-            $mockSuccessResponse  // Second call succeeds
+            $this->throwException(new RegionException('RawGet', 'EpochNotMatch')),
+            $mockSuccessResponse
         );
-    
-    $client = new RawKvClient($mockPd, $grpc);
+
+    $client = new RawKvClient($pdClient, $grpc);
     $result = $client->get('key');
-    
+
     // Should succeed after retry
-    $this->assertEquals('value', $result);
+    $this->assertSame('value', $result);
 }
 ```
 
@@ -844,7 +923,7 @@ trait TestDataGenerator
     
     protected function generateRandomData(int $size = 100): string
     {
-        return bin2hex(random_bytes($size / 2));
+        return bin2hex(random_bytes(intdiv($size, 2)));
     }
     
     protected function generateKeyRange(int $count, string $prefix = 'test'): array
@@ -946,26 +1025,35 @@ it must stay `fan-out/sequential` and equal. The benchmark also sweeps the
 region count (1, 2, 5, 10, 20), because the whole point is how the two curves
 diverge.
 
-For other operations, create focused benchmark classes under
-`tests/Benchmark/`:
+For other operations, create a focused standalone benchmark under
+`benchmarks/` (the existing scripts are plain PHP files, not PHPUnit test
+classes):
 
 ```php
 <?php
-namespace CrazyGoat\TiKV\Tests\Benchmark;
 
-class BatchPerformanceTest
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/vendor/autoload.php';
+
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+
+final class BatchPerformanceBenchmark
 {
-    private RawKvClient $client;
-    
+    public function __construct(private RawKvClient $client)
+    {
+    }
+
     public function benchmarkBatchPut(int $size): float
     {
         $data = [];
         for ($i = 0; $i < $size; $i++) {
             $data["bench:$i"] = "value-$i";
         }
-        
+
         $start = hrtime(true);
         $this->client->batchPut($data);
+
         return (hrtime(true) - $start) / 1e6;
     }
 }
@@ -979,7 +1067,7 @@ class BatchPerformanceTest
 public function streamScan(string $prefix, callable $callback): void
 {
     $startKey = $prefix;
-    $endKey = $this->calculatePrefixEndKey($prefix);
+    $endKey = RawKvSplitter::calculatePrefixEndKey($prefix);
     
     while (true) {
         $batch = $this->client->scan($startKey, $endKey, limit: 100);
@@ -1056,8 +1144,8 @@ sudo tcpdump -i lo -w tikv.pcap port 20160
 // Check region cache
 $logger->debug('Region lookup', ['key' => $key]);
 
-// Clear cache and retry
-$client->clearRegionCache();  // If you add this method
+// Force a refresh of the region cache and retry
+$client->refreshRegionCache(force: true);
 ```
 
 **Connection Issues:**
