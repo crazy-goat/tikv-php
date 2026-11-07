@@ -1321,7 +1321,9 @@ final class TxnKvClient
      * Transactions this client began that are still active are rolled back
      * first, while the transport and the PD client they depend on are still
      * open (issue #226, TXN-21). A rollback failure is logged and does not
-     * abort the shutdown; the transaction keeps its destructor fallback.
+     * abort the shutdown; the attempted rollback still leaves the transaction
+     * terminal (closed, `RolledBack`, issue #231), so neither its destructor
+     * nor a second `close()` retries it.
      * The region cache is then cleared, the owned transport is closed and the
      * PD client is closed.
      *
@@ -1381,8 +1383,9 @@ final class TxnKvClient
      * Runs before the region cache, transport and PD client are released, so
      * an abandoned transaction does not leave its locks behind until the TTL
      * expires (issue #226, TXN-21). A failure is logged, not propagated:
-     * close() must never throw, and the transaction's own destructor keeps
-     * its rollback fallback.
+     * close() must never throw. The attempted rollback still leaves the
+     * transaction terminal (closed, `RolledBack`, issue #231), so neither its
+     * destructor nor a second close() retries it.
      */
     private function rollbackLiveTransactions(): void
     {

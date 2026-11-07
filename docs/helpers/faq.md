@@ -1378,6 +1378,21 @@ status Active so a second `commit()` could reuse the timestamp — that premise
 expired with #215, and the test now asserts the failure is swallowed and
 exactly one timestamp is minted.
 
+## A failed rollback is still terminal — finalise in a finally (issue #231, TXN-26)
+
+`rollback()` used to set `RolledBack` and `close()` only after every RPC
+succeeded. A permanent `KvBatchRollback`/`KVPessimisticRollback` failure then
+left the transaction `Active`: `getStatus()` reported a dead transaction as
+usable, and `__destruct()` repeated the same failing rollback and logged a
+second error. The state finalisation now runs in a `finally` block around the
+RPCs, so the write/read sets are cleared and the status becomes `RolledBack`
+with the state closed on both paths, while the exception still propagates.
+Do not "retry a failed rollback": the client-side transaction is terminal by
+design, and any locks the failed RPC left behind are removed by their TTL (or
+by a lock resolver). This does not weaken #559 — that fix keeps the failure
+from being swallowed and reported as a confirmed rollback; it does not promise
+the transaction stays reusable.
+
 ## The classifier contract is a RetryVerdict — return a decision, not a throw (issue #534)
 
 The RetryExecutor's classifier chain is `handleNotLeader → classifier → ErrorClassifier`. A classifier returns a `RetryVerdict`: `RetryVerdict::retry($backoff)` retries, `RetryVerdict::fatal()` stops immediately, and `RetryVerdict::pass()` falls through to the default `ErrorClassifier::classify()`. Before issue #534 the contract was `?BackoffType`, so `null` meant "no opinion" and a classifier that wanted a fatal verdict had to throw from inside the executor's catch block — which skipped the executor's fatal path (`'Fatal error, not retrying'` log, region invalidation and `closeChannel()` cleanup). Issue #239's snippet (`if ($e instanceof GrpcException) { return null; }`) is still wrong for a different reason: `null` (now `pass()`) is not "do not retry", it defers to the built-in classifier, which retries every retryable `GrpcException` as `TiKvRpc`. `RawKvAtomic::compareAndSwap()` therefore returns `RetryVerdict::fatal()` for a `GrpcException` (#239/#534), and a fatal `UNAVAILABLE` now closes the broken channel. Do not reintroduce the throw-from-classifier trick.

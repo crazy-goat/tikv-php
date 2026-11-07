@@ -195,9 +195,17 @@ class TxnKvClientCloseTransactionTest extends TestCase
 
         $this->assertContains('Transaction rollback failed during client close', $this->logger->messages);
         $this->assertSame(
-            TransactionStatus::Active,
+            TransactionStatus::RolledBack,
             $transaction->getStatus(),
-            'a failed close() rollback leaves the transaction to its destructor',
+            'a failed close() rollback still leaves the transaction terminal',
+        );
+
+        // The destructor must not repeat the rollback that already failed.
+        $transaction->__destruct();
+        $this->assertSame(
+            1,
+            count(array_keys($this->rpcMethods, 'KvBatchRollback', true)),
+            'the destructor must not retry a failed rollback',
         );
     }
 
@@ -233,7 +241,7 @@ class TxnKvClientCloseTransactionTest extends TestCase
 
         $client->close();
 
-        $this->assertSame(TransactionStatus::Active, $failing->getStatus());
+        $this->assertSame(TransactionStatus::RolledBack, $failing->getStatus());
         $this->assertSame(TransactionStatus::RolledBack, $succeeding->getStatus());
         $this->assertContains('Transaction rollback failed during client close', $this->logger->messages);
     }

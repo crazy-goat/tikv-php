@@ -707,9 +707,11 @@ final class TxnKvFanoutTest extends TestCase
     /**
      * Issue #275: a batch deadline in the rollback fan-out propagates like a
      * partial failure. A silent return would report a failed cleanup as a
-     * success and leave the transaction closed, so nobody retries it.
+     * success. Since issue #231 the transaction is still marked `RolledBack`
+     * and closed, so the exception is what tells the caller the cleanup did
+     * not complete.
      */
-    public function testBatchDeadlineInTheRollbackFanOutPropagatesAndKeepsTheTransactionRollbackable(): void
+    public function testBatchDeadlineInTheRollbackFanOutPropagatesAndLeavesTheTransactionTerminal(): void
     {
         $regions = $this->makeRegions(3);
         $this->stubPdClient($regions);
@@ -730,7 +732,8 @@ final class TxnKvFanoutTest extends TestCase
             $txn->rollback();
             self::fail('a batch deadline in the rollback fan-out must propagate');
         } catch (BatchDeadlineExceededException) {
-            self::assertNotSame(TransactionStatus::RolledBack, $txn->getStatus());
+            self::assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+            self::assertSame([], $txn->getWriteSet());
         }
     }
 

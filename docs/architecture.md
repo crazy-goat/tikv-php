@@ -243,9 +243,13 @@ rollback because the transaction or its lock is already gone (even when
 `retryable` is co-set), and a structured `conflict` is a fatal
 `TransactionConflictException` rather than a retry. A bare `retryable` string
 is retried; every other `KeyError` (including an empty payload) throws the
-base `TiKvException`, so the write set is not cleared and the transaction is
-not reported `RolledBack`; it stays active-but-unwritable so the caller (or
-the destructor) can retry the cleanup (issue #559).
+base `TiKvException`. Whatever the outcome, the attempted rollback is
+terminal for the client (issue #231, TXN-26): a `finally` block clears the
+write and read sets, sets the status to `RolledBack` and closes the state
+before the exception propagates, so `getStatus()` never reports a dead
+transaction as `Active` and neither the caller nor the destructor repeats
+the failing rollback. Locks the failed RPC left behind expire with their TTL
+and are the lock resolvers' responsibility.
 
 **Memory bounds**: the write set grows in the PHP worker for the whole
 transaction and is opt-in bounded on `begin()` (`0` = unlimited) by
