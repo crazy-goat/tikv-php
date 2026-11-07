@@ -68,6 +68,24 @@ class RegionCacheTest extends TestCase
         );
     }
 
+    private function makeRegionWithNonVotingPeers(): RegionInfo
+    {
+        return new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 10,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'z',
+            peers: [
+                new PeerInfo(peerId: 10, storeId: 1),
+                new PeerInfo(peerId: 20, storeId: 2, role: PeerInfo::ROLE_LEARNER),
+                new PeerInfo(peerId: 30, storeId: 3, isWitness: true),
+            ],
+        );
+    }
+
     public function testImplementsInterface(): void
     {
         $cache = new RegionCache();
@@ -611,6 +629,36 @@ class RegionCacheTest extends TestCase
         $resolved = $cache->getByKey('m');
         $this->assertNotNull($resolved);
         $this->assertSame(1, $resolved->leaderStoreId);
+    }
+
+    public function testSwitchLeaderRefusesLearnerPeer(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->makeRegionWithNonVotingPeers());
+
+        $result = $cache->switchLeader(1, 2);
+
+        $this->assertFalse($result);
+
+        $resolved = $cache->getByKey('m');
+        $this->assertNotNull($resolved);
+        $this->assertSame(1, $resolved->leaderStoreId);
+        $this->assertSame(10, $resolved->leaderPeerId);
+    }
+
+    public function testSwitchLeaderRefusesWitnessPeer(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->makeRegionWithNonVotingPeers());
+
+        $result = $cache->switchLeader(1, 3);
+
+        $this->assertFalse($result);
+
+        $resolved = $cache->getByKey('m');
+        $this->assertNotNull($resolved);
+        $this->assertSame(1, $resolved->leaderStoreId);
+        $this->assertSame(10, $resolved->leaderPeerId);
     }
 
     public function testSwitchLeaderWithUnknownRegionIdReturnsFalse(): void

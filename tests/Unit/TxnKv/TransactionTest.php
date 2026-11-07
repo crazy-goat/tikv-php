@@ -44,6 +44,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
@@ -57,9 +58,11 @@ use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+use CrazyGoat\TiKV\Client\Util\ShutdownState;
 use CrazyGoat\TiKV\Tests\Unit\Support\ContextRecordingLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\RecordingLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\StubRegionCache;
+use CrazyGoat\TiKV\Tests\Unit\Support\ThrowingLogger;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -103,6 +106,11 @@ class TransactionTest extends TestCase
             $this->pdClient,
             1000, // matches createTransaction default startTs
         );
+    }
+
+    protected function tearDown(): void
+    {
+        ShutdownState::resetForTests();
     }
 
     /**
@@ -2044,6 +2052,51 @@ class TransactionTest extends TestCase
         $this->assertSame('k3', $result[1]['key']);
     }
 
+    public function testScanMergePlacesWriteSetKeysAroundScannedRows(): void
+    {
+        // The merge places every in-range write-set key relative to the
+        // already-sorted scanned rows (issue #302): before the first row,
+        // between two rows, exactly on a row (override or tombstone) and after
+        // the last row. The write set is deliberately not in key order — only
+        // the write keys are sorted, never the scanned rows.
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response = $this->makeScanResponse([
+            'k2' => 'scanned-v2',
+            'k4' => 'scanned-v4',
+        ]);
+        $this->grpc->method('call')->willReturnCallback(
+            static fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k4', 'local-v4');
+        $txn->set('k1', 'local-v1');
+        $txn->delete('k2');
+        $txn->set('k5', 'local-v5');
+        $txn->set('k3', 'local-v3');
+
+        $result = $txn->scan('', '', 0);
+
+        $this->assertSame(['k1', 'k3', 'k4', 'k5'], array_column($result, 'key'));
+        $this->assertSame(
+            ['local-v1', 'local-v3', 'local-v4', 'local-v5'],
+            array_column($result, 'value'),
+        );
+
+        // The limit truncates the merged sequence after tombstones are
+        // dropped, so the deleted 'k2' does not consume one of the two rows.
+        $limited = $txn->scan('', '', 2);
+
+        $this->assertSame(['k1', 'k3'], array_column($limited, 'key'));
+    }
+
     // ========================================================================
     // Retry / error classification
     // ========================================================================
@@ -2314,7 +2367,11 @@ class TransactionTest extends TestCase
                 static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
                     return match ($method) {
                         'KvGet' => ++$getCalls === 1
-                            ? throw new RegionException('test', 'RegionNotFound')
+                            ? throw new RegionException(
+                                'test',
+                                'RegionNotFound',
+                                errorKind: ErrorKind::RegionNotFound,
+                            )
                             : $response,
                         default => throw new \RuntimeException("Unexpected method: $method"),
                     };
@@ -7635,6 +7692,69 @@ class TransactionTest extends TestCase
 
         $txn->rollback();
         $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+    }
+
+    /**
+     * Issue #287 (GRPC-28): the destructor's rollback failure is logged
+     * through a guard, so a logger that throws cannot replace it with a
+     * fatal error from the destructor.
+     */
+    public function testDestructorSwallowsAThrowingLoggerWhenRollbackFails(): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $keyError = new KeyError();
+        $keyError->setAbort('simulated rollback failure');
+        $errorResponse->setError($keyError);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'KvBatchRollback' => $errorResponse,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => false,
+            'logger' => new ThrowingLogger(),
+        ]);
+        $txn->set('key', 'value');
+
+        $txn->__destruct();
+
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+    }
+
+    /**
+     * Issue #287 (GRPC-28): a rollback is a network round trip, so the
+     * destructor skips it once PHP is shutting down. The transaction keeps
+     * its locks until the lock TTL expires instead of calling into ext-grpc
+     * during module shutdown.
+     */
+    public function testDestructorSkipsRollbackDuringShutdown(): void
+    {
+        $this->grpc->expects($this->never())->method('call');
+        $logger = new RecordingLogger();
+
+        ShutdownState::markShutdown();
+        try {
+            $txn = $this->createTransaction([
+                'pessimistic' => false,
+                'logger' => $logger,
+            ]);
+            $txn->set('key', 'value');
+
+            $txn->__destruct();
+
+            $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+            $this->assertContains('Transaction rollback skipped during shutdown', $logger->messages);
+
+            // Destroy the object while the flag is still set, so the second
+            // destructor run also stays off the network.
+            unset($txn);
+        } finally {
+            ShutdownState::resetForTests();
+        }
     }
 
     public function testRollbackEncounteringLockResolvesItAndRetries(): void

@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\SafeLogging;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
@@ -28,6 +29,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\UndeterminedCommitException;
+use CrazyGoat\TiKV\Client\Util\ShutdownState;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -204,6 +206,10 @@ final class Transaction
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
+        // Arm the shutdown flag before the destructor can consult it; the
+        // registered callback runs before PHP destroys the remaining
+        // objects (issue #287, GRPC-28).
+        ShutdownState::ensureRegistered();
         if ($this->maxScanLimit < 1) {
             throw new InvalidArgumentException('maxScanLimit must be >= 1');
         }
@@ -576,7 +582,13 @@ final class Transaction
             $lockTtlMs = $this->committer->ttlWithUptimeMs($this->state, $this->pessimisticLockTtlMs);
             $this->state->setPessimisticPrimaryKey($key);
             try {
-                $this->committer->lockKeys([$key], $this->state, $forUpdateTs, $key);
+                $this->committer->lockKeys(
+                    [$key],
+                    $this->state,
+                    $forUpdateTs,
+                    $key,
+                    retryExecutor: $this->retryExecutor()->beginOperation(),
+                );
             } catch (\Throwable $failure) {
                 $this->failPessimisticStatement($failure);
             }
@@ -716,7 +728,13 @@ final class Transaction
         // lock: the tracked expiry must never be later than the real one.
         $lockTtlMs = $this->committer->ttlWithUptimeMs($this->state, $this->pessimisticLockTtlMs);
         try {
-            $this->committer->lockKeys($keys, $this->state, $this->pdClient->getTimestamp(), $primary);
+            $this->committer->lockKeys(
+                $keys,
+                $this->state,
+                $this->pdClient->getTimestamp(),
+                $primary,
+                retryExecutor: $this->retryExecutor()->beginOperation(),
+            );
         } catch (\Throwable $failure) {
             $this->failPessimisticStatement($failure);
         }
@@ -775,6 +793,7 @@ final class Transaction
                 $this->pdClient->getTimestamp(),
                 $primary,
                 true,
+                $this->retryExecutor()->beginOperation(),
             );
         } catch (\Throwable $failure) {
             $this->failPessimisticStatement($failure);
@@ -962,17 +981,42 @@ final class Transaction
     //  Internal
     // ---------------------------------------------------------------
 
+    /**
+     * Roll back a transaction the caller abandoned.
+     *
+     * Best-effort by design: a rollback is a network round trip and this
+     * method runs from a destructor, where an exception must never escape.
+     * During PHP's shutdown sequence the rollback is skipped entirely —
+     * ext-grpc may already be in or past module shutdown, where the
+     * behaviour of a call is undefined rather than merely erroneous (issue
+     * #287, GRPC-28). The transaction then keeps its locks until the lock
+     * TTL expires; callers that need an immediate release must call
+     * {@see self::commit()} or {@see self::rollback()} explicitly.
+     */
     public function __destruct()
     {
-        if ($this->state->getStatus() === TransactionStatus::Active && !$this->state->isClosed()) {
-            try {
-                $this->rollback();
-            } catch (\Throwable $e) {
-                $this->logger->error('Transaction destruct rollback failed', [
-                    'txnId' => $this->txnId,
-                    'exception' => $e,
-                ]);
-            }
+        if ($this->state->getStatus() !== TransactionStatus::Active || $this->state->isClosed()) {
+            return;
+        }
+
+        if (ShutdownState::isShuttingDown()) {
+            SafeLogging::log($this->logger, 'warning', 'Transaction rollback skipped during shutdown', [
+                'txnId' => $this->txnId,
+            ]);
+
+            return;
+        }
+
+        try {
+            $this->rollback();
+        } catch (\Throwable $e) {
+            // The logger may itself be unusable during shutdown: the guard
+            // is what keeps the destructor from throwing (issue #287,
+            // GRPC-28).
+            SafeLogging::log($this->logger, 'error', 'Transaction destruct rollback failed', [
+                'txnId' => $this->txnId,
+                'exception' => $e,
+            ]);
         }
     }
 

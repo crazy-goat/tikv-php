@@ -156,7 +156,17 @@ final readonly class RegionResolver
         $this->storeAddresses = $storeAddresses ?? new StoreAddressIndex();
     }
 
-    public function getRegionInfo(string $key): RegionInfo
+    /**
+     * Resolve the region that contains the given key.
+     *
+     * @param int|null $timeoutMs Deadline in milliseconds for the PD
+     *        `GetRegion` miss path; null uses the configured
+     *        TimeoutConfig::$pdTimeoutMs (issue #257)
+     *
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD error
+     */
+    public function getRegionInfo(string $key, ?int $timeoutMs = null): RegionInfo
     {
         $region = $this->regionCache->getByKey($key);
         if ($region instanceof RegionInfo) {
@@ -166,7 +176,7 @@ final readonly class RegionResolver
         }
 
         $this->metrics->regionCacheMiss('region_resolution');
-        $region = $this->pdClient->getRegion($key);
+        $region = $this->pdClient->getRegion($key, $timeoutMs);
 
         // Issue #253 (REG-22): PD serves GetRegion from a possibly stale
         // region tree, so during a split it can answer with a region that no
@@ -205,10 +215,13 @@ final readonly class RegionResolver
      * Returns null only when there is no region below $key: the key is in the
      * first region of the keyspace, or PD reports no adjacent region.
      *
+     * @param int|null $timeoutMs Deadline in milliseconds for the PD lookups;
+     *        null uses the configured TimeoutConfig::$pdTimeoutMs (issue #257)
+     *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD error
      */
-    public function getRegionBelow(string $key): ?RegionInfo
+    public function getRegionBelow(string $key, ?int $timeoutMs = null): ?RegionInfo
     {
         $cached = $this->regionCache->getRegionBelow($key);
         if ($cached instanceof RegionInfo) {
@@ -217,13 +230,13 @@ final readonly class RegionResolver
             return $cached;
         }
 
-        $region = $this->getRegionInfo($key);
+        $region = $this->getRegionInfo($key, $timeoutMs);
         if (KeyOrder::lt($region->startKey, $key)) {
             // $key is inside the region, so this region holds keys below it.
             return $region;
         }
 
-        $previous = $this->pdClient->getPrevRegion($key);
+        $previous = $this->pdClient->getPrevRegion($key, $timeoutMs);
         if ($previous instanceof RegionInfo) {
             $this->regionCache->put($previous);
         }
@@ -384,10 +397,13 @@ final readonly class RegionResolver
      * rule).
      *
      * @param string[] $keys
+     * @param int|null $timeoutMs Deadline in milliseconds for the PD
+     *        `ScanRegions` lookups; null uses the configured
+     *        TimeoutConfig::$pdTimeoutMs (issue #257)
      * @return array<array-key, RegionInfo> key => region mapping
      * @throws TiKvException when any key cannot be mapped to a region
      */
-    public function batchResolveRegions(array $keys): array
+    public function batchResolveRegions(array $keys, ?int $timeoutMs = null): array
     {
         if ($keys === []) {
             return [];
@@ -426,7 +442,7 @@ final readonly class RegionResolver
 
         foreach ($runs as $run) {
             $maxKey = $run[count($run) - 1];
-            $regions = $this->scanRun($run[0], KeyOrder::successor($maxKey));
+            $regions = $this->scanRun($run[0], KeyOrder::successor($maxKey), $timeoutMs);
 
             foreach ($regions as $region) {
                 $this->cacheScannedRegion($region);
@@ -470,13 +486,13 @@ final readonly class RegionResolver
      *
      * @return list<RegionInfo> regions in ascending startKey order
      */
-    private function scanRun(string $startKey, string $endKey): array
+    private function scanRun(string $startKey, string $endKey, ?int $timeoutMs = null): array
     {
         $regions = [];
         $cursor = $startKey;
 
         for ($page = 0; $page < self::MAX_SCAN_PAGES; $page++) {
-            $batch = $this->pdClient->scanRegions($cursor, $endKey, self::SCAN_PAGE_SIZE);
+            $batch = $this->pdClient->scanRegions($cursor, $endKey, self::SCAN_PAGE_SIZE, $timeoutMs);
             if ($batch === []) {
                 break;
             }

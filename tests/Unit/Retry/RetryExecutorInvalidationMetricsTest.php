@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\Retry;
 
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -200,7 +201,7 @@ class RetryExecutorInvalidationMetricsTest extends TestCase
     // RegionException propagate into the retry loop.
     // ========================================================================
 
-    private function makeNotLeaderResponse(int $regionId, ?Peer $hint): object
+    private function makeNotLeaderResponse(int $regionId, ?Peer $hint): RawGetResponse
     {
         $notLeader = new NotLeader();
         $notLeader->setRegionId($regionId);
@@ -211,16 +212,10 @@ class RetryExecutorInvalidationMetricsTest extends TestCase
         $error->setMessage('not leader');
         $error->setNotLeader($notLeader);
 
-        return new class ($error) {
-            public function __construct(private readonly \CrazyGoat\Proto\Errorpb\Error $error)
-            {
-            }
+        $response = new RawGetResponse();
+        $response->setRegionError($error);
 
-            public function getRegionError(): \CrazyGoat\Proto\Errorpb\Error
-            {
-                return $this->error;
-            }
-        };
+        return $response;
     }
 
     /**

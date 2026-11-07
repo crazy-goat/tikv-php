@@ -30,6 +30,11 @@ final class RegionException extends TiKvException
      * @param StoreNotMatch|null $storeNotMatch The payload of a
      *     StoreNotMatch error. It names the store ID the request was sent to,
      *     which is the store-cache entry the retry must drop (issue #247).
+     * @param bool $fromErrorpb Whether this exception was built from a real
+     *     `errorpb.Error` by {@see self::fromRegionError()}. Only such an
+     *     exception is an unrecognised REGION error when its kind is null and
+     *     gets the bounded retry (issue #444); a synthetic RegionException
+     *     wrapping a response-level error string or KeyError stays fatal.
      */
     public function __construct(
         string $operation,
@@ -39,6 +44,7 @@ final class RegionException extends TiKvException
         public readonly ?EpochNotMatch $epochNotMatch = null,
         public readonly ?RegionInfo $cachedRegion = null,
         public readonly ?StoreNotMatch $storeNotMatch = null,
+        public readonly bool $fromErrorpb = false,
     ) {
         parent::__construct("{$operation} failed: {$message}");
     }
@@ -64,6 +70,7 @@ final class RegionException extends TiKvException
             epochNotMatch: $error->getEpochNotMatch(),
             cachedRegion: $cachedRegion,
             storeNotMatch: $error->getStoreNotMatch(),
+            fromErrorpb: true,
         );
     }
 

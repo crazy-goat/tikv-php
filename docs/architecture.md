@@ -499,7 +499,9 @@ heap records.
   when it is usable (the returned regions cover the key, decode cleanly, and
   the old leader is still a peer); otherwise invalidate the specific region
   and let the next attempt resolve it through PD (issue #246)
-- **NotLeader**: Update leader info or invalidate
+- **NotLeader**: Update leader info when the hinted peer may lead — a voter
+  that is not a witness; a hint naming a learner or a witness invalidates the
+  region and re-resolves it through PD (issue #258, REG-27)
 - **RegionNotFound**: Invalidate and retry
 - **ServerIsBusy / DiskFull / IsWitness / RecoveryInProgress**: Keep the
   cached region — the request reached the right region, so only the retry
@@ -639,8 +641,15 @@ enum BackoffType
     case IsWitness;               // 1000ms–10000ms
     case MaxTimestampNotSynced;   // 2ms–500ms
     case TxnLock;                 // 200ms–3000ms (transactional)
+    case TxnLockFast;             // 10ms–3000ms (client-go BoTxnLockFast, DefBackoffLockFast base)
+    case TxnNotFound;             // 2ms–500ms (client-go BoTxnNotFound)
+    case CommitTSLag;             // 2ms–500ms (client-go BoCommitTSLag)
+    case PDRpc;                   // 500ms–3000ms (client-go BoPDRPC)
 }
 ```
+
+PHP currently applies equal jitter to every case; client-go uses `NoJitter` for
+`BoTxnNotFound` and `BoCommitTSLag`.
 
 **Retry Budgets**:
 - **Scope**: one budget per logical operation (issue #223). `RetryExecutor::beginOperation()` returns an executor whose `execute()` calls share the same `maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline, and every client fan-out entry point (`scan()`/`reverseScan()`/`batchScan()`, the batch methods, transactional reads, `commit()`, `rollback()`, `deleteRange()`, `checksum()`) uses one for all its regions and pages. A later operation starts from zero, so a read-heavy transaction cannot starve its commit. The attempt cap stays per `execute()` call (one retry loop), so a wide fan-out does not exhaust it on one retry per region.
@@ -877,7 +886,9 @@ the sequential retrying path.
 - Cache on first access
 - Refresh on EpochNotMatch from its `current_regions` payload; invalidate
   when the payload is absent or unusable
-- Update on NotLeader hint
+- Update on a NotLeader hint only when the hinted peer is a voter and not a
+  witness; a learner or witness hint invalidates the entry so the next attempt
+  re-resolves it through PD (issue #258)
 - Offer an opt-in tick (`refreshRegionCache()`) and an explicit boot-time
   preload (`preloadRegions()`) for long-lived workers (issue #425)
 - Drop the cached store address on a `StoreNotMatch` region error or a

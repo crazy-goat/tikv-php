@@ -226,6 +226,25 @@ on a machine that has it (an extension that is too old is still reported) and
 the Unit-only workflow keeps working on one that has not. Re-check both
 whenever the job's PHP setup changes.
 
+A missing extension must not hide the transport tests, though (issue #284):
+
+- `phpunit.xml` enables `displayDetailsOnSkippedTests` and
+  `displayDetailsOnTestsThatTriggerWarnings`; `GrpcExtensionGate` emits one
+  `E_USER_WARNING` per skipped class (once, not once per test), so every run
+  names each skipped transport class and its reason instead of reducing it to
+  one `S`. The warning is what makes the class visible in the TestDox output
+  the CI jobs and composer scripts use, because the TestDox printer ignores
+  `displayDetailsOnSkippedTests`.
+- The gate's message names the test class, the `ext-grpc >= 1.57` requirement
+  and `pecl install grpc`, and points at `composer test:grpc`.
+- The `grpc-unit-tests` job sets `REQUIRE_GRPC_EXTENSION=1`; if `ext-grpc`
+  disappears from its PHP setup, the gate calls `self::fail()` with that
+  message instead of skipping. The job also passes `--fail-on-skipped`, so a
+  skip fails the build either way.
+- The `unit-tests` job needs no such flag: it passes `--fail-on-skipped`, so a
+  transport test that leaks into the Unit suite fails there instead of
+  skipping.
+
 ## PHP coerces numeric-string array keys to int — string-cast at every typed consumption point
 
 When a string that parses as an integer is used as an array key (`$map['12345']`,
@@ -627,6 +646,37 @@ dropped the entry before scheduling another attempt", while `check()` may run
 outside any retry executor. Do not collapse the two labels, and do not
 assume the executor owns every drop.
 
+## `RegionErrorHandler::check()` is a closed-set `instanceof` dispatch, not duck typing (PERF-16, issue #303)
+
+`check()` used to call `method_exists()` twice on every response. It now
+matches the response against the explicit set of types the client sends
+(`RawGetResponse`, `RawBatchGetResponse`, the transactional responses, …) and
+calls the getter only in the matching arm. The generated protobuf classes
+share no interface, so the set lives in the two `match (true)` blocks inside
+`check()` (region error first, then the top-level error); a new response type
+that can carry a `region_error` or a top-level `error` must be added there, or
+`check()` will silently treat it as clean. That is deliberate for an object
+the handler does not know (the `stdClass` test pins it): the handler only
+sees the client's own response types in production, and duck-typing a
+`getRegionError()` method was exactly the reflection cost the issue removed.
+The `regionErrorResponseProvider` / `topLevelErrorResponseProvider` data
+providers in `RegionErrorHandlerTest` enumerate the 24 region-error types and
+the 18 `getError()` types, so removing one from a match fails the suite
+instead of silently accepting that response.
+
+The batch-get path also walks its repeated `pairs` field once. The unary path
+resolves to the collected `array<array-key, ?string>` from
+`CheckedGrpcFuture::fromBatchGetFuture()` /
+`RegionErrorHandler::checkAndCollectBatchGet()`; the multiplexed path calls
+`check(..., checkPairErrors: false)` in `tryMultiplex()` and collects with
+`RegionErrorHandler::collectBatchGetPairs()` in `RawKvBatch::batchGet()`.
+Both loops throw the same `KeyErrorException` at the same point in the order
+(region error first, then the first bad pair), so the exception surface is
+unchanged: the unary path still wraps it in `BatchPartialFailureException`,
+the multiplexed path still lets it escape. Do not "simplify" by moving the
+pair check out of the per-region waiter on the unary path — that would change
+the wrapper the caller sees.
+
 ## PHPStan `ternary.alwaysFalse` fires for by-ref bool flags mutated in a sibling closure — sequence mocks instead
 
 When a test shares state between mocked-method callbacks through a
@@ -809,9 +859,10 @@ today are safe for two *different* reasons, worth knowing instead of
 re-deriving: `CheckedGrpcFutureRetryableDispatchTest`'s NotLeader-with-hint
 case never reaches the fatal block because `handleNotLeader()` claims it
 first (it returns `BackoffType::NotLeader` ahead of the classifier chain — the
-predicate would in fact answer `true` for it), and its kind-less
-`RaftEntryTooLarge` `RegionException` is built without a typed kind, so
-`errorKind === null` and the predicate rejects it before touching the cache.
+predicate would in fact answer `true` for it), and its `RaftEntryTooLarge`
+`RegionException` carries a typed non-routing kind, so the predicate rejects it
+before touching the cache. The kind-less synthetic case is covered separately
+by `testBareBatchErrorStringRegionExceptionIsFatal`.
 
 ## Error-handling docs must be derived from source, not from the issue text
 
@@ -1488,6 +1539,18 @@ still passes the identity assertions while every counter goes nowhere.
 `rpcStarted()`, and asserts the transport's `rpcStarted()` / `rpcCompleted()`
 for both factories plus the client-side `regionCacheMiss` on the RawKV path.
 
+The same premise expiry closed issue #259 (audit REG-28, "duplicated
+`getAllStores()` docblock"): 0c50f7e added two identical
+`/** @return Store[] */` blocks above `PdClient::getAllStores()`, and 6c7cbf2
+(PR #612, issue #234, the PD `ResponseHeader.error` rewrite) deleted the first
+block while it was already editing that docblock. Current `master` therefore has one block
+and `phpcs` reports nothing, so no source or test change is needed;
+`git log -S '@return Store[]' -- src/Client/Connection/PdClient.php` shows both
+the introduction and the removal. A duplicate docblock of the same shape still
+sits above `ApiV2GrpcClient::call()`
+(`src/Client/Grpc/ApiV2GrpcClient.php:57-66`, added by a1415aa0) — a separate
+finding, not part of this issue.
+
 ## A stray Markdown fence can become a legitimate closer — render the file before deleting it
 
 Issue #381 (DOC-15) reported an orphan closing fence after the TLS "manual
@@ -1614,20 +1677,22 @@ Facts fixed by the implementation, worth not re-deriving:
   reassigned after construction. Cache-carrying services can't be
   `readonly` classes.
 
-## BatchPartialFailureException's array keys are sub-batch indices, not region IDs or user keys
+## BatchPartialFailureException's array keys are call indices; use getFailedRegionIds() for region IDs
 
-`BatchPartialFailureException::getRegionErrors()` is documented in several
-places as "regionId → exception", but the keys are actually indices into the
-internal list of sub-batch callables (`RawKvBatch` groups keys per region and
-splits each region into ≤512-key/16 KB sub-batches before dispatch, so the
-count of units is larger than the region count whenever any region's keys
-exceed one sub-batch). There is no public
-mapping from a failed index back to the user keys it contained. Practical
-consequence for recovery advice: you cannot "re-drive only the affected keys"
-through the exception alone — for idempotent work retry the whole batch; for
-non-idempotent work re-read and recompute, or use a transaction. (Documented
-in docs/operations.md, issue #393; `docs/troubleshooting.md`'s "regionId →
-exception" wording is a candidate for the same correction.)
+`BatchPartialFailureException::getRegionErrors()` is keyed by an internal
+fan-out call index, not a region ID or a user key (`RawKvBatch` groups keys
+per region and splits each region into ≤512-key/16 KB sub-batches before
+dispatch, so the number of calls is larger than the region count). Since
+issue #285 the exception also carries a `BatchCallId` per call:
+`getFailedRegionIds()` returns the real TiKV region IDs (unique, ascending,
+ready for `pd-ctl` and cluster metrics) and `getFailedCallIds()` maps each
+failed call index to `{regionId, subBatchIndex}`, so several sub-batches of
+one region are distinguishable and identifiers never collide. There is still
+no public mapping from a failed call back to the user keys it contained: for
+idempotent work retry the whole batch; for non-idempotent work re-read and
+recompute, or use a transaction. (Documented in docs/operations.md, issue
+#393; `BatchDeadlineExceededException` carries the same real region IDs under
+`getContext()['dispatchedRegionIds']` / `['pendingRegionIds']`.)
 
 ## Capturing gRPC requests in a helper-scoped PHPUnit mock callback — closure must take `$requests` by reference
 
@@ -2962,3 +3027,22 @@ wait does not prove the shared budget.
 
 The experimental BatchCommands multiplex path (`RawKvBatch::tryMultiplex`) is bounded per call
 only. It does not use the batch deadline.
+
+## Destructors log best-effort and skip rollback during shutdown (#287)
+
+PHP runs `register_shutdown_function()` callbacks before it destroys the
+remaining objects, so `Util\ShutdownState` flips a process-wide flag from one
+of them and the destructors that do network I/O consult it. `TxnKvClient` and
+`Transaction` register the callback when they are constructed. During
+shutdown `Transaction::__destruct()` and `TxnKvClient::close()` skip the
+rollback RPC — ext-grpc may already be in or past module shutdown — and the
+transaction's locks expire with the lock TTL. An explicit `close()` before
+shutdown still rolls the live transactions back.
+
+Every record on a close or destructor path goes through
+`Observability\SafeLogging::log()`, which swallows any `Throwable` from the
+logger. Do not add a direct `$this->logger->...()` call to `close()`,
+`closeChannel()`, `closeChannelObject()` or `Transaction::__destruct()`: a
+Monolog `StreamHandler` whose stream is already closed throws on `write()`,
+and that throw would escape the destructor as a fatal error and hide the real
+failure. The regression tests use `tests/Unit/Support/ThrowingLogger.php`.

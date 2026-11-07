@@ -82,6 +82,19 @@ final readonly class BatchAsyncExecutor
      *                                                   is thrown after
      *                                                   cancelling any
      *                                                   in-flight futures.
+     * @param array<int, BatchCallId>         $labels     fan-out slot => call
+     *                                                   descriptor (issue #285,
+     *                                                   GRPC-26). When supplied,
+     *                                                   log context names the
+     *                                                   real TiKV region ID and
+     *                                                   the sub-batch index
+     *                                                   instead of the slot
+     *                                                   index; the exception
+     *                                                   exposes them through
+     *                                                   {@see BatchPartialFailureException::getFailedRegionIds()}.
+     *                                                   Omitted entries fall
+     *                                                   back to a `callKey`
+     *                                                   log field.
      * @return array<int, mixed>
      * @throws BatchPartialFailureException   If any region fails
      * @throws BatchDeadlineExceededException If $deadlineMs > 0 and dispatch+wait exceeds it
@@ -92,6 +105,7 @@ final readonly class BatchAsyncExecutor
     public function executeParallel(
         array $regionCalls,
         int $deadlineMs = TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS,
+        array $labels = [],
     ): array {
         $totalRegions = count($regionCalls);
 
@@ -107,29 +121,35 @@ final readonly class BatchAsyncExecutor
         // phase doesn't extend the wall-clock budget indefinitely.
         $futures = [];
         $errors = [];
-        foreach ($regionCalls as $regionId => $callable) {
+        foreach ($regionCalls as $slot => $callable) {
             if ($deadlineMs > 0) {
                 $elapsedMs = (int) (microtime(true) * 1000) - $startTimeMs;
                 if ($elapsedMs >= $deadlineMs) {
-                    $this->logger->error('Batch deadline exhausted during dispatch', [
-                        'regionId' => $regionId,
-                        'elapsedMs' => $elapsedMs,
-                        'deadlineMs' => $deadlineMs,
-                    ]);
+                    $this->logger->error(
+                        'Batch deadline exhausted during dispatch',
+                        $this->logContext($slot, $labels) + [
+                            'elapsedMs' => $elapsedMs,
+                            'deadlineMs' => $deadlineMs,
+                        ],
+                    );
                     $this->cancelAll($futures);
-                    throw new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
-                        'dispatchedRegions' => array_keys($futures),
-                        'pendingRegions' => array_keys(array_diff_key($regionCalls, $futures)),
-                    ]);
+                    throw new BatchDeadlineExceededException(
+                        $deadlineMs,
+                        $elapsedMs,
+                        $this->deadlineContext(
+                            $labels,
+                            array_keys($futures),
+                            array_keys(array_diff_key($regionCalls, $futures)),
+                        ),
+                    );
                 }
             }
 
             try {
-                $futures[$regionId] = $callable();
+                $futures[$slot] = $callable();
             } catch (TiKvException $e) {
-                $errors[$regionId] = $e;
-                $this->logger->warning('Region failed during dispatch', [
-                    'regionId' => $regionId,
+                $errors[$slot] = $e;
+                $this->logger->warning('Region failed during dispatch', $this->logContext($slot, $labels) + [
                     'error' => $e->getMessage(),
                 ]);
             }
@@ -140,29 +160,36 @@ final readonly class BatchAsyncExecutor
         // futures to prevent gRPC channel/completion-queue leaks.
         $results = [];
         try {
-            foreach ($futures as $regionId => $future) {
+            foreach ($futures as $slot => $future) {
                 if ($deadlineMs > 0) {
                     $elapsedMs = (int) (microtime(true) * 1000) - $startTimeMs;
                     if ($elapsedMs >= $deadlineMs) {
-                        $this->logger->error('Batch deadline exhausted during wait', [
-                            'regionId' => $regionId,
-                            'elapsedMs' => $elapsedMs,
-                            'deadlineMs' => $deadlineMs,
-                        ]);
+                        $this->logger->error(
+                            'Batch deadline exhausted during wait',
+                            $this->logContext($slot, $labels) + [
+                                'elapsedMs' => $elapsedMs,
+                                'deadlineMs' => $deadlineMs,
+                            ],
+                        );
                         $this->cancelAll($futures);
-                        throw new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
-                            'pendingRegions' => array_keys(array_diff_key($futures, $results, $errors)),
-                        ]);
+                        throw new BatchDeadlineExceededException(
+                            $deadlineMs,
+                            $elapsedMs,
+                            $this->deadlineContext(
+                                $labels,
+                                array_keys($futures),
+                                array_keys(array_diff_key($futures, $results, $errors)),
+                            ),
+                        );
                     }
                 }
 
                 try {
-                    $results[$regionId] = $this->awaitValue($future);
-                    $this->logger->debug('Region completed successfully', ['regionId' => $regionId]);
+                    $results[$slot] = $this->awaitValue($future);
+                    $this->logger->debug('Region completed successfully', $this->logContext($slot, $labels));
                 } catch (TiKvException $e) {
-                    $errors[$regionId] = $e;
-                    $this->logger->warning('Region failed', [
-                        'regionId' => $regionId,
+                    $errors[$slot] = $e;
+                    $this->logger->warning('Region failed', $this->logContext($slot, $labels) + [
                         'error' => $e->getMessage(),
                     ]);
                     // Continue awaiting other in-flight calls so the partial
@@ -181,7 +208,7 @@ final readonly class BatchAsyncExecutor
         }
 
         if ($errors !== []) {
-            throw new BatchPartialFailureException($errors, $totalRegions, $results);
+            throw new BatchPartialFailureException($errors, $totalRegions, $results, $labels);
         }
 
         $this->logger->debug('Parallel batch execution completed', [
@@ -227,6 +254,12 @@ final readonly class BatchAsyncExecutor
      *                                                      for dispatch+wait
      *                                                      across ALL windows;
      *                                                      0 disables it
+     * @param array<int, BatchCallId>       $labels         fan-out slot => call
+     *                                                      descriptor, forwarded
+     *                                                      to
+     *                                                      {@see self::executeParallel()}
+     *                                                      (issue #285,
+     *                                                      GRPC-26)
      * @return array<int, mixed> results keyed by the original fan-out slot
      * @throws BatchPartialFailureException   If any region fails
      * @throws BatchDeadlineExceededException If $deadlineMs > 0 and dispatch+wait exceeds it
@@ -236,6 +269,7 @@ final readonly class BatchAsyncExecutor
         array $regionCalls,
         int $maxConcurrency = self::DEFAULT_MAX_CONCURRENCY,
         int $deadlineMs = TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS,
+        array $labels = [],
     ): array {
         if ($maxConcurrency < 1) {
             throw new \InvalidArgumentException(sprintf(
@@ -267,13 +301,14 @@ final readonly class BatchAsyncExecutor
                         $deadlineMs,
                         $elapsedMs,
                         array_keys($results),
+                        $labels,
                     );
                 }
                 $windowDeadlineMs = $deadlineMs - $elapsedMs;
             }
 
             try {
-                $windowResults = $this->executeParallel($window, $windowDeadlineMs);
+                $windowResults = $this->executeParallel($window, $windowDeadlineMs, $labels);
             } catch (BatchDeadlineExceededException $e) {
                 // The inner exception speaks for one window and for the
                 // remaining budget. Report the configured deadline, the total
@@ -287,6 +322,7 @@ final readonly class BatchAsyncExecutor
                     $deadlineMs,
                     (int) (microtime(true) * 1000) - $startTimeMs,
                     array_merge(array_keys($results), $dispatched),
+                    $labels,
                 );
             }
 
@@ -306,6 +342,7 @@ final readonly class BatchAsyncExecutor
      * @param array<int, callable(): mixed> $regionCalls
      * @param array<int, mixed>             $results
      * @param array<int, int>               $dispatched
+     * @param array<int, BatchCallId>       $labels
      */
     private function capDeadlineException(
         array $regionCalls,
@@ -313,11 +350,109 @@ final readonly class BatchAsyncExecutor
         int $deadlineMs,
         int $elapsedMs,
         array $dispatched,
+        array $labels = [],
     ): BatchDeadlineExceededException {
-        return new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
+        return new BatchDeadlineExceededException(
+            $deadlineMs,
+            $elapsedMs,
+            $this->deadlineContext(
+                $labels,
+                $dispatched,
+                array_keys(array_diff_key($regionCalls, $results)),
+            ),
+        );
+    }
+
+    /**
+     * Log fields identifying a fan-out slot: the real region ID and
+     * sub-batch index when the caller supplied a descriptor, otherwise the
+     * slot under an honest `callKey` name (never a fabricated `regionId`).
+     *
+     * @param array<int, BatchCallId> $labels
+     * @return array<string, int|string>
+     */
+    private function logContext(int $slot, array $labels): array
+    {
+        $callId = $labels[$slot] ?? null;
+        if (!$callId instanceof BatchCallId) {
+            return ['callKey' => $slot];
+        }
+
+        return [
+            'regionId' => $callId->regionId,
+            'subBatchIndex' => $callId->subBatchIndex,
+        ];
+    }
+
+    /**
+     * Build the diagnostic context of a deadline exception. The historical
+     * `dispatchedRegions`/`pendingRegions` keys stay fan-out slots (their
+     * consumers are internal and several tests pin them); when descriptors
+     * are available the same context also carries the real TiKV region IDs
+     * and the per-call identities, so a failure can be correlated with the
+     * cluster (issue #285, GRPC-26).
+     *
+     * @param array<int, BatchCallId> $labels
+     * @param array<int, int>         $dispatched
+     * @param array<int, int>         $pending
+     * @return array<string, mixed>
+     */
+    private function deadlineContext(array $labels, array $dispatched, array $pending): array
+    {
+        $context = [
             'dispatchedRegions' => array_values(array_unique($dispatched)),
-            'pendingRegions' => array_keys(array_diff_key($regionCalls, $results)),
-        ]);
+            'pendingRegions' => array_values(array_unique($pending)),
+        ];
+
+        if ($labels === []) {
+            return $context;
+        }
+
+        $context['dispatchedRegionIds'] = $this->regionIdsFor($labels, $dispatched);
+        $context['pendingRegionIds'] = $this->regionIdsFor($labels, $pending);
+        $context['dispatchedCalls'] = $this->describeCalls($labels, $dispatched);
+        $context['pendingCalls'] = $this->describeCalls($labels, $pending);
+
+        return $context;
+    }
+
+    /**
+     * @param array<int, BatchCallId> $labels
+     * @param array<int, int>         $slots
+     * @return list<int>
+     */
+    private function regionIdsFor(array $labels, array $slots): array
+    {
+        $regionIds = [];
+        foreach ($slots as $slot) {
+            $callId = $labels[$slot] ?? null;
+            if ($callId instanceof BatchCallId) {
+                $regionIds[$callId->regionId] = true;
+            }
+        }
+
+        $regionIds = array_keys($regionIds);
+        sort($regionIds);
+
+        return $regionIds;
+    }
+
+    /**
+     * @param array<int, BatchCallId> $labels
+     * @param array<int, int>         $slots
+     * @return list<string>
+     */
+    private function describeCalls(array $labels, array $slots): array
+    {
+        $calls = [];
+        foreach ($slots as $slot) {
+            $callId = $labels[$slot] ?? null;
+            if ($callId instanceof BatchCallId) {
+                $calls[] = (string) $callId;
+            }
+        }
+
+        return $calls;
     }
 
     /**

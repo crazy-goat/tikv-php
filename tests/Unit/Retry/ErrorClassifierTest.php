@@ -180,6 +180,45 @@ class ErrorClassifierTest extends TestCase
     }
 
     /**
+     * The other direction of the same contract (issue #444, DIV-08): every
+     * errorpb.Error oneof must map to an ErrorKind, so a proto update that
+     * adds a variant fails here instead of silently falling into the
+     * bounded-retry default for unrecognised region errors.
+     *
+     * @return array<string, array{string}>
+     */
+    public static function provideErrorpbOneofDetectors(): array
+    {
+        $cases = [];
+        foreach (get_class_methods(Error::class) as $method) {
+            if (str_starts_with($method, 'has')) {
+                $cases[$method] = [$method];
+            }
+        }
+
+        return $cases;
+    }
+
+    #[DataProvider('provideErrorpbOneofDetectors')]
+    public function testEveryErrorpbOneofMapsToAnErrorKind(string $method): void
+    {
+        // hasNotLeader -> NotLeader -> not_leader
+        $field = substr($method, 3);
+        $value = strtolower((string) preg_replace('/(?<!^)[A-Z]/', '_$0', $field));
+
+        $this->assertNotNull(
+            ErrorKind::tryFrom($value),
+            sprintf(
+                '%s::%s() has no matching ErrorKind case (%s); add one and '
+                . 'decide its BackoffType in ErrorClassifier::classifyByKind()',
+                Error::class,
+                $method,
+                $value,
+            ),
+        );
+    }
+
+    /**
      * The classification table is an array literal, so a new ErrorKind case
      * would leave it green and untested. PHPStan's match.unhandled already
      * rejects a missing errorClassForKind() arm, but it never sees this
@@ -402,11 +441,77 @@ class ErrorClassifierTest extends TestCase
         $this->assertVerdict(null, ErrorClassifier::classify(new GrpcException('NotLeader for UNAVAILABLE', 16)),);
     }
 
-    public function testRegionExceptionWithoutKindIsFatal(): void
+    public function testRegionExceptionWithoutKindGetsBoundedRegionMissRetry(): void
     {
+        // Issue #444: an error variant the enum does not know yet is retried
+        // on a bounded RegionMiss curve instead of failing immediately. The
+        // retry path invalidates the cached region for a kind-less
+        // RegionException, so the next attempt re-resolves it.
+        $this->assertVerdict(
+            BackoffType::RegionMiss,
+            ErrorClassifier::classify(new RegionException('test', 'region error', fromErrorpb: true)),
+        );
+    }
+
+    /**
+     * The bounded retry is only reachable through the real factory, so pin
+     * the flag there (issue #444). An Error with a message but no oneof is
+     * the "variant this client does not know yet" case; if fromRegionError()
+     * ever stops setting fromErrorpb, this test fails instead of every
+     * synthetic-input test staying green.
+     */
+    public function testFromRegionErrorSetsFlagAndGetsBoundedRetry(): void
+    {
+        $error = new Error();
+        $error->setMessage('a region error variant this client does not know');
+
+        $exception = RegionException::fromRegionError($error);
+
+        $this->assertTrue($exception->fromErrorpb);
+        $this->assertNull($exception->errorKind);
+        $this->assertVerdict(BackoffType::RegionMiss, ErrorClassifier::classify($exception));
+    }
+
+    public function testSyntheticRegionExceptionWithoutKindStaysFatal(): void
+    {
+        // A response-level error string or a top-level KeyError is wrapped in
+        // a RegionException but is not a region error, so it must not inherit
+        // the bounded retry (issue #251, REG-20).
         $this->assertVerdict(
             null,
-            ErrorClassifier::classify(new RegionException('test', 'region error')),
+            ErrorClassifier::classify(new RegionException('BatchRequest', 'ttl is not enabled')),
+        );
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function provideRegionErrorMessageKeywords(): array
+    {
+        return [
+            'NotLeader' => ['NotLeader'],
+            'EpochNotMatch' => ['EpochNotMatch'],
+            'ServerIsBusy' => ['ServerIsBusy'],
+            'RaftEntryTooLarge' => ['RaftEntryTooLarge'],
+            'KeyNotInRegion' => ['KeyNotInRegion'],
+            'DataIsNotReady' => ['DataIsNotReady'],
+        ];
+    }
+
+    /**
+     * Issue #444 (DIV-08): message-string matching must not apply to a
+     * RegionException. Whatever the text says, a kind-less region error is
+     * the same bounded RegionMiss retry — a TiKV wording change or a key that
+     * happens to contain a keyword cannot reclassify it.
+     */
+    #[DataProvider('provideRegionErrorMessageKeywords')]
+    public function testRegionExceptionWithoutKindIgnoresMessageKeywords(string $keyword): void
+    {
+        $this->assertVerdict(
+            BackoffType::RegionMiss,
+            ErrorClassifier::classify(
+                new RegionException('test', 'some ' . $keyword . ' error', fromErrorpb: true),
+            ),
         );
     }
 

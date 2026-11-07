@@ -336,7 +336,10 @@ final readonly class LockResolver
         bool $notLeaderOwnedByRetryExecutor = true,
         int $deadlineAtMs = 0,
     ): array {
-        $region = $this->regionResolver->getRegionInfo($primaryKey);
+        $region = $this->regionResolver->getRegionInfo(
+            $primaryKey,
+            $this->pdTimeoutWithinBudget($deadlineAtMs),
+        );
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new CheckTxnStatusRequest();
@@ -468,6 +471,7 @@ final readonly class LockResolver
         $keysByRegion = RegionGrouper::groupKeysByRegionBatch(
             $secondaries,
             $this->regionResolver,
+            $this->pdTimeoutWithinBudget($deadlineAtMs),
         );
 
         $lockTs = (int) $lock->getLockVersion();
@@ -582,7 +586,11 @@ final readonly class LockResolver
         $keys = [...$secondaries, (string) $lock->getKey()];
 
         try {
-            $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
+            $keysByRegion = RegionGrouper::groupKeysByRegionBatch(
+                $keys,
+                $this->regionResolver,
+                $this->pdTimeoutWithinBudget($deadlineAtMs),
+            );
         } catch (RegionException $e) {
             $this->logger->warning('Async-commit resolve failed to group keys', [
                 'key' => KeyRedactor::redact((string) $lock->getKey()),
@@ -645,7 +653,11 @@ final readonly class LockResolver
         bool $notLeaderOwnedByRetryExecutor,
         int $deadlineAtMs = 0,
     ): void {
-        $keysByRegion = RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
+        $keysByRegion = RegionGrouper::groupKeysByRegionBatch(
+            $keys,
+            $this->regionResolver,
+            $this->pdTimeoutWithinBudget($deadlineAtMs),
+        );
 
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
@@ -703,7 +715,10 @@ final readonly class LockResolver
             'commitTs' => $commitTs,
         ]);
 
-        $region = $this->regionResolver->getRegionInfo($key);
+        $region = $this->regionResolver->getRegionInfo(
+            $key,
+            $this->pdTimeoutWithinBudget($deadlineAtMs),
+        );
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new ResolveLockRequest();
@@ -736,7 +751,10 @@ final readonly class LockResolver
             'lockTs' => $lockTs,
         ]);
 
-        $region = $this->regionResolver->getRegionInfo($key);
+        $region = $this->regionResolver->getRegionInfo(
+            $key,
+            $this->pdTimeoutWithinBudget($deadlineAtMs),
+        );
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
         $request = new ResolveLockRequest();
@@ -817,6 +835,25 @@ final readonly class LockResolver
         }
 
         return max(1, min($configuredMs, $remainingMs));
+    }
+
+    /**
+     * Deadline for a PD region lookup performed during lock resolution
+     * (issue #257, REG-26), or null when the resolution has no budget.
+     *
+     * A `GetRegion` / `ScanRegions` lookup is part of the resolution, so it
+     * must not outlive the caller's retry deadline either. The configured
+     * `pdTimeoutMs` stays the upper bound; a disabled deadline returns null
+     * so PdClient applies that configured value unchanged.
+     */
+    private function pdTimeoutWithinBudget(int $deadlineAtMs): ?int
+    {
+        $remainingMs = $this->remainingDeadlineMs($deadlineAtMs);
+        if ($remainingMs <= 0) {
+            return null;
+        }
+
+        return max(1, min($this->timeoutConfig->pdTimeoutMs, $remainingMs));
     }
 
     private function invalidateRegionFor(string $key): void

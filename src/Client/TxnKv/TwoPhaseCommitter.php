@@ -24,6 +24,7 @@ use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatRequest;
 use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -357,7 +358,7 @@ final readonly class TwoPhaseCommitter
         $primary = $state->getPessimisticPrimaryKey() ?? $state->getPrimaryKey();
 
         if ($this->pessimistic) {
-            $this->pessimisticLockBatch($primary, $state);
+            $this->pessimisticLockBatch($primary, $state, $retryExecutor);
         }
 
         $mutations = $this->buildMutations($state);
@@ -537,11 +538,11 @@ final readonly class TwoPhaseCommitter
          * A partial failure is aggregated, not truncated (issue #431,
          * GAP-17): the executor waits for every in-flight region and
          * collects each region's failure, so one region's error neither
-         * cancels its peers nor hides them. The aggregate is logged with
-         * the identity of every failing region (the exception's own keys
-         * are group indices, which name no region) and the error of the
-         * first failing group in dispatch order — the one the sequential
-         * loop would have thrown — is rethrown.
+         * cancels its peers nor hides them. The aggregate is logged with a
+         * descriptor for every failed call — the real region ID and
+         * sub-batch index — and the error of the first failing group in
+         * dispatch order — the one the sequential loop would have thrown —
+         * is rethrown.
          */
         $prewriteSecondaries = function () use (
             $secondaryGroups,
@@ -557,7 +558,15 @@ final readonly class TwoPhaseCommitter
             }
 
             $regionCalls = [];
+            /** @var array<int, BatchCallId> $labels */
+            $labels = [];
+            /** @var array<int, int> $subBatchIndexes */
+            $subBatchIndexes = [];
             foreach ($secondaryGroups as $group) {
+                $regionId = $group['region']->regionId;
+                $subBatchIndex = $subBatchIndexes[$regionId] ?? 0;
+                $subBatchIndexes[$regionId] = $subBatchIndex + 1;
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->prewriteWithRetry(
                     $group,
                     $lockTtlMs,
@@ -569,6 +578,7 @@ final readonly class TwoPhaseCommitter
                     $retryExecutor,
                     $classifier,
                 );
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
             }
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
@@ -576,9 +586,10 @@ final readonly class TwoPhaseCommitter
                 $results = $batchExecutor->executeParallel(
                     $regionCalls,
                     $this->timeoutConfig->batchDeadlineMs,
+                    $labels,
                 );
             } catch (BatchPartialFailureException $e) {
-                $this->logPrewritePartialFailure($e, $secondaryGroups);
+                $this->logPrewritePartialFailure($e);
 
                 throw $e->getFirstRegionError();
             }
@@ -797,49 +808,65 @@ final readonly class TwoPhaseCommitter
         int $adviseLockTtlMs = 10000,
     ): int {
         $targetStoreId = null;
+        // A heartbeat fired from the commit loop shares the commit
+        // operation's budget; a standalone caller (Transaction::heartbeat())
+        // has none, so start one for this heartbeat. Starting a new budget
+        // unconditionally would reset the enclosing operation's deadline and
+        // regress the issue #223 rule that one commit() is one budget
+        // (issue #257 review).
+        $budget = $retryExecutor->currentBudget();
+        if (!$budget instanceof RetryBudget) {
+            $retryExecutor = $retryExecutor->beginOperation();
+            $budget = $retryExecutor->currentBudget();
+        }
 
-        return $retryExecutor->execute($primary, function () use ($primary, $adviseLockTtlMs, &$targetStoreId): int {
-            $region = $this->regionResolver->getRegionInfo($primary);
-            $targetStoreId = $region->leaderStoreId;
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+        return $retryExecutor->execute(
+            $primary,
+            function () use ($primary, $adviseLockTtlMs, $budget, &$targetStoreId): int {
+                $region = $this->regionResolver->getRegionInfo($primary);
+                $targetStoreId = $region->leaderStoreId;
+                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-            $request = new TxnHeartBeatRequest();
-            $request->setContext($this->buildContext($region));
-            $request->setPrimaryLock($primary);
-            $request->setStartVersion($this->startTs);
-            $request->setAdviseLockTtl($adviseLockTtlMs);
+                $request = new TxnHeartBeatRequest();
+                $request->setContext($this->buildContext($region));
+                $request->setPrimaryLock($primary);
+                $request->setStartVersion($this->startTs);
+                $request->setAdviseLockTtl($adviseLockTtlMs);
 
-            $this->logger->debug('TxnHeartBeat', [
-                'primary' => KeyRedactor::redact($primary),
-                'adviseLockTtlMs' => $adviseLockTtlMs,
-            ]);
+                $this->logger->debug('TxnHeartBeat', [
+                    'primary' => KeyRedactor::redact($primary),
+                    'adviseLockTtlMs' => $adviseLockTtlMs,
+                ]);
 
-            /** @var TxnHeartBeatResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvTxnHeartBeat',
-                $request,
-                TxnHeartBeatResponse::class,
-                $this->timeoutMs('write'),
-            );
+                /** @var TxnHeartBeatResponse $response */
+                $response = $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'KvTxnHeartBeat',
+                    $request,
+                    TxnHeartBeatResponse::class,
+                    $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
+                );
 
-            RegionErrorHandler::check(
-                $response,
-                $this->regionCache,
-                $region->regionId,
-                keyErrorsHandledByCaller: true,
-            );
+                RegionErrorHandler::check(
+                    $response,
+                    $this->regionCache,
+                    $region->regionId,
+                    keyErrorsHandledByCaller: true,
+                );
 
-            $error = $response->getError();
-            if ($error !== null) {
-                $this->handleHeartbeatError($error, $primary);
+                $error = $response->getError();
+                if ($error !== null) {
+                    $this->handleHeartbeatError($error, $primary);
+                }
+
+                return (int) $response->getLockTtl();
+            },
+            $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
             }
-
-            return (int) $response->getLockTtl();
-        }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
-            return $targetStoreId;
-        });
+        );
     }
 
     /**
@@ -1326,27 +1353,21 @@ final readonly class TwoPhaseCommitter
      * Report the aggregated failures of a parallel prewrite fan-out
      * (issue #431, GAP-17).
      *
-     * `BatchPartialFailureException::getRegionErrors()` is keyed by the
-     * index of the failed call in the fan-out, and the fan-out's calls are
-     * the secondary groups in dispatch order — so the index maps back to
-     * the group, and with it to the region that failed. Without this the
-     * aggregate would be dropped together with the rethrown first error,
-     * and a failure in several regions would look like a single-region
-     * one.
-     *
-     * @param list<array{region: RegionInfo, mutations: Mutation[], isPrimary: bool, firstKey: string}> $secondaryGroups
+     * `BatchPartialFailureException` carries a descriptor for every failed
+     * call (issue #285, GRPC-26): the real TiKV region ID and the sub-batch
+     * index, so several failures from one region are reported separately
+     * instead of being mapped through a bare array index.
      */
-    private function logPrewritePartialFailure(
-        BatchPartialFailureException $failure,
-        array $secondaryGroups,
-    ): void {
+    private function logPrewritePartialFailure(BatchPartialFailureException $failure): void
+    {
         $regionErrors = $failure->getRegionErrors();
         $failedRegions = [];
-        foreach (array_keys($regionErrors) as $index) {
-            $group = $secondaryGroups[$index] ?? null;
+        foreach ($failure->getFailedCallIds() as $index => $callId) {
+            $error = $regionErrors[$index] ?? null;
             $failedRegions[] = [
-                'regionId' => $group === null ? null : $group['region']->regionId,
-                'error' => $regionErrors[$index]->getMessage(),
+                'regionId' => $callId->regionId,
+                'subBatchIndex' => $callId->subBatchIndex,
+                'error' => $error instanceof TiKvException ? $error->getMessage() : 'Unknown',
             ];
         }
 
@@ -1529,6 +1550,7 @@ final readonly class TwoPhaseCommitter
                 $primaryBatch['keys'],
                 $state,
                 notLeaderOwnedByRetryExecutor: false,
+                budget: $retryExecutor->currentBudget(),
             )->waitForExecutor();
         } catch (GrpcException $e) {
             // A transport-level failure on the primary commit leaves the
@@ -1563,6 +1585,21 @@ final readonly class TwoPhaseCommitter
         // so their server-side latencies overlap. The primary's commit has
         // already been acknowledged above, which is the protocol's ordering
         // requirement.
+        //
+        // The per-region sub-batch ordinals are computed over the original
+        // list, before the primary batch is removed, so a later batch of the
+        // primary's region keeps its real ordinal (issue #285, GRPC-26).
+        /** @var array<int, BatchCallId> $callIdsByBatchIndex */
+        $callIdsByBatchIndex = [];
+        /** @var array<int, int> $subBatchIndexes */
+        $subBatchIndexes = [];
+        foreach ($keysByRegion as $batchIndex => $batch) {
+            $regionId = $batch['region']->regionId;
+            $subBatchIndex = $subBatchIndexes[$regionId] ?? 0;
+            $subBatchIndexes[$regionId] = $subBatchIndex + 1;
+            $callIdsByBatchIndex[$batchIndex] = new BatchCallId($regionId, $subBatchIndex);
+        }
+
         unset($keysByRegion[$primaryBatchIndex]);
 
         if ($keysByRegion === []) {
@@ -1570,11 +1607,14 @@ final readonly class TwoPhaseCommitter
         }
 
         $regionCalls = [];
-        foreach ($keysByRegion as $batch) {
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
+        foreach ($keysByRegion as $batchIndex => $batch) {
             $region = $batch['region'];
             $regionKeys = $batch['keys'];
             $firstKey = $regionKeys[0] ?? '';
 
+            $slot = count($regionCalls);
             $regionCalls[] = fn(): CheckedGrpcFuture => $this->secondaryCommitSwallowing(
                 $region,
                 $regionKeys,
@@ -1584,6 +1624,7 @@ final readonly class TwoPhaseCommitter
                 $classifier,
                 $region->regionId,
             );
+            $labels[$slot] = $callIdsByBatchIndex[$batchIndex];
         }
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
@@ -1596,7 +1637,11 @@ final readonly class TwoPhaseCommitter
         // to apply it twice. Log it like any other secondary-commit failure
         // and return; leftover secondary locks are resolved by readers.
         try {
-            $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
+            $batchExecutor->executeParallel(
+                $regionCalls,
+                $this->timeoutConfig->batchDeadlineMs,
+                $labels,
+            );
         } catch (BatchDeadlineExceededException $e) {
             $this->logger->warning(
                 'Secondary commit fan-out hit the batch deadline; locks will be resolved by readers',
@@ -1672,12 +1717,16 @@ final readonly class TwoPhaseCommitter
         callable $classifier,
     ): CheckedGrpcFuture {
         $targetStoreId = 0;
+        // The executor returned by beginOperation() owns the operation's
+        // budget; the commit's RPC deadline reads the same object's live
+        // remaining time (issue #257, REG-26).
+        $budget = $retryExecutor->currentBudget();
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($region, $keys, $state, &$targetStoreId): CheckedGrpcFuture {
+            function () use ($region, $keys, $state, $budget, &$targetStoreId): CheckedGrpcFuture {
                 $targetStoreId = $region->leaderStoreId;
 
-                return $this->commitForRegionAsync($region, $keys, $state);
+                return $this->commitForRegionAsync($region, $keys, $state, budget: $budget);
             },
             $retryExecutor,
             $firstKey,
@@ -1702,6 +1751,9 @@ final readonly class TwoPhaseCommitter
      *                                            fatal and never retried, so no
      *                                            handleNotLeader() would ever drop
      *                                            the stale entry.
+     * @param RetryBudget|null $budget Retry budget of the enclosing commit
+     *        operation. Its live remaining deadline caps the `KvCommit`
+     *        deadline (issue #257, REG-26).
      *
      * @throws InvalidStateException if commitTs is null
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException on a transport
@@ -1714,6 +1766,7 @@ final readonly class TwoPhaseCommitter
         array $keys,
         TransactionState $state,
         bool $notLeaderOwnedByRetryExecutor = true,
+        ?RetryBudget $budget = null,
     ): CheckedGrpcFuture {
         $commitTs = $state->getCommitTs();
         if ($commitTs === null) {
@@ -1742,7 +1795,7 @@ final readonly class TwoPhaseCommitter
             'KvCommit',
             $request,
             CommitResponse::class,
-            $this->timeoutMs('write'),
+            $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
         );
 
         return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $notLeaderOwnedByRetryExecutor) {
@@ -1813,21 +1866,29 @@ final readonly class TwoPhaseCommitter
             // failing group is the one surfaced — the same exception the
             // sequential loop aborted with.
             $regionCalls = [];
-            foreach ($keysByRegion as $regionData) {
+            /** @var array<int, BatchCallId> $labels */
+            $labels = [];
+            foreach ($keysByRegion as $regionId => $regionData) {
                 $regionKeys = $regionData['keys'];
                 $firstKey = $regionKeys[0] ?? '';
 
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchRollbackWithRetry(
                     $firstKey,
                     $regionKeys,
                     $retryExecutor,
                     $classifier,
                 );
+                $labels[$slot] = new BatchCallId($regionId);
             }
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
             try {
-                $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
+                $batchExecutor->executeParallel(
+                    $regionCalls,
+                    $this->timeoutConfig->batchDeadlineMs,
+                    $labels,
+                );
                 continue;
             } catch (BatchPartialFailureException $e) {
                 // Preserve the sequential first-abort exception semantics
@@ -2155,6 +2216,9 @@ final readonly class TwoPhaseCommitter
      *
      * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
      * @param int $waitTimeoutMs effective wait timeout for the first attempt
+     * @param RetryBudget|null $budget retry budget of the enclosing lock
+     *        operation; its live remaining deadline caps every
+     *        `KvPessimisticLock` deadline (issue #257, REG-26)
      * @return array{0: array<int, GrpcFuture>, 1: array<int, Mutation[]>}
      */
     private function dispatchPessimisticLockFirstAttempts(
@@ -2165,6 +2229,7 @@ final readonly class TwoPhaseCommitter
         int $waitTimeoutMs,
         int $lockTtlMs,
         bool $returnValues,
+        ?RetryBudget $budget = null,
     ): array {
         $firstAttempts = [];
         $mutationsByGroup = [];
@@ -2206,7 +2271,7 @@ final readonly class TwoPhaseCommitter
                 'KvPessimisticLock',
                 $request,
                 PessimisticLockResponse::class,
-                $this->timeoutMs('write'),
+                $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
             );
         }
 
@@ -2224,6 +2289,10 @@ final readonly class TwoPhaseCommitter
      * deferred commit path.
      *
      * @param string[] $keys
+     * @param RetryExecutor|null $retryExecutor Executor whose operation budget
+     *        caps the `KvPessimisticLock` deadlines (issue #257, REG-26). Pass
+     *        an executor returned by `beginOperation()`; null keeps the
+     *        configured write timeout unchanged.
      * @return array<array-key, ?string> Values TiKV returned for the locked
      *         keys (issue #436); empty when the server returned none. A
      *         missing key is `null`.
@@ -2234,6 +2303,7 @@ final readonly class TwoPhaseCommitter
         int $forUpdateTs,
         string $primary,
         bool $returnValues = false,
+        ?RetryExecutor $retryExecutor = null,
     ): array {
         $keys = array_values(array_unique($keys));
         if ($keys === []) {
@@ -2244,7 +2314,14 @@ final readonly class TwoPhaseCommitter
         $state->setPessimisticPrimaryKey($primary);
         $state->updateMaxForUpdateTs($forUpdateTs);
         try {
-            return $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs, $returnValues);
+            return $this->lockKeysInternal(
+                $keys,
+                $state,
+                $primary,
+                $forUpdateTs,
+                $returnValues,
+                $retryExecutor?->currentBudget(),
+            );
         } catch (\Throwable $failure) {
             $state->markPessimisticWriteFailed();
             throw $failure;
@@ -2254,6 +2331,7 @@ final readonly class TwoPhaseCommitter
     private function pessimisticLockBatch(
         string $primary,
         TransactionState $state,
+        ?RetryExecutor $retryExecutor = null,
     ): void {
         $keys = array_values(array_unique($state->getPendingLockKeys()));
         $state->clearPendingLockKeys();
@@ -2274,7 +2352,14 @@ final readonly class TwoPhaseCommitter
         try {
             $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->pdClient->getTimestamp();
             $state->updateMaxForUpdateTs($forUpdateTs);
-            $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs, false);
+            $this->lockKeysInternal(
+                $keys,
+                $state,
+                $primary,
+                $forUpdateTs,
+                false,
+                $retryExecutor?->currentBudget(),
+            );
         } catch (\Throwable $failure) {
             $state->markPessimisticWriteFailed();
             throw $failure;
@@ -2283,6 +2368,9 @@ final readonly class TwoPhaseCommitter
 
     /**
      * @param string[] $keys
+     * @param RetryBudget|null $budget retry budget of the enclosing lock
+     *        operation; its live remaining deadline caps every
+     *        `KvPessimisticLock` deadline (issue #257, REG-26)
      * @return array<array-key, ?string> Values returned for the locked keys
      */
     private function lockKeysInternal(
@@ -2291,6 +2379,7 @@ final readonly class TwoPhaseCommitter
         string $primary,
         int $forUpdateTs,
         bool $returnValues,
+        ?RetryBudget $budget = null,
     ): array {
         $valuesByKey = [];
         foreach ($keys as $key) {
@@ -2344,6 +2433,7 @@ final readonly class TwoPhaseCommitter
                 $this->effectiveLockWaitTimeoutMs(0),
                 $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                 $returnValues,
+                $budget,
             );
 
             try {
@@ -2428,7 +2518,7 @@ final readonly class TwoPhaseCommitter
                                     'KvPessimisticLock',
                                     $request,
                                     PessimisticLockResponse::class,
-                                    $this->timeoutMs('write'),
+                                    $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
                                 );
                             }
 
@@ -2733,10 +2823,13 @@ final readonly class TwoPhaseCommitter
             // Fan out all region groups in parallel (issue #291) — same
             // pattern as batchRollback() above.
             $regionCalls = [];
-            foreach ($keysByRegion as $regionData) {
+            /** @var array<int, BatchCallId> $labels */
+            $labels = [];
+            foreach ($keysByRegion as $regionId => $regionData) {
                 $regionKeys = $regionData['keys'];
                 $firstKey = $regionKeys[0] ?? '';
 
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->pessimisticRollbackWithRetry(
                     $firstKey,
                     $regionKeys,
@@ -2744,11 +2837,16 @@ final readonly class TwoPhaseCommitter
                     $retryExecutor,
                     $classifier,
                 );
+                $labels[$slot] = new BatchCallId($regionId);
             }
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
             try {
-                $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
+                $batchExecutor->executeParallel(
+                    $regionCalls,
+                    $this->timeoutConfig->batchDeadlineMs,
+                    $labels,
+                );
                 continue;
             } catch (BatchPartialFailureException $e) {
                 // Preserve the sequential first-abort exception semantics.

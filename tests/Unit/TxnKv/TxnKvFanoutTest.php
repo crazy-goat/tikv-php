@@ -636,8 +636,8 @@ final class TxnKvFanoutTest extends TestCase
         self::assertSame(2, $context['totalRegions']);
         self::assertSame(
             [
-                ['regionId' => 101, 'error' => 'gRPC error: prewrite failed on k1'],
-                ['regionId' => 102, 'error' => 'gRPC error: prewrite failed on k2'],
+                ['regionId' => 101, 'subBatchIndex' => 0, 'error' => 'gRPC error: prewrite failed on k1'],
+                ['regionId' => 102, 'subBatchIndex' => 0, 'error' => 'gRPC error: prewrite failed on k2'],
             ],
             $context['errors'],
         );
