@@ -99,7 +99,13 @@ use Psr\Log\NullLogger;
  */
 final class RawKvClient
 {
-    public const MAX_SCAN_LIMIT = 10240;
+    /**
+     * Maximum rows per scan RPC, and the upper bound on a `ScanIterator`
+     * `batchSize`. Kept as an alias of the canonical
+     * {@see RawKvScanner::MAX_SCAN_LIMIT} so the public iterator bound and the
+     * wire-enforced scan bound cannot drift apart.
+     */
+    public const MAX_SCAN_LIMIT = RawKvScanner::MAX_SCAN_LIMIT;
 
     public const MAX_BATCH_LIMIT = 512;
 

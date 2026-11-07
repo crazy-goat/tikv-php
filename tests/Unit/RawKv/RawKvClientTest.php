@@ -3922,6 +3922,22 @@ class RawKvClientTest extends TestCase
         }
     }
 
+    public function testMaxScanLimitAliasesScannerConstant(): void
+    {
+        self::assertSame(
+            RawKvScanner::MAX_SCAN_LIMIT,
+            RawKvClient::MAX_SCAN_LIMIT,
+            'The public iterator bound must stay equal to the wire-enforced scan bound.',
+        );
+    }
+
+    public function testScanIteratorAcceptsBatchSizeAtScannerMaxScanLimit(): void
+    {
+        $iterator = $this->client->scanIterator('a', 'z', RawKvScanner::MAX_SCAN_LIMIT);
+
+        self::assertInstanceOf(ScanIterator::class, $iterator);
+    }
+
     public function testIngestValidatesEmptyKey(): void
     {
         $this->expectException(InvalidArgumentException::class);
