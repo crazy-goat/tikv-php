@@ -943,26 +943,64 @@ final readonly class RawKvScanner
     }
 
     /**
-     * Scan multiple ranges concurrently.
+     * Scan multiple non-contiguous ranges with a client-side loop of
+     * per-range `RawScan` requests.
      *
-     * Each range's first RawScan send is issued at the wire layer before any
-     * wait begins, so the ranges' server-side latencies overlap instead of
-     * accumulating serially (issue #295). Ranges whose region enumeration
-     * yields more than one sub-range fan out all of those sends too; after
-     * the waits, a sub-range whose region returned a region error or shrank
-     * after enumeration is re-run through the sequential retrying path, and
-     * a split of the final sub-range continues from its fresh end key, so no
-     * part of the range is dropped (issue #267 semantics).
+     * This is **not** the `RawBatchScan` RPC. The client decomposes the call
+     * into one `RawScan` per range, and each range is itself clipped into one
+     * request per region, then assembles the answers into the returned array.
+     * The RPC count is therefore linear in the number of ranges and in the
+     * regions those ranges cover, and every range independently resolves its
+     * regions: fifty ranges cost roughly fifty scans, not one round trip per
+     * region for the whole call. Size range lists accordingly, or call
+     * {@see self::scan()} directly and parallelise in application code.
      *
-     * At most {@see self::$maxConcurrency} requests are in flight at any
-     * moment, and the returned outer array preserves input range order.
-     * Every range is validated before the first send; a reversed range
-     * rejects the whole call.
+     * The per-range sends are dispatched concurrently in windows of at most
+     * {@see self::$maxConcurrency} ranges (issue #295), so their server-side
+     * latencies overlap instead of accumulating serially; all sends share one
+     * batch deadline ({@see TimeoutConfig::$batchDeadlineMs}) and one retry
+     * budget (issue #223). Concurrency bounds the wall-clock overlap, not the
+     * total work: the number of `RawScan` RPCs still grows with the number of
+     * ranges and regions, so a long range list remains proportionally more
+     * expensive than a short one.
+     *
+     * Each range's first `RawScan` send is issued at the wire layer before any
+     * wait begins; ranges whose region enumeration yields more than one
+     * sub-range fan out all of those sends too. After the waits, a sub-range
+     * whose region returned a region error or shrank after enumeration is
+     * re-run through the sequential retrying path, and a split of the final
+     * sub-range continues from its fresh end key, so no part of the range is
+     * dropped (issue #267 semantics).
+     *
+     * `eachLimit` is required and must be in `1..MAX_SCAN_LIMIT`. Unlike
+     * {@see self::scan()}, `0` is rejected instead of meaning "the whole
+     * range", so one `batchScan()` call cannot omit the per-range cap or
+     * request an unbounded result set. Empty bounds are still allowed:
+     * `batchScan([['', '']], eachLimit: 100)` scans the whole keyspace and
+     * returns at most 100 rows. Each range returns at most `eachLimit` rows;
+     * a returned count equal to the limit may mean the range holds more rows
+     * (issue #440).
+     *
+     * Every range is validated before the first send: a reversed range
+     * rejects the whole call with {@see InvalidArgumentException}.
+     *
+     * The result is one entry per range, in input order for a list; with
+     * non-sequential input keys the outer array is re-indexed in ascending
+     * key order. The shape is
+     * `[[['key' => ..., 'value' => ...], ...], ...]`. Each inner list holds
+     * at most `eachLimit` rows in ascending key order, and `value` is `null`
+     * when `$keyOnly` is true. An empty `$ranges` list returns `[]`; a range
+     * that matches no rows contributes an empty inner list. This per-range
+     * grouping is a client-side convenience and is not the flat `kvs` list a
+     * `RawBatchScan` response would carry.
      *
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
-     * @throws InvalidArgumentException When a range is malformed or reversed
+     * @throws InvalidArgumentException When `eachLimit` is invalid, or a range
+     *         is malformed or reversed
      * @throws \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException When any range fails
+     * @throws BatchDeadlineExceededException When the fan-out exceeds
+     *         `options['timeout']['batchDeadlineMs']`
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly, string $columnFamily = ''): array
     {
