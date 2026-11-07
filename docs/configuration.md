@@ -1851,10 +1851,9 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 // - Max backoff: 20 seconds (non-ServerBusy errors, cumulative)
 // - Server busy budget: 60 seconds (cumulative ServerBusy sleep)
 // - Retry deadline: 30 seconds (checked before each retry attempt AND before
-//   each backoff sleep, which is clamped to the remaining budget; occupancy
-//   can still exceed it by the duration of the last in-flight RPC, which is
-//   bounded only by the gRPC timeout option (options['timeout']), not by the
-//   retry deadline)
+//   each backoff sleep, which is clamped to the remaining budget; the TxnKV
+//   data-path RPCs and the PD lookups of lock resolution are also capped by
+//   the remaining budget, so they cannot outlive it)
 
 // Custom retry deadline (issue #294) — bounds the blocking backoff loop so a
 // sustained ServerIsBusy episode cannot pin a PHP-FPM worker for minutes:
@@ -1865,9 +1864,14 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 
 > **Occupancy note:** the deadline is checked before every attempt AND
 > before every backoff sleep (which is clamped to the remaining budget), so
-> sleeping cannot overshoot it — but an in-flight RPC cannot be interrupted.
-> Example: `retryDeadlineMs => 1000` with a gRPC call that runs 5 s ⇒ real
-> occupancy ≈ 6 s (the deadline is enforced when that RPC returns).
+> sleeping cannot overshoot it. The TxnKV data-path RPCs (`KvGet`,
+> `KvBatchGet`, `KvScan`, `KvPrewrite`, `KvCommit`, `KvTxnHeartBeat`,
+> `KvPessimisticLock` and the rollback calls) are also given a deadline of
+> `min(configured timeout, remaining budget)`, so one slow attempt cannot
+> outlive the operation either (issue #257). A path that does not expose a
+> live operation budget to its caller — a RawKV point/batch call, or the PD
+> failover/discovery step inside a metadata call — remains bounded by its
+> configured timeout.
 
 > **Lock resolution (TxnKV):** a `KeyError.locked` conflict during prewrite,
 > rollback or a transactional read is resolved inside the retry loop, so its
@@ -1876,7 +1880,10 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > operation's **remaining** retry deadline. The resolver converts that
 > remaining budget into one absolute deadline at its entry, so the nested
 > RPCs share the same live budget and none is given a deadline beyond the
-> operation's `retryDeadlineMs`. A live lock is still reported as a retryable
+> operation's `retryDeadlineMs`. The PD `GetRegion`/`ScanRegions` lookups
+> the resolution performs are capped by that budget too (issue #257), so a
+> cold region cache cannot make the resolution outlive the operation. A live
+> lock is still reported as a retryable
 > error (the executor owns the backoff) and the resolver never sleeps for the
 > lock TTL; the executor's own deadline check raises
 > `RetryBudgetExhaustedException` when the budget is spent. With
@@ -1984,7 +1991,7 @@ since issue #241):
 | Bound | Default | Description |
 |-------|---------|-------------|
 | `maxAttempts` | `30` | Maximum number of times the operation is invoked before the executor gives up. |
-| `deadlineMs` | `30000` (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`; `0` disables) | Wall-clock deadline from the start of the operation. Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget); the executor terminates when it is reached, regardless of `sleepMs`. |
+| `deadlineMs` | `30000` (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`; `0` disables) | Wall-clock deadline from the start of the operation. Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget); the executor terminates when it is reached, regardless of `sleepMs`. The TxnKV data-path RPCs and the PD lookups of lock resolution are capped by the same remaining budget (issue #257). |
 
 When either bound is reached the executor throws
 `RetryBudgetExhaustedException` (extends `TiKvException`). This exception

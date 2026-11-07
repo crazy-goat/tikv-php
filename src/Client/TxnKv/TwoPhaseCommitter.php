@@ -357,7 +357,7 @@ final readonly class TwoPhaseCommitter
         $primary = $state->getPessimisticPrimaryKey() ?? $state->getPrimaryKey();
 
         if ($this->pessimistic) {
-            $this->pessimisticLockBatch($primary, $state);
+            $this->pessimisticLockBatch($primary, $state, $retryExecutor);
         }
 
         $mutations = $this->buildMutations($state);
@@ -797,49 +797,60 @@ final readonly class TwoPhaseCommitter
         int $adviseLockTtlMs = 10000,
     ): int {
         $targetStoreId = null;
+        // One heartbeat is one logical operation: begin its own budget so the
+        // `KvTxnHeartBeat` deadline can be capped by the live remaining time
+        // (issue #257, REG-26). The caller's executor may be standalone, in
+        // which case currentBudget() would be null.
+        $retryExecutor = $retryExecutor->beginOperation();
+        $budget = $retryExecutor->currentBudget();
 
-        return $retryExecutor->execute($primary, function () use ($primary, $adviseLockTtlMs, &$targetStoreId): int {
-            $region = $this->regionResolver->getRegionInfo($primary);
-            $targetStoreId = $region->leaderStoreId;
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+        return $retryExecutor->execute(
+            $primary,
+            function () use ($primary, $adviseLockTtlMs, $budget, &$targetStoreId): int {
+                $region = $this->regionResolver->getRegionInfo($primary);
+                $targetStoreId = $region->leaderStoreId;
+                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-            $request = new TxnHeartBeatRequest();
-            $request->setContext($this->buildContext($region));
-            $request->setPrimaryLock($primary);
-            $request->setStartVersion($this->startTs);
-            $request->setAdviseLockTtl($adviseLockTtlMs);
+                $request = new TxnHeartBeatRequest();
+                $request->setContext($this->buildContext($region));
+                $request->setPrimaryLock($primary);
+                $request->setStartVersion($this->startTs);
+                $request->setAdviseLockTtl($adviseLockTtlMs);
 
-            $this->logger->debug('TxnHeartBeat', [
-                'primary' => KeyRedactor::redact($primary),
-                'adviseLockTtlMs' => $adviseLockTtlMs,
-            ]);
+                $this->logger->debug('TxnHeartBeat', [
+                    'primary' => KeyRedactor::redact($primary),
+                    'adviseLockTtlMs' => $adviseLockTtlMs,
+                ]);
 
-            /** @var TxnHeartBeatResponse $response */
-            $response = $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'KvTxnHeartBeat',
-                $request,
-                TxnHeartBeatResponse::class,
-                $this->timeoutMs('write'),
-            );
+                /** @var TxnHeartBeatResponse $response */
+                $response = $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'KvTxnHeartBeat',
+                    $request,
+                    TxnHeartBeatResponse::class,
+                    $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
+                );
 
-            RegionErrorHandler::check(
-                $response,
-                $this->regionCache,
-                $region->regionId,
-                keyErrorsHandledByCaller: true,
-            );
+                RegionErrorHandler::check(
+                    $response,
+                    $this->regionCache,
+                    $region->regionId,
+                    keyErrorsHandledByCaller: true,
+                );
 
-            $error = $response->getError();
-            if ($error !== null) {
-                $this->handleHeartbeatError($error, $primary);
+                $error = $response->getError();
+                if ($error !== null) {
+                    $this->handleHeartbeatError($error, $primary);
+                }
+
+                return (int) $response->getLockTtl();
+            },
+            $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
             }
-
-            return (int) $response->getLockTtl();
-        }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
-            return $targetStoreId;
-        });
+        );
     }
 
     /**
@@ -1529,6 +1540,7 @@ final readonly class TwoPhaseCommitter
                 $primaryBatch['keys'],
                 $state,
                 notLeaderOwnedByRetryExecutor: false,
+                budget: $retryExecutor->currentBudget(),
             )->waitForExecutor();
         } catch (GrpcException $e) {
             // A transport-level failure on the primary commit leaves the
@@ -1672,12 +1684,16 @@ final readonly class TwoPhaseCommitter
         callable $classifier,
     ): CheckedGrpcFuture {
         $targetStoreId = 0;
+        // The executor returned by beginOperation() owns the operation's
+        // budget; the commit's RPC deadline reads the same object's live
+        // remaining time (issue #257, REG-26).
+        $budget = $retryExecutor->currentBudget();
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($region, $keys, $state, &$targetStoreId): CheckedGrpcFuture {
+            function () use ($region, $keys, $state, $budget, &$targetStoreId): CheckedGrpcFuture {
                 $targetStoreId = $region->leaderStoreId;
 
-                return $this->commitForRegionAsync($region, $keys, $state);
+                return $this->commitForRegionAsync($region, $keys, $state, budget: $budget);
             },
             $retryExecutor,
             $firstKey,
@@ -1702,6 +1718,9 @@ final readonly class TwoPhaseCommitter
      *                                            fatal and never retried, so no
      *                                            handleNotLeader() would ever drop
      *                                            the stale entry.
+     * @param RetryBudget|null $budget Retry budget of the enclosing commit
+     *        operation. Its live remaining deadline caps the `KvCommit`
+     *        deadline (issue #257, REG-26).
      *
      * @throws InvalidStateException if commitTs is null
      * @throws \CrazyGoat\TiKV\Client\Exception\GrpcException on a transport
@@ -1714,6 +1733,7 @@ final readonly class TwoPhaseCommitter
         array $keys,
         TransactionState $state,
         bool $notLeaderOwnedByRetryExecutor = true,
+        ?RetryBudget $budget = null,
     ): CheckedGrpcFuture {
         $commitTs = $state->getCommitTs();
         if ($commitTs === null) {
@@ -1742,7 +1762,7 @@ final readonly class TwoPhaseCommitter
             'KvCommit',
             $request,
             CommitResponse::class,
-            $this->timeoutMs('write'),
+            $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
         );
 
         return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $notLeaderOwnedByRetryExecutor) {
@@ -2155,6 +2175,9 @@ final readonly class TwoPhaseCommitter
      *
      * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
      * @param int $waitTimeoutMs effective wait timeout for the first attempt
+     * @param RetryBudget|null $budget retry budget of the enclosing lock
+     *        operation; its live remaining deadline caps every
+     *        `KvPessimisticLock` deadline (issue #257, REG-26)
      * @return array{0: array<int, GrpcFuture>, 1: array<int, Mutation[]>}
      */
     private function dispatchPessimisticLockFirstAttempts(
@@ -2165,6 +2188,7 @@ final readonly class TwoPhaseCommitter
         int $waitTimeoutMs,
         int $lockTtlMs,
         bool $returnValues,
+        ?RetryBudget $budget = null,
     ): array {
         $firstAttempts = [];
         $mutationsByGroup = [];
@@ -2206,7 +2230,7 @@ final readonly class TwoPhaseCommitter
                 'KvPessimisticLock',
                 $request,
                 PessimisticLockResponse::class,
-                $this->timeoutMs('write'),
+                $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
             );
         }
 
@@ -2224,6 +2248,10 @@ final readonly class TwoPhaseCommitter
      * deferred commit path.
      *
      * @param string[] $keys
+     * @param RetryExecutor|null $retryExecutor Executor whose operation budget
+     *        caps the `KvPessimisticLock` deadlines (issue #257, REG-26). Pass
+     *        an executor returned by `beginOperation()`; null keeps the
+     *        configured write timeout unchanged.
      * @return array<array-key, ?string> Values TiKV returned for the locked
      *         keys (issue #436); empty when the server returned none. A
      *         missing key is `null`.
@@ -2234,6 +2262,7 @@ final readonly class TwoPhaseCommitter
         int $forUpdateTs,
         string $primary,
         bool $returnValues = false,
+        ?RetryExecutor $retryExecutor = null,
     ): array {
         $keys = array_values(array_unique($keys));
         if ($keys === []) {
@@ -2244,7 +2273,14 @@ final readonly class TwoPhaseCommitter
         $state->setPessimisticPrimaryKey($primary);
         $state->updateMaxForUpdateTs($forUpdateTs);
         try {
-            return $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs, $returnValues);
+            return $this->lockKeysInternal(
+                $keys,
+                $state,
+                $primary,
+                $forUpdateTs,
+                $returnValues,
+                $retryExecutor?->currentBudget(),
+            );
         } catch (\Throwable $failure) {
             $state->markPessimisticWriteFailed();
             throw $failure;
@@ -2254,6 +2290,7 @@ final readonly class TwoPhaseCommitter
     private function pessimisticLockBatch(
         string $primary,
         TransactionState $state,
+        ?RetryExecutor $retryExecutor = null,
     ): void {
         $keys = array_values(array_unique($state->getPendingLockKeys()));
         $state->clearPendingLockKeys();
@@ -2274,7 +2311,14 @@ final readonly class TwoPhaseCommitter
         try {
             $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->pdClient->getTimestamp();
             $state->updateMaxForUpdateTs($forUpdateTs);
-            $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs, false);
+            $this->lockKeysInternal(
+                $keys,
+                $state,
+                $primary,
+                $forUpdateTs,
+                false,
+                $retryExecutor?->currentBudget(),
+            );
         } catch (\Throwable $failure) {
             $state->markPessimisticWriteFailed();
             throw $failure;
@@ -2283,6 +2327,9 @@ final readonly class TwoPhaseCommitter
 
     /**
      * @param string[] $keys
+     * @param RetryBudget|null $budget retry budget of the enclosing lock
+     *        operation; its live remaining deadline caps every
+     *        `KvPessimisticLock` deadline (issue #257, REG-26)
      * @return array<array-key, ?string> Values returned for the locked keys
      */
     private function lockKeysInternal(
@@ -2291,6 +2338,7 @@ final readonly class TwoPhaseCommitter
         string $primary,
         int $forUpdateTs,
         bool $returnValues,
+        ?RetryBudget $budget = null,
     ): array {
         $valuesByKey = [];
         foreach ($keys as $key) {
@@ -2344,6 +2392,7 @@ final readonly class TwoPhaseCommitter
                 $this->effectiveLockWaitTimeoutMs(0),
                 $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                 $returnValues,
+                $budget,
             );
 
             try {
@@ -2428,7 +2477,7 @@ final readonly class TwoPhaseCommitter
                                     'KvPessimisticLock',
                                     $request,
                                     PessimisticLockResponse::class,
-                                    $this->timeoutMs('write'),
+                                    $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
                                 );
                             }
 
