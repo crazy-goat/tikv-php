@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- The close-idempotency lifecycle tests now assert what their names promise instead of relying on mock `expects()` alone (issue #357, LQ-09). `RawKvClientTest` and `TxnKvClientTest` record each sub-close invocation through a callback and assert the count is exactly one after repeated `close()` calls, including when a sub-close throws; `GrpcClientTest::testCloseIsIdempotent` now injects a channel mock and asserts the channel cache is emptied once instead of calling `expectNotToPerformAssertions()`, and `testCloseIsIdempotentAfterPartialFailure` asserts the cache is empty too. No production behaviour changes. (#357)
+
 ## [v0.12.0] - 2026-11-07
 
 ### Added
