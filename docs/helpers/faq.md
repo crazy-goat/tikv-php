@@ -297,6 +297,12 @@ Two traps when measuring coverage:
    reason. `ext-grpc` is required too: the `Grpc` suite mocks `\Grpc\Call`, which is a hard error
    (not a skip) without the extension.
 
+`phpunit.xml` configures no coverage report on purpose (issue #556): a report block there makes
+every bare `vendor/bin/phpunit` run request a driver, so on the documented local setup
+(`xdebug.mode=debug`) it exits 1 with the warning above although every test passed, and with a
+driver in coverage mode it leaves `coverage.xml` / `coverage-html/` behind. The report is requested
+on the command line by `composer test:coverage` and the CI coverage job.
+
 ## Every TiKV `*_ts` protobuf field must be a PD TSO timestamp, never a monotonic-clock value
 
 TiKV interprets every timestamp protobuf field (`caller_start_ts`,

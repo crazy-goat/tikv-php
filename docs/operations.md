@@ -496,10 +496,15 @@ follows:
   when the cached region chain is incomplete.
 - **Continuation** — after consuming a page, the next fetch starts after the
   page's last key (`lastKey . "\x00"`), the same continuation rule as manual
-  pagination. The scan is exhausted when a page returns fewer than `batchSize`
-  rows. A page whose last key does not move the cursor forward (or whose first
-  key lies before it) throws `TiKvException`: it is a protocol violation, not
-  a transient error (#312).
+  pagination. The iteration ends only when a page returns no rows, or when the
+  resume key reaches `endKey`; a page that returns fewer than `batchSize` rows
+  is **not** treated as the end, because `scan()` may return a short page while
+  data remains (a skipped region, a server-side per-region cap, a
+  region-boundary effect). A short page therefore costs at most one extra RPC
+  and can no longer silently truncate the result (issue #195). A page whose
+  last key does not move the cursor forward (or whose first key lies before it)
+  throws `TiKvException`: it is a protocol violation, not a transient error
+  (#312).
 - **keyOnly** — with `keyOnly: true` values are not transferred; `current()`
   returns `null` for every entry.
 - **Rewindable** — calling `rewind()` (e.g. running the same `foreach` twice)
@@ -552,6 +557,11 @@ descending key order — the same fan-out as an unbounded forward scan. A
 region or transport error, or a region that split after enumeration, falls
 back to the sequential retrying path. A bounded reverse scan
 (`limit > 0`) stays sequential.
+
+Regions are resolved from the upper bound downwards in bounded batches
+(issue #198): the region cache answers the common case and a miss asks PD for
+the region containing the cursor or the adjacent region below it, so a narrow
+reverse scan does not enumerate the rest of the range.
 
 **Example:**
 

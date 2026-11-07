@@ -26,6 +26,23 @@ interface PdClientInterface
     public function getRegion(string $key): RegionInfo;
 
     /**
+     * Get the region immediately before the region that contains the given
+     * key.
+     *
+     * PD's `GetPrevRegion` is the backwards counterpart of
+     * {@see self::getRegion()}: it resolves the adjacent region whose end key
+     * is the start key of the region containing `$key`. A reverse scan uses
+     * it to walk a range from its upper bound downwards without enumerating
+     * the whole range up front (issue #198). Returns null when there is no
+     * adjacent region below — the key is in the first region of the keyspace,
+     * or PD reports a gap.
+     *
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD error
+     */
+    public function getPrevRegion(string $key): ?RegionInfo;
+
+    /**
      * Resolve a keyspace name to its numeric ID through PD.
      *
      * @throws GrpcException On transport error
