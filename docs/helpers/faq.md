@@ -1574,9 +1574,10 @@ finding, not part of this issue.
 The same premise expiry closed issue #227 (audit TXN-22, "the `priority`
 option is never written to the request `Context`"): the audit's line
 references are stale. `TxnKvClient::begin()` has read `options['priority']`
-and passed it to `Transaction` and `TwoPhaseCommitter` since the option was
-introduced in 7404768, and the write path has set `Context.priority` since
-#441 (`fc3c7c1`); the read path followed in #336 (`739b1c1`), which added the
+since the option was introduced in 7404768 and passed it to `Transaction`;
+`TwoPhaseCommitter` has received it since it was split out of `Transaction`
+in 32f8948 (#173). The write path has set `Context.priority` since #441
+(`fc3c7c1`); the read path followed in #336 (`739b1c1`), which added the
 `priority` argument to `RegionContextFactory::fromRegionInfo()` and
 `resolveTarget()` and made `TxnReader` pass it at all three read
 context-building call sites. `begin(['priority' => 2])` therefore reaches
