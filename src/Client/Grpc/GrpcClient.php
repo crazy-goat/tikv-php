@@ -9,7 +9,10 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\NoOpTracer;
 use CrazyGoat\TiKV\Client\Observability\SafeLogging;
+use CrazyGoat\TiKV\Client\Observability\TraceCategory;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\Tls\TlsConfig;
 use Google\Protobuf\Internal\Message;
 use Grpc\Call;
@@ -265,6 +268,12 @@ final class GrpcClient implements GrpcClientInterface
         private readonly ?\Closure $clock = null,
         private readonly ?\Closure $callFactory = null,
         private readonly ?\Closure $credentialsFactory = null,
+        /**
+         * Optional structured tracing callback (issue #434, GAP-20). The
+         * transport emits a `kv_request`/`rpc_started` and `rpc_completed`
+         * event per call; the application bridges them to its tracing SDK.
+         */
+        private readonly TraceEventInterface $tracer = new NoOpTracer(),
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -324,8 +333,8 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->startRpc($operation);
         $start = hrtime(true);
+        $this->startRpc($operation, $start);
         $success = false;
         try {
             $channel = $this->getChannel($address);
@@ -384,8 +393,8 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->startRpc($operation);
         $start = hrtime(true);
+        $this->startRpc($operation, $start);
         $success = false;
         $call = null;
         try {
@@ -528,8 +537,8 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->startRpc($operation);
         $start = hrtime(true);
+        $this->startRpc($operation, $start);
 
         try {
             $channel = $this->getChannel($address);
@@ -581,12 +590,24 @@ final class GrpcClient implements GrpcClientInterface
      * `rpcStarted()` alone breaks it — its own counters are not trustworthy
      * in that case.
      */
-    private function startRpc(string $operation): void
+    private function startRpc(string $operation, int|float $startNs): void
     {
         try {
             $this->metrics->rpcStarted($operation);
         } catch (\Throwable $e) {
             $this->logger->warning('Metrics backend threw from rpcStarted()', [
+                'operation' => $operation,
+                'exception' => $e,
+            ]);
+        }
+
+        try {
+            $this->tracer->traceEvent(TraceCategory::KV_REQUEST, 'rpc_started', [
+                'operation' => $operation,
+                'eventId' => (string) $startNs,
+            ]);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Trace backend threw from rpc_started', [
                 'operation' => $operation,
                 'exception' => $e,
             ]);
@@ -600,10 +621,26 @@ final class GrpcClient implements GrpcClientInterface
      */
     private function completeRpc(string $operation, int|float $startNs, bool $success): void
     {
+        $durationMs = (hrtime(true) - $startNs) / 1_000_000;
+
         try {
-            $this->metrics->rpcCompleted($operation, (hrtime(true) - $startNs) / 1_000_000, $success);
+            $this->metrics->rpcCompleted($operation, $durationMs, $success);
         } catch (\Throwable $e) {
             $this->logger->warning('Metrics backend threw from rpcCompleted()', [
+                'operation' => $operation,
+                'exception' => $e,
+            ]);
+        }
+
+        try {
+            $this->tracer->traceEvent(TraceCategory::KV_REQUEST, 'rpc_completed', [
+                'operation' => $operation,
+                'eventId' => (string) $startNs,
+                'durationMs' => $durationMs,
+                'success' => $success,
+            ]);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Trace backend threw from rpc_completed', [
                 'operation' => $operation,
                 'exception' => $e,
             ]);

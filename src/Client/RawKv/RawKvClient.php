@@ -135,6 +135,14 @@ final class RawKvClient
     public const OPT_SLOW_LOG = 'slowLog';
     public const OPT_METRICS = 'metrics';
 
+    /**
+     * Structured tracing callback (issue #434, GAP-20): an instance of
+     * {@see \CrazyGoat\TiKV\Client\Observability\TraceEventInterface}. The
+     * transport emits one event pair per gRPC call; RawKV has no client-side
+     * phase events of its own.
+     */
+    public const OPT_TRACER = 'tracer';
+
     /** API protocol version: 0/1 (V1, default) or 2 (keyspace-aware). */
     public const OPT_API_VERSION = 'apiVersion';
 

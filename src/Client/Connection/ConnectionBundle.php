@@ -12,6 +12,8 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpTracer;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\Tls\TlsConfig;
 use Psr\Log\LoggerInterface;
 
@@ -57,6 +59,13 @@ final readonly class ConnectionBundle
         public ?array $allowedStorePorts = null,
         public CodecInterface $codec = new CodecV1(),
         public bool $ownsGrpcClient = true,
+        /**
+         * Optional structured tracing callback (issue #434, GAP-20). The
+         * client-side 2PC and lock-resolution paths emit events through it;
+         * with an injected transport its own RPC events follow that
+         * transport.
+         */
+        public TraceEventInterface $tracer = new NoOpTracer(),
     ) {
     }
 }

@@ -16,7 +16,9 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\NoOpTracer;
 use CrazyGoat\TiKV\Client\Observability\SafeLogging;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
@@ -203,6 +205,11 @@ final class Transaction
          * resource-control fields unset.
          */
         private readonly ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Optional structured tracing callback (issue #434, GAP-20), handed
+         * to the two-phase committer.
+         */
+        private readonly TraceEventInterface $tracer = new NoOpTracer(),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -304,6 +311,8 @@ final class Transaction
             maxTxnBatchCount: $this->maxTxnBatchCount,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            metrics: $this->metrics,
+            tracer: $this->tracer,
         );
     }
 

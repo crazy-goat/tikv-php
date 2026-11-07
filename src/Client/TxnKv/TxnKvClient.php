@@ -25,7 +25,9 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\NoOpTracer;
 use CrazyGoat\TiKV\Client\Observability\SafeLogging;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\Region\RegionCacheWarmer;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
@@ -40,6 +42,13 @@ final class TxnKvClient
 {
     public const OPT_TIMEOUT = 'timeout';
     public const OPT_METRICS = 'metrics';
+
+    /**
+     * Structured tracing callback (issue #434, GAP-20): an instance of
+     * {@see TraceEventInterface}. The client emits 2PC and lock-resolution
+     * events through it; the transport emits one event pair per gRPC call.
+     */
+    public const OPT_TRACER = 'tracer';
 
     /** API protocol version: 0/1 (V1, default) or 2 (keyspace-aware). */
     public const OPT_API_VERSION = 'apiVersion';
@@ -362,6 +371,7 @@ final class TxnKvClient
             requestContext: self::resolveRequestContext($options),
             resourceControl: ResourceControl::fromOptions($options),
             lockWaitTimeMs: self::resolveLockWaitTimeMs($options, Transaction::DEFAULT_LOCK_WAIT_TIME_MS),
+            tracer: $bundle->tracer,
         );
     }
 
@@ -454,6 +464,12 @@ final class TxnKvClient
          * default timeout". Must be >= 0.
          */
         private readonly int $lockWaitTimeMs = Transaction::DEFAULT_LOCK_WAIT_TIME_MS,
+        /**
+         * Optional structured tracing callback (issue #434, GAP-20),
+         * inherited by every transaction and its lock resolver. The default
+         * is the zero-cost no-op.
+         */
+        private readonly TraceEventInterface $tracer = new NoOpTracer(),
     ) {
         if ($regionCacheRefreshMs < 0) {
             throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
@@ -754,6 +770,8 @@ final class TxnKvClient
             statusCache: $this->resolvedStatusCache,
             requestContext: $requestContext,
             resourceControl: $resourceControl,
+            metrics: $this->metrics,
+            tracer: $this->tracer,
         );
 
         $transaction = new Transaction(
@@ -790,6 +808,7 @@ final class TxnKvClient
             trackReadSet: $trackReadSet,
             requestContext: $requestContext,
             resourceControl: $resourceControl,
+            tracer: $this->tracer,
         );
 
         $this->pruneFinishedTransactions();

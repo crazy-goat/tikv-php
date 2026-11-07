@@ -141,4 +141,79 @@ class MetricsTest extends TestCase
         $this->assertSame(0, $m->getInvalidations('not_leader'));
         $this->assertSame(0.0, $m->getMeanLatencyMs('a'));
     }
+
+    public function testBackoffDurationsAreRecordedByType(): void
+    {
+        $m = new InMemoryMetrics();
+        $m->backoffCompleted('ServerBusy', 0, 10.0);
+        $m->backoffCompleted('ServerBusy', 1, 30.0);
+        $m->backoffCompleted('NotLeader', 0, 5.0);
+
+        $this->assertSame(2, $m->getBackoffCount('ServerBusy'));
+        $this->assertSame(40.0, $m->getTotalBackoffMs('ServerBusy'));
+        $this->assertSame(20.0, $m->getMeanBackoffMs('ServerBusy'));
+        $this->assertSame(1, $m->getBackoffCount('NotLeader'));
+        $this->assertSame(0, $m->getBackoffCount('RegionMiss'));
+    }
+
+    public function testStoreAttemptsAreRecordedPerStoreAndErrorKind(): void
+    {
+        $m = new InMemoryMetrics();
+        $m->storeAttemptCompleted(1, true);
+        $m->storeAttemptCompleted(1, true);
+        $m->storeAttemptCompleted(1, false, 'server_is_busy');
+        $m->storeAttemptCompleted(2, false, 'transport');
+        $m->storeAttemptCompleted(2, false);
+
+        $this->assertSame(2, $m->getStoreSuccesses(1));
+        $this->assertSame(1, $m->getStoreFailures(1));
+        $this->assertSame(['server_is_busy' => 1], $m->getStoreErrorKinds(1));
+        $this->assertSame(2, $m->getStoreFailures(2));
+        $this->assertSame(['transport' => 1, 'unknown' => 1], $m->getStoreErrorKinds(2));
+        $this->assertSame(0, $m->getStoreSuccesses(3));
+    }
+
+    public function testLockResolutionCountsAndDurationsAreRecorded(): void
+    {
+        $m = new InMemoryMetrics();
+        $m->lockResolved('resolved', 2.0);
+        $m->lockResolved('resolved', 4.0);
+        $m->lockResolved('live', 1.0);
+
+        $this->assertSame(2, $m->getLockResolutions('resolved'));
+        $this->assertSame(1, $m->getLockResolutions('live'));
+        $this->assertSame(0, $m->getLockResolutions('error'));
+        $this->assertSame(3.0, $m->getMeanLockResolutionMs('resolved'));
+    }
+
+    public function testTwoPhasePhaseCountsAndFailuresAreRecorded(): void
+    {
+        $m = new InMemoryMetrics();
+        $m->twoPhasePhaseCompleted('prewrite', 10.0, true);
+        $m->twoPhasePhaseCompleted('prewrite', 30.0, false);
+        $m->twoPhasePhaseCompleted('commit', 5.0, true);
+
+        $this->assertSame(2, $m->getTwoPhaseCount('prewrite'));
+        $this->assertSame(1, $m->getTwoPhaseFailures('prewrite'));
+        $this->assertSame(20.0, $m->getMeanTwoPhaseMs('prewrite'));
+        $this->assertSame(1, $m->getTwoPhaseCount('commit'));
+        $this->assertSame(0, $m->getTwoPhaseFailures('commit'));
+    }
+
+    public function testResetClearsDetailedSignals(): void
+    {
+        $m = new InMemoryMetrics();
+        $m->backoffCompleted('ServerBusy', 0, 10.0);
+        $m->storeAttemptCompleted(1, false, 'transport');
+        $m->lockResolved('resolved', 2.0);
+        $m->twoPhasePhaseCompleted('prewrite', 1.0, true);
+
+        $m->reset();
+
+        $this->assertSame(0, $m->getBackoffCount('ServerBusy'));
+        $this->assertSame(0, $m->getStoreFailures(1));
+        $this->assertSame([], $m->getStoreErrorKinds(1));
+        $this->assertSame(0, $m->getLockResolutions('resolved'));
+        $this->assertSame(0, $m->getTwoPhaseCount('prewrite'));
+    }
 }
