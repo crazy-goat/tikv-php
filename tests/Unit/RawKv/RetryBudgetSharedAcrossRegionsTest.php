@@ -473,8 +473,9 @@ class RetryBudgetSharedAcrossRegionsTest extends TestCase
             $caught = $e;
         }
 
-        $this->assertInstanceOf(TiKvException::class, $caught);
-        $this->assertSame('StaleCommand', $caught->getMessage());
+        $this->assertInstanceOf(RetryBudgetExhaustedException::class, $caught);
+        $this->assertStringContainsString('Retry backoff budget', $caught->getMessage());
+        $this->assertSame('StaleCommand', $caught->getPrevious()?->getMessage());
         $this->assertSame(2, $failuresPerRegion[0], 'Region 1 fits its two retries in the shared budget');
         $this->assertGreaterThanOrEqual(
             1,

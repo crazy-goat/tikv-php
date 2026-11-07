@@ -37,8 +37,9 @@ so the attempt cap fires in milliseconds; (b) pass an explicit
 use a small `maxBackoffMs` (e.g. 50) so the sleep budget exhausts after a
 handful of 2/4/8/16 ms retries — a regression test can then assert
 `attempts < DEFAULT_MAX_ATTEMPTS` and a minimum wall-clock elapsed time.
-Remember that budget exhaustion for sleep-budget classes **rethrows the
-original TiKvException**, not `RetryBudgetExhaustedException`, and that
+Remember that budget exhaustion for sleep-budget classes also throws
+`RetryBudgetExhaustedException` (with the original TiKvException in
+`getPrevious()`), and that
 `Backoff::exponential(..., equalJitter: true)` returns `[base/2, base]` — so
 `sleepMs(100)` for a cap of 500 returns in `[250, 500]`, never exactly the cap.
 
@@ -89,10 +90,11 @@ first and the ServerBusy budget is unreachable — raising it alone changes
 nothing. The deadline is guaranteed to bind first only while the budget is
 at least one maximum ServerBusy backoff (~10 s) above it; when the budget is
 within ~10 s of the deadline or below it, either can bind. Diagnostics
-differ too: the deadline throws
-`RetryBudgetExhaustedException` with the `ServerIsBusy` error in
-`getPrevious()`, while an exhausted ServerBusy budget rethrows the original
-`TiKvException`. See
+differ only in the message: the deadline throws
+`RetryBudgetExhaustedException` with `Retry deadline (...) exhausted`, while
+an exhausted ServerBusy budget throws the same class with
+`ServerBusy budget (...) exhausted`; both carry the original `ServerIsBusy`
+error in `getPrevious()`. See
 [ServerBusy Budget vs Retry Deadline](../configuration.md#serverbusy-budget-vs-retry-deadline).
 
 ## Store-health invalidation runs after the retry invalidation, so only sibling regions remain

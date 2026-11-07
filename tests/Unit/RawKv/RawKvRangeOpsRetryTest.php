@@ -23,6 +23,7 @@ use CrazyGoat\TiKV\Client\RawKv\RawKvRangeOps;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -257,7 +258,9 @@ final class RawKvRangeOpsRetryTest extends TestCase
             $this->rangeOps(maxBackoffMs: 5)->deleteRange('a', 'z');
             self::fail('Expected the exhausted retry budget to surface');
         } catch (BatchPartialFailureException $e) {
-            $this->assertInstanceOf(RegionException::class, $e->getFirstRegionError());
+            $firstError = $e->getFirstRegionError();
+            $this->assertInstanceOf(RetryBudgetExhaustedException::class, $firstError);
+            $this->assertInstanceOf(RegionException::class, $firstError->getPrevious());
             $this->assertGreaterThanOrEqual(2, $calls, 'A retryable response error must be retried at least once');
             $this->assertLessThan(30, $calls, 'The retry budget must bound the number of attempts');
         }

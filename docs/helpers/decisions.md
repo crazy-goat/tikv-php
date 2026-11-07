@@ -393,6 +393,13 @@ it builds the `RegionException` first and gates its own drop on
 `invalidatesRoutingKind()`, keeping the handler-specific `region_error:<kind>`
 reason because it is a separate drop path, not the pre-retry executor path.
 
+`RetryBudgetExhaustedException` is fatal before the message fallback. The
+library's `ServerBusy budget (…)` message contains `ServerBusy`, not the
+classifier's `ServerIsBusy` keyword, so today it falls through to the fatal
+default; the typed arm keeps the verdict fatal if the message ever names
+`ServerIsBusy` (or a caller constructs one), because an outer executor must
+never retry an inner executor's give-up (issue #256).
+
 The kind-level predicate is a compatibility commitment, not a convenience:
 `RetryExecutor` is a documented user-constructible collaborator
 (`docs/configuration.md`), so `invalidatesRoutingOnFatal()`'s name and
@@ -1089,7 +1096,12 @@ a `BatchPartialFailureException` and rethrows the **first failing region's own
 error**, so the sequential "abort at the first failing region" contract holds
 and `docs/error-handling.md`'s exception list for `Transaction::commit()` stays
 accurate — it does not mention `BatchPartialFailureException`, and callers
-catching `GrpcException` or `RegionException` around `commit()` keep working.
+catching `GrpcException` or `RegionException` around `commit()` keep working
+for the errors the per-region RPC raises. The one exception is retry-budget
+exhaustion: the region's executor now throws `RetryBudgetExhaustedException`
+(issue #256) with the original `GrpcException` / `RegionException` in
+`getPrevious()`, so a caller that wants to see that case must catch
+`TiKvException` (or `RetryBudgetExhaustedException`) as well.
 
 Issue #431 asked for the partial failures to be "aggregated and retried per
 region". Both halves were already in place: the fan-out waits for its
@@ -1710,8 +1722,9 @@ Four consequences to keep:
    the original object still get it from `getPrevious()`.
 3. **Region errors are unchanged.** `NotLeader`, `EpochNotMatch`, … are rejected
    before the write is proposed and stay retryable; a retried-and-succeeded
-   region error still returns a `CasResult`, and an exhausted retry budget still
-   surfaces as `RetryBudgetExhaustedException` / `RegionException`, never as an
+   region error still returns a `CasResult`, and an exhausted retry budget
+   surfaces as `RetryBudgetExhaustedException` with the original error in
+   `getPrevious()`, never as an
    indeterminate CAS. The `UndeterminedResult` kind is the documented exception:
    it says the result is unknown but is still retried today — a known limitation
    of the current classifier, not changed by this issue.

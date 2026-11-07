@@ -80,7 +80,7 @@ class RetryExecutorTest extends TestCase
     // Total backoff budget exhaustion (non-ServerBusy errors)
     // ========================================================================
 
-    public function testTotalBackoffBudgetExhaustedThrowsOriginalException(): void
+    public function testTotalBackoffBudgetExhaustedThrowsRetryBudgetExhausted(): void
     {
         $executor = $this->createExecutor(
             maxBackoffMs: 10, // very small budget
@@ -93,15 +93,28 @@ class RetryExecutorTest extends TestCase
         // sleep is drawn from [expo/2, expo]: 1-2, 2-4, 4-8 ms.
         // Worst-case spend 2+4+8=14 > 10 exhausts the budget; even in the
         // best case (1+2+4=7) the next attempt adds 8-16 ms and crosses 10,
-        // so the budget is always exhausted and the original error rethrown.
-        $operation = function (): void {
-            throw new TiKvException('test error');
+        // so the budget is always exhausted.
+        $lastError = null;
+        $operation = function () use (&$lastError): void {
+            $lastError = new TiKvException('test error');
+            throw $lastError;
         };
 
-        $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('test error');
+        $caught = null;
+        try {
+            $executor->execute('test_key', $operation, $classifier);
+        } catch (RetryBudgetExhaustedException $e) {
+            $caught = $e;
+        }
 
-        $executor->execute('test_key', $operation, $classifier);
+        $this->assertInstanceOf(RetryBudgetExhaustedException::class, $caught);
+        $this->assertSame($lastError, $caught->getPrevious());
+        $this->assertSame('test error', $caught->getPrevious()?->getMessage());
+        $this->assertGreaterThan(10, $caught->elapsedOrBackoffMs());
+        $this->assertGreaterThanOrEqual(1, $caught->attempts());
+        $this->assertStringContainsString('Retry backoff budget (10 ms) exhausted', $caught->getMessage());
+        $this->assertStringNotContainsString('test_key', $caught->getMessage());
+        $this->assertSame('test_key', $caught->getRawKey());
     }
 
     public function testTotalBackoffBudgetExhaustionLogsError(): void
@@ -162,12 +175,12 @@ class RetryExecutorTest extends TestCase
             };
         };
 
-        // First call: exhausts its budget (2+4+8=14 > 6) and rethrows.
+        // First call: exhausts its budget (2+4+8=14 > 6) and throws.
         try {
             $executor->execute('test_key', $operationFactory(true), $classifier);
             $this->fail('Expected first execute() to exhaust the budget');
-        } catch (TiKvException $e) {
-            $this->assertSame('test error', $e->getMessage());
+        } catch (RetryBudgetExhaustedException $e) {
+            $this->assertSame('test error', $e->getPrevious()?->getMessage());
         }
         $this->assertSame(3, $calls);
 
@@ -217,10 +230,10 @@ class RetryExecutorTest extends TestCase
         for ($i = 0; $i < 3; $i++) {
             try {
                 // The never-returning operation always throws; the budget
-                // check then rethrows it after one ServerBusy sleep.
+                // check then wraps it after one ServerBusy sleep.
                 $executor->execute('test_key', $operation, $classifier);
-            } catch (TiKvException $e) {
-                $this->assertSame('server busy', $e->getMessage());
+            } catch (RetryBudgetExhaustedException $e) {
+                $this->assertSame('server busy', $e->getPrevious()?->getMessage());
             }
         }
 
@@ -240,7 +253,7 @@ class RetryExecutorTest extends TestCase
     // ServerBusy budget exhaustion
     // ========================================================================
 
-    public function testServerBusyBudgetExhaustedThrowsOriginalException(): void
+    public function testServerBusyBudgetExhaustedThrowsRetryBudgetExhausted(): void
     {
         $executor = $this->createExecutor(
             maxBackoffMs: 10000,
@@ -252,14 +265,26 @@ class RetryExecutorTest extends TestCase
         // serverBusyBackoffMs = 0 + >=1000 > 100 → throw on first retry
         $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::ServerBusy);
 
-        $operation = function (): void {
-            throw new TiKvException('server busy');
+        $lastError = null;
+        $operation = function () use (&$lastError): void {
+            $lastError = new TiKvException('server busy');
+            throw $lastError;
         };
 
-        $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('server busy');
+        $caught = null;
+        try {
+            $executor->execute('test_key', $operation, $classifier);
+        } catch (RetryBudgetExhaustedException $e) {
+            $caught = $e;
+        }
 
-        $executor->execute('test_key', $operation, $classifier);
+        $this->assertInstanceOf(RetryBudgetExhaustedException::class, $caught);
+        $this->assertSame($lastError, $caught->getPrevious());
+        $this->assertSame(0, $caught->attempts());
+        $this->assertGreaterThan(100, $caught->elapsedOrBackoffMs());
+        $this->assertStringContainsString('ServerBusy budget (100 ms) exhausted', $caught->getMessage());
+        $this->assertStringNotContainsString('test_key', $caught->getMessage());
+        $this->assertSame('test_key', $caught->getRawKey());
     }
 
     public function testServerBusyBudgetExhaustionLogsError(): void
@@ -666,9 +691,8 @@ class RetryExecutorTest extends TestCase
                 $attempts++;
                 throw new TiKvException('EpochNotMatch something');
             });
-        } catch (TiKvException) {
-            // Budget exhaustion rethrows the ORIGINAL error (not
-            // RetryBudgetExhaustedException) for sleep-budget classes.
+        } catch (RetryBudgetExhaustedException) {
+            // Budget exhaustion throws the same type as the other paths.
         }
 
         $elapsedMs = (int) (microtime(true) * 1000) - $startMs;

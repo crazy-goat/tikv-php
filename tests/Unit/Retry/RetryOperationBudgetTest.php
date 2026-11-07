@@ -90,7 +90,8 @@ class RetryOperationBudgetTest extends TestCase
             $caught = $e;
         }
 
-        self::assertSame('second', $caught->getMessage());
+        self::assertInstanceOf(RetryBudgetExhaustedException::class, $caught);
+        self::assertSame('second', $caught->getPrevious()?->getMessage());
         self::assertSame(
             1,
             $secondAttempts,
@@ -200,7 +201,8 @@ class RetryOperationBudgetTest extends TestCase
             $caught = $e;
         }
 
-        self::assertSame('ServerIsBusy', $caught->getMessage());
+        self::assertInstanceOf(RetryBudgetExhaustedException::class, $caught);
+        self::assertSame('ServerIsBusy', $caught->getPrevious()?->getMessage());
         self::assertSame(
             1,
             $secondAttempts,

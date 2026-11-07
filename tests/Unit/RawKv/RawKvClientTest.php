@@ -54,6 +54,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use CrazyGoat\TiKV\Tests\Unit\Support\DeadEndpointGrpcFuture;
@@ -3208,7 +3209,7 @@ class RawKvClientTest extends TestCase
         $this->assertSame('found', $result);
     }
 
-    public function testBudgetExceededThrowsLastException(): void
+    public function testBudgetExceededThrowsRetryBudgetExhaustedWithLastException(): void
     {
         $client = new RawKvClient($this->pdClient, $this->grpc, $this->regionCache, 0, new NullLogger(), 0);
 
@@ -3222,9 +3223,17 @@ class RawKvClientTest extends TestCase
         $this->grpc->method('call')
             ->willThrowException(new TiKvException('ServerIsBusy'));
 
-        $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('ServerIsBusy');
-        $client->get('key');
+        try {
+            $client->get('key');
+            self::fail('The exhausted ServerBusy budget must throw');
+        } catch (RetryBudgetExhaustedException $e) {
+            self::assertStringContainsString('ServerBusy budget', $e->getMessage());
+            self::assertSame(
+                'ServerIsBusy',
+                $e->getPrevious()?->getMessage(),
+                'The original ServerIsBusy error must not be lost',
+            );
+        }
     }
 
     public function testGrpcExceptionTriggersRetry(): void
