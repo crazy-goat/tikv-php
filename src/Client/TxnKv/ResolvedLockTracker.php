@@ -12,11 +12,14 @@ use InvalidArgumentException;
  * resolved (issue #432, GAP-18).
  *
  * TiKV accepts the start timestamps of transactions a request has already
- * resolved in `Context.resolved_locks`, and the subset that was resolved as
- * committed in `Context.committed_locks`. Sending them on later requests lets
- * the server skip locks the client has already dealt with instead of making
- * the client resolve the same transaction again after a retry or a region
- * cache invalidation.
+ * resolved in `Context.resolved_locks`, and the committed ones the request
+ * must read through in `Context.committed_locks`. The two sets are disjoint:
+ * a transaction is classified against the reader's start timestamp, because a
+ * commit at or before that timestamp is visible to the snapshot while a later
+ * commit is not. Sending them on later requests lets the server skip locks it
+ * can ignore and read through locks it must see, instead of making the client
+ * resolve the same transaction again after a retry or a region cache
+ * invalidation.
  *
  * Both sets are bounded FIFO maps keyed by the lock's start timestamp. The
  * bound matters because a long-lived snapshot under sustained contention
@@ -48,23 +51,21 @@ final class ResolvedLockTracker
     }
 
     /**
-     * Remember that the transaction starting at `$lockTs` was resolved.
-     *
-     * A positive commit timestamp also records the transaction as committed;
-     * zero means it was rolled back and only belongs to the resolved set.
+     * Remember a transaction the reader can ignore: rolled back, or committed
+     * after the reader's start timestamp.
      */
-    public function record(int $lockTs, int $commitTs): void
+    public function recordResolved(int $lockTs): void
     {
-        $evicted = $this->insert($this->resolvedLocks, $lockTs);
-        if ($evicted !== null) {
-            // Committed locks are a subset of the resolved ones: never report
-            // a committed transaction the resolved set has already forgotten.
-            unset($this->committedLocks[$evicted]);
-        }
+        $this->insert($this->resolvedLocks, $lockTs);
+    }
 
-        if ($commitTs > 0) {
-            $this->insert($this->committedLocks, $lockTs);
-        }
+    /**
+     * Remember a transaction the reader must read through: committed at or
+     * before the reader's start timestamp.
+     */
+    public function recordCommitted(int $lockTs): void
+    {
+        $this->insert($this->committedLocks, $lockTs);
     }
 
     /**
@@ -119,22 +120,17 @@ final class ResolvedLockTracker
 
     /**
      * @param array<int, true> $set
-     * @return int|null the evicted timestamp, or null when nothing was evicted
      */
-    private function insert(array &$set, int $lockTs): ?int
+    private function insert(array &$set, int $lockTs): void
     {
         if (isset($set[$lockTs])) {
-            return null;
+            return;
         }
 
-        $evicted = null;
         if (count($set) >= $this->capacity) {
-            $evicted = array_key_first($set);
-            unset($set[$evicted]);
+            unset($set[array_key_first($set)]);
         }
 
         $set[$lockTs] = true;
-
-        return $evicted;
     }
 }

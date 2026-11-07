@@ -1823,3 +1823,10 @@ another would tell TiKV to ignore locks the second transaction has not
 resolved. Both sets are bounded FIFO (2048 entries, oldest evicted first);
 client-go's `TSSet` is unbounded, which is unsuitable for a long-lived PHP
 transaction under sustained contention.
+
+The two sets are disjoint, classified in `LockResolver` against its
+`callerStartTs`: a rolled-back transaction, or one committed after that
+timestamp, goes into `resolved_locks`; a transaction committed at or before it
+goes into `committed_locks`. Do not put a timestamp in both. TiKV checks the
+bypass set first, so a duplicate would be ignored instead of read through and
+could return the value from before the commit — a stale read.

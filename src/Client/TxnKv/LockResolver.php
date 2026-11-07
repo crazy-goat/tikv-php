@@ -229,7 +229,7 @@ final readonly class LockResolver
         $commitTs = $status['commitTs'] ?? null;
 
         if ($commitTs !== null && $commitTs > 0) {
-            $this->resolveLockCommitted($lock, $lockTs, $commitTs, $deadlineAtMs);
+            $this->resolveLockCommitted($lock, $lockTs, $commitTs, $deadlineAtMs, $notLeaderOwnedByRetryExecutor);
         } elseif ($commitTs === 0 && !$status['final']) {
             // Async-commit lock (issue #419): the primary lock carries the
             // commit decision, so before spending the TTL wait ask the
@@ -277,9 +277,9 @@ final readonly class LockResolver
 
             // The status check reported no commit and no live lock, so TiKV
             // has expired or rolled back the transaction and resolution is safe.
-            $this->resolveLockRolledBack($lock, $lockTs, $deadlineAtMs);
+            $this->resolveLockRolledBack($lock, $lockTs, $deadlineAtMs, $notLeaderOwnedByRetryExecutor);
         } else {
-            $this->resolveLockRolledBack($lock, $lockTs, $deadlineAtMs);
+            $this->resolveLockRolledBack($lock, $lockTs, $deadlineAtMs, $notLeaderOwnedByRetryExecutor);
         }
 
         $this->invalidateRegionFor((string) $lock->getKey());
@@ -669,7 +669,7 @@ final readonly class LockResolver
             );
         }
 
-        $this->resolvedLocks->record($lockTs, $commitTs);
+        $this->recordResolvedLock($lockTs, $commitTs);
     }
 
     /**
@@ -732,7 +732,7 @@ final readonly class LockResolver
             $this->invalidateRegionFor($regionData['keys'][0]);
         }
 
-        $this->resolvedLocks->record($lockTs, $commitTs);
+        $this->recordResolvedLock($lockTs, $commitTs);
     }
 
     private function resolveLockCommitted(
@@ -740,6 +740,7 @@ final readonly class LockResolver
         int $lockTs,
         int $commitTs,
         int $deadlineAtMs = 0,
+        bool $notLeaderOwnedByRetryExecutor = true,
     ): void {
         $key = (string) $lock->getKey();
         $this->logger->debug('Resolving lock as committed', [
@@ -763,7 +764,8 @@ final readonly class LockResolver
         $request->setStartVersion($lockTs);
         $request->setCommitVersion($commitTs);
 
-        $this->grpc->call(
+        /** @var ResolveLockResponse $response */
+        $response = $this->grpc->call(
             $address,
             'tikvpb.Tikv',
             'KvResolveLock',
@@ -772,13 +774,22 @@ final readonly class LockResolver
             $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
         );
 
-        $this->resolvedLocks->record($lockTs, $commitTs);
+        RegionErrorHandler::check(
+            $response,
+            $this->regionCache,
+            $region->regionId,
+            notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+            keyErrorsHandledByCaller: true,
+        );
+
+        $this->recordResolvedLock($lockTs, $commitTs);
     }
 
     private function resolveLockRolledBack(
         LockInfo $lock,
         int $lockTs,
         int $deadlineAtMs = 0,
+        bool $notLeaderOwnedByRetryExecutor = true,
     ): void {
         $key = (string) $lock->getKey();
         $this->logger->debug('Resolving lock as rolled back', [
@@ -801,7 +812,8 @@ final readonly class LockResolver
         $request->setStartVersion($lockTs);
         $request->setCommitVersion(0);
 
-        $this->grpc->call(
+        /** @var ResolveLockResponse $response */
+        $response = $this->grpc->call(
             $address,
             'tikvpb.Tikv',
             'KvResolveLock',
@@ -810,7 +822,37 @@ final readonly class LockResolver
             $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
         );
 
-        $this->resolvedLocks->record($lockTs, 0);
+        RegionErrorHandler::check(
+            $response,
+            $this->regionCache,
+            $region->regionId,
+            notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
+            keyErrorsHandledByCaller: true,
+        );
+
+        $this->recordResolvedLock($lockTs, 0);
+    }
+
+    /**
+     * Classify a successful resolution against the reader's start timestamp
+     * and remember it for later requests (issue #432, GAP-18).
+     *
+     * `Context.resolved_locks` and `Context.committed_locks` are disjoint:
+     * TiKV checks the bypass set first, so a timestamp in both would be
+     * ignored and could hide a commit the snapshot must see. A rolled-back
+     * transaction, or one committed after the reader's start ts, is invisible
+     * to the snapshot and belongs in `resolved_locks`; a transaction
+     * committed at or before the start ts must be read through and belongs in
+     * `committed_locks`.
+     */
+    private function recordResolvedLock(int $lockTs, int $commitTs): void
+    {
+        if ($commitTs > 0 && $commitTs <= $this->callerStartTs) {
+            $this->resolvedLocks->recordCommitted($lockTs);
+            return;
+        }
+
+        $this->resolvedLocks->recordResolved($lockTs);
     }
 
     /**
