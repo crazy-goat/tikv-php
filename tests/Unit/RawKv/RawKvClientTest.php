@@ -325,11 +325,6 @@ class RawKvClientTest extends TestCase
     // Lifecycle
     // ========================================================================
 
-    public function testCreateFactoryMethodExists(): void
-    {
-        $this->assertTrue(method_exists(RawKvClient::class, 'create')); // @phpstan-ignore function.alreadyNarrowedType
-    }
-
     public function testCreateThrowsOnEmptyPdEndpoints(): void
     {
         $this->expectException(InvalidArgumentException::class);
