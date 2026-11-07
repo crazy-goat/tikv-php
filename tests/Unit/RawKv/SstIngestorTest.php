@@ -362,6 +362,22 @@ class SstIngestorTest extends TestCase
         $region = $this->defaultRegion();
 
         $this->setupStandardPdMocks($region, $store);
+        // The retried closure re-resolves the region after the write error.
+        // Return a real RegionInfo explicitly: PHPUnit cannot auto-generate
+        // one because RegionInfo is final.
+        $this->pdClient->method('getRegion')->willReturn($region);
+
+        // Keep the retryable write error from driving a long backoff loop;
+        // the test only asserts that normal mode is restored.
+        $this->ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            maxBackoffMs: 1,
+        );
 
         // SwitchMode goes through callAsync since issue #295.
         $switchModeAddresses = [];
