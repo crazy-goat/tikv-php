@@ -375,6 +375,14 @@ $values = $txn->batchGet(['account:1', 'account:2']);
 // a larger range throws ScanLimitExceededException instead of truncating)
 $results = $txn->scan('account:', 'account;');
 
+// Reverse scan reads [lower, upper) descending; the first argument is the
+// exclusive upper bound, exactly like RawKvClient::reverseScan()
+$latest = $txn->reverseScan('account;', 'account:', limit: 10);
+
+// Buffer an atomic delete for every key in [start, end); bounded by the same
+// 10240-row cap and the transaction's write-set limits
+$deleted = $txn->deleteRange('account:100', 'account:200');
+
 // Commit (2-phase: prewrite + commit)
 $txn->commit();
 

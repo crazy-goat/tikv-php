@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Observability\SafeLogging;
+use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
@@ -519,6 +520,14 @@ final class Transaction
      *                   throws InvalidArgumentException before the scan RPC
      *                   (a pessimistic transaction refreshes its read
      *                   timestamp first)
+     * @param bool $reverse Read the range in descending key order. The bounds
+     *                      then keep the {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::reverseScan()}
+     *                      meaning: `$startKey` is the exclusive upper bound
+     *                      and `$endKey` the lower bound, so the scan reads
+     *                      `[endKey, startKey)` (issue #435, GAP-21). An empty
+     *                      `$startKey` with a non-empty `$endKey` is rejected,
+     *                      and `$startKey === $endKey` returns `[]`. The
+     *                      convenience wrapper is {@see self::reverseScan()}.
      * @return array<array{key: string, value: ?string}>
      *
      * @throws InvalidArgumentException
@@ -530,7 +539,7 @@ final class Transaction
      * @throws ScanLimitExceededException When limit is 0 and the range holds
      *         more than {@see self::MAX_SCAN_LIMIT} rows
      */
-    public function scan(string $startKey, string $endKey, int $limit = 0): array
+    public function scan(string $startKey, string $endKey, int $limit = 0, bool $reverse = false): array
     {
         $this->state->ensureWritable();
         $this->keepPrimaryLockAlive();
@@ -550,7 +559,120 @@ final class Transaction
             $this->retryExecutor(),
             $this->classifyError(...),
             $this->maxScanLimit,
+            $reverse,
         );
+    }
+
+    /**
+     * Reverse range scan over `[endKey, startKey)`, in descending key order.
+     *
+     * This is the transactional counterpart of
+     * {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::reverseScan()}: the first
+     * argument is the **exclusive upper bound**, the second the lower bound.
+     * It reads at the transaction's snapshot and observes the transaction's
+     * own buffered writes, so a key set or deleted earlier in the transaction
+     * appears (or is hidden) in its sorted position.
+     *
+     * `limit = 0` means the whole range, capped at
+     * {@see self::MAX_SCAN_LIMIT} rows exactly like {@see self::scan()}; a
+     * larger range throws {@see ScanLimitExceededException} instead of
+     * returning a truncated result. Regions are walked from the upper bound
+     * downwards, so a narrow reverse scan never enumerates the rest of the
+     * range (issue #435, GAP-21).
+     *
+     * @return array<array{key: string, value: ?string}>
+     *
+     * @throws InvalidArgumentException When the range is reversed (an empty
+     *         upper bound with a non-empty lower one, or `$startKey` sorts
+     *         before `$endKey`)
+     * @throws InvalidStateException
+     * @throws TiKvException
+     * @throws TransactionConflictException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws ScanLimitExceededException When limit is 0 and the range holds
+     *         more than {@see self::MAX_SCAN_LIMIT} rows
+     */
+    public function reverseScan(string $startKey, string $endKey, int $limit = 0): array
+    {
+        return $this->scan($startKey, $endKey, $limit, true);
+    }
+
+    /**
+     * Delete every key in the forward range `[startKey, endKey)` inside this
+     * transaction (issue #435, GAP-21).
+     *
+     * The keys are read at the transaction's snapshot and buffered as
+     * deletes, so the deletion is **atomic with the transaction**: it becomes
+     * visible only at `commit()` and is undone by `rollback()`. Keys the
+     * transaction already wrote are honoured (a buffered `set()` is deleted,
+     * an earlier `delete()` is not sent twice).
+     *
+     * The range is read with {@see self::scan()} and therefore obeys the same
+     * cap: a range holding more than {@see self::MAX_SCAN_LIMIT} rows throws
+     * {@see ScanLimitExceededException} instead of silently deleting a part.
+     * The buffered deletes also count against the transaction's write-set
+     * limits (`maxTxnEntryCount`, `maxTxnTotalSize`, …) and the whole range
+     * is one transaction, so this method is meant for bounded ranges. For a
+     * range of unbounded size use `RawKvClient::deleteRange()` (a raw,
+     * non-transactional range delete) or delete in explicit batches across
+     * several transactions.
+     *
+     * @param string $startKey Inclusive lower bound
+     * @param string $endKey   Exclusive upper bound; `''` means the end of the
+     *                         keyspace. `startKey === endKey` deletes nothing
+     * @return int Number of keys marked deleted
+     *
+     * @throws InvalidArgumentException When the range is reversed
+     * @throws InvalidStateException
+     * @throws TiKvException
+     * @throws TransactionConflictException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws ScanLimitExceededException When the range holds more than
+     *         {@see self::MAX_SCAN_LIMIT} rows
+     * @throws TransactionTooLargeException When the deletes exceed a
+     *         configured transaction size limit
+     */
+    public function deleteRange(string $startKey, string $endKey): int
+    {
+        $this->state->ensureWritable();
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'deleteRange');
+
+        if ($startKey === $endKey) {
+            return 0;
+        }
+
+        $rows = $this->scan($startKey, $endKey, 0);
+        $keys = [];
+        foreach ($rows as $row) {
+            $keys[] = $row['key'];
+        }
+        if ($keys === []) {
+            return 0;
+        }
+
+        if ($this->pessimistic && $this->eagerPessimisticLocks) {
+            // Validate every write before acquiring any lock, exactly like
+            // set()/delete(): an oversized range fails before an RPC. Then
+            // take every physical lock in one batched lockKeys() call (it
+            // groups the keys by region) instead of one RPC per key.
+            foreach ($keys as $key) {
+                $this->state->assertWriteAllowed($key, null);
+            }
+            $this->lockKeys(...$keys);
+            foreach ($keys as $key) {
+                $this->state->setWrite($key, null);
+            }
+
+            return count($keys);
+        }
+
+        foreach ($keys as $key) {
+            $this->delete($key);
+        }
+
+        return count($keys);
     }
 
     // ---------------------------------------------------------------

@@ -473,8 +473,13 @@ $value  = $txn->get('account:1');                        // ?string
 $values = $txn->batchGet(['account:1', 'account:2']);    // array<array-key, ?string>
 $rows   = $txn->scan('account:', 'account;', limit: 100); // array<array{key, value}>
 
+// Reverse scan: the first argument is the exclusive upper bound, the second
+// the lower bound, so this reads [account:, account;) descending.
+$latest = $txn->reverseScan('account;', 'account:', limit: 10);
+
 $txn->set('account:1', '100');
 $txn->delete('account:2');
+$deleted = $txn->deleteRange('account:100', 'account:200'); // atomic tombstones
 ```
 
 Reads are **snapshot reads at `startTs`** and observe your own buffered
@@ -487,6 +492,21 @@ They do *not* see other transactions' uncommitted data.
 > truncated: the scan throws `ScanLimitExceededException` instead, so a
 > partial range is never mistaken for a complete one. Pass an explicit
 > `limit` when you need one.
+
+`Transaction::reverseScan($upper, $lower, $limit)` uses the same
+`RawKvClient::reverseScan()` bound convention — `$upper` is exclusive, so the
+range is `[lower, upper)` — and returns rows in descending key order. It walks
+the regions from the upper bound downwards and observes buffered writes like
+the forward scan; `scan($start, $end, $limit, reverse: true)` is the same call
+with a flag.
+
+`Transaction::deleteRange($start, $end)` reads the range at the snapshot and
+buffers a delete for every key, so the deletion is **atomic with the
+transaction**. It obeys the same 10240-row scan cap and the transaction's
+write-set limits, so use it for bounded ranges; for an unbounded range delete
+in explicit batches across several transactions, or use
+`RawKvClient::deleteRange()` when a raw, non-transactional delete is
+acceptable.
 
 #### Optimistic vs pessimistic
 
@@ -1262,6 +1282,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 
 - ✅ **RawKV core** — CRUD, batch operations, scans, range operations, TTL and compare-and-swap
 - ✅ **Transactions (TxnKV)** — snapshot reads, two-phase commit, pessimistic and optimistic locking, GC safe points
+- ✅ **Transactional reverse scan and range deletion** — `Transaction::reverseScan()` / `scan(..., reverse: true)` walk regions top-down and observe buffered writes; `deleteRange()` buffers atomic tombstones for a bounded range ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ✅ **API V2 and keyspaces** — V2 key encoding and PD keyspace resolution
 - ✅ **Multi-endpoint PD** — leader discovery and failover
 - ✅ **GC safe-point awareness** — service safe points for long-running reads
@@ -1306,7 +1327,6 @@ feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
-- ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ⬜ **`RawBatchScan` RPC for multi-range scans** — `batchScan()` is a client-side loop today ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
 - ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 
