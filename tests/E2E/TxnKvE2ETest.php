@@ -1031,9 +1031,9 @@ PHP;
         // sub-scan starts exactly at the split boundary ("\x01\x00" / "mrr").
         // The old escape decoder stopped at the first 0x00 0x00 and produced
         // "\x01", one byte below the region's lower bound, which TiKV rejects
-        // as an invalid range. TxnKV has no reverse-scan API (only RawKV does),
-        // so a forward scan is the strongest cross-region scan coverage
-        // available for the transactional path.
+        // as an invalid range. The reverse direction over the same pre-split
+        // regions is covered by
+        // testReverseScanAcrossPreSplitRegionsWithBufferedWrites() below.
         $scan = $this->testClient->begin(['pessimistic' => false]);
         $scanned = $scan->scan("\x00", "\x72");
         $scan->rollback();
