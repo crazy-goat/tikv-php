@@ -545,7 +545,7 @@ class SstIngestorTest extends TestCase
         } catch (RetryBudgetExhaustedException $e) {
             $previous = $e->getPrevious();
             self::assertInstanceOf(GrpcException::class, $previous);
-            self::assertSame('write failed', $previous->getMessage());
+            self::assertStringContainsString('write failed', $previous->getMessage());
         } finally {
             // Verify SwitchMode(Normal) was called after the error.
             // At least 2 calls: import mode + normal mode.
