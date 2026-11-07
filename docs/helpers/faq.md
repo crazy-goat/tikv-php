@@ -1374,10 +1374,12 @@ decide — do not re-derive routability in application code. `TwoPhaseCommitter`
 is not affected: it groups through `RegionGrouper`, so it has failed closed
 since #244.
 
-Separately, `ingest()` is not retried at all: any region/transport error
-aborts the remaining regions (the `finally` still switches all stores back to
-normal mode), and a killed process leaves the cluster in import mode — see the
-[DOC-24] section in `docs/operations.md`.
+Separately, `ingest()` retries each region group through the retry executor
+(issue #197), but the import is not atomic across regions: a permanent failure
+aborts the remaining groups, reports the applied region IDs through
+`IngestPartialFailureException`, and the `finally` still switches all stores
+back to normal mode. A killed process leaves the cluster in import mode — see
+the [DOC-24] section in `docs/operations.md`.
 
 ## Doc enum/const lists drift — regenerate them from code, never hand-write
 

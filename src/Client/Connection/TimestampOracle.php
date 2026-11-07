@@ -98,6 +98,9 @@ final class TimestampOracle
     /** PID that fetched the pool; a fork invalidates the pool. */
     private ?int $poolPid = null;
 
+    /** Shared cluster-ID learning/verification rules (issue #250, REG-19). */
+    private readonly ClusterIdGuard $clusterIdGuard;
+
     /**
      * @param \Closure(): ?int $getClusterId
      * @param \Closure(int): void $setClusterId
@@ -153,13 +156,6 @@ final class TimestampOracle
         private readonly int $tsoTimeoutMs = self::DEFAULT_TSO_TIMEOUT_MS,
         private readonly ?int $expectedClusterId = null,
     ) {
-        if ($expectedClusterId !== null && $expectedClusterId < 1) {
-            throw new InvalidArgumentException(sprintf(
-                'expectedClusterId must be greater than 0, got %d',
-                $expectedClusterId,
-            ));
-        }
-
         $this->pdAddress = $pdAddress instanceof \Closure
             ? $pdAddress
             : static fn (): string => $pdAddress;
@@ -194,6 +190,13 @@ final class TimestampOracle
         $this->poolMaxAgeMs = $resolvedPoolMaxAgeMs;
 
         $this->pid = $pid ?? static fn (): int => (int) getmypid();
+
+        $this->clusterIdGuard = new ClusterIdGuard(
+            $this->getClusterId,
+            $this->setClusterId,
+            $this->expectedClusterId,
+            $this->logger,
+        );
     }
 
     /**
@@ -331,7 +334,7 @@ final class TimestampOracle
 
             return $this->extractTimestampRange($response, $count);
         } catch (GrpcException $e) {
-            if ($this->extractClusterIdFromError($e->getMessage()) === null) {
+            if (ClusterIdGuard::extractFromError($e->getMessage()) === null) {
                 // Transport-level failure: let the owning PdClient fail over
                 // to another endpoint before this failure propagates. The
                 // closure is bound to its owning PdClient already — do NOT
@@ -522,7 +525,7 @@ final class TimestampOracle
 
             return $response;
         } catch (GrpcException $e) {
-            $extractedId = $this->extractClusterIdFromError($e->getMessage());
+            $extractedId = ClusterIdGuard::extractFromError($e->getMessage());
             if ($extractedId === null) {
                 throw $e;
             }
@@ -530,7 +533,7 @@ final class TimestampOracle
             // The error text is server-controlled: validate the ID before it
             // is adopted, so it cannot override an expected or an
             // already-established cluster ID (issue #308, SEC-05).
-            $this->assertReportedClusterIdMatches($extractedId);
+            $this->clusterIdGuard->checkReportedInError($extractedId);
 
             $this->logger->warning(
                 'Cluster ID mismatch on TSO, retrying',
@@ -555,86 +558,18 @@ final class TimestampOracle
     }
 
     /**
-     * Learn the cluster ID from a TSO response header.
+     * Verify the cluster ID from a TSO response header.
      *
+     * The rules live in {@see ClusterIdGuard} and are shared with
+     * {@see PdClient} (issue #250, REG-19): every response is checked, not
+     * only the first one, and a reported ID of zero means "not reported".
      * With an expected cluster ID configured (issue #308, SEC-05) a response
-     * without a cluster-ID header is a protocol violation: leaving the ID
-     * unset would let a server bypass the check simply by omitting the
-     * header. A header naming another cluster also throws before the ID is
-     * adopted and before a timestamp is served. The mismatch check runs
-     * after the ID has been established too, so a later response from an
-     * impostor cannot pass unnoticed.
+     * without a cluster-ID header is a protocol violation.
      */
     private function learnClusterId(TsoResponse $response): void
     {
         $header = $response->getHeader();
-        if ($header === null) {
-            if ($this->expectedClusterId !== null) {
-                throw new TiKvException(sprintf(
-                    'Cluster ID missing: expected %d, response carried none',
-                    $this->expectedClusterId,
-                ));
-            }
-
-            return;
-        }
-
-        $clusterId = (int) $header->getClusterId();
-
-        if ($this->expectedClusterId !== null && $clusterId !== $this->expectedClusterId) {
-            throw new TiKvException(sprintf(
-                'Cluster ID mismatch: expected %d, server reported %d',
-                $this->expectedClusterId,
-                $clusterId,
-            ));
-        }
-
-        if (($this->getClusterId)() !== null) {
-            return;
-        }
-
-        ($this->setClusterId)($clusterId);
-        $this->logger->info('Learned cluster ID', ['clusterId' => $clusterId]);
-    }
-
-    /**
-     * Validate a cluster ID parsed out of a gRPC error string before it is
-     * adopted (issue #308, SEC-05).
-     *
-     * The error text is controlled by whichever server answers the socket,
-     * so it may not override a configured expected ID or a cluster ID that
-     * has already been established from a response header.
-     */
-    private function assertReportedClusterIdMatches(int $reportedClusterId): void
-    {
-        if ($this->expectedClusterId !== null && $reportedClusterId !== $this->expectedClusterId) {
-            throw new TiKvException(sprintf(
-                'Cluster ID mismatch: expected %d, server reported %d',
-                $this->expectedClusterId,
-                $reportedClusterId,
-            ));
-        }
-
-        $establishedId = ($this->getClusterId)();
-        if ($establishedId !== null && $establishedId !== $reportedClusterId) {
-            throw new TiKvException(sprintf(
-                'Cluster ID mismatch: established %d, server reported %d',
-                $establishedId,
-                $reportedClusterId,
-            ));
-        }
-    }
-
-    private function extractClusterIdFromError(string $message): ?int
-    {
-        if (!str_contains($message, 'mismatch cluster id')) {
-            return null;
-        }
-        if (preg_match('/need (\d+) but got/', $message, $matches)) {
-            return (int) $matches[1];
-        }
-
-        return null;
+        $this->clusterIdGuard->check($header === null ? null : (int) $header->getClusterId());
     }
 
     /**
