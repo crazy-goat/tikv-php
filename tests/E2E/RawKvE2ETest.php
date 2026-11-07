@@ -857,6 +857,20 @@ class RawKvE2ETest extends TestCase
         $this->testClient->reverseScan('log:', 'log;', limit: 10);
     }
 
+    public function testReverseScanWithAnEmptyStartKeyThrowsBeforeAnyRpc(): void
+    {
+        $this->putAndTrack(['rev-empty-a' => 'va', 'rev-empty-b' => 'vb']);
+
+        // Reverse scan has no +infinity upper-bound sentinel. An empty start
+        // key is the keyspace minimum, not "start from the top": TiKV's
+        // reverse_seek('') finds nothing, so accepting the call would return
+        // [] silently. It is rejected before any RPC instead (RAW-09, #194).
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('an empty start key is not a valid upper bound');
+
+        $this->testClient->reverseScan('', 'rev-empty-');
+    }
+
     public function testReverseScanWithLimit(): void
     {
         $pairs = ['rev-lim-a' => 'va', 'rev-lim-b' => 'vb', 'rev-lim-c' => 'vc'];

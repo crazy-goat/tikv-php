@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `reverseScan('', $lower)` with a non-empty lower bound now fails with an `InvalidArgumentException` that names the empty upper bound, instead of the generic "start key must not sort before end key" text. Reverse scan has no +infinity sentinel (TiKV's reverse `RawScan` seeks for the largest key not greater than the empty `start_key` and finds nothing), so the call was already rejected by the reversed-range check from #343; `docs/operations.md` now states the restriction explicitly and an E2E test pins the rejection. `reverseScan('', '')` remains the documented empty range. (#194)
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added
