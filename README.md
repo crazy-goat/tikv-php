@@ -278,13 +278,15 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // inclusive of that key.
 $results = $client->reverseScan('log;', 'log:', limit: 100);
 
-// Scan multiple non-contiguous ranges. This is a client-side loop of
-// per-range RawScan requests, not the RawBatchScan RPC: the RPC count is
-// linear in the number of ranges and the regions they cover (each range
-// resolves its own regions), although the per-range sends are fanned out
-// concurrently up to options['maxConcurrency']. eachLimit is required and
-// must be > 0. Returns one list per range: a list input keeps its order,
-// while non-sequential keys are re-indexed in ascending key order.
+// Scan multiple non-contiguous ranges. The client groups the ranges by
+// region and sends one RawBatchScan request per region, so the RPC count is
+// the number of regions touched rather than one per range. Requests to
+// distinct regions are dispatched concurrently up to
+// options['maxConcurrency']. eachLimit is required and must be > 0; each
+// range returns at most eachLimit rows. Overlapping ranges, and a region
+// error or transport failure, fall back to the per-range RawScan path.
+// Returns one list per range: a list input keeps its order, while
+// non-sequential keys are re-indexed in ascending key order.
 $results = $client->batchScan([['a:', 'a;'], ['b:', 'b;']], eachLimit: 50);
 ```
 
@@ -1300,6 +1302,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **PD connection reuse** — `TxnKvClient::pdClient()` exposes the client's own `PdClientInterface` for cluster inspection and tests ([#515](https://github.com/crazy-goat/tikv-php/issues/515))
 - ✅ **Explicit pessimistic key locking** — `Transaction::lockKeys()` and `getForUpdate()` acquire locks without writing, with the same conflict, deadlock and wait-timeout handling ([#436](https://github.com/crazy-goat/tikv-php/issues/436))
 - ✅ **Peer-role awareness** — `PeerInfo` carries the TiKV role and a learner or witness can never be adopted as the leader ([#258](https://github.com/crazy-goat/tikv-php/issues/258))
+- ✅ **`RawBatchScan` for multi-range scans** — `batchScan()` groups the ranges by region and sends one `RawBatchScan` per region, with the per-range result shape unchanged ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
 
 ### Planned
 
@@ -1313,7 +1316,6 @@ the issue is still open.
 
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
-- ⬜ **`RawBatchScan` RPC for multi-range scans** — `batchScan()` is a client-side loop today ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
 - ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 
 ## Contributing
