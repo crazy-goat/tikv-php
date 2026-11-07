@@ -1400,7 +1400,8 @@ The RetryExecutor's classifier chain is `handleNotLeader → classifier → Erro
 ## A rebase can leave stray conflict markers in docs — grep before finishing
 
 All three of fix/216, fix/237 and fix/238 carried a leftover
-`their rebase (and #238 also in `docs/helpers/faq.md`), silently committed
+`>>>>>>> <sha> (...)` line right after the new CHANGELOG.md bullet after
+their rebase (and #238 also in `docs/helpers/faq.md`), silently committed
 by the follow-up fix. A squash/fixup during a rebase can resurrect markers
 from an earlier conflict that was "resolved" by keeping both sides. Before
 every push, grep the whole diff for conflict markers:
@@ -1419,6 +1420,22 @@ genuinely sharing a start key cannot coexist: the newest put wins (the
 overlap removal also deletes the equal-startKey stale entry that the
 ordered treap would otherwise retain). Supersession is silent metrics-wise;
 `invalidate()` remains the sole `regionInvalidated()` emission point.
+
+Caveat: the overlap removal itself does not compare epochs; the stale-epoch
+guard is a separate check earlier in `put()`. On the leader-known path, a
+same-ID region whose `epochVersion` is lower — or equal with a lower
+`epochConfVer` — is ignored before any removal, so an incoming *older-epoch*
+region cannot evict a newer one (issue #249, REG-18, fixed). The leaderless
+early return (`leaderStoreId === 0`) is not covered by that guard: it removes
+the same-ID and overlapping entries before the epoch check runs, so a stale
+leaderless answer can still evict a fresher entry. The guard is same-ID only:
+a split or merge changes the region layout (a new ID, or the surviving ID
+with a newer epoch), and the new range must still supersede the cached entries
+it replaces.
+
+When a unit test inspects the cache's private maps (`entriesById`, `lruOrder`)
+by reflection, PHPStan level 9 needs `is_array`/`instanceof` asserts on the
+`getValue()` results — they are `mixed`.
 
 ## A PdClientInterface mock auto-returns [] from scanRegions — grouping comes back empty (loud since #187)
 
@@ -1450,18 +1467,6 @@ shifts the counts and must be added to the tree — issue #216 added
 `UndeterminedCommitException` and initially left the counts stale. This is the
 proactive corollary of the #394 lesson (counts derived from source, not issue
 text): when *writing* a subclass, update the enumeration in the same commit.
-
-## A rebase can leave stray conflict markers in docs — grep before finishing
-
-All three of fix/216, fix/237 and fix/238 carried a leftover
-`their rebase (and #238 also in `docs/helpers/faq.md`), silently committed
-by the follow-up fix. A squash/fixup during a rebase can resurrect markers
-from an earlier conflict that was "resolved" by keeping both sides. Before
-every push, grep the whole diff for conflict markers:
-`git diff master...HEAD | grep -n ">>>>>>>\|<<<<<<<"`. PHPCS/PHPStan do
-not catch these in Markdown files.
-
-
 
 ## gRPC status codes, not exception type, decide GrpcException retries — and detail text must not leak into classification
 

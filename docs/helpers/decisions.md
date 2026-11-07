@@ -1787,3 +1787,22 @@ runs after the string exists and cannot prevent that allocation. It remains
 only as a post-allocation defence-in-depth assertion (it can skip the second,
 larger allocation performed by protobuf decoding when set tighter than the
 transport limit).
+
+## Workflows pin actions by commit SHA (issue #316, SEC-13)
+
+Every `uses:` reference in `.github/workflows/` names a full 40-character commit SHA and a
+trailing version comment (`actions/checkout@3d3c… # v7.0.1`). A major tag such as `@v7` is a
+mutable ref: whoever controls the action repository can force-move it and execute unreviewed
+code on the runner. The comment is not decoration — Dependabot's `github-actions` ecosystem
+uses it to rewrite the SHA and the comment together when a release is published.
+
+The two `crazy-goat/.github` reusable workflows are pinned the same way, but that repository
+has no release tags, so their `# main` pins are bumped by hand when the shared workflow changes;
+Dependabot cannot refresh them. Do not "simplify" any of these back to `@vN` or `@main`.
+
+The workflow keeps `permissions: contents: read` at the top level. Add a job-level scope only
+when that job genuinely needs it (the release workflow needs `contents: write` to create a
+release; the reusable `changes` workflow classifies files with `git diff` and needs no API
+scope). `tests/Unit/Ci/WorkflowSupplyChainGuardTest.php` fails the Unit suite on an unpinned
+reference, a missing version comment, a missing top-level read-only block, or a Dependabot
+configuration without the `github-actions` ecosystem.
