@@ -25,13 +25,20 @@ use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryBudget;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
+use CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\NullLogger;
 
 /**
  * Issue #257 (REG-26): the retry deadline must bound the RPC deadline of
@@ -218,6 +225,32 @@ final class OuterRpcDeadlineClampTest extends TestCase
         );
     }
 
+    private function createCommitter(): TwoPhaseCommitter
+    {
+        $regionCache = new RegionCache();
+        $regionResolver = new RegionResolver($this->pdClient, $regionCache);
+        $lockResolver = new LockResolver(
+            $this->grpc,
+            $regionResolver,
+            $regionCache,
+            $this->pdClient,
+            1000,
+        );
+
+        return new TwoPhaseCommitter(
+            startTs: 1000,
+            pessimistic: false,
+            priority: 0,
+            pdClient: $this->pdClient,
+            grpc: $this->grpc,
+            regionCache: $regionCache,
+            regionResolver: $regionResolver,
+            lockResolver: $lockResolver,
+            timeoutConfig: new TimeoutConfig(),
+            maxBackoffMs: 20000,
+        );
+    }
+
     /**
      * @return list<array{method: string, timeoutMs: ?int}>
      */
@@ -284,6 +317,57 @@ final class OuterRpcDeadlineClampTest extends TestCase
         $this->assertWithinDeadline('KvTxnHeartBeat');
     }
 
+    /**
+     * A heartbeat fired inside an enclosing operation must keep that
+     * operation's budget instead of resetting it (issue #257 review).
+     *
+     * The executor carries a budget that already spent 750 of its 800 ms;
+     * starting a fresh budget would hand the heartbeat roughly the full
+     * 800 ms again, which is exactly what a prewrite-triggered heartbeat did
+     * before the fix.
+     */
+    public function testHeartbeatKeepsTheEnclosingOperationBudget(): void
+    {
+        $executor = new RetryExecutor(
+            maxBackoffMs: 20000,
+            serverBusyBudgetMs: 60000,
+            regionCache: new RegionCache(),
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, new RegionCache()),
+            logger: new NullLogger(),
+            deadlineMs: self::DEADLINE_MS,
+            budget: new RetryBudget(
+                startTimeMs: (int) (microtime(true) * 1000) - 750,
+                deadlineMs: self::DEADLINE_MS,
+            ),
+        );
+
+        $state = new TransactionState();
+        $state->setWrite('k1', 'v1');
+
+        $this->createCommitter()->heartbeat(
+            'k1',
+            $state,
+            $executor,
+            static fn (): RetryVerdict => RetryVerdict::pass(),
+        );
+
+        $calls = $this->callsTo('KvTxnHeartBeat');
+        self::assertCount(1, $calls);
+        foreach ($calls as $call) {
+            self::assertNotNull($call['timeoutMs']);
+            self::assertGreaterThan(0, $call['timeoutMs']);
+            // A fresh budget would be ~800 ms; the enclosing budget has
+            // ~50 ms left, so a generous 400 ms ceiling still separates the
+            // two while tolerating slow CI overhead.
+            self::assertLessThanOrEqual(
+                400,
+                $call['timeoutMs'],
+                'a fresh budget would give the heartbeat the full deadline again',
+            );
+        }
+    }
+
     public function testPessimisticLockRpcDeadlineIsCappedByTheRemainingRetryDeadline(): void
     {
         $this->createTransaction(pessimistic: true)->set('k1', 'v1');
@@ -336,6 +420,33 @@ final class OuterRpcDeadlineClampTest extends TestCase
         $regionResolver->batchResolveRegions(['k1'], 260);
 
         self::assertSame([250, 260], $this->pdTimeouts);
+    }
+
+    /**
+     * The predecessor lookup uses the same caller-supplied timeout as the
+     * containing-region lookup.
+     */
+    public function testRegionResolverPassesTheTimeoutToGetRegionBelow(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getRegion')->willReturnCallback(
+            function (string $key, ?int $timeoutMs = null): RegionInfo {
+                $this->pdTimeouts[] = $timeoutMs;
+
+                return new RegionInfo(1, 1, 1, 1, 1, startKey: 'k1');
+            },
+        );
+        $pdClient->method('getPrevRegion')->willReturnCallback(
+            function (string $key, ?int $timeoutMs = null): ?RegionInfo {
+                $this->pdTimeouts[] = $timeoutMs;
+
+                return null;
+            },
+        );
+
+        (new RegionResolver($pdClient, new RegionCache()))->getRegionBelow('k1', 250);
+
+        self::assertSame([250, 250], $this->pdTimeouts);
     }
 
     /**

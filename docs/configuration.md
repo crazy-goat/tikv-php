@@ -1521,8 +1521,8 @@ Four settings determine whether that can happen:
 | Setting | Effect |
 |---|---|
 | `optimisticLockTtlMs` / `pessimisticLockTtlMs` | The base lock lifetime. Optimistic locks use `min(optimisticLockTtlMs + 10 ms × mutations, 120000)`, where the mutation count is the **whole write set**, not one batch; pessimistic locks use `pessimisticLockTtlMs`. The value sent with the request is `min(uptime + base, 3600000)`, so a lock created at the start of prewrite expires roughly `base` milliseconds later (less only when the transaction has already run for more than `3600000 − base`). |
-| `writeTimeoutMs` (default `5000`) | The gRPC deadline of **each** `KvPrewrite` and `KvCommit` attempt. One attempt can occupy the wire for at most this long. With the defaults, an optimistic transaction with fewer than ~200 mutations has a base TTL below `writeTimeoutMs` (`3000 + 10 × mutations`), so a single slow prewrite can outlive it. |
-| Retry budget (`retryDeadlineMs`, default `30000`; `maxBackoffMs`, default `20000` sleep budget) | A region's prewrite may be attempted more than once. Each attempt gets its own `writeTimeoutMs`, and the retries share the `commit()` operation's wall-clock deadline, so one region can consume several timeout windows before it succeeds or fails. |
+| `writeTimeoutMs` (default `5000`) | The upper bound of the gRPC deadline of **each** `KvPrewrite` and `KvCommit` attempt. The deadline actually sent is `min(writeTimeoutMs, remaining retry deadline)`, so one attempt can occupy the wire for at most this long and never past the operation's deadline. With the defaults, an optimistic transaction with fewer than ~200 mutations has a base TTL below `writeTimeoutMs` (`3000 + 10 × mutations`), so a single slow prewrite can outlive it. |
+| Retry budget (`retryDeadlineMs`, default `30000`; `maxBackoffMs`, default `20000` sleep budget) | A region's prewrite may be attempted more than once. Each attempt gets up to `writeTimeoutMs`, capped by the remaining retry deadline, so one region can consume several timeout windows only until `retryDeadlineMs` is reached. |
 | `batchDeadlineMs` (default `60000`) | The wall-clock deadline of the parallel secondary-prewrite fan-out (and of the secondary commit fan-out). It can exceed the lock TTL and does not itself extend any lock. |
 
 Guidance:
@@ -1880,10 +1880,14 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > operation's **remaining** retry deadline. The resolver converts that
 > remaining budget into one absolute deadline at its entry, so the nested
 > RPCs share the same live budget and none is given a deadline beyond the
-> operation's `retryDeadlineMs`. The PD `GetRegion`/`ScanRegions` lookups
-> the resolution performs are capped by that budget too (issue #257), so a
-> cold region cache cannot make the resolution outlive the operation. A live
-> lock is still reported as a retryable
+> operation's `retryDeadlineMs`. Each PD `GetRegion`/`ScanRegions` lookup
+> the resolution performs is capped by the remaining budget at the time of
+> the attempt (issue #257), so a single lookup cannot outlive it. The cap is
+> recomputed from the same relative value for each `ScanRegions` page and
+> each PD failover endpoint, so a multi-page scan or a failover can consume
+> the remaining budget once per page/endpoint; the resolution as a whole is
+> bounded by the deadline plus one configured `pdTimeoutMs` per extra page
+> or endpoint. A live lock is still reported as a retryable
 > error (the executor owns the backoff) and the resolver never sleeps for the
 > lock TTL; the executor's own deadline check raises
 > `RetryBudgetExhaustedException` when the budget is spent. With

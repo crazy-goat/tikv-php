@@ -797,12 +797,17 @@ final readonly class TwoPhaseCommitter
         int $adviseLockTtlMs = 10000,
     ): int {
         $targetStoreId = null;
-        // One heartbeat is one logical operation: begin its own budget so the
-        // `KvTxnHeartBeat` deadline can be capped by the live remaining time
-        // (issue #257, REG-26). The caller's executor may be standalone, in
-        // which case currentBudget() would be null.
-        $retryExecutor = $retryExecutor->beginOperation();
+        // A heartbeat fired from the commit loop shares the commit
+        // operation's budget; a standalone caller (Transaction::heartbeat())
+        // has none, so start one for this heartbeat. Starting a new budget
+        // unconditionally would reset the enclosing operation's deadline and
+        // regress the issue #223 rule that one commit() is one budget
+        // (issue #257 review).
         $budget = $retryExecutor->currentBudget();
+        if (!$budget instanceof RetryBudget) {
+            $retryExecutor = $retryExecutor->beginOperation();
+            $budget = $retryExecutor->currentBudget();
+        }
 
         return $retryExecutor->execute(
             $primary,
