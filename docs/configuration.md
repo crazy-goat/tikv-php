@@ -878,8 +878,8 @@ $client = new RawKvClient(
 
 With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
 matching dependency in `close()`; the defaults are `false` for a
-hand-assembled `RawKvClient`. `TxnKvClient` takes the same `ownsGrpcClient`
-parameter.
+hand-assembled `RawKvClient`. `TxnKvClient` has the same `ownsGrpcClient`
+parameter but still defaults to `true`.
 
 ### Security: Fail-Closed TLS
 

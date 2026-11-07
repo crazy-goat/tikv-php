@@ -1310,8 +1310,11 @@ userland state, and a live channel is not serializable.
 `close()` releases the client's resources in guarded steps: `TxnKvClient`
 first rolls back the transactions it began that are still active
 (`RawKvClient` has no transactions), then the client clears the region cache,
-closes the gRPC transport if the client owns it, and closes the PD client
-(always — there is no ownership flag for it). Outside PHP's shutdown
+closes the gRPC transport if the client owns it, and closes the PD client if
+it owns it too. `RawKvClient::create()` owns the PD client and the transport
+it built; a hand-assembled `RawKvClient` leaves both supplied connections open
+(see [Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients)).
+`TxnKvClient` still closes its PD client unconditionally. Outside PHP's shutdown
 sequence, the transaction rollback runs while the region cache, transport
 and PD client are still usable, so an abandoned transaction does not leave
 its locks behind until the TTL expires. Once PHP is shutting down, the

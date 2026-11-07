@@ -362,6 +362,11 @@ final class RawKvClient
             storeCache: $bundle->storeCache,
             requestContext: self::resolveRequestContext($options),
             resourceControl: self::resolveResourceControl($options),
+            // ConnectionFactory always builds the PD client, even when the
+            // transport is injected through options['grpcClient'], so
+            // create() owns it on every path. If the factory ever accepts an
+            // injected PD client, this flag must follow the bundle the way
+            // ownsGrpcClient does (issue #204).
             ownsPdClient: true,
         );
     }
