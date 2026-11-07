@@ -225,6 +225,24 @@ the diff:
    unbounded path passes no limit to the merge: the cap bounds the TiKV read,
    and the transaction's own writes must stay visible (read-your-writes).
 
+## A PHP-level merge of scan rows is slower than the native `array_unique()` + `sort()` it replaces (issue #302)
+
+`TxnReader::finalizeScanResults()` merges the scanned rows with the
+transaction's in-range write-set keys. The obvious optimisation — sort only the
+write keys and merge the two sorted sequences in one linear pass — was
+implemented, measured and rejected: `array_unique()` and `sort()` are C, while
+the merge compares one row at a time in PHP and appends to a PHP array, so the
+"linear" version cost about 13 ms for 10,240 rows plus 100 write keys against
+about 7 ms for the code it replaced. The shipped version keeps the per-row work
+in C: it copies runs of scanned rows as `array_slice()`s and inserts each
+write key at its lower bound (binary search, so only
+`|writeSet| × log(rows)` comparisons run in PHP). Do not "simplify" this back
+into a row-by-row loop without re-running `benchmarks/TxnScanMergeBenchmark.php`.
+The invariant the merge relies on — TiKV returns scan rows in ascending byte
+order, pages continuing from the region boundary and regions clipped in
+ascending order — is why the scanned rows need no sort at all; a per-row
+fallback sort would silently reintroduce the cost.
+
 ## All key ordering goes through `Client\Util\KeyOrder`, enforced by a PHPStan rule (issue #186)
 
 TiKV orders keys by unsigned byte value, PHP 8 compares two numeric strings
@@ -382,6 +400,29 @@ signature are semver-visible. Moving the table into `ErrorClassifier` — it
 needs the *kind*, not the exception — stays compatible with the commitment,
 because what callers are promised is the routing/non-routing table, not the
 class it lives in.
+
+## Region errors are classified by their typed oneof, never by their message (issue #444)
+
+`ErrorClassifier` used to fall back to `str_contains()` for any exception
+without a typed `ErrorKind`, including a `RegionException`. That made the
+taxonomy depend on TiKV's wording, and a key or redacted text embedded in a
+message could become a classification signal. The region path is now closed: a
+`RegionException` carrying an `ErrorKind` is mapped by `classifyByKind()`, an
+`errorpb.Error` with no known kind gets a bounded `RegionMiss` retry, and a
+synthetic `RegionException` (a response-level error string or a top-level
+`KeyError` raised by `RegionErrorHandler`) stays fatal. The new
+`RegionException::$fromErrorpb` marks the first case; do not infer it from the
+message or the operation name.
+
+The message fallback itself is kept for non-region exceptions such as
+`PdException` (see the PD header decision above) — the issue asks to remove it
+from the region-error path, not from every error. The four client-go backoff
+types that had no PHP equivalent (`BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound`,
+`BoCommitTSLag`) are now `BackoffType::PDRpc` (500–3000 ms), `TxnLockFast`
+(10–3000 ms), and `TxnNotFound` / `CommitTSLag` (2–500 ms each), so a custom
+classifier can use the same curves. client-go applies `NoJitter` to
+`BoTxnNotFound` and `BoCommitTSLag`, while PHP currently applies equal jitter to
+every `BackoffType`.
 
 ## `notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)
 

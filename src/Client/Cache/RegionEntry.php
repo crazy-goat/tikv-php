@@ -32,11 +32,22 @@ final class RegionEntry
     public function switchLeader(int $leaderStoreId): bool
     {
         foreach ($this->region->peers as $peer) {
-            if ($peer->storeId === $leaderStoreId) {
-                $this->leaderStoreId = $peer->storeId;
-                $this->leaderPeerId = $peer->peerId;
-                return true;
+            if ($peer->storeId !== $leaderStoreId) {
+                continue;
             }
+
+            // A NotLeader hint may name a learner or a witness (issue #258,
+            // REG-27). Neither may lead: a learner does not vote and a
+            // witness cannot serve reads. Refuse the switch so the caller
+            // falls back to invalidating the region and re-resolving it
+            // through PD instead of routing to a peer that cannot lead.
+            if (!$peer->canBeLeader()) {
+                return false;
+            }
+
+            $this->leaderStoreId = $peer->storeId;
+            $this->leaderPeerId = $peer->peerId;
+            return true;
         }
 
         return false;

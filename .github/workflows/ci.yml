@@ -122,6 +122,12 @@ jobs:
     needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    env:
+      # Turn a missing extension into a clear failure instead of a skipped
+      # transport test (issue #284, GRPC-25). The suite already runs with
+      # --fail-on-skipped; this makes the gate name the cause when ext-grpc
+      # disappears from the setup step.
+      REQUIRE_GRPC_EXTENSION: '1'
     steps:
       - uses: actions/checkout@v7
 

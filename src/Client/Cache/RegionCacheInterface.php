@@ -132,7 +132,8 @@ interface RegionCacheInterface
      * Switch the leader of a cached region to the peer with the given store ID.
      *
      * Returns true if the peer was found and the leader was switched.
-     * Returns false if the region is not cached or the store ID is not among known peers.
+     * Returns false if the region is not cached, the store ID is not among
+     * known peers, or the peer may not lead (a learner or a witness).
      */
     public function switchLeader(int $regionId, int $leaderStoreId): bool;
 

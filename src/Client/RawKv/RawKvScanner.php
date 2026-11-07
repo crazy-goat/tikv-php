@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\RawKv;
 use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -763,9 +764,13 @@ final readonly class RawKvScanner
             if ($deadlineMs > 0) {
                 $elapsedMs = (int) (microtime(true) * 1000) - $startTimeMs;
                 if ($elapsedMs >= $deadlineMs) {
+                    $dispatched = array_slice($segments, 0, $offset, true);
+                    $pending = array_slice($segments, $offset, null, true);
                     throw new BatchDeadlineExceededException($deadlineMs, $elapsedMs, [
-                        'dispatchedRegions' => array_keys(array_slice($segments, 0, $offset, true)),
-                        'pendingRegions' => array_keys(array_slice($segments, $offset, null, true)),
+                        'dispatchedRegions' => array_keys($dispatched),
+                        'pendingRegions' => array_keys($pending),
+                        'dispatchedRegionIds' => $this->segmentRegionIds($dispatched),
+                        'pendingRegionIds' => $this->segmentRegionIds($pending),
                     ]);
                 }
                 $windowDeadlineMs = $deadlineMs - $elapsedMs;
@@ -777,7 +782,9 @@ final readonly class RawKvScanner
             /** @var array<int, string> $freshEnds */
             $freshEnds = [];
             $calls = [];
-            foreach ($window as $index => [, $scanStart, $scanEnd]) {
+            /** @var array<int, BatchCallId> $labels */
+            $labels = [];
+            foreach ($window as $index => [$region, $scanStart, $scanEnd]) {
                 $freshEnds[$index] = '';
                 $calls[$index] = function () use (
                     $executor,
@@ -801,6 +808,7 @@ final readonly class RawKvScanner
                         $freshEnds[$index],
                     );
                 };
+                $labels[$index] = new BatchCallId($region->regionId);
             }
 
             try {
@@ -808,17 +816,22 @@ final readonly class RawKvScanner
                     $calls,
                     $this->maxConcurrency,
                     $windowDeadlineMs,
+                    $labels,
                 );
             } catch (BatchDeadlineExceededException) {
                 // An exhausted deadline is not a reason to fall back: the
                 // sequential path has no deadline at all. Report the
                 // configured deadline and the segments without a result.
+                $dispatched = array_slice($segments, 0, $offset + count($window), true);
+                $pending = array_slice($segments, $offset, null, true);
                 throw new BatchDeadlineExceededException(
                     $deadlineMs,
                     (int) (microtime(true) * 1000) - $startTimeMs,
                     [
-                        'dispatchedRegions' => array_keys(array_slice($segments, 0, $offset + count($window), true)),
-                        'pendingRegions' => array_keys(array_slice($segments, $offset, null, true)),
+                        'dispatchedRegions' => array_keys($dispatched),
+                        'pendingRegions' => array_keys($pending),
+                        'dispatchedRegionIds' => $this->segmentRegionIds($dispatched),
+                        'pendingRegionIds' => $this->segmentRegionIds($pending),
                     ],
                 );
             } catch (TiKvException) {
@@ -940,6 +953,27 @@ final readonly class RawKvScanner
         }
 
         return $results;
+    }
+
+    /**
+     * Real TiKV region IDs covered by the given segment list, unique and
+     * ascending (issue #285, GRPC-26). Segments are one per region, so the
+     * IDs name the parts of the scan that were or were not dispatched.
+     *
+     * @param array<int, array{RegionInfo, string, string}> $segments
+     * @return list<int>
+     */
+    private function segmentRegionIds(array $segments): array
+    {
+        $regionIds = [];
+        foreach ($segments as [$region]) {
+            $regionIds[$region->regionId] = true;
+        }
+
+        $regionIds = array_keys($regionIds);
+        sort($regionIds);
+
+        return $regionIds;
     }
 
     /**

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Batch;
 
 use Closure;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -15,7 +16,7 @@ use Google\Protobuf\Internal\Message;
  * Lazy region-error-checking wrapper for the dispatch phase of a batch
  * operation.
  *
- * Three construction modes are supported:
+ * Four construction modes are supported:
  *
  *   1. {@see self::fromGrpcFuture()}: wrap an un-waited {@see GrpcFuture}.
  *      `waitForExecutor()` performs the underlying wait + a region-error
@@ -24,28 +25,37 @@ use Google\Protobuf\Internal\Message;
  *      makes true client-side fan-out possible: the per-region callables
  *      can issue every send before any wait begins.
  *
- *   2. {@see self::fromCallable()}: wrap a callable that already has run
+ *   2. {@see self::fromBatchGetFuture()}: wrap an un-waited {@see GrpcFuture}
+ *      for a `RawBatchGetResponse`. `waitForExecutor()` waits, checks the
+ *      region error and resolves to the collected `array<array-key, ?string>`
+ *      key => value map, so the per-pair error check and the value
+ *      collection share one traversal (#303).
+ *
+ *   3. {@see self::fromCallable()}: wrap a callable that already has run
  *      (or will run) arbitrary work and returns a resolved protobuf
  *      message. This is used by the multi-region split/merge path inside
  *      {@see \CrazyGoat\TiKV\Client\RawKv\RawKvBatch}, which issues sends
  *      for every sub-region up-front and then merges their responses
  *      during the wait phase.
  *
- *   3. {@see self::fromRetryableDispatch()}: combine both — issue the first
+ *   4. {@see self::fromRetryableDispatch()}: combine both — issue the first
  *      attempt eagerly during dispatch, then run the whole dispatch+wait
  *      cycle under a {@see RetryExecutor} during the wait phase so a region
  *      error carried on the response is retried per region (#183).
  *
- * The executor never sees the raw protobuf response without first
- * running {@see RegionErrorHandler::check()} on it.
+ * The executor never sees a raw protobuf response without first
+ * running {@see RegionErrorHandler::check()} on it (a batch get resolves to
+ * the already-checked, collected map instead).
  */
 final readonly class CheckedGrpcFuture
 {
     /**
      * @param callable(): mixed $waiter         Resolves the future to its
      *                                          result (a protobuf message,
-     *                                          or an aggregated value for
-     *                                          the batchScan fan-out)
+     *                                          an aggregated value for the
+     *                                          batchScan fan-out, or the
+     *                                          collected key => value map
+     *                                          for a batch get)
      * @param bool               $hasInnerFuture True if there is a single
      *                                          underlying {@see GrpcFuture}
      *                                          that exposes cancel/isCompleted
@@ -72,6 +82,35 @@ final readonly class CheckedGrpcFuture
                 $response = $future->wait();
                 RegionErrorHandler::check($response);
                 return $response;
+            },
+        );
+    }
+
+    /**
+     * Wrap an un-waited gRPC future for a RawBatchGet response.
+     *
+     * The waiter checks the response and collects its pairs into a
+     * key => value map in a single traversal (issue #303), so
+     * RawKvBatch::batchGet() does not have to walk the repeated field a
+     * second time. The region error is still checked first, inside the
+     * per-region retry wrapper, so the exception surface is unchanged: on
+     * the unary path a per-pair KeyError is still wrapped in
+     * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException} by
+     * BatchAsyncExecutor.
+     *
+     * The future resolves to `array<array-key, ?string>`, not to the raw
+     * message.
+     */
+    public static function fromBatchGetFuture(GrpcFuture $future): self
+    {
+        return new self(
+            inner: $future,
+            hasInnerFuture: true,
+            waiter: static function () use ($future): array {
+                $response = $future->wait();
+                assert($response instanceof RawBatchGetResponse);
+
+                return RegionErrorHandler::checkAndCollectBatchGet($response);
             },
         );
     }
