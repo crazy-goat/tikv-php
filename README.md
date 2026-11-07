@@ -748,7 +748,9 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 The `*BaseDir` options are optional and restrict **where** the certificate
 files may live: the path is canonicalized with `realpath()` before the
 comparison, so a `..` segment or a symlink cannot pull in a file from outside
-the base directory. `caCertBaseDir` guards `caCertFile`; `clientCertBaseDir`
+the base directory, and the comparison uses directory boundaries rather than a
+string prefix, so a sibling like `/etc/tikv-attacker` cannot pass a base of
+`/etc/tikv`. `caCertBaseDir` guards `caCertFile`; `clientCertBaseDir`
 guards `clientCertFile` and `clientKeyFile`.
 
 > **Deprecated:** the legacy `caCert`, `clientCert` and `clientKey` keys guess
