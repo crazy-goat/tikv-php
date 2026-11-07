@@ -337,7 +337,11 @@ Two additional APIs reduce PD traffic where that is safe and explicit:
 
 Additionally, the pessimistic-lock path in `TwoPhaseCommitter` acquires
 one `for_update_ts` per locking pass instead of one per region, cutting
-one PD round trip per additional region.
+one PD round trip per additional region. The same timestamp is reused by
+every retry of that pass: only a new statement allocates a new read
+timestamp, so a retried lock cannot silently advance past a concurrent
+commit and let a stale read-modify-write pass the prewrite constraint
+check.
 
 ### Store Address Validation
 
@@ -775,6 +779,12 @@ $options = [
     ],
 ];
 ```
+
+When both forms are given for the same credential, the explicit file path wins:
+`caCertFile` takes priority over `caCertPem`, and a complete
+`clientCertFile` + `clientKeyFile` pair takes priority over
+`clientCertPem` + `clientKeyPem`. Supplying both is redundant rather than an
+error, but the file is the one that is read.
 
 ### Deprecated TLS Option Keys
 
@@ -1902,16 +1912,43 @@ cluster-wide `gc_life_time`.
 
 ### Retry Behavior
 
-The client retries on these errors:
+`ErrorClassifier` maps each retryable error to a real `BackoffType` case
+(`src/Client/Retry/BackoffType.php`). The case name is what the retry log
+records under `backoffType` and what `MetricsInterface::retryAttempted()`
+receives, so a metrics adapter can label retries by backoff type (the
+Prometheus example in [Metrics Collection](advanced.md#metrics-collection) uses
+`retries_total{backoff_type}`).
 
-| Error Type | Backoff Strategy | Description |
-|------------|------------------|-------------|
-| `EpochNotMatch` | Jittered (2–500 ms) | Region epoch mismatch, small backoff (like client-go's `BoEpochNotMatch`) |
-| `NotLeader` | Fast | Leader changed, quick retry |
-| `ServerIsBusy` | Progressive | Server overloaded, increasing delays |
-| `RegionNotFound` | Medium | Region not found, moderate delay |
-| `StaleCommand` | Fast | Stale command, quick retry |
-| gRPC errors | Progressive | Network issues, increasing delays |
+For attempt *n*, `BackoffType::sleepMs()` computes
+`min(cap, base × 2^n)` and then applies **equal jitter**: the actual sleep is
+uniformly random in `[delay/2, delay]` (issue #242). Every case is jittered;
+`None` is the only case without a sleep. The ranges below are the exponential
+envelope before jitter, in milliseconds.
+
+| `BackoffType` | Base → cap (ms) | Jitter | Retried error / condition |
+|---------------|-----------------|--------|---------------------------|
+| `None` | 0 (no sleep) | none (no sleep) | `DataIsNotReady` — replica lag on a follower or stale read |
+| `EpochNotMatch` | 2 → 500 | equal | `EpochNotMatch` — stale region epoch |
+| `ServerBusy` | 2000 → 10000 | equal | `ServerIsBusy`; gRPC `RESOURCE_EXHAUSTED`. Charged to the separate 60 s ServerBusy budget |
+| `StaleCmd` | 2 → 1000 | equal | `StaleCommand` |
+| `RegionMiss` | 2 → 500 | equal | `RegionNotFound`, `StoreNotMatch`, `MismatchPeerId`, `BucketVersionNotMatch`, `UndeterminedResult` |
+| `TiKvRpc` | 100 → 2000 | equal | gRPC `UNAVAILABLE`, `ABORTED`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`; a store in health cooldown (`StoreUnavailableException`) |
+| `NotLeader` | 2 → 500 | equal | `NotLeader` — leader transfer |
+| `DiskFull` | 500 → 5000 | equal | `DiskFull` |
+| `RegionNotInitialized` | 2 → 1000 | equal | `RegionNotInitialized` |
+| `ReadIndexNotReady` | 2 → 500 | equal | `ReadIndexNotReady` |
+| `ProposalInMergingMode` | 2 → 500 | equal | `ProposalInMergingMode` |
+| `RecoveryInProgress` | 100 → 10000 | equal | `RecoveryInProgress` |
+| `IsWitness` | 1000 → 10000 | equal | `IsWitness` |
+| `MaxTimestampNotSynced` | 2 → 500 | equal | `MaxTimestampNotSynced` |
+| `TxnLock` | 200 → 3000 | equal | A `KeyError.locked` conflict (or `TxnLockNotFound`) during a TxnKV prewrite, rollback or read; chosen by the lock-resolution paths, not by `ErrorClassifier` |
+
+The mapping lives in `ErrorClassifier::classifyByKind()` (the typed `ErrorKind`
+carried by `RegionException`), `ErrorClassifier::classifyGrpcStatus()` (gRPC
+status codes) and the message-text fallback in
+`ErrorClassifier::classifyToBackoffType()` for exceptions without a typed kind.
+See [Retry Strategies](advanced.md#retry-strategies) for the retry budgets and
+why an application-level retry loop on top of the client is counterproductive.
 
 ### Non-Retryable Errors
 
@@ -1920,6 +1957,11 @@ These errors are not retried:
 - `KeyNotInRegion` - Key outside region range
 - `RaftEntryTooLarge` - Value too large
 - `FlashbackInProgress` - Region in flashback mode
+- `FlashbackNotPrepared` - Region not prepared for flashback
+- Any other gRPC status code: `CANCELLED`, `INVALID_ARGUMENT`, `NOT_FOUND`,
+  `PERMISSION_DENIED`, `UNAUTHENTICATED`, `UNIMPLEMENTED`,
+  `FAILED_PRECONDITION`, `ALREADY_EXISTS`, `OUT_OF_RANGE`, `DATA_LOSS`, and
+  any unrecognised code (fail closed)
 
 ### Retry Bounds
 
