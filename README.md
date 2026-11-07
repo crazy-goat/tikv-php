@@ -1,6 +1,6 @@
 # TiKV PHP Client
 
-[![Tests](https://github.com/crazy-goat/tikv-php/actions/workflows/tests.yml/badge.svg)](https://github.com/crazy-goat/tikv-php/actions/workflows/tests.yml)
+[![CI](https://github.com/crazy-goat/tikv-php/actions/workflows/ci.yml/badge.svg)](https://github.com/crazy-goat/tikv-php/actions/workflows/ci.yml)
 
 PHP client for TiKV's RawKV and TxnKV APIs, using the gRPC extension.
 
