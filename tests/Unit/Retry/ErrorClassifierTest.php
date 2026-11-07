@@ -135,6 +135,78 @@ class ErrorClassifierTest extends TestCase
     }
 
     // ========================================================================
+    // ErrorKind <-> errorpb.Error oneof correspondence (issue #608)
+    // ========================================================================
+
+    /**
+     * Every ErrorKind case names a oneof field of errorpb.Error, so it must
+     * have a matching `has{PascalCase}()` detector. RegionException::
+     * detectErrorKind() builds that method name from the case value and calls
+     * it blindly, so a case without a oneof turns every
+     * RegionException::fromRegionError() into a raw `\Error` ("Call to
+     * undefined method") that escapes `catch (TiKvException)` — in a test run
+     * that surfaces as unrelated failures scattered across suites.
+     *
+     * @return array<string, array{ErrorKind}>
+     */
+    public static function provideErrorKindCases(): array
+    {
+        $cases = [];
+        foreach (ErrorKind::cases() as $kind) {
+            $cases[$kind->name] = [$kind];
+        }
+
+        return $cases;
+    }
+
+    #[DataProvider('provideErrorKindCases')]
+    public function testEveryErrorKindHasAnErrorpbOneofDetector(ErrorKind $kind): void
+    {
+        // Same derivation as RegionException::detectErrorKind().
+        $method = 'has' . str_replace('_', '', ucwords($kind->value, '_'));
+
+        $this->assertTrue(
+            method_exists(Error::class, $method),
+            sprintf(
+                'ErrorKind::%s (%s) has no matching %s::%s() oneof detector; '
+                . 'add the field to errorpb.Error or drop the case',
+                $kind->name,
+                $kind->value,
+                Error::class,
+                $method,
+            ),
+        );
+    }
+
+    /**
+     * The classification table is an array literal, so a new ErrorKind case
+     * would leave it green and untested. PHPStan's match.unhandled already
+     * rejects a missing errorClassForKind() arm, but it never sees this
+     * provider; the guard makes the classifyByKind() decision mandatory at
+     * runtime too (issue #608).
+     */
+    public function testErrorKindMappingCoversEveryCase(): void
+    {
+        $covered = array_map(
+            static fn (array $row): string => $row[0]->name,
+            self::provideErrorKindMapping(),
+        );
+        sort($covered);
+
+        $cases = array_map(
+            static fn (ErrorKind $kind): string => $kind->name,
+            ErrorKind::cases(),
+        );
+        sort($cases);
+
+        $this->assertSame(
+            $cases,
+            $covered,
+            'every ErrorKind case needs a classifyByKind() expectation (issue #608)',
+        );
+    }
+
+    // ========================================================================
     // Fallback: message-text matching for exceptions without typed kind
     // ========================================================================
 

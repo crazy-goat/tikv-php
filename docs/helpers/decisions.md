@@ -352,9 +352,13 @@ every case, so a case with no matching `errorpb.Error` oneof turns *every*
 `Error: Call to undefined method …`. That is not silent, but the blast radius
 is wrong for the mistake — the same sentinel measured 8 errors + 3 failures
 across 11 tests in `LockResolverTest`, `RawKvScannerTest`, `TxnReaderTest` and
-`TransactionTest`, and not one of those names the enum. A one-line test
-asserting `method_exists(Error::class, 'has' . PascalCase($kind->value))` for
-every case would turn that scatter into a legible failure.
+`TransactionTest`, and not one of those names the enum. `ErrorClassifierTest::
+testEveryErrorKindHasAnErrorpbOneofDetector()` now asserts
+`method_exists(Error::class, 'has' . PascalCase($kind->value))` for every
+`ErrorKind::cases()` entry, so that scatter is one failure naming the enum case
+and the missing `Error::has…()` method instead (issue #608).
+`testErrorKindMappingCoversEveryCase()` applies the same rule to the
+classification table, which PHPStan cannot see because it is an array literal.
 
 The retryable path now uses the same table (issue #245, REG-14):
 `RetryExecutor` gates its pre-retry drop on `invalidatesRoutingOnRetry()`, which
