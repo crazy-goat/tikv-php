@@ -1967,7 +1967,7 @@ envelope before jitter, in milliseconds.
 | `EpochNotMatch` | 2 → 500 | equal | `EpochNotMatch` — stale region epoch |
 | `ServerBusy` | 2000 → 10000 | equal | `ServerIsBusy`; gRPC `RESOURCE_EXHAUSTED`. Charged to the separate 60 s ServerBusy budget |
 | `StaleCmd` | 2 → 1000 | equal | `StaleCommand` |
-| `RegionMiss` | 2 → 500 | equal | `RegionNotFound`, `StoreNotMatch`, `MismatchPeerId`, `BucketVersionNotMatch`, `UndeterminedResult` |
+| `RegionMiss` | 2 → 500 | equal | `RegionNotFound`, `StoreNotMatch`, `MismatchPeerId`, `BucketVersionNotMatch`, `UndeterminedResult`, an `errorpb.Error` variant the client does not know yet (bounded retry) |
 | `TiKvRpc` | 100 → 2000 | equal | gRPC `UNAVAILABLE`, `ABORTED`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`; a store in health cooldown (`StoreUnavailableException`) |
 | `NotLeader` | 2 → 500 | equal | `NotLeader` — leader transfer |
 | `DiskFull` | 500 → 5000 | equal | `DiskFull` |
@@ -1982,9 +1982,12 @@ envelope before jitter, in milliseconds.
 The mapping lives in `ErrorClassifier::classifyByKind()` (the typed `ErrorKind`
 carried by `RegionException`), `ErrorClassifier::classifyGrpcStatus()` (gRPC
 status codes) and the message-text fallback in
-`ErrorClassifier::classifyToBackoffType()` for exceptions without a typed kind.
+`ErrorClassifier::classifyToBackoffType()` for non-region exceptions without a
+typed kind.
 See [Retry Strategies](advanced.md#retry-strategies) for the retry budgets and
 why an application-level retry loop on top of the client is counterproductive.
+
+Region errors are classified from the typed `errorpb.Error` oneof only. Message text is never inspected on that path: a TiKV wording change, or a key embedded in the message, cannot reclassify an error. A synthetic `RegionException` that wraps a response-level error string or a top-level `KeyError` is not a region error and stays fatal.
 
 ### Non-Retryable Errors
 
@@ -2083,6 +2086,11 @@ subclassing — there is no `classifyError()` hook on the client and no
   path, including region invalidation and the broken-channel cleanup;
 - `RetryVerdict::pass()` falls through to the built-in classification, which
   itself always answers Retry or Fatal and never Pass.
+
+The backoff taxonomy mirrors client-go's set: besides the region-error curves,
+`BackoffType` exposes `PDRpc` (500–3000 ms), `TxnLockFast` (10–3000 ms), and
+`TxnNotFound` and `CommitTSLag` (2–500 ms each), the equivalents of client-go's
+`BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound` and `BoCommitTSLag`.
 
 Note that a `NotLeader` error is classified before your classifier is
 consulted.

@@ -639,8 +639,15 @@ enum BackoffType
     case IsWitness;               // 1000ms–10000ms
     case MaxTimestampNotSynced;   // 2ms–500ms
     case TxnLock;                 // 200ms–3000ms (transactional)
+    case TxnLockFast;             // 10ms–3000ms (client-go BoTxnLockFast, DefBackoffLockFast base)
+    case TxnNotFound;             // 2ms–500ms (client-go BoTxnNotFound)
+    case CommitTSLag;             // 2ms–500ms (client-go BoCommitTSLag)
+    case PDRpc;                   // 500ms–3000ms (client-go BoPDRPC)
 }
 ```
+
+PHP currently applies equal jitter to every case; client-go uses `NoJitter` for
+`BoTxnNotFound` and `BoCommitTSLag`.
 
 **Retry Budgets**:
 - **Scope**: one budget per logical operation (issue #223). `RetryExecutor::beginOperation()` returns an executor whose `execute()` calls share the same `maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline, and every client fan-out entry point (`scan()`/`reverseScan()`/`batchScan()`, the batch methods, transactional reads, `commit()`, `rollback()`, `deleteRange()`, `checksum()`) uses one for all its regions and pages. A later operation starts from zero, so a read-heavy transaction cannot starve its commit. The attempt cap stays per `execute()` call (one retry loop), so a wide fan-out does not exhaust it on one retry per region.

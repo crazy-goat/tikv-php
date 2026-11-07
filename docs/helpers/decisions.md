@@ -399,6 +399,29 @@ needs the *kind*, not the exception — stays compatible with the commitment,
 because what callers are promised is the routing/non-routing table, not the
 class it lives in.
 
+## Region errors are classified by their typed oneof, never by their message (issue #444)
+
+`ErrorClassifier` used to fall back to `str_contains()` for any exception
+without a typed `ErrorKind`, including a `RegionException`. That made the
+taxonomy depend on TiKV's wording, and a key or redacted text embedded in a
+message could become a classification signal. The region path is now closed: a
+`RegionException` carrying an `ErrorKind` is mapped by `classifyByKind()`, an
+`errorpb.Error` with no known kind gets a bounded `RegionMiss` retry, and a
+synthetic `RegionException` (a response-level error string or a top-level
+`KeyError` raised by `RegionErrorHandler`) stays fatal. The new
+`RegionException::$fromErrorpb` marks the first case; do not infer it from the
+message or the operation name.
+
+The message fallback itself is kept for non-region exceptions such as
+`PdException` (see the PD header decision above) — the issue asks to remove it
+from the region-error path, not from every error. The four client-go backoff
+types that had no PHP equivalent (`BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound`,
+`BoCommitTSLag`) are now `BackoffType::PDRpc` (500–3000 ms), `TxnLockFast`
+(10–3000 ms), and `TxnNotFound` / `CommitTSLag` (2–500 ms each), so a custom
+classifier can use the same curves. client-go applies `NoJitter` to
+`BoTxnNotFound` and `BoCommitTSLag`, while PHP currently applies equal jitter to
+every `BackoffType`.
+
 ## `notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)
 
 `LockResolver` is reached from two kinds of call site: executor-owned ones

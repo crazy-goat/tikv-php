@@ -838,9 +838,10 @@ today are safe for two *different* reasons, worth knowing instead of
 re-deriving: `CheckedGrpcFutureRetryableDispatchTest`'s NotLeader-with-hint
 case never reaches the fatal block because `handleNotLeader()` claims it
 first (it returns `BackoffType::NotLeader` ahead of the classifier chain — the
-predicate would in fact answer `true` for it), and its kind-less
-`RaftEntryTooLarge` `RegionException` is built without a typed kind, so
-`errorKind === null` and the predicate rejects it before touching the cache.
+predicate would in fact answer `true` for it), and its `RaftEntryTooLarge`
+`RegionException` carries a typed non-routing kind, so the predicate rejects it
+before touching the cache. The kind-less synthetic case is covered separately
+by `testBareBatchErrorStringRegionExceptionIsFatal`.
 
 ## Error-handling docs must be derived from source, not from the issue text
 
