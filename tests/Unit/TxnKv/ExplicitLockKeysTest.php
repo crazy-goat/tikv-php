@@ -32,6 +32,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
@@ -115,6 +116,8 @@ class ExplicitLockKeysTest extends TestCase
      *     lockWaitTimeMs?: int,
      *     maxBackoffMs?: int,
      *     eagerPessimisticLocks?: bool,
+     *     trackReadSet?: bool,
+     *     maxReadSetEntries?: int,
      * } $options
      */
     private function createTransaction(array $options = []): Transaction
@@ -132,6 +135,8 @@ class ExplicitLockKeysTest extends TestCase
             maxBackoffMs: $options['maxBackoffMs'] ?? 20000,
             eagerPessimisticLocks: $options['eagerPessimisticLocks'] ?? true,
             lockWaitTimeMs: $options['lockWaitTimeMs'] ?? Transaction::DEFAULT_LOCK_WAIT_TIME_MS,
+            maxReadSetEntries: $options['maxReadSetEntries'] ?? 0,
+            trackReadSet: $options['trackReadSet'] ?? false,
         );
     }
 
@@ -343,6 +348,71 @@ class ExplicitLockKeysTest extends TestCase
         $this->assertSame(['key'], $this->lockedKeys($request));
         $this->assertSame('key', $request->getPrimaryLock());
         $this->assertTrue($request->getReturnValues());
+    }
+
+    public function testGetForUpdatePopulatesTheTrackedReadSet(): void
+    {
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setValues(['current-value']);
+        $lockResponse->setNotFounds([false]);
+        $this->stubLockResponse($lockResponse);
+
+        $txn = $this->createTransaction(['trackReadSet' => true]);
+
+        $this->assertSame('current-value', $txn->getForUpdate('key'));
+        $this->assertSame(['key' => 'current-value'], $txn->getReadSet());
+        $this->assertSame(1, $txn->getReadSetCount());
+    }
+
+    public function testGetForUpdateRecordsAMissingKeyInTheTrackedReadSet(): void
+    {
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setValues(['']);
+        $lockResponse->setNotFounds([true]);
+        $this->stubLockResponse($lockResponse);
+
+        $txn = $this->createTransaction(['trackReadSet' => true]);
+
+        $this->assertNull($txn->getForUpdate('missing'));
+        $this->assertSame(['missing' => null], $txn->getReadSet());
+    }
+
+    public function testGetForUpdateRespectsTheReadSetLimit(): void
+    {
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setValues(['value']);
+        $lockResponse->setNotFounds([false]);
+        $this->stubLockResponse($lockResponse);
+
+        $txn = $this->createTransaction(['trackReadSet' => true, 'maxReadSetEntries' => 1]);
+        $txn->getForUpdate('a');
+
+        $this->expectException(TransactionTooLargeException::class);
+
+        $txn->getForUpdate('b');
+    }
+
+    public function testEagerWriteDoesNotRequestLockReturnValues(): void
+    {
+        $this->stubLockResponse(new PessimisticLockResponse());
+
+        $txn = $this->createTransaction();
+        $txn->set('key', 'value');
+
+        $this->assertCount(1, $this->lockRequests);
+        $this->assertFalse($this->lockRequests[0]->getReturnValues());
+    }
+
+    public function testDeferredPessimisticLocksDoNotRequestReturnValues(): void
+    {
+        $this->stubLockResponse(new PessimisticLockResponse());
+
+        $txn = $this->createTransaction(['eagerPessimisticLocks' => false]);
+        $txn->set('key', 'value');
+        $txn->commit();
+
+        $this->assertNotEmpty($this->lockRequests);
+        $this->assertFalse($this->lockRequests[0]->getReturnValues());
     }
 
     public function testGetForUpdateReturnsNullForAMissingKey(): void
