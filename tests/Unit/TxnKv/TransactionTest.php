@@ -3432,6 +3432,48 @@ class TransactionTest extends TestCase
         $this->assertSame(['KvGet'], $methods);
     }
 
+    public function testGetRejectsUnhandledResponseKeyError(): void
+    {
+        // TXN-16: a KeyError variant the read path does not handle must fail
+        // the read instead of falling through to the value extraction and
+        // returning '' (which would also be cached as the key's value).
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $keyError = new KeyError();
+        $keyError->setTxnNotFound(new TxnNotFound());
+        $response->setError($keyError);
+
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false, 'trackReadSet' => true]);
+
+        try {
+            $txn->get('key');
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame('Get failed: TxnNotFound', $e->getMessage());
+        }
+
+        $this->assertSame(['KvGet'], $methods, 'an unhandled KeyError must not be retried');
+        $this->assertSame([], $txn->getReadSet(), 'a failed read must not be cached');
+    }
+
     // ========================================================================
     // commit()
     // ========================================================================
