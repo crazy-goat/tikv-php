@@ -1551,6 +1551,10 @@ final class RawKvClient
      * regions is split across their requests and trimmed back to
      * `$eachLimit` rows. Overlapping ranges, a region error, a transport
      * failure or a missing store fall back to the per-range `RawScan` path.
+     * The batch deadline covers region enumeration as well as the store
+     * fan-out, and the fallback only gets the remaining budget. A PD failure
+     * during region enumeration is reported as a
+     * `BatchPartialFailureException`, like the pre-#433 per-range path.
      * See {@see RawKvScanner::batchScan()} for the full cost model.
      *
      * Returns one entry per range, each a list of

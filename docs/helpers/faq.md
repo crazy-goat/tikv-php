@@ -2074,6 +2074,18 @@ to `eachLimit` rows from each; the client trims the merged ascending rows to
 key on a non-final range as "up to the next range's start". The client
 therefore sorts each region's entries by start key.
 
+The fallback starts its own retry budget and receives only the part of
+`options['timeout']['batchDeadlineMs']` that the region path did not consume.
+The deadline covers region enumeration too (it is checked before every
+range's `resolveScanRegions()`), so a cold cache cannot spend an unbounded
+number of PD round trips outside the budget. A PD failure during enumeration
+is wrapped in `BatchPartialFailureException` — before #433 the enumeration ran
+inside the per-range callables and the batch executor produced that type — so
+the documented exception surface does not widen. The fallback is a deliberate
+deviation from a strict regroup-and-retry: it re-reads every range instead of
+regrouping only the failed regions, which is safe because reads are
+idempotent.
+
 ## TxnKV region lookups must be MCE-encoded (GAP-01)
 
 Validated empirically against TiKV v8.5.5 / PD v8.5.5 (V1 txn cluster) while

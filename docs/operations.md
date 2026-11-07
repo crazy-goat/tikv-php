@@ -659,8 +659,16 @@ contributes an empty inner list.
 > call with overlapping ranges keeps the per-range `RawScan` path, and a
 > region error, transport failure or missing store falls back to it for the
 > whole call (reads are idempotent, and that path re-resolves and retries
-> each range). A `BatchDeadlineExceededException` is never a reason to fall
-> back: it is rethrown with the configured deadline.
+> each range with a fresh retry budget). This is a deliberate deviation from
+> a strict regroup-and-retry: the successful region responses are discarded
+> and re-read. A PD failure during region enumeration is reported as a
+> `BatchPartialFailureException`, matching the pre-#433 surface.
+>
+> **Batch deadline.** `options['timeout']['batchDeadlineMs']` is one
+> wall-clock budget for the whole call: it covers region enumeration as well
+> as the store fan-out, and the fallback only gets the remaining budget
+> rather than starting a second full one. An exhausted budget is rethrown as
+> `BatchDeadlineExceededException` instead of being retried.
 
 **Example:**
 

@@ -417,7 +417,7 @@ printf(
     EACH_LIMIT,
     RPC_LATENCY_MS,
 );
-printf("  per-range loop:  %3d RawScan RPCs,     median %8.2f ms\n", $perRangeCalls, $perRangeMedian);
-printf("  RawBatchScan:    %3d RawBatchScan RPCs, median %8.2f ms\n", $batchScanCalls, $batchScanMedian);
+printf("  per-range loop (sequential): %3d RawScan RPCs,     median %8.2f ms\n", $perRangeCalls, $perRangeMedian);
+printf("  RawBatchScan:                %3d RawBatchScan RPCs, median %8.2f ms\n", $batchScanCalls, $batchScanMedian);
 printf("  RPC reduction:   %.1fx\n", $perRangeCalls / max(1, $batchScanCalls));
 printf("  latency speedup: %.1fx\n", $perRangeMedian / max(0.001, $batchScanMedian));

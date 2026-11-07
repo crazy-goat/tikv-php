@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
+use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
@@ -1002,9 +1003,18 @@ final readonly class RawKvScanner
      * region error, a transport failure or a missing store makes the
      * un-retried region fan-out untrustworthy: reads are idempotent, so the
      * whole call is re-run through the per-range path, which re-resolves and
-     * retries each range (issue #267 semantics). A
-     * {@see BatchDeadlineExceededException} is never a reason to fall back
-     * (the per-range path has no batch deadline) and is rethrown.
+     * retries each range with a fresh retry budget (issue #267 semantics).
+     * This is a deliberate deviation from a strict regroup-and-retry: the
+     * successful region responses are discarded and re-read.
+     *
+     * The batch deadline ({@see TimeoutConfig::$batchDeadlineMs}) covers
+     * region enumeration as well as the store fan-out. The fallback shares
+     * the remaining budget rather than starting a second full one, and an
+     * exhausted budget is rethrown as
+     * {@see BatchDeadlineExceededException}. A PD failure during region
+     * enumeration is wrapped in
+     * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException},
+     * matching the pre-#433 surface.
      *
      * `eachLimit` is required and must be in `1..MAX_SCAN_LIMIT`. Unlike
      * {@see self::scan()}, `0` is rejected instead of meaning "the whole
@@ -1064,33 +1074,68 @@ final readonly class RawKvScanner
             $normalized[$index] = [$startKey, $endKey];
         }
 
-        // One batchScan() call is one logical operation: every range and
-        // region shares one retry budget (issue #223).
-        $executor = $this->createRetryExecutor()->beginOperation();
+        // The batch deadline is one wall-clock budget for the whole call: it
+        // covers region enumeration as well as the store fan-out, and the
+        // fallback only gets what is left (issue #433 review).
+        $batchDeadlineMs = $this->timeoutConfig->batchDeadlineMs;
+        $startedAtMs = $batchDeadlineMs > 0 ? (int) (microtime(true) * 1000) : 0;
 
         // A flat RawBatchScan response carries no per-range boundaries, so
         // the grouping can only be restored when the ranges are disjoint.
         if (!$this->rangesAreDisjoint($normalized)) {
-            return $this->batchScanPerRange($normalized, $eachLimit, $keyOnly, $columnFamily, $executor);
+            return $this->batchScanPerRange(
+                $normalized,
+                $eachLimit,
+                $keyOnly,
+                $columnFamily,
+                $this->remainingBatchDeadlineMs($startedAtMs, $batchDeadlineMs),
+            );
         }
 
-        $groups = $this->groupBatchScanRangesByRegion($normalized);
+        try {
+            $groups = $this->groupBatchScanRangesByRegion($normalized, $startedAtMs, $batchDeadlineMs);
+        } catch (BatchDeadlineExceededException $e) {
+            throw $e;
+        } catch (TiKvException $e) {
+            // Region enumeration used to run inside the per-range callables,
+            // where BatchAsyncExecutor wrapped a PD failure in
+            // BatchPartialFailureException. Keep that documented surface
+            // instead of leaking the base exception (issue #433 review).
+            throw new BatchPartialFailureException([0 => $e], count($normalized));
+        }
+
         if ($groups === []) {
             return $this->emptyBatchScanResult($normalized);
         }
 
         try {
-            return $this->batchScanByRegion($groups, $normalized, $eachLimit, $keyOnly, $columnFamily);
-        } catch (BatchDeadlineExceededException $e) {
-            // The per-range path has no batch deadline: falling back would
-            // silently lift the caller's wall-clock bound.
-            throw $e;
-        } catch (TiKvException) {
-            // Region errors, transport failures and missing stores make the
-            // un-retried region fan-out untrustworthy. Reads are idempotent,
-            // so re-run the whole call through the per-range path, which
-            // re-resolves the regions and retries each range.
-            return $this->batchScanPerRange($normalized, $eachLimit, $keyOnly, $columnFamily, $executor);
+            return $this->batchScanByRegion(
+                $groups,
+                $normalized,
+                $eachLimit,
+                $keyOnly,
+                $columnFamily,
+                $this->remainingBatchDeadlineMs($startedAtMs, $batchDeadlineMs),
+            );
+        } catch (BatchPartialFailureException) {
+            // BatchDeadlineExceededException is deliberately not caught here:
+            // the remaining budget is exhausted, so a fallback would throw
+            // immediately; it propagates instead of starting a second budget.
+            //
+            // Deliberate deviation from a strict regroup-and-retry: instead
+            // of regrouping only the failed regions and re-dispatching
+            // RawBatchScan, re-run the whole call through the per-range
+            // path. It re-resolves and retries every range with a fresh
+            // retry budget and the remaining batch deadline. Reads are
+            // idempotent, so discarding the successful region responses is
+            // safe.
+            return $this->batchScanPerRange(
+                $normalized,
+                $eachLimit,
+                $keyOnly,
+                $columnFamily,
+                $this->remainingBatchDeadlineMs($startedAtMs, $batchDeadlineMs),
+            );
         }
     }
 
@@ -1147,13 +1192,17 @@ final readonly class RawKvScanner
      * clipped range with an empty end key (+infinity) last: TiKV reads an
      * empty end key on a non-final range as "up to the next range's start".
      *
+     * The batch deadline is checked before every range's region enumeration,
+     * so a cold cache cannot spend an unbounded number of PD round trips
+     * before the store fan-out starts.
+     *
      * @param array<array-key, array{0: string, 1: string}> $ranges
      * @return array<int, array{
      *     region: RegionInfo,
      *     ranges: list<array{index: int|string, start: string, end: string}>
      * }>
      */
-    private function groupBatchScanRangesByRegion(array $ranges): array
+    private function groupBatchScanRangesByRegion(array $ranges, int $startedAtMs, int $batchDeadlineMs): array
     {
         $clipper = new RegionRangeClipper();
         /** @var array<int, array{
@@ -1164,6 +1213,7 @@ final readonly class RawKvScanner
         $groups = [];
 
         foreach ($ranges as $index => [$startKey, $endKey]) {
+            $this->assertBatchDeadlineNotExceeded($startedAtMs, $batchDeadlineMs);
             $regions = $this->resolveScanRegions($startKey, $endKey, RegionScanBatch::MAX_REGIONS);
             foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
                 $regionId = $region->regionId;
@@ -1203,6 +1253,9 @@ final readonly class RawKvScanner
      * }> $groups
      * @param array<array-key, array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
+     *
+     * @throws BatchPartialFailureException When a region send fails
+     * @throws BatchDeadlineExceededException When the batch deadline expires
      */
     private function batchScanByRegion(
         array $groups,
@@ -1210,6 +1263,7 @@ final readonly class RawKvScanner
         int $eachLimit,
         bool $keyOnly,
         string $columnFamily,
+        int $batchDeadlineMs,
     ): array {
         $regionIds = array_keys($groups);
         usort(
@@ -1242,7 +1296,7 @@ final readonly class RawKvScanner
         $responses = $this->createBatchExecutor()->executeParallelCapped(
             $calls,
             $this->maxConcurrency,
-            $this->timeoutConfig->batchDeadlineMs,
+            $batchDeadlineMs,
             $labels,
         );
 
@@ -1398,6 +1452,52 @@ final readonly class RawKvScanner
     }
 
     /**
+     * Milliseconds elapsed since a batch-deadline start stamp.
+     */
+    private function elapsedMs(int $startedAtMs): int
+    {
+        return (int) (microtime(true) * 1000) - $startedAtMs;
+    }
+
+    /**
+     * Throw when the batch deadline is enabled and already exhausted.
+     *
+     * @throws BatchDeadlineExceededException
+     */
+    private function assertBatchDeadlineNotExceeded(int $startedAtMs, int $batchDeadlineMs): void
+    {
+        if ($batchDeadlineMs <= 0) {
+            return;
+        }
+
+        $elapsedMs = $this->elapsedMs($startedAtMs);
+        if ($elapsedMs >= $batchDeadlineMs) {
+            throw new BatchDeadlineExceededException($batchDeadlineMs, $elapsedMs);
+        }
+    }
+
+    /**
+     * The part of the batch deadline still available to the next phase, or
+     * `0` when the deadline is disabled.
+     *
+     * @throws BatchDeadlineExceededException When the budget is exhausted
+     */
+    private function remainingBatchDeadlineMs(int $startedAtMs, int $batchDeadlineMs): int
+    {
+        if ($batchDeadlineMs <= 0) {
+            return 0;
+        }
+
+        $elapsedMs = $this->elapsedMs($startedAtMs);
+        $remainingMs = $batchDeadlineMs - $elapsedMs;
+        if ($remainingMs <= 0) {
+            throw new BatchDeadlineExceededException($batchDeadlineMs, $elapsedMs);
+        }
+
+        return $remainingMs;
+    }
+
+    /**
      * The per-range `RawScan` path: one scan per range, fanned out
      * concurrently (issue #295).
      *
@@ -1405,6 +1505,11 @@ final readonly class RawKvScanner
      * cannot be split unambiguously, and as the recovery path when the
      * region-grouped fan-out fails. Every range independently resolves and
      * retries its own regions (issue #267).
+     *
+     * The retry budget starts here, not before the region-grouped path, so
+     * a slow `RawBatchScan` fan-out cannot leave the fallback with an
+     * already-exhausted budget (issue #433 review). The caller passes the
+     * batch deadline that is still available to this path.
      *
      * @param array<array-key, array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
@@ -1414,8 +1519,11 @@ final readonly class RawKvScanner
         int $eachLimit,
         bool $keyOnly,
         string $columnFamily,
-        RetryExecutor $executor,
+        int $batchDeadlineMs,
     ): array {
+        // One per-range fallback is one logical operation: all ranges share
+        // one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $clipper = new RegionRangeClipper();
 
         $calls = [];
@@ -1434,7 +1542,7 @@ final readonly class RawKvScanner
         $executed = $this->createBatchExecutor()->executeParallelCapped(
             $calls,
             $this->maxConcurrency,
-            $this->timeoutConfig->batchDeadlineMs,
+            $batchDeadlineMs,
         );
 
         ksort($executed);

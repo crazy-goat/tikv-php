@@ -10,16 +10,23 @@ use CrazyGoat\Proto\Kvrpcpb\KeyRange;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
+use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -45,15 +52,25 @@ final class RawKvScannerBatchScanTest extends TestCase
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
-        $this->scanner = new RawKvScanner(
+        $this->scanner = $this->makeScanner();
+    }
+
+    private function makeScanner(
+        int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
+        ?TimeoutConfig $timeoutConfig = null,
+        int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
+    ): RawKvScanner {
+        return new RawKvScanner(
             $this->pdClient,
             $this->grpc,
             $this->regionResolver,
-            new TimeoutConfig(),
+            $timeoutConfig ?? new TimeoutConfig(),
             maxBackoffMs: 20000,
             serverBusyBudgetMs: 600000,
             regionCache: $this->regionCache,
             logger: new NullLogger(),
+            retryDeadlineMs: $retryDeadlineMs,
+            maxConcurrency: $maxConcurrency,
         );
     }
 
@@ -352,7 +369,7 @@ final class RawKvScannerBatchScanTest extends TestCase
                         return GrpcFuture::completed($response);
                     }
 
-                    self::assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawScanRequest::class, $request);
+                    self::assertInstanceOf(RawScanRequest::class, $request);
 
                     return GrpcFuture::completed($this->scanResponse(['a1', 'a2']));
                 },
@@ -381,7 +398,7 @@ final class RawKvScannerBatchScanTest extends TestCase
                 ) use (&$methods): GrpcFuture {
                     $methods[] = $method;
                     self::assertSame('RawScan', $method);
-                    self::assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\RawScanRequest::class, $request);
+                    self::assertInstanceOf(RawScanRequest::class, $request);
 
                     return GrpcFuture::completed($this->scanResponse(['a1']));
                 },
@@ -418,5 +435,307 @@ final class RawKvScannerBatchScanTest extends TestCase
             );
 
         $this->scanner->batchScan([['a', '']], 10, false);
+    }
+
+    public function testBatchScanKeepsAnUnboundedRangeLastWithinARegion(): void
+    {
+        $region = $this->region(1, 'a', '');
+        $this->stubRegions([$region]);
+
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ): GrpcFuture {
+                    self::assertInstanceOf(RawBatchScanRequest::class, $request);
+                    self::assertSame(
+                        [['a', 'c'], ['x', '']],
+                        array_map(
+                            static fn(KeyRange $range): array => [$range->getStartKey(), $range->getEndKey()],
+                            iterator_to_array($request->getRanges()),
+                        ),
+                    );
+
+                    return GrpcFuture::completed($this->batchScanResponse([
+                        ['a1', 'v1'],
+                        ['x1', 'v2'],
+                    ]));
+                },
+            );
+
+        // Input order puts the unbounded range first; the client sorts it
+        // last so TiKV does not read its empty end as the next range's start.
+        $result = $this->scanner->batchScan([['x', ''], ['a', 'c']], 10, false);
+
+        self::assertSame(['x1'], array_column($result[0], 'key'));
+        self::assertSame(['a1'], array_column($result[1], 'key'));
+    }
+
+    public function testBatchScanAllEmptyRangesReturnsEmptyListsWithoutStoreRpc(): void
+    {
+        $region = $this->region(1, 'a', '');
+        $this->stubRegions([$region]);
+
+        $this->grpc->expects($this->never())->method('callAsync');
+        $this->pdClient->expects($this->never())->method('scanRegions');
+
+        $result = $this->scanner->batchScan([['a', 'a'], ['b', 'b']], 10, false);
+
+        self::assertSame([[], []], $result);
+    }
+
+    public function testBatchScanMixedEmptyAndNonEmptyRangesKeepsTheShape(): void
+    {
+        $region = $this->region(1, 'a', '');
+        $this->stubRegions([$region]);
+
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ): GrpcFuture {
+                    self::assertInstanceOf(RawBatchScanRequest::class, $request);
+                    self::assertCount(1, $request->getRanges(), 'empty ranges are not sent');
+
+                    return GrpcFuture::completed($this->batchScanResponse([
+                        ['a1', 'v1'],
+                    ]));
+                },
+            );
+
+        $result = $this->scanner->batchScan([['a', 'b'], ['c', 'c']], 10, false);
+
+        self::assertCount(2, $result);
+        self::assertSame(['a1'], array_column($result[0], 'key'));
+        self::assertSame([], $result[1]);
+    }
+
+    public function testBatchScanTrimsToEachLimitWhenTheFirstRegionReturnsFewerRows(): void
+    {
+        $region1 = $this->region(1, 'a', 'm');
+        $region2 = $this->region(2, 'm', 'z');
+        $this->stubRegions([$region1, $region2]);
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ): GrpcFuture {
+                    self::assertInstanceOf(RawBatchScanRequest::class, $request);
+                    $start = $request->getRanges()[0]->getStartKey();
+
+                    return GrpcFuture::completed($this->batchScanResponse(
+                        $start === 'a'
+                            ? [['a1', 'v1']]
+                            : [['m1', 'v2'], ['m2', 'v3']],
+                    ));
+                },
+            );
+
+        $result = $this->scanner->batchScan([['a', 'z']], 3, false);
+
+        self::assertSame(['a1', 'm1', 'm2'], array_column($result[0], 'key'));
+    }
+
+    public function testBatchScanFallsBackToRawScanOnTransportFailure(): void
+    {
+        $region = $this->region(1, 'a', '');
+        $this->stubRegions([$region]);
+
+        $methods = [];
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (&$methods): GrpcFuture {
+                    $methods[] = $method;
+
+                    if ($method === 'RawBatchScan') {
+                        return GrpcFuture::fromWaiter(static function (): Message {
+                            throw new GrpcException('connection refused', 14);
+                        });
+                    }
+
+                    self::assertInstanceOf(RawScanRequest::class, $request);
+
+                    return GrpcFuture::completed($this->scanResponse(['a1']));
+                },
+            );
+
+        $result = $this->scanner->batchScan([['a', 'c']], 10, false);
+
+        self::assertSame(['RawBatchScan', 'RawScan'], $methods);
+        self::assertSame(['a1'], array_column($result[0], 'key'));
+    }
+
+    public function testFallbackStartsWithAFreshRetryBudgetAfterASlowRegionPath(): void
+    {
+        $region = $this->region(1, 'a', '');
+        $this->stubRegions([$region]);
+        $this->regionCache->method('invalidate');
+
+        $methods = [];
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (&$methods): GrpcFuture {
+                    $methods[] = $method;
+
+                    if ($method === 'RawBatchScan') {
+                        return GrpcFuture::fromWaiter(static function (): Message {
+                            // Longer than the 20 ms retry deadline: the old
+                            // shared budget left the fallback dead on arrival.
+                            usleep(60_000);
+                            $error = new Error();
+                            $error->setNotLeader(new NotLeader());
+                            $response = new RawBatchScanResponse();
+                            $response->setRegionError($error);
+
+                            return $response;
+                        });
+                    }
+
+                    self::assertInstanceOf(RawScanRequest::class, $request);
+
+                    return GrpcFuture::completed($this->scanResponse(['a1']));
+                },
+            );
+
+        $scanner = $this->makeScanner(retryDeadlineMs: 20);
+        $result = $scanner->batchScan([['a', 'c']], 10, false);
+
+        self::assertSame(['RawBatchScan', 'RawScan'], $methods);
+        self::assertSame(['a1'], array_column($result[0], 'key'));
+    }
+
+    public function testBatchScanWrapsPdEnumerationFailureInBatchPartialFailure(): void
+    {
+        $this->regionCache->method('getRegionsInRange')->willReturn([]);
+        $this->regionCache->method('getCachedChain')->willReturn([]);
+        $this->pdClient->method('scanRegions')->willThrowException(new GrpcException('pd down', 14));
+
+        try {
+            $this->scanner->batchScan([['a', 'b'], ['c', 'd']], 10, false);
+            self::fail('Expected BatchPartialFailureException');
+        } catch (BatchPartialFailureException $e) {
+            self::assertInstanceOf(GrpcException::class, $e->getFirstRegionError());
+            self::assertSame(2, $e->getTotalRegions());
+        }
+    }
+
+    public function testBatchDeadlineCoversRegionEnumerationAndDoesNotFallBack(): void
+    {
+        $this->regionCache->method('getRegionsInRange')->willReturn([]);
+        $this->regionCache->method('getCachedChain')->willReturn([]);
+        $this->pdClient->method('scanRegions')->willReturnCallback(
+            function (): array {
+                usleep(80_000);
+
+                return [$this->region(1, '', '')];
+            },
+        );
+        $this->pdClient->method('getStore')->willReturn($this->store());
+        $this->grpc->expects($this->never())->method('callAsync');
+
+        $scanner = $this->makeScanner(timeoutConfig: $this->tightTimeoutConfig(50));
+
+        $this->expectException(BatchDeadlineExceededException::class);
+        $scanner->batchScan([['a', 'b'], ['c', 'd']], 10, false);
+    }
+
+    public function testBatchDeadlineExceededIsRethrownInsteadOfFallingBack(): void
+    {
+        $region1 = $this->region(1, 'a', 'm');
+        $region2 = $this->region(2, 'm', '');
+        $this->stubRegions([$region1, $region2]);
+
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ): GrpcFuture {
+                    self::assertSame('RawBatchScan', $method);
+                    self::assertInstanceOf(RawBatchScanRequest::class, $request);
+
+                    return GrpcFuture::fromWaiter(static function (): Message {
+                        usleep(80_000);
+
+                        return new RawBatchScanResponse();
+                    });
+                },
+            );
+
+        $scanner = $this->makeScanner(
+            timeoutConfig: $this->tightTimeoutConfig(50),
+            maxConcurrency: 1,
+        );
+
+        $this->expectException(BatchDeadlineExceededException::class);
+        $scanner->batchScan([['a', '']], 10, false);
+    }
+
+    public function testBatchScanUnexpectedResponseTypeIsNotSwallowedByTheFallback(): void
+    {
+        $region = $this->region(1, 'a', '');
+        $this->stubRegions([$region]);
+
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                static fn(
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ): GrpcFuture => GrpcFuture::completed(new RawScanResponse()),
+            );
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('RawBatchScan returned an unexpected response type');
+
+        $this->scanner->batchScan([['a', 'c']], 10, false);
+    }
+
+    /**
+     * A timeout config whose batch fan-out timeouts are all at or below the
+     * batch deadline, as the TimeoutConfig constructor requires.
+     */
+    private function tightTimeoutConfig(int $batchDeadlineMs): TimeoutConfig
+    {
+        return new TimeoutConfig(
+            writeTimeoutMs: $batchDeadlineMs,
+            batchReadTimeoutMs: $batchDeadlineMs,
+            batchWriteTimeoutMs: $batchDeadlineMs,
+            scanTimeoutMs: $batchDeadlineMs,
+            deleteRangeTimeoutMs: $batchDeadlineMs,
+            checksumTimeoutMs: $batchDeadlineMs,
+            ingestTimeoutMs: $batchDeadlineMs,
+            batchDeadlineMs: $batchDeadlineMs,
+        );
     }
 }
