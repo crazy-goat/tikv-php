@@ -272,8 +272,10 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // Reverse scan (descending order)
 // Note the order: startKey = UPPER bound (exclusive), endKey = LOWER bound
 // (inclusive) — the first argument must sort after the second. Bump the last
-// byte of a prefix to cover all of its keys ('log:' -> 'log;'); append "\x00"
-// to a key to make the upper bound inclusive of that key.
+// byte of a prefix to cover all of its keys ('log:' -> 'log;');
+// RawKvSplitter::calculatePrefixEndKey('log:') computes that end key safely
+// (including a trailing 0xFF). Append "\x00" to a key to make the upper bound
+// inclusive of that key.
 $results = $client->reverseScan('log;', 'log:', limit: 100);
 
 // Scan multiple non-contiguous ranges. This is a client-side loop of
