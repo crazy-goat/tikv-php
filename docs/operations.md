@@ -1209,7 +1209,7 @@ forked child, and never share an instance between threads or processes.
 |---|---|---|
 | gRPC channel cache | one channel per address, soft cap **64**, idle TTL **600000 ms** (10 minutes) | LRU eviction when a new address needs a slot; idle channels are swept on a cache miss and, rate-limited, on a cache hit |
 | Region cache | **10000** entries, TTL **600 s** plus up to **60 s** of jitter | LRU eviction at the cap; an entry is dropped on a region error or when a newer region supersedes its range |
-| PD client | store cache (**128** entries), TSO pool (**64** timestamps) | endpoint rotation, cluster-ID cache, timestamp batching |
+| PD client | store cache (**128** entries), TSO pool (**64** timestamps) | endpoint rotation, cluster-ID cache, timestamp batching; the store cache evicts its least recently used entry at the cap |
 
 The channel cap is **soft**: eviction never closes a channel that still
 carries in-flight calls, so a batch that fans out over more stores than the

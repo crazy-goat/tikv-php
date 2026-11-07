@@ -92,7 +92,9 @@ Two review decisions on the #238 fix (REG-07) that should not be "corrected" lat
    overlap removal are O((k + 1) log n), without packed-array splices or
    full identity-index shifts. LRU recency is an insertion-ordered hash and TTL
    cleanup uses a lazy expiry heap, so eviction and periodic sweeps do not
-   scan the complete cache.
+   scan the complete cache. `StoreCache` uses the same recency-ordered hash:
+   `touch()` removes the key before appending it, so `array_key_first()` is
+   the LRU entry and eviction never scans the store map (issue #255).
 
 ## Tests are delegated / E2E needs Docker
 

@@ -67,19 +67,25 @@ function median(array $measurements): float
     return ($measurements[$middle - 1] + $measurements[$middle]) / 2;
 }
 
-$regions = [];
-for ($i = 0; $i < 10000; $i++) {
-    $start = sprintf('k%08d', $i * 10);
-    $end = sprintf('k%08d', ($i + 1) * 10);
-    $regions[] = new RegionInfo(
-        regionId: $i + 1,
+/**
+ * A region whose start key sorts after every region with a lower index.
+ */
+function makeRegion(int $index): RegionInfo
+{
+    return new RegionInfo(
+        regionId: $index + 1,
         leaderPeerId: 1,
         leaderStoreId: 1,
         epochConfVer: 1,
         epochVersion: 1,
-        startKey: $start,
-        endKey: $end,
+        startKey: sprintf('k%08d', $index * 10),
+        endKey: sprintf('k%08d', ($index + 1) * 10),
     );
+}
+
+$regions = [];
+for ($i = 0; $i < 10000; $i++) {
+    $regions[] = makeRegion($i);
 }
 
 // One key per region, each of them inside its region.
@@ -176,3 +182,41 @@ printf(
     "  the guard saves %.1f %% of the lookup time (the absolute milliseconds are machine-specific)\n",
     (1 - $guardedMs / $referenceMs) * 100,
 );
+
+// Eviction at capacity (issue #255, REG-24): a put() that has to evict the
+// least recently used entry must not scan the cache. The LRU recency index
+// is an insertion-ordered hash and eviction takes its first key, so the only
+// work that grows with the cache is the start-key treap's O(log n) walk.
+// Read the curve as logarithmic, not flat: a reintroduced linear scan would
+// multiply the cost by the capacity instead. Each capacity is filled first,
+// then every timed put() is a miss that evicts one entry.
+printf(
+    "\nRegionCache: put() at capacity (one eviction per put, O(log n) treap walk, median of %d runs)\n",
+    $runs,
+);
+$evictionPuts = 2000;
+foreach ([1000, 10000, 50000] as $capacity) {
+    $cache = new RegionCache(jitterSeconds: 0, maxEntries: $capacity);
+    for ($i = 0; $i < $capacity; $i++) {
+        $cache->put(makeRegion($i));
+    }
+
+    $measurements = [];
+    for ($run = 0; $run < $runs; $run++) {
+        $start = hrtime(true);
+        for ($i = $capacity + $run * $evictionPuts; $i < $capacity + ($run + 1) * $evictionPuts; $i++) {
+            $cache->put(makeRegion($i));
+        }
+        $measurements[] = (hrtime(true) - $start) / 1_000_000;
+    }
+
+    $medianMs = median($measurements);
+    printf(
+        "  capacity %6d: %d evicting puts %.2f ms (%.2f us/put), count=%d\n",
+        $capacity,
+        $evictionPuts,
+        $medianMs,
+        $medianMs * 1000 / $evictionPuts,
+        $cache->count(),
+    );
+}

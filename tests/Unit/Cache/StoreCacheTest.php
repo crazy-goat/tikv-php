@@ -190,6 +190,60 @@ class StoreCacheTest extends TestCase
         $this->assertNull($cache->get(2), 'store2 should have been evicted (LRU)');
     }
 
+    public function testPutExistingPromotesToMostRecentlyUsed(): void
+    {
+        // Re-inserting a cached store refreshes its recency, so the next
+        // eviction takes the other store even though this one was inserted
+        // first (issue #255, REG-24).
+        $cache = new StoreCache(ttlSeconds: 3600, jitterSeconds: 0, maxEntries: 2);
+
+        $s1 = new Store(); $s1->setId(1); $s1->setAddress("a:1");
+        $s2 = new Store(); $s2->setId(2); $s2->setAddress("b:2");
+        $s3 = new Store(); $s3->setId(3); $s3->setAddress("c:3");
+        $s1new = new Store(); $s1new->setId(1); $s1new->setAddress("a:1-new");
+
+        $cache->put($s1);
+        $cache->put($s2);
+        $cache->put($s1new);
+
+        // s1 was re-put last, so s2 is the LRU entry.
+        $cache->put($s3);
+
+        $this->assertNotNull($cache->get(1), 'store1 should still be cached');
+        $this->assertNotNull($cache->get(3), 'store3 should be cached');
+        $this->assertNull($cache->get(2), 'store2 should have been evicted (LRU)');
+    }
+
+    public function testEvictionFollowsAccessOrderAcrossSeveralTurns(): void
+    {
+        $cache = new StoreCache(ttlSeconds: 3600, jitterSeconds: 0, maxEntries: 3);
+
+        $stores = [];
+        for ($id = 1; $id <= 5; $id++) {
+            $stores[$id] = new Store();
+            $stores[$id]->setId($id);
+            $stores[$id]->setAddress("addr:{$id}");
+        }
+
+        $cache->put($stores[1]);
+        $cache->put($stores[2]);
+        $cache->put($stores[3]);
+
+        // Recency after the accesses: 2 (LRU), 3, 1 (MRU).
+        $cache->get(3);
+        $cache->get(1);
+
+        $cache->put($stores[4]); // evicts 2; recency: 3 (LRU), 1, 4 (MRU)
+        $cache->get(1);          // recency: 3 (LRU), 4, 1 (MRU)
+        $cache->put($stores[5]); // evicts 3
+
+        $this->assertNull($cache->get(2), 'store2 should have been evicted first');
+        $this->assertNull($cache->get(3), 'store3 should have been evicted second');
+        $this->assertNotNull($cache->get(1), 'store1 should still be cached');
+        $this->assertNotNull($cache->get(4), 'store4 should still be cached');
+        $this->assertNotNull($cache->get(5), 'store5 should be cached');
+    }
+
     public function testPutExistingDoesNotCountTowardsCapacity(): void
     {
         // Overwriting an existing entry should not trigger eviction
