@@ -601,8 +601,9 @@ $results = $client->batchScan($ranges, eachLimit: 50, keyOnly: false);
 
 **Parameters:**
 - `ranges` (array<array{0: string, 1: string}>): Array of `[startKey, endKey]`
-  pairs; an empty `endKey` means +infinity. A reversed range rejects the whole
-  call with `InvalidArgumentException` before any RPC.
+  pairs; an empty `endKey` means +infinity. A malformed range (not a
+  two-element pair of strings) or a reversed range rejects the whole call with
+  `InvalidArgumentException` before any RPC.
 - `eachLimit` (int): Maximum results per range (required)
 - `keyOnly` (bool, optional): Return only keys
 

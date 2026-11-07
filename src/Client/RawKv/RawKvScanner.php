@@ -884,7 +884,7 @@ final readonly class RawKvScanner
      *
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
-     * @throws InvalidArgumentException When a range is reversed
+     * @throws InvalidArgumentException When a range is malformed or reversed
      * @throws \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException When any range fails
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly, string $columnFamily = ''): array
@@ -912,7 +912,7 @@ final readonly class RawKvScanner
 
         $calls = [];
         foreach ($ranges as $index => $range) {
-            [$startKey, $endKey] = $range;
+            [$startKey, $endKey] = $this->assertBatchRange($range, $index);
             RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'batchScan');
             $calls[$index] = fn(): CheckedGrpcFuture => $this->scanRangeAsync(
                 $executor,
@@ -941,6 +941,36 @@ final readonly class RawKvScanner
         }
 
         return $results;
+    }
+
+    /**
+     * Validate one `[startKey, endKey]` pair of a batchScan() call before it
+     * is destructured. Destructuring a malformed range would raise an
+     * "Undefined array key 1" warning and then a TypeError; rejecting it
+     * here gives the caller a descriptive exception instead (issue #516).
+     *
+     * @return array{0: string, 1: string}
+     *
+     * @throws InvalidArgumentException When the range is not a two-element
+     *         array of strings
+     */
+    private function assertBatchRange(mixed $range, int|string $index): array
+    {
+        if (
+            !is_array($range)
+            || count($range) !== 2
+            || !array_key_exists(0, $range)
+            || !array_key_exists(1, $range)
+            || !is_string($range[0])
+            || !is_string($range[1])
+        ) {
+            throw new InvalidArgumentException(sprintf(
+                'Invalid range in batchScan at index %s: expected a [startKey, endKey] pair of strings',
+                (string) $index,
+            ));
+        }
+
+        return [$range[0], $range[1]];
     }
 
     /**

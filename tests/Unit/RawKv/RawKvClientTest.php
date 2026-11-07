@@ -1862,11 +1862,42 @@ class RawKvClientTest extends TestCase
 
     public function testBatchScanThrowsOnInvalidRangeFormat(): void
     {
-        $this->pdClient->method('scanRegions')->willReturn([]);
-        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->expectNoRpc();
 
-        $this->expectException(\TypeError::class);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid range in batchScan at index 0');
+
         $this->client->batchScan([['only-one']], 10); // @phpstan-ignore argument.type
+    }
+
+    /**
+     * A malformed range is rejected before it is destructured, so the caller
+     * gets a descriptive exception instead of an "Undefined array key 1"
+     * warning followed by a TypeError (issue #516).
+     *
+     * @param array<mixed> $ranges
+     */
+    #[DataProvider('malformedBatchRangeProvider')]
+    public function testBatchScanRejectsMalformedRangeBeforeAnyRpc(array $ranges, int $index): void
+    {
+        $this->expectNoRpc();
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('Invalid range in batchScan at index %d', $index));
+
+        $this->client->batchScan($ranges, 10); // @phpstan-ignore argument.type
+    }
+
+    /** @return iterable<string, array{array<mixed>, int}> */
+    public static function malformedBatchRangeProvider(): iterable
+    {
+        yield 'one element' => [[['only-one']], 0];
+        yield 'three elements' => [[['a', 'b', 'c']], 0];
+        yield 'non-string start key' => [[[1, 'b']], 0];
+        yield 'null end key' => [[['a', null]], 0];
+        yield 'associative keys' => [[['start' => 'a', 'end' => 'b']], 0];
+        yield 'non-array range' => [['a-b'], 0];
+        yield 'second range malformed' => [[['a', 'b'], ['only-one']], 1];
     }
 
     public function testBatchScanEmptyReturnsEmpty(): void
