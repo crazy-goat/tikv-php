@@ -24,6 +24,7 @@ use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatRequest;
 use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -537,11 +538,11 @@ final readonly class TwoPhaseCommitter
          * A partial failure is aggregated, not truncated (issue #431,
          * GAP-17): the executor waits for every in-flight region and
          * collects each region's failure, so one region's error neither
-         * cancels its peers nor hides them. The aggregate is logged with
-         * the identity of every failing region (the exception's own keys
-         * are group indices, which name no region) and the error of the
-         * first failing group in dispatch order — the one the sequential
-         * loop would have thrown — is rethrown.
+         * cancels its peers nor hides them. The aggregate is logged with a
+         * descriptor for every failed call — the real region ID and
+         * sub-batch index — and the error of the first failing group in
+         * dispatch order — the one the sequential loop would have thrown —
+         * is rethrown.
          */
         $prewriteSecondaries = function () use (
             $secondaryGroups,
@@ -557,7 +558,15 @@ final readonly class TwoPhaseCommitter
             }
 
             $regionCalls = [];
+            /** @var array<int, BatchCallId> $labels */
+            $labels = [];
+            /** @var array<int, int> $subBatchIndexes */
+            $subBatchIndexes = [];
             foreach ($secondaryGroups as $group) {
+                $regionId = $group['region']->regionId;
+                $subBatchIndex = $subBatchIndexes[$regionId] ?? 0;
+                $subBatchIndexes[$regionId] = $subBatchIndex + 1;
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->prewriteWithRetry(
                     $group,
                     $lockTtlMs,
@@ -569,6 +578,7 @@ final readonly class TwoPhaseCommitter
                     $retryExecutor,
                     $classifier,
                 );
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
             }
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
@@ -576,9 +586,10 @@ final readonly class TwoPhaseCommitter
                 $results = $batchExecutor->executeParallel(
                     $regionCalls,
                     $this->timeoutConfig->batchDeadlineMs,
+                    $labels,
                 );
             } catch (BatchPartialFailureException $e) {
-                $this->logPrewritePartialFailure($e, $secondaryGroups);
+                $this->logPrewritePartialFailure($e);
 
                 throw $e->getFirstRegionError();
             }
@@ -1326,27 +1337,21 @@ final readonly class TwoPhaseCommitter
      * Report the aggregated failures of a parallel prewrite fan-out
      * (issue #431, GAP-17).
      *
-     * `BatchPartialFailureException::getRegionErrors()` is keyed by the
-     * index of the failed call in the fan-out, and the fan-out's calls are
-     * the secondary groups in dispatch order — so the index maps back to
-     * the group, and with it to the region that failed. Without this the
-     * aggregate would be dropped together with the rethrown first error,
-     * and a failure in several regions would look like a single-region
-     * one.
-     *
-     * @param list<array{region: RegionInfo, mutations: Mutation[], isPrimary: bool, firstKey: string}> $secondaryGroups
+     * `BatchPartialFailureException` carries a descriptor for every failed
+     * call (issue #285, GRPC-26): the real TiKV region ID and the sub-batch
+     * index, so several failures from one region are reported separately
+     * instead of being mapped through a bare array index.
      */
-    private function logPrewritePartialFailure(
-        BatchPartialFailureException $failure,
-        array $secondaryGroups,
-    ): void {
+    private function logPrewritePartialFailure(BatchPartialFailureException $failure): void
+    {
         $regionErrors = $failure->getRegionErrors();
         $failedRegions = [];
-        foreach (array_keys($regionErrors) as $index) {
-            $group = $secondaryGroups[$index] ?? null;
+        foreach ($failure->getFailedCallIds() as $index => $callId) {
+            $error = $regionErrors[$index] ?? null;
             $failedRegions[] = [
-                'regionId' => $group === null ? null : $group['region']->regionId,
-                'error' => $regionErrors[$index]->getMessage(),
+                'regionId' => $callId->regionId,
+                'subBatchIndex' => $callId->subBatchIndex,
+                'error' => $error instanceof TiKvException ? $error->getMessage() : 'Unknown',
             ];
         }
 
@@ -1563,6 +1568,21 @@ final readonly class TwoPhaseCommitter
         // so their server-side latencies overlap. The primary's commit has
         // already been acknowledged above, which is the protocol's ordering
         // requirement.
+        //
+        // The per-region sub-batch ordinals are computed over the original
+        // list, before the primary batch is removed, so a later batch of the
+        // primary's region keeps its real ordinal (issue #285, GRPC-26).
+        /** @var array<int, BatchCallId> $callIdsByBatchIndex */
+        $callIdsByBatchIndex = [];
+        /** @var array<int, int> $subBatchIndexes */
+        $subBatchIndexes = [];
+        foreach ($keysByRegion as $batchIndex => $batch) {
+            $regionId = $batch['region']->regionId;
+            $subBatchIndex = $subBatchIndexes[$regionId] ?? 0;
+            $subBatchIndexes[$regionId] = $subBatchIndex + 1;
+            $callIdsByBatchIndex[$batchIndex] = new BatchCallId($regionId, $subBatchIndex);
+        }
+
         unset($keysByRegion[$primaryBatchIndex]);
 
         if ($keysByRegion === []) {
@@ -1570,11 +1590,14 @@ final readonly class TwoPhaseCommitter
         }
 
         $regionCalls = [];
-        foreach ($keysByRegion as $batch) {
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
+        foreach ($keysByRegion as $batchIndex => $batch) {
             $region = $batch['region'];
             $regionKeys = $batch['keys'];
             $firstKey = $regionKeys[0] ?? '';
 
+            $slot = count($regionCalls);
             $regionCalls[] = fn(): CheckedGrpcFuture => $this->secondaryCommitSwallowing(
                 $region,
                 $regionKeys,
@@ -1584,6 +1607,7 @@ final readonly class TwoPhaseCommitter
                 $classifier,
                 $region->regionId,
             );
+            $labels[$slot] = $callIdsByBatchIndex[$batchIndex];
         }
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
@@ -1596,7 +1620,11 @@ final readonly class TwoPhaseCommitter
         // to apply it twice. Log it like any other secondary-commit failure
         // and return; leftover secondary locks are resolved by readers.
         try {
-            $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
+            $batchExecutor->executeParallel(
+                $regionCalls,
+                $this->timeoutConfig->batchDeadlineMs,
+                $labels,
+            );
         } catch (BatchDeadlineExceededException $e) {
             $this->logger->warning(
                 'Secondary commit fan-out hit the batch deadline; locks will be resolved by readers',
@@ -1813,21 +1841,29 @@ final readonly class TwoPhaseCommitter
             // failing group is the one surfaced — the same exception the
             // sequential loop aborted with.
             $regionCalls = [];
-            foreach ($keysByRegion as $regionData) {
+            /** @var array<int, BatchCallId> $labels */
+            $labels = [];
+            foreach ($keysByRegion as $regionId => $regionData) {
                 $regionKeys = $regionData['keys'];
                 $firstKey = $regionKeys[0] ?? '';
 
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchRollbackWithRetry(
                     $firstKey,
                     $regionKeys,
                     $retryExecutor,
                     $classifier,
                 );
+                $labels[$slot] = new BatchCallId($regionId);
             }
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
             try {
-                $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
+                $batchExecutor->executeParallel(
+                    $regionCalls,
+                    $this->timeoutConfig->batchDeadlineMs,
+                    $labels,
+                );
                 continue;
             } catch (BatchPartialFailureException $e) {
                 // Preserve the sequential first-abort exception semantics
@@ -2733,10 +2769,13 @@ final readonly class TwoPhaseCommitter
             // Fan out all region groups in parallel (issue #291) — same
             // pattern as batchRollback() above.
             $regionCalls = [];
-            foreach ($keysByRegion as $regionData) {
+            /** @var array<int, BatchCallId> $labels */
+            $labels = [];
+            foreach ($keysByRegion as $regionId => $regionData) {
                 $regionKeys = $regionData['keys'];
                 $firstKey = $regionKeys[0] ?? '';
 
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->pessimisticRollbackWithRetry(
                     $firstKey,
                     $regionKeys,
@@ -2744,11 +2783,16 @@ final readonly class TwoPhaseCommitter
                     $retryExecutor,
                     $classifier,
                 );
+                $labels[$slot] = new BatchCallId($regionId);
             }
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
             try {
-                $batchExecutor->executeParallel($regionCalls, $this->timeoutConfig->batchDeadlineMs);
+                $batchExecutor->executeParallel(
+                    $regionCalls,
+                    $this->timeoutConfig->batchDeadlineMs,
+                    $labels,
+                );
                 continue;
             } catch (BatchPartialFailureException $e) {
                 // Preserve the sequential first-abort exception semantics.

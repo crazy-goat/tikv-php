@@ -757,16 +757,19 @@ regions were never dispatched or their results were cancelled.
 default), or TiKV nodes are slow or unreachable. Raise `batchDeadlineMs` in
 `options['timeout']`, or set it to `0` to disable the batch deadline.
 `getContext()['pendingRegions']` lists every fan-out slot without a result,
-including the slots of windows that never started.
+including the slots of windows that never started; when the call site supplied
+fan-out descriptors, `getContext()['pendingRegionIds']` holds the corresponding
+real TiKV region IDs.
 
 **Solution:** A read (`batchGet`, scan, checksum) applies nothing, so retry the
 whole operation. Raise `batchDeadlineMs` in `options['timeout']` if the batch is
 too large. For writes, do not retry blindly: the batch is **partially applied**.
 `getContext()['pendingRegions']` and `['dispatchedRegions']` hold internal
-sub-batch or segment indices, not region IDs and not user keys. Treat the batch
-as partially applied and re-check per key. For scans the deadline applies per
-region batch, not per `scan()` call. See
-[BatchDeadlineExceededException](error-handling.md#exception-hierarchy).
+sub-batch or segment indices; `['pendingRegionIds']` and
+`['dispatchedRegionIds']` (when present) hold the real TiKV region IDs. Neither
+names your user keys. Treat the batch as partially applied and re-check per
+key. For scans the deadline applies per region batch, not per `scan()` call.
+See [BatchDeadlineExceededException](error-handling.md#exception-hierarchy).
 
 #### Batch Partial Failure
 
@@ -783,15 +786,17 @@ first failure.
 (overload, restarts, network partition).
 
 **Solution:** Do not retry the whole batch blindly. `getRegionErrors()` maps
-internal sub-batch indices (not TiKV region IDs, not user keys — the client
-does not expose which keys belonged to a failed sub-batch) to exceptions, so
-you cannot re-drive "only the failing keys": treat the batch as partially
-applied with unknown affected keys and re-check per key. deleteRange and
-checksum are idempotent and safe to retry whole; batchGet/batchDelete are
-idempotent per key; a batchPut whose key/value set is fixed is safe to
-re-issue as a whole — but non-idempotent values must not be retried blind
-(see [Batch Operations](operations.md#batch-operations)). The per-operation
-verdicts are in
+internal call indices to exceptions, and `getFailedRegionIds()` names the real
+TiKV region IDs of the failed calls (so they can be correlated with `pd-ctl`
+and cluster metrics). `getFailedCallIds()` distinguishes several sub-batches of
+one region via `subBatchIndex`. The client still does not expose which user
+keys belonged to a failed sub-batch, so you cannot re-drive "only the failing
+keys": treat the batch as partially applied with unknown affected keys and
+re-check per key. deleteRange and checksum are idempotent and safe to retry
+whole; batchGet/batchDelete are idempotent per key; a batchPut whose key/value
+set is fixed is safe to re-issue as a whole — but non-idempotent values must
+not be retried blind (see [Batch Operations](operations.md#batch-operations)).
+The per-operation verdicts are in
 [Idempotency and Retry Safety](error-handling.md#idempotency-and-retry-safety).
 
 #### Store Not Found

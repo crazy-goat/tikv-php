@@ -12,6 +12,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsEntry;
 use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsMultiplexer;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
@@ -100,21 +101,26 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
         /** @var array<int, BatchCommandsEntry> $entries */
         $entries = [];
         foreach ($keysByRegion as $regionData) {
+            $regionId = $regionData['region']->regionId;
             $subBatches = RawKvSplitter::splitIntoBatches(
                 $regionData['keys'],
                 self::MAX_BATCH_LIMIT,
                 self::MAX_BATCH_GET_SIZE,
                 strlen(...),
             );
-            foreach ($subBatches as $subBatch) {
+            foreach ($subBatches as $subBatchIndex => $subBatch) {
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetWithRetry(
                     $subBatch,
                     $retryExecutor,
                     $columnFamily,
                 );
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
                 if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
                     $entries[] = $this->batchGetEntry($regionData['region'], $subBatch, $columnFamily);
                 }
@@ -124,25 +130,30 @@ final readonly class RawKvBatch
         $multiplexed = [];
         $fallbackCalls = $this->tryMultiplex($entries, $regionCalls, $multiplexed, 'batch_read');
 
+        // The per-pair error check and the key => value collection share one
+        // traversal of each response (issue #303). The unary path already
+        // collected inside the per-region waiter; the multiplexed path defers
+        // the pair check to collectBatchGetPairs() below.
         $results = [];
         foreach ($multiplexed as $response) {
             assert($response instanceof RawBatchGetResponse);
-            foreach ($response->getPairs() as $pair) {
-                $results[$pair->getKey()] = $pair->getValue();
+            foreach (RegionErrorHandler::collectBatchGetPairs($response) as $collectedKey => $collectedValue) {
+                $results[$collectedKey] = $collectedValue;
             }
         }
 
         if ($fallbackCalls !== []) {
+            /** @var array<int, array<array-key, ?string>> $regionResults */
             $regionResults = $batchExecutor->executeParallelCapped(
                 $fallbackCalls,
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
+                array_intersect_key($labels, $fallbackCalls),
             );
 
-            foreach ($regionResults as $response) {
-                assert($response instanceof RawBatchGetResponse);
-                foreach ($response->getPairs() as $pair) {
-                    $results[$pair->getKey()] = $pair->getValue();
+            foreach ($regionResults as $collected) {
+                foreach ($collected as $collectedKey => $collectedValue) {
+                    $results[$collectedKey] = $collectedValue;
                 }
             }
         }
@@ -219,9 +230,12 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
         /** @var array<int, BatchCommandsEntry> $entries */
         $entries = [];
         foreach ($pairsByRegion as $regionData) {
+            $regionId = $regionData['region']->regionId;
             $regionPairs = $regionData['pairs'];
             $regionTtls = $regionData['ttls'] ?? [];
 
@@ -232,9 +246,10 @@ final readonly class RawKvBatch
                 $regionTtls,
             );
 
-            foreach ($subBatches as $subBatch) {
+            foreach ($subBatches as $subBatchIndex => $subBatch) {
                 $batchTtls = $subBatch['ttls'];
                 $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchPutWithRetry(
                     $subBatch['pairs'],
                     $batchTtl,
@@ -242,6 +257,7 @@ final readonly class RawKvBatch
                     $forCas,
                     $columnFamily,
                 );
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
                 if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
                     $entries[] = $this->batchPutEntry(
                         $regionData['region'],
@@ -262,6 +278,7 @@ final readonly class RawKvBatch
                 $fallbackCalls,
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
+                array_intersect_key($labels, $fallbackCalls),
             );
         }
     }
@@ -288,22 +305,27 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
         /** @var array<int, BatchCommandsEntry> $entries */
         $entries = [];
         foreach ($keysByRegion as $regionData) {
+            $regionId = $regionData['region']->regionId;
             $subBatches = RawKvSplitter::splitIntoBatches(
                 $regionData['keys'],
                 self::MAX_BATCH_LIMIT,
                 self::MAX_BATCH_DELETE_SIZE,
                 strlen(...),
             );
-            foreach ($subBatches as $subBatch) {
+            foreach ($subBatches as $subBatchIndex => $subBatch) {
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchDeleteWithRetry(
                     $subBatch,
                     $retryExecutor,
                     $forCas,
                     $columnFamily,
                 );
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
                 if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
                     $entries[] = $this->batchDeleteEntry($regionData['region'], $subBatch, $forCas, $columnFamily);
                 }
@@ -318,6 +340,7 @@ final readonly class RawKvBatch
                 $fallbackCalls,
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
+                array_intersect_key($labels, $fallbackCalls),
             );
         }
     }
@@ -543,7 +566,10 @@ final readonly class RawKvBatch
             }
 
             try {
-                RegionErrorHandler::check($response);
+                // Pair errors are left to the caller's collection loop, so a
+                // batch-get response is traversed once (issue #303). Write
+                // responses carry no pairs, so the flag changes nothing there.
+                RegionErrorHandler::check($response, checkPairErrors: false);
             } catch (RegionException) {
                 // Region error on the multiplexed response: recover on the
                 // unary path, whose retry wrapper invalidates the region
@@ -695,7 +721,10 @@ final readonly class RawKvBatch
 
                 if ($allInRegion) {
                     $inner = $this->executeBatchGetForRegionAsync($fresh, $keys, $columnFamily, $targetStoreId);
-                    return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_read', $key);
+                    // Resolves to the collected key => value map: the per-pair
+                    // error check and the collection share one traversal
+                    // (issue #303).
+                    return $this->wrapWithLogging(CheckedGrpcFuture::fromBatchGetFuture($inner), 'batch_read', $key);
                 }
 
                 // Multi-region recovery has several targets; a single
@@ -739,8 +768,8 @@ final readonly class RawKvBatch
                 // by one sub-response's region error therefore leaves the
                 // other sub-futures in flight. Rare (multi-region recovery
                 // path only); do not restructure here.
-                $waiter = function () use ($innerFutures, $innerTargets, &$targetStoreId): Message {
-                    $allPairs = [];
+                $waiter = function () use ($innerFutures, $innerTargets, &$targetStoreId): array {
+                    $collected = [];
                     foreach ($innerFutures as $index => $future) {
                         // Report the sub-future's own store before awaiting it
                         // so a transport failure closes that channel, not the
@@ -748,15 +777,19 @@ final readonly class RawKvBatch
                         $targetStoreId = $innerTargets[$index];
                         /** @var RawBatchGetResponse $response */
                         $response = $future->wait();
-                        RegionErrorHandler::check($response);
-                        foreach ($response->getPairs() as $pair) {
-                            $allPairs[] = $pair;
+                        // Error check and value collection in one pass
+                        // (issue #303): the merged result is the map itself,
+                        // not a rebuilt RawBatchGetResponse the caller would
+                        // have to walk again. Merge with a plain assignment
+                        // (not array_replace) so the fold stays O(N) instead
+                        // of copying the accumulated map per sub-response.
+                        $partial = RegionErrorHandler::checkAndCollectBatchGet($response);
+                        foreach ($partial as $collectedKey => $collectedValue) {
+                            $collected[$collectedKey] = $collectedValue;
                         }
                     }
                     $targetStoreId = 0;
-                    $merged = new RawBatchGetResponse();
-                    $merged->setPairs($allPairs);
-                    return $merged;
+                    return $collected;
                 };
                 return $this->wrapWithLogging(
                     CheckedGrpcFuture::fromCallable($waiter),
