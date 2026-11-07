@@ -59,9 +59,11 @@ composer mutation:show     # same, but print the surviving mutants
 make help                  # all make targets (install, up, down, clean, shell, example, proto-generate)
 ```
 
-The Makefile calls `docker-compose` (v1 syntax); CI uses `docker compose`, and the scripts
-prefer it too (`scripts/lib/compose.sh` falls back to the v1 binary when the v2 plugin is
-missing).
+The Makefile and the runner scripts use the Compose v2 plugin (`docker compose`) and fall
+back to the v1 binary (`docker-compose`) when the plugin is missing: the Makefile resolves the
+command once into `$(COMPOSE)`, and the scripts share the detection in `scripts/lib/compose.sh`
+(with `compose_running_services()` for the v1-compatible readiness check). CI uses
+`docker compose`.
 
 The mutation scope is `src/Client/TxnKv/` and `src/Client/Region/` (see `infection.json` and
 `docs/development.md`); its CI job runs nightly and on demand, not on every pull request.

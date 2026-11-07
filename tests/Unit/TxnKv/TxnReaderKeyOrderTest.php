@@ -170,6 +170,30 @@ final class TxnReaderKeyOrderTest extends TestCase
         );
     }
 
+    public function testScanReturnsTheIssueVectorInByteOrder(): void
+    {
+        // The issue's own vector: TiKV returns "10", "100" and "9" in byte
+        // order, and the transaction's write set adds "9". A SORT_REGULAR
+        // merge orders the numeric strings numerically ("9" < "10" < "100"),
+        // so pagination resuming from the last returned key would skip every
+        // key between "100" and "9" in byte order (issue #220, TXN-15).
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubRegionLookup([$region]);
+
+        /** @var list<ScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $this->stubScan($this->stored(['10', '100', '9']), $capturedRequests);
+
+        $txn = $this->createTransaction();
+        $txn->set('9', 'local-9');
+
+        $result = $txn->scan('', '', 0);
+
+        $this->assertSame(['10', '100', '9'], array_column($result, 'key'));
+        $this->assertSame(['v-10', 'v-100', 'local-9'], array_column($result, 'value'));
+    }
+
     public function testScanClipsTheWireRangeToTheFreshRegionEndBytewise(): void
     {
         // The outer enumeration is the pre-split ['', '4'); the retry
