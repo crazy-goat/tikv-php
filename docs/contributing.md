@@ -408,6 +408,12 @@ and resolves only inside the compose network; on the host use the published PD p
 PD_ENDPOINTS=localhost:${PD_PORT:-2379} composer test:e2e:raw
 ```
 
+The published PD and TiKV ports are bound to `127.0.0.1`, not to every host interface,
+because the development cluster has no authentication or transport security. The
+`localhost` form above is therefore the only host-side address that works; reaching the
+cluster from another machine needs an SSH tunnel or a compose override that opts in
+deliberately (issue #318, SEC-15).
+
 The API V2 lane needs a second keyspace that already exists in the cluster (the
 suite proves that the same user key stays isolated per keyspace). Create it once
 and name it in `TIKV_ALT_KEYSPACE`:
