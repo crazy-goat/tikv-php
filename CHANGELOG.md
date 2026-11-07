@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- The gRPC response-size bound is now documented and tested where it actually takes effect: `grpc.max_receive_message_length` is set on every channel from `options['grpc']['maxReceiveMessageBytes']` (default 64 MB), so grpc-core rejects an oversized frame before its payload is allocated as a PHP string (SEC-16, issue #319). `GrpcResponseParser::setMaxMessageSize()` remains only as a post-allocation defence-in-depth assertion, and its docblocks no longer claim it prevents memory exhaustion. The 64 MB default is kept instead of the audit's suggested 4 MB because the gRPC core's 4 MB default makes full-limit scans and batch reads fail with `RESOURCE_EXHAUSTED` (issue #265). No behaviour change: the channel argument has been present since #265. Documented in `docs/configuration.md#grpc-channel-options`. (#319)
+
 ### Tests
 
 - `RawKvClientTest::testNoOpMetricsRecordsNothingForAnyInput()` now pins the default `NoOpMetrics` contract instead of re-asserting the object type (issue #351, LQ-03). It exercises all seven `MetricsInterface` methods with hostile input — empty tags, a negative duration, a binary operation name and a 10 KB tag — and asserts that the no-op backend is still indistinguishable from a fresh instance, while an `InMemoryMetrics` given the same calls records every one of them, so the calls are real and the empty state is the no-op's behaviour. `docs/advanced.md` now states the accept-anything/record-nothing guarantee and lists the missing `storeHealthChanged()` method. No production behaviour changes. (#351)
