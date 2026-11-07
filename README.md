@@ -144,7 +144,7 @@ that keeps existing, correct code working.
 | `RawKv\RawKvClient` | every public method — the RawKV entry point |
 | `TxnKv\TxnKvClient` | every public method — `create()`, `begin()` (with its `pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit` and `eagerPessimisticLocks` options), `beginOptimistic()`, `beginPessimistic()`, `holdGcSafePoint()`, `releaseGcSafePoint()`, `getClusterId()`, `healthCheck()`, `getMetrics()`, `reapIdleChannels()`, `refreshRegionCache()`, `preloadRegions()`, `close()` — the TxnKV entry point |
 | `TxnKv\Transaction` | every public method — the transaction handle |
-| `RawKv\CasResult`, `RawKv\ChecksumResult` | the result DTOs of `compareAndSwap()` and `checksum()` |
+| `RawKv\CasResult`, `RawKv\ChecksumResult`, `RawKv\KeyTtl` | the result DTOs of `compareAndSwap()`, `checksum()` and `getKeyTTLResult()` |
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
 | `TxnKv\TransactionStatus` | the enum returned by `Transaction::getStatus()` |
 | `Exception\*` | `TiKvException` and every subclass, plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |

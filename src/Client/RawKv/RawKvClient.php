@@ -1008,6 +1008,12 @@ final class RawKvClient
     }
 
     /**
+     * Get the remaining TTL of a key in seconds.
+     *
+     * Returns `null` in two different situations: the key does not exist, or
+     * the key exists but has no expiry. Callers that must tell them apart use
+     * {@see getKeyTTLResult()}, which reports existence separately.
+     *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
      * @throws RegionException
@@ -1025,7 +1031,41 @@ final class RawKvClient
         $this->validateKeyNotEmpty($key, 'getKeyTTL');
         $this->validateKeySize($key, 'getKeyTTL');
 
-        return $this->crud->getKeyTTL($key, $this->createRetryExecutor(), $this->columnFamily);
+        return $this->lookupKeyTtl($key)->ttlSeconds;
+    }
+
+    /**
+     * Look up a key's TTL, distinguishing a missing key from one without an
+     * expiry.
+     *
+     * The returned {@see KeyTtl} reports `exists` and `ttlSeconds`: a missing
+     * key is `exists: false, ttlSeconds: null`, a key without an expiry is
+     * `exists: true, ttlSeconds: null`, and a key with an expiry is
+     * `exists: true, ttlSeconds: > 0`.
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
+     */
+    public function getKeyTTLResult(string $key): KeyTtl
+    {
+        $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'getKeyTTLResult');
+        $this->validateKeySize($key, 'getKeyTTLResult');
+
+        return $this->lookupKeyTtl($key);
+    }
+
+    private function lookupKeyTtl(string $key): KeyTtl
+    {
+        return $this->crud->getKeyTTLResult($key, $this->createRetryExecutor(), $this->columnFamily);
     }
 
     // ========================================================================

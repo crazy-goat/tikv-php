@@ -211,14 +211,14 @@ final readonly class RawKvCrud
         });
     }
 
-    public function getKeyTTL(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): ?int
+    public function getKeyTTLResult(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): KeyTtl
     {
         $excludedStore = null;
         $targetStoreId = null;
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $columnFamily, &$excludedStore, &$targetStoreId): ?int {
+            function () use ($key, $columnFamily, &$excludedStore, &$targetStoreId): KeyTtl {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
@@ -264,11 +264,11 @@ final readonly class RawKvCrud
                 }
 
                 if ($response->getNotFound()) {
-                    return null;
+                    return new KeyTtl(exists: false, ttlSeconds: null);
                 }
 
                 $ttl = (int) $response->getTtl();
-                return $ttl > 0 ? $ttl : null;
+                return new KeyTtl(exists: true, ttlSeconds: $ttl > 0 ? $ttl : null);
             },
             targetStoreId: static function () use (&$targetStoreId): ?int {
                 return $targetStoreId;
