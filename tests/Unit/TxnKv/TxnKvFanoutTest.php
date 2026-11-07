@@ -21,6 +21,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
@@ -391,9 +392,11 @@ final class TxnKvFanoutTest extends TestCase
     }
 
     /**
-     * A failing secondary prewrite must surface the region's original
-     * exception (first-abort semantics preserved from the sequential loop),
-     * not a BatchPartialFailureException aggregate.
+     * A failing secondary prewrite must surface the first region's error
+     * (first-abort semantics preserved from the sequential loop), not a
+     * BatchPartialFailureException aggregate. The error is the executor's
+     * RetryBudgetExhaustedException, which carries the region's original
+     * GrpcException as getPrevious().
      */
     public function testFailingPrewriteSurfacesOriginalException(): void
     {
@@ -412,9 +415,14 @@ final class TxnKvFanoutTest extends TestCase
             $txn->set("k{$i}", "v{$i}");
         }
 
-        $this->expectException(GrpcException::class);
-        $this->expectExceptionMessage('boom');
-        $txn->commit();
+        try {
+            $txn->commit();
+            self::fail('Expected the prewrite retry budget to exhaust');
+        } catch (RetryBudgetExhaustedException $e) {
+            $previous = $e->getPrevious();
+            self::assertInstanceOf(GrpcException::class, $previous);
+            self::assertStringContainsString('boom', $previous->getMessage());
+        }
     }
 
     /**

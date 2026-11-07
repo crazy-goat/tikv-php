@@ -1652,8 +1652,9 @@ Four consequences to keep:
    the original object still get it from `getPrevious()`.
 3. **Region errors are unchanged.** `NotLeader`, `EpochNotMatch`, … are rejected
    before the write is proposed and stay retryable; a retried-and-succeeded
-   region error still returns a `CasResult`, and an exhausted retry budget still
-   surfaces as `RetryBudgetExhaustedException` / `RegionException`, never as an
+   region error still returns a `CasResult`, and an exhausted retry budget
+   surfaces as `RetryBudgetExhaustedException` with the original error in
+   `getPrevious()`, never as an
    indeterminate CAS. The `UndeterminedResult` kind is the documented exception:
    it says the result is unknown but is still retried today — a known limitation
    of the current classifier, not changed by this issue.

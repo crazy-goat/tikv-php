@@ -44,6 +44,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
@@ -5795,7 +5796,7 @@ class TransactionTest extends TestCase
     // Retry — budget exhaustion
     // ========================================================================
 
-    public function testExecuteWithRetryExhaustsBudgetAndThrowsOriginalException(): void
+    public function testExecuteWithRetryExhaustsBudgetAndWrapsOriginalException(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
@@ -5815,11 +5816,15 @@ class TransactionTest extends TestCase
                 },
             );
 
-        $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('StaleCommand');
+        $this->expectException(RetryBudgetExhaustedException::class);
 
-        $txn = $this->createTransaction(['pessimistic' => false, 'maxBackoffMs' => 1]);
-        $txn->get('key');
+        try {
+            $txn = $this->createTransaction(['pessimistic' => false, 'maxBackoffMs' => 1]);
+            $txn->get('key');
+        } catch (RetryBudgetExhaustedException $e) {
+            $this->assertSame($originalException, $e->getPrevious());
+            throw $e;
+        }
     }
 
     // ========================================================================

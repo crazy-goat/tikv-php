@@ -16,6 +16,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -250,8 +251,9 @@ class RetryExecutorInvalidationMetricsTest extends TestCase
                 return 'ok';
             });
             $this->fail('Expected the retry budget to exhaust');
-        } catch (RegionException) {
-            // expected — original error rethrown when maxBackoffMs crosses
+        } catch (RetryBudgetExhaustedException) {
+            // expected — the backoff budget crossing maxBackoffMs wraps the
+            // last RegionException as getPrevious()
         }
 
         $this->assertGreaterThan(2, $calls, 'NotLeader must be retried multiple times');
@@ -289,7 +291,7 @@ class RetryExecutorInvalidationMetricsTest extends TestCase
                 return 'ok';
             });
             $this->fail('Expected the retry budget to exhaust');
-        } catch (RegionException) {
+        } catch (RetryBudgetExhaustedException) {
             // expected
         }
 

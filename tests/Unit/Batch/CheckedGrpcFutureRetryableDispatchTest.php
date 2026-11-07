@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -271,8 +272,8 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
         try {
             $future->waitForExecutor();
             self::fail('Expected the retry budget to be exhausted');
-        } catch (TiKvException $e) {
-            self::assertInstanceOf(RegionException::class, $e);
+        } catch (RetryBudgetExhaustedException $e) {
+            self::assertInstanceOf(RegionException::class, $e->getPrevious());
         }
 
         self::assertGreaterThanOrEqual(3, $attempts);

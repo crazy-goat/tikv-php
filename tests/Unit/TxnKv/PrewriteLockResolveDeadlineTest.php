@@ -270,7 +270,8 @@ final class PrewriteLockResolveDeadlineTest extends TestCase
      * behaviour: the resolver reports the live lock as retryable and the
      * executor's cumulative-backoff budget (not a deadline) decides when to
      * give up. With `maxBackoffMs = 1` the first charge exhausts that budget,
-     * so the original `TxnRetryableException` is rethrown.
+     * so `RetryBudgetExhaustedException` is thrown with the original
+     * `TxnRetryableException` as `getPrevious()`.
      */
     public function testNoDeadlineExecutorKeepsTheRetryableLockBehaviour(): void
     {
@@ -297,7 +298,8 @@ final class PrewriteLockResolveDeadlineTest extends TestCase
         try {
             $txn->commit();
             self::fail('the live lock must be reported as retryable without a deadline');
-        } catch (TxnRetryableException) {
+        } catch (RetryBudgetExhaustedException $e) {
+            self::assertInstanceOf(TxnRetryableException::class, $e->getPrevious());
             self::assertSame(1, $prewriteCalls);
         }
 
