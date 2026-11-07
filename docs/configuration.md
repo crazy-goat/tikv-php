@@ -463,13 +463,13 @@ deterministically for that data, even though the client's scan limit allows
 ```php
 $options = [
     'grpc' => [
-        'maxReceiveMessageBytes' => 67108864, // default: 64 MB (gRPC core default: 4 MB)
-        'maxSendMessageBytes'    => 67108864, // default: 64 MB
-        'keepaliveTimeMs'        => 10000,    // default: 10 s — ping interval on idle connections
-        'keepaliveTimeoutMs'     => 3000,     // default: 3 s
-        'keepalivePermitWithoutCalls' => true, // default: true — ping while no call is in flight
-        'compression'            => 'none',   // default: none; 'gzip' or 'deflate' to enable
-        'initialWindowSizeBytes' => 0,        // default: 0 = let the gRPC core auto-tune
+        'maxReceiveMessageBytes'      => 67108864, // default: 64 MB (gRPC core default: 4 MB)
+        'maxSendMessageBytes'         => 67108864, // default: 64 MB
+        'keepaliveTimeMs'             => 10000,    // default: 10 s — ping interval on idle connections
+        'keepaliveTimeoutMs'          => 3000,     // default: 3 s
+        'keepalivePermitWithoutCalls' => true,     // default: true — ping while no call is in flight
+        'compression'                 => 'none',   // default: none; 'gzip' or 'deflate' to compress requests
+        'initialWindowSizeBytes'      => 0,        // default: 0 = let the gRPC core auto-tune
     ],
 ];
 
@@ -490,18 +490,28 @@ stateful firewalls / NAT gateways — which typically drop idle flows after
 retransmission gives up. Lowering `maxReceiveMessageBytes` is a valid
 hardening choice when you know your values are small.
 
-Compression is off by default: `'gzip'` or `'deflate'` sets
-`grpc.default_compression_algorithm` on every channel, trading CPU for wire
-size on large values. The server must support the algorithm, and gzip is the
-one every gRPC implementation ships; deflate is optional. A non-default
-algorithm changes the channel key, so a process that uses both compressed and
-uncompressed clients to the same store keeps two TCP connections.
+Compression is off by default and applies to the **outgoing** side:
+`'gzip'` or `'deflate'` sets `grpc.default_compression_algorithm` on every
+channel, so requests are compressed. Responses are not controlled by this
+option — the server compresses them (or not) based on the client's advertised
+`grpc-accept-encoding`, which the core sends regardless of the default. The
+trade-off is CPU for wire size on large values. The server must support the
+algorithm, and gzip is the one every gRPC implementation ships; deflate is
+optional.
 
 `initialWindowSizeBytes` sets `grpc.http2.lookahead_bytes`, the gRPC core's
 HTTP/2 initial stream window (0 leaves the core's BDP-based auto-tuning in
-place). Raise it for known high-latency links with large responses; it also
-disables the auto-tuning, so the configured value is a fixed memory budget
-per stream.
+place). Raise it for known high-latency links with large responses. A positive
+value also sets `grpc.http2.bdp_probe` to `0`: without that, BDP probing
+re-tunes the window from its bandwidth estimate almost immediately, so the
+configured value would only be a starting point. The trade-off is a fixed
+window that no longer adapts to the link.
+
+All three of `keepalivePermitWithoutCalls`, `compression` and
+`initialWindowSizeBytes` add or change channel arguments, and ext-grpc keys
+its persistent channels on those arguments. A client configured with a
+different value therefore uses a distinct underlying channel (a separate TCP
+connection) from a default-configured client for the same store address.
 
 ### Channel Pool (maxChannels, idleTtlMs)
 

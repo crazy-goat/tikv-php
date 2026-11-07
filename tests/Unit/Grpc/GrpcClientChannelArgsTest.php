@@ -89,6 +89,8 @@ class GrpcClientChannelArgsTest extends TestCase
         $args = $this->channelArgsOf(new GrpcClient(initialWindowSizeBytes: 1 << 27));
 
         $this->assertSame(1 << 27, $args['grpc.http2.lookahead_bytes']);
+        // A fixed window needs BDP probing off, or the core re-tunes it.
+        $this->assertSame(0, $args['grpc.http2.bdp_probe']);
     }
 
     public function testInitialWindowSizeIsLeftToGrpcByDefault(): void
@@ -96,6 +98,7 @@ class GrpcClientChannelArgsTest extends TestCase
         $args = $this->channelArgsOf(new GrpcClient());
 
         $this->assertArrayNotHasKey('grpc.http2.lookahead_bytes', $args);
+        $this->assertArrayNotHasKey('grpc.http2.bdp_probe', $args);
     }
 
     public function testInitialWindowSizeMustNotBeNegative(): void

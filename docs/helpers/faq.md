@@ -1065,6 +1065,25 @@ single seam — its output is the effective channel key material — and it is
 unit-tested via reflection in the Unit suite (`GrpcClientChannelArgsTest`)
 without ext-grpc, since no real channel is created.
 
+## There is no `grpc.http2.initial_window_size` channel arg (#423)
+
+The gRPC HTTP/2 initial stream window is not a channel argument of its own.
+`grpc.http2.lookahead_bytes` (`GRPC_ARG_HTTP2_STREAM_LOOKAHEAD_BYTES`) is the
+knob: `chttp2_transport.cc::read_channel_args()` feeds it to
+`settings.SetInitialWindowSize()` and `flow_control.set_target_initial_window_size()`.
+`grpc.http2.initial_window_size` — the name used in issue #423's sketch — does
+not exist and is silently ignored by the core, so `GrpcClient` maps
+`initialWindowSizeBytes` to `lookahead_bytes`.
+
+`lookahead_bytes` alone does **not** pin the window: while
+`grpc.http2.bdp_probe` is true (the default) the chttp2 transport's
+`PeriodicUpdate()` overwrites `target_initial_window_size_` from its BDP
+estimate and memory pressure almost immediately, so the configured value is
+only a starting point. `GrpcClient` therefore also emits
+`grpc.http2.bdp_probe => 0` when `initialWindowSizeBytes > 0`; the cost is a
+fixed window that no longer adapts to the link. Do not "fix" that by dropping
+the bdp_probe arg — the configured window would not stick.
+
 ## ext-grpc's persistent channels are shared and reference-counted (#283)
 
 `Grpc\Channel` keys its process-global persistent-channel table on the

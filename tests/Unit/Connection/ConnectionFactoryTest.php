@@ -225,6 +225,19 @@ class ConnectionFactoryTest extends TestCase
         );
     }
 
+    public function testGrpcOptionsRejectNonIntInitialWindowSize(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['grpc'][initialWindowSizeBytes] must be an int >= 0, got string",
+        );
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpc' => ['initialWindowSizeBytes' => '1024']],
+        );
+    }
+
     // ========================================================================
     // options['tsoPoolSize'] — PD TSO timestamp pool (issue #292)
     // ========================================================================

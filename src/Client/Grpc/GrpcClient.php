@@ -149,8 +149,12 @@ final class GrpcClient implements GrpcClientInterface
     /**
      * HTTP/2 initial stream window size in bytes
      * (grpc.http2.lookahead_bytes). 0 leaves the gRPC core default in
-     * place; a positive value disables its BDP-based auto-tuning and fixes
-     * the window, so raise it only for known high-latency links.
+     * place. A positive value also turns BDP probing off
+     * (grpc.http2.bdp_probe => 0), because the probe would otherwise
+     * re-tune the window from its bandwidth estimate and memory pressure
+     * almost immediately, making the configured value only a starting
+     * point. The trade-off is a fixed window: it no longer adapts to the
+     * link's bandwidth-delay product.
      */
     public const DEFAULT_INITIAL_WINDOW_SIZE_BYTES = 0;
 
@@ -223,7 +227,10 @@ final class GrpcClient implements GrpcClientInterface
      *                            {@see self::COMPRESSION_GZIP} or {@see self::COMPRESSION_DEFLATE}.
      * @param int $initialWindowSizeBytes grpc.http2.lookahead_bytes channel argument in bytes
      *                                    (default 0 = leave the gRPC core default, which
-     *                                    auto-tunes the HTTP/2 initial stream window).
+     *                                    auto-tunes the HTTP/2 initial stream window). A
+     *                                    positive value also sets grpc.http2.bdp_probe to 0,
+     *                                    so the window is fixed instead of being re-tuned
+     *                                    from the core's bandwidth estimate.
      * @param (\Closure(): float)|null $clock Source of the current time in seconds
      *                                         (default `microtime(true)`). Tests inject
      *                                         a fake clock to age channels without sleeping.
@@ -1042,9 +1049,12 @@ final class GrpcClient implements GrpcClientInterface
         // gRPC C core has no "initial_window_size" channel argument; the
         // HTTP/2 initial stream window is set through
         // grpc.http2.lookahead_bytes (it feeds SetInitialWindowSize and
-        // target_initial_window_size in the chttp2 transport).
+        // target_initial_window_size in the chttp2 transport). BDP probing
+        // would re-tune that target almost immediately, so it is turned off
+        // when a fixed window was asked for.
         if ($this->initialWindowSizeBytes > 0) {
             $args['grpc.http2.lookahead_bytes'] = $this->initialWindowSizeBytes;
+            $args['grpc.http2.bdp_probe'] = 0;
         }
 
         return $args;
