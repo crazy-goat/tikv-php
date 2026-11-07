@@ -101,7 +101,16 @@ class RawKvClientTest extends TestCase
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
-        $this->client = new RawKvClient($this->pdClient, $this->grpc, $this->regionCache);
+        $this->client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            // The lifecycle tests below pin the close() contract on a client
+            // that owns its connections; ownership of hand-assembled clients
+            // is covered by RawKvClientOwnershipTest (issue #204).
+            ownsGrpcClient: true,
+            ownsPdClient: true,
+        );
     }
 
     /**

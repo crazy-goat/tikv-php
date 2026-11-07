@@ -116,42 +116,24 @@ class TlsConfigTest extends TestCase
     }
 
     // ========================================================================
-    // close() key-zeroing
+    // SEC-12: no in-memory scrubbing
     // ========================================================================
 
-    public function testCloseZeroesClientKey(): void
+    /**
+     * PHP strings are immutable and copy-on-write, so a "zero the key"
+     * method only rebinds the property to a new string: the original buffer
+     * and the copy already handed to gRPC stay in memory. Such a method also
+     * breaks reconnection when a caller uses it as documented, because the
+     * transport rebuilds the credentials from this object after eviction
+     * (issue #315, SEC-12). Do not reintroduce one.
+     */
+    public function testThereIsNoCloseMethodThatClaimsToScrubCredentials(): void
     {
-        $config = new TlsConfig(caCert: self::CA_PEM, clientCert: self::CERT_PEM, clientKey: self::KEY_PEM);
-
-        $config->close();
-
-        $this->assertNotNull($config->clientKey);
-        $this->assertSame(strlen(self::KEY_PEM), strlen($config->clientKey));
-        $this->assertSame(str_repeat("\0", strlen(self::KEY_PEM)), $config->clientKey);
-    }
-
-    public function testCloseWithNullClientKeyDoesNotCrash(): void
-    {
-        $config = new TlsConfig(caCert: self::CA_PEM);
-
-        // Should not throw
-        $config->close();
-
-        $this->assertNull($config->clientKey);
-    }
-
-    public function testCloseDoesNotAffectCaCertOrClientCert(): void
-    {
-        $config = new TlsConfig(
-            caCert: self::CA_PEM,
-            clientCert: self::CERT_PEM,
-            clientKey: "-----BEGIN PRIVATE KEY-----\nsensitive-key\n-----END PRIVATE KEY-----",
+        $this->assertFalse(
+            (new \ReflectionClass(TlsConfig::class))->hasMethod('close'),
+            'TlsConfig must not expose a credential-scrubbing close(): PHP cannot zero a string, '
+            . 'and zeroing clientKey would break channel re-creation after eviction',
         );
-
-        $config->close();
-
-        $this->assertSame(self::CA_PEM, $config->caCert);
-        $this->assertSame(self::CERT_PEM, $config->clientCert);
     }
 
     // ========================================================================

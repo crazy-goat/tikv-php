@@ -1254,18 +1254,18 @@ $client = new RawKvClient(
     $pdClient,
     $grpcClient,
     new RegionCache(ttlSeconds: 60),
-    ownsGrpcClient: false, // the transport is the application's
 );
 ```
 
-`create()` always builds the default. A hand-assembled client closes the
-transport it was given unless you pass `ownsGrpcClient: false` — see
+`create()` always builds the default. A hand-assembled client closes only
+the connections it owns: the transport and the PD client it is given stay
+open, so the application remains their owner and may share them with other
+clients (issue #204). Pass `ownsGrpcClient: true` and/or `ownsPdClient: true`
+to transfer ownership — see
 [Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients).
 A `RegionCache` passed to the constructor is still cleared by `close()` (the
 client has no ownership flag for it), so do not share one between clients
-that you close independently. The same applies to the `PdClient`: `close()`
-always closes it (there is no `ownsPdClient` flag), resetting its store
-cache, TSO pool and leader-discovery state.
+that you close independently.
 
 ### Long-running workers and CLI daemons (recommended)
 
@@ -1333,8 +1333,11 @@ userland state, and a live channel is not serializable.
 `close()` releases the client's resources in guarded steps: `TxnKvClient`
 first rolls back the transactions it began that are still active
 (`RawKvClient` has no transactions), then the client clears the region cache,
-closes the gRPC transport if the client owns it, and closes the PD client
-(always — there is no ownership flag for it). Outside PHP's shutdown
+closes the gRPC transport if the client owns it, and closes the PD client if
+it owns it too. `RawKvClient::create()` owns the PD client and the transport
+it built; a hand-assembled `RawKvClient` leaves both supplied connections open
+(see [Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients)).
+`TxnKvClient` still closes its PD client unconditionally. Outside PHP's shutdown
 sequence, the transaction rollback runs while the region cache, transport
 and PD client are still usable, so an abandoned transaction does not leave
 its locks behind until the TTL expires. Once PHP is shutting down, the
@@ -1365,8 +1368,10 @@ before calling `close()`, or expect them to fail. A client built with
 calls continue (and become the application's responsibility when it closes
 the transport).
 
-`__destruct()` calls `close()`, so a forgotten `close()` is not a leak: the
-caches and handles are released when the object is destroyed. In a
+`__destruct()` calls `close()`, so a client built by `create()` releases its
+caches, handles and connections when the object is destroyed. A client
+assembled by hand releases only its own caches: the transport and PD client
+it was given stay open, because the caller owns them (issue #204). In a
 long-running process, still call `close()` explicitly so resources are
 released at a known point instead of at an arbitrary destructor.
 
