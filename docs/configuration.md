@@ -290,10 +290,10 @@ the client to cluster 0. The header and error-string rules live in one shared
 REG-19).
 
 An absent or explicitly `null` option keeps the historical initial
-learn-and-adopt behaviour: the first cluster ID PD reports is adopted.
-Existing deployments that relied on an error string replacing an already
-established ID do change — intentionally. The option must be a positive
-integer; any other type, `0` or a negative value throws
+learn-and-adopt behaviour: the first non-zero cluster ID PD reports is
+adopted. Existing deployments that relied on an error string replacing an
+already established ID do change — intentionally. The option must be a
+positive integer; any other type, `0` or a negative value throws
 `InvalidArgumentException` at client creation. The value must fit in a PHP
 `int`: PD cluster IDs are `uint64`, and the protobuf runtime clamps a decoded
 value above `PHP_INT_MAX` to `PHP_INT_MAX`, so a cluster whose ID exceeds

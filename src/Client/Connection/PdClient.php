@@ -294,10 +294,10 @@ final class PdClient implements PdClientInterface
      * what every subsequent PD and TSO RPC targets, and `GetMembers` is the
      * RPC that reports it, so a health check that discarded it was
      * reporting less than it had learned). Returns the cluster ID on
-     * success; returns null if the response carried no cluster ID header.
-     * When an expected cluster ID is configured (issue #308, SEC-05), a
-     * response without a cluster ID header is a protocol violation and
-     * throws instead of returning null.
+     * success; returns null if the response carried no cluster ID header or
+     * reported `0`. When an expected cluster ID is configured (issue #308,
+     * SEC-05), a response without a cluster ID header is a protocol
+     * violation and throws instead of returning null.
      * Unlike getRegion(), this call does NOT look up any user data and never
      * fails with "no region" — making it suitable as a health check.
      *

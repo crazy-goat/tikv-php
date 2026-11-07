@@ -1069,7 +1069,7 @@ class PdClientTest extends TestCase
     }
 
     // ========================================================================
-    //  extractClusterIdFromError tests (indirect via callWithClusterIdRetry)
+    //  cluster-id mismatch parsing (indirect via callWithClusterIdRetry)
     // ========================================================================
 
     public function testNonMismatchErrorDoesNotRetry(): void
@@ -1394,6 +1394,30 @@ class PdClientTest extends TestCase
         $client->getRegion('key');
 
         $this->assertNull($client->getClusterId());
+    }
+
+    public function testHeaderClusterIdZeroAfterLearningKeepsEstablishedId(): void
+    {
+        $learned = $this->makeGetRegionResponse();
+
+        $zeroHeader = new ResponseHeader();
+        $zeroHeader->setClusterId(0);
+        $zero = $this->makeGetRegionResponse();
+        $zero->setHeader($zeroHeader);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls($learned, $zero);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $client->getRegion('key1');
+        $this->assertSame(12345, $client->getClusterId());
+
+        // A header reporting 0 means "not reported", not a different cluster:
+        // it must neither clear nor replace the established ID.
+        $client->getRegion('key2');
+        $this->assertSame(12345, $client->getClusterId());
     }
 
     public function testSetClusterIdRejectsZero(): void
