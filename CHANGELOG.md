@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Added
+
+- `options['grpc']` on `RawKvClient::create()` / `TxnKvClient::create()` now also accepts `keepalivePermitWithoutCalls` (bool, default `true`), `compression` (`'none'` — the default — `'gzip'` or `'deflate'`) and `initialWindowSizeBytes` (int `>= 0`, default `0` = leave the gRPC core default), plus the matching `GrpcClient` constructor parameters (issue #423, GAP-09). `grpc.keepalive_permit_without_calls` is no longer hardcoded to 1; compression is off by default and maps to `grpc.default_compression_algorithm` (the numeric `grpc_compression_algorithm` value, emitted only when enabled); the window size maps to `grpc.http2.lookahead_bytes`, which is the gRPC C core's HTTP/2 initial stream window — the issue's `grpc.http2.initial_window_size` name does not exist in the core and would be silently ignored. Default-configured clients emit the same channel arguments as before, so their persistent-channel key is unchanged. Documented in `docs/configuration.md#grpc-channel-options`. (#423)
+
 ### Fixed
 
 - PD cluster identity is now verified on every response, not only when it is first learned (issue #250, REG-19). Once a cluster ID has been adopted, a later PD response header naming a different cluster raises `TiKvException` (`Cluster ID mismatch: established X, server reported Y`) instead of being accepted, so a PD endpoint repointed at another cluster (a VIP move, a restored backup, staging pointed at production) can no longer silently take over region routing; `setClusterId()` applies the same no-overwrite rule. A reported cluster ID of `0` — proto3's unset value — is treated as "not learned": it is never adopted, `healthCheck()` / `getClusterId()` keep returning `null` instead of pinning the client to cluster 0, and `setClusterId()` rejects non-positive IDs. The learning/verification rules and the `mismatch cluster id, need X but got Y` parsing now live in one shared `ClusterIdGuard` used by `PdClient` and `TimestampOracle`, instead of two divergent copies. (#250)

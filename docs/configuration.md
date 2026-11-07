@@ -467,6 +467,9 @@ $options = [
         'maxSendMessageBytes'    => 67108864, // default: 64 MB
         'keepaliveTimeMs'        => 10000,    // default: 10 s — ping interval on idle connections
         'keepaliveTimeoutMs'     => 3000,     // default: 3 s
+        'keepalivePermitWithoutCalls' => true, // default: true — ping while no call is in flight
+        'compression'            => 'none',   // default: none; 'gzip' or 'deflate' to enable
+        'initialWindowSizeBytes' => 0,        // default: 0 = let the gRPC core auto-tune
     ],
 ];
 
@@ -476,12 +479,29 @@ $client = RawKvClient::create(
 );
 ```
 
-All values must be ints `>= 1`. Keepalive pings (sent every `keepaliveTimeMs`,
-even without in-flight calls) keep idle connections alive behind stateful
-firewalls / NAT gateways — which typically drop idle flows after ~5 minutes —
-so a dead connection is detected rather than blocking until TCP retransmission
-gives up. Lowering `maxReceiveMessageBytes` is a valid hardening choice when
-you know your values are small.
+The byte limits and keepalive timings must be ints `>= 1`;
+`keepalivePermitWithoutCalls` must be a bool, `compression` one of `none`,
+`gzip` or `deflate`, and `initialWindowSizeBytes` an int `>= 0`.
+
+Keepalive pings (sent every `keepaliveTimeMs`, even without in-flight calls
+when `keepalivePermitWithoutCalls` is true) keep idle connections alive behind
+stateful firewalls / NAT gateways — which typically drop idle flows after
+~5 minutes — so a dead connection is detected rather than blocking until TCP
+retransmission gives up. Lowering `maxReceiveMessageBytes` is a valid
+hardening choice when you know your values are small.
+
+Compression is off by default: `'gzip'` or `'deflate'` sets
+`grpc.default_compression_algorithm` on every channel, trading CPU for wire
+size on large values. The server must support the algorithm, and gzip is the
+one every gRPC implementation ships; deflate is optional. A non-default
+algorithm changes the channel key, so a process that uses both compressed and
+uncompressed clients to the same store keeps two TCP connections.
+
+`initialWindowSizeBytes` sets `grpc.http2.lookahead_bytes`, the gRPC core's
+HTTP/2 initial stream window (0 leaves the core's BDP-based auto-tuning in
+place). Raise it for known high-latency links with large responses; it also
+disables the auto-tuning, so the configured value is a fixed memory budget
+per stream.
 
 ### Channel Pool (maxChannels, idleTtlMs)
 

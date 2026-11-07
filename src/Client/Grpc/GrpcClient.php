@@ -130,6 +130,42 @@ final class GrpcClient implements GrpcClientInterface
     public const DEFAULT_KEEPALIVE_TIMEOUT_MS = 3000;
 
     /**
+     * Whether keepalive pings may be sent while no call is in flight
+     * (grpc.keepalive_permit_without_calls). True by default: without it the
+     * ping only runs during an RPC, which is exactly when the connection is
+     * demonstrably alive, so idle NAT/firewall-dropped flows go undetected.
+     */
+    public const DEFAULT_KEEPALIVE_PERMIT_WITHOUT_CALLS = true;
+
+    /**
+     * Outgoing message compression (grpc.default_compression_algorithm).
+     * Off by default, matching the gRPC core's own default.
+     */
+    public const COMPRESSION_NONE = 'none';
+    public const COMPRESSION_GZIP = 'gzip';
+    public const COMPRESSION_DEFLATE = 'deflate';
+    public const DEFAULT_COMPRESSION = self::COMPRESSION_NONE;
+
+    /**
+     * HTTP/2 initial stream window size in bytes
+     * (grpc.http2.lookahead_bytes). 0 leaves the gRPC core default in
+     * place; a positive value disables its BDP-based auto-tuning and fixes
+     * the window, so raise it only for known high-latency links.
+     */
+    public const DEFAULT_INITIAL_WINDOW_SIZE_BYTES = 0;
+
+    /**
+     * Numeric grpc_compression_algorithm values the channel argument expects
+     * (0 is identity, i.e. no compression, and is passed by omitting the arg).
+     *
+     * @var array<string, int>
+     */
+    private const COMPRESSION_ALGORITHM_IDS = [
+        self::COMPRESSION_DEFLATE => 1,
+        self::COMPRESSION_GZIP => 2,
+    ];
+
+    /**
      * Deadline applied to a call whose `$timeoutMs` is null (issue #260).
      *
      * `null` used to mean "no deadline" (`Timeval::infFuture()`), which is
@@ -179,6 +215,15 @@ final class GrpcClient implements GrpcClientInterface
      *                             how often to ping an idle connection so NAT/firewall-dropped
      *                             flows are detected instead of silently dead.
      * @param int $keepaliveTimeoutMs grpc.keepalive_timeout_ms channel argument (default 3 s).
+     * @param bool $keepalivePermitWithoutCalls grpc.keepalive_permit_without_calls channel
+     *                             argument (default true) — whether pings may be sent while no
+     *                             call is in flight.
+     * @param string $compression grpc.default_compression_algorithm channel argument: one of
+     *                            {@see self::COMPRESSION_NONE} (default, no arg is emitted),
+     *                            {@see self::COMPRESSION_GZIP} or {@see self::COMPRESSION_DEFLATE}.
+     * @param int $initialWindowSizeBytes grpc.http2.lookahead_bytes channel argument in bytes
+     *                                    (default 0 = leave the gRPC core default, which
+     *                                    auto-tunes the HTTP/2 initial stream window).
      * @param (\Closure(): float)|null $clock Source of the current time in seconds
      *                                         (default `microtime(true)`). Tests inject
      *                                         a fake clock to age channels without sleeping.
@@ -194,6 +239,9 @@ final class GrpcClient implements GrpcClientInterface
         private readonly int $maxSendMessageBytes = self::DEFAULT_MAX_SEND_MESSAGE_BYTES,
         private readonly int $keepaliveTimeMs = self::DEFAULT_KEEPALIVE_TIME_MS,
         private readonly int $keepaliveTimeoutMs = self::DEFAULT_KEEPALIVE_TIMEOUT_MS,
+        private readonly bool $keepalivePermitWithoutCalls = self::DEFAULT_KEEPALIVE_PERMIT_WITHOUT_CALLS,
+        private readonly string $compression = self::DEFAULT_COMPRESSION,
+        private readonly int $initialWindowSizeBytes = self::DEFAULT_INITIAL_WINDOW_SIZE_BYTES,
         private readonly ?\Closure $clock = null,
     ) {
         if ($this->maxChannels < 1) {
@@ -219,6 +267,18 @@ final class GrpcClient implements GrpcClientInterface
         if ($this->keepaliveTimeoutMs < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
                 'keepaliveTimeoutMs must be at least 1',
+            );
+        }
+        $compressions = [self::COMPRESSION_NONE, self::COMPRESSION_GZIP, self::COMPRESSION_DEFLATE];
+        if (!in_array($this->compression, $compressions, true)) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(sprintf(
+                "compression must be one of 'none', 'gzip', 'deflate', got '%s'",
+                $this->compression,
+            ));
+        }
+        if ($this->initialWindowSizeBytes < 0) {
+            throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
+                'initialWindowSizeBytes must be greater than or equal to 0',
             );
         }
     }
@@ -950,24 +1010,44 @@ final class GrpcClient implements GrpcClientInterface
     }
 
     /**
-     * gRPC channel arguments applied to every created channel (issue #265).
+     * gRPC channel arguments applied to every created channel (issue #265,
+     * #423).
      *
      * Note: adding channel arguments changes ext-grpc's persistent-channel
      * key, which is desirable — two GrpcClient instances configured
      * differently get distinct channels.
      *
+     * Compression is emitted only when enabled (the gRPC core default is
+     * identity, i.e. no compression), and the window size only when set, so
+     * a default-configured client keeps the same channel key it had before
+     * these options existed.
+     *
      * @return array<string, int|string|bool>
      */
     private function channelArgs(): array
     {
-        return [
+        $args = [
             'grpc.max_receive_message_length' => $this->maxReceiveMessageBytes,
             'grpc.max_send_message_length' => $this->maxSendMessageBytes,
             'grpc.keepalive_time_ms' => $this->keepaliveTimeMs,
             'grpc.keepalive_timeout_ms' => $this->keepaliveTimeoutMs,
-            'grpc.keepalive_permit_without_calls' => 1,
+            'grpc.keepalive_permit_without_calls' => $this->keepalivePermitWithoutCalls ? 1 : 0,
             'grpc.http2.max_pings_without_data' => 0,
         ];
+
+        if ($this->compression !== self::COMPRESSION_NONE) {
+            $args['grpc.default_compression_algorithm'] = self::COMPRESSION_ALGORITHM_IDS[$this->compression];
+        }
+
+        // gRPC C core has no "initial_window_size" channel argument; the
+        // HTTP/2 initial stream window is set through
+        // grpc.http2.lookahead_bytes (it feeds SetInitialWindowSize and
+        // target_initial_window_size in the chttp2 transport).
+        if ($this->initialWindowSizeBytes > 0) {
+            $args['grpc.http2.lookahead_bytes'] = $this->initialWindowSizeBytes;
+        }
+
+        return $args;
     }
 
     private function now(): float

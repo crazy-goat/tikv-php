@@ -52,6 +52,59 @@ class GrpcClientChannelArgsTest extends TestCase
         $this->assertSame(1000, $args['grpc.keepalive_timeout_ms']);
     }
 
+    public function testCompressionIsOffByDefault(): void
+    {
+        $args = $this->channelArgsOf(new GrpcClient());
+
+        $this->assertArrayNotHasKey('grpc.default_compression_algorithm', $args);
+    }
+
+    public function testCompressionAlgorithmIsPassedIntoChannelArgs(): void
+    {
+        $gzip = $this->channelArgsOf(new GrpcClient(compression: GrpcClient::COMPRESSION_GZIP));
+        $deflate = $this->channelArgsOf(new GrpcClient(compression: GrpcClient::COMPRESSION_DEFLATE));
+
+        $this->assertSame(2, $gzip['grpc.default_compression_algorithm']);
+        $this->assertSame(1, $deflate['grpc.default_compression_algorithm']);
+    }
+
+    public function testUnknownCompressionAlgorithmIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "compression must be one of 'none', 'gzip', 'deflate', got 'snappy'",
+        );
+        new GrpcClient(compression: 'snappy');
+    }
+
+    public function testKeepaliveWithoutCallsIsConfigurable(): void
+    {
+        $disabled = $this->channelArgsOf(new GrpcClient(keepalivePermitWithoutCalls: false));
+
+        $this->assertSame(0, $disabled['grpc.keepalive_permit_without_calls']);
+    }
+
+    public function testInitialWindowSizeIsPassedIntoChannelArgs(): void
+    {
+        $args = $this->channelArgsOf(new GrpcClient(initialWindowSizeBytes: 1 << 27));
+
+        $this->assertSame(1 << 27, $args['grpc.http2.lookahead_bytes']);
+    }
+
+    public function testInitialWindowSizeIsLeftToGrpcByDefault(): void
+    {
+        $args = $this->channelArgsOf(new GrpcClient());
+
+        $this->assertArrayNotHasKey('grpc.http2.lookahead_bytes', $args);
+    }
+
+    public function testInitialWindowSizeMustNotBeNegative(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('initialWindowSizeBytes must be greater than or equal to 0');
+        new GrpcClient(initialWindowSizeBytes: -1);
+    }
+
     public function testMaxReceiveMessageBytesMustBeAtLeastOne(): void
     {
         $this->expectException(InvalidArgumentException::class);
