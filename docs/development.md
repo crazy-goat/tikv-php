@@ -125,6 +125,12 @@ the error-to-backoff mapping; message-based fallbacks live in
 public static function classifyByKind(ErrorKind $kind): ?BackoffType
 ```
 
+`ErrorClassifier::classify()` returns a `RetryVerdict`
+(`src/Client/Retry/RetryVerdict.php`) instead of `?BackoffType`, so a custom
+classifier can distinguish "no opinion" (`RetryVerdict::pass()`) from an
+explicit fatal verdict (`RetryVerdict::fatal()`); the mapping helpers above
+keep returning `?BackoffType` (issue #534).
+
 ## Adding New Features
 
 ### Step-by-Step Guide
@@ -343,28 +349,12 @@ class MyOperationE2ETest extends TestCase
 - Update `README.md` usage section
 - Add example to `examples/` (if applicable)
 
-#### 9. Update Implementation Plans
+#### 9. Update the Changelog
 
-If this was a planned feature:
-
-```markdown
-# docs/superpowers/plans/XX-my-operation.md
-
-# My Operation Implementation
-
-## Status: ✅ COMPLETED
-
-## Implementation
-- [x] Proto message handling
-- [x] RawKvClient method
-- [x] Unit tests
-- [x] E2E tests
-- [x] Documentation
-- [x] Example
-
-## Notes
-Any special considerations...
-```
+Add an entry under `## [Unreleased]` in [`CHANGELOG.md`](../CHANGELOG.md), with
+the issue number in parentheses. Implementation plans live in
+[GitHub Issues](https://github.com/crazy-goat/tikv-php/issues), not in this
+repository.
 
 ### Pattern: Batch Operations
 

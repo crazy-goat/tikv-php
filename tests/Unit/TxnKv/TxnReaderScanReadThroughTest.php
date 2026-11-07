@@ -15,8 +15,8 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TxnReader;
@@ -138,7 +138,7 @@ final class TxnReaderScanReadThroughTest extends TestCase
             10,
             new TransactionState(),
             $this->executor(),
-            static fn (): ?BackoffType => null,
+            static fn (): RetryVerdict => RetryVerdict::pass(),
         );
     }
 
