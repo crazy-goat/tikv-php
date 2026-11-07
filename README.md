@@ -805,6 +805,26 @@ $client = RawKvClient::create(['127.0.0.1:2379'], logger: $logger);
 // - Error conditions
 ```
 
+Every key the client itself formats for a log line or an exception message is
+redacted before it leaves the client. The default
+[`KeyRedactor`](src/Client/Util/KeyRedactor.php) replaces each key with a
+truncated keyed hash and the total byte length, for example
+`#3c469e9d6c5875d3 (5 bytes)`. The digest is the first 16 hex characters of
+`hash_hmac('sha256', $key, $salt)`, so it is **one-way for keys of every
+length** — a key of 8 bytes or fewer is no longer hex-encoded in full — while
+the same key keeps the same token within a process, so log lines can still be
+correlated. The salt is 32 random bytes generated on first use, so the example
+shows the shape only and the exact token differs per process; pin a high-entropy
+salt with `KeyRedactor::setSalt()` before the first redaction when tokens must
+be comparable across processes or restarts. `KeyRedactor::setRedactor()`
+replaces the default entirely: it is an explicit opt-out, and a reversible
+scheme installed there re-exposes the key material. This guarantee covers keys
+the client holds; TiKV's own error text can still name a key the client never
+saw, and the client cannot redact what it never received. See
+[Log Redaction](docs/configuration.md#log-redaction) for the format, the
+server-text caveat, the override trade-off and the exception messages that
+carry a token.
+
 ### Complete Example
 
 ```php
@@ -993,7 +1013,7 @@ Two settings are methods on the client rather than options:
 ### Infrastructure
 - ✅ **PD Region Discovery** — With RegionEpoch support
 - ✅ **Region Routing** — Direct to correct TiKV node
-- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. Both scan paths (RawKV and TxnKV `Transaction::scan()`) read the cache first and query PD only for the uncovered ranges, and report `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels
+- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. RawKV forward scans/iterators and TxnKV `Transaction::scan()` read the cache first and query PD only for the uncovered ranges, reporting `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels; RawKV `reverseScan()` resolves regions top-down through the region resolver and reports `region_resolution`
 - ✅ **Region cache refresh and preload** — opt-in, PHP-process-model friendly (no timers): call `refreshRegionCache()` from a worker tick (throttled by `options['regionCacheRefreshMs']`, default `0` = disabled) and `preloadRegions([['start', 'end'], ...])` at boot to warm the keys the worker will touch without serving a read. Both keep the old entry and only log when PD fails, and are no-ops after `close()` ([Region Cache Refresh and Preload](docs/configuration.md#region-cache-refresh-and-preload))
 - ✅ **Store Cache** — In-memory caching of store addresses
 - ✅ **Retry Logic** — Automatic retry with exponential backoff; the wall-clock bound of one retry loop is `options['retryDeadlineMs']` (see [Retry System](docs/architecture.md#8-retry-system))

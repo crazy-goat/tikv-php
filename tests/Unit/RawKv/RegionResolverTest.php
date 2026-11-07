@@ -54,6 +54,53 @@ class RegionResolverTest extends TestCase
         $this->assertSame($region, $result);
     }
 
+    public function testGetRegionBelowCacheHit(): void
+    {
+        $region = $this->defaultRegion();
+        $this->regionCache->method('getRegionBelow')->with('key')->willReturn($region);
+        $this->pdClient->expects($this->never())->method('getRegion');
+        $this->pdClient->expects($this->never())->method('getPrevRegion');
+
+        $this->assertSame($region, $this->resolver->getRegionBelow('key'));
+    }
+
+    public function testGetRegionBelowInteriorKeyUsesGetRegion(): void
+    {
+        $region = $this->defaultRegion();
+        $this->regionCache->method('getRegionBelow')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->expects($this->once())->method('put')->with($region);
+        $this->pdClient->method('getRegion')->with('key')->willReturn($region);
+        $this->pdClient->expects($this->never())->method('getPrevRegion');
+
+        $this->assertSame($region, $this->resolver->getRegionBelow('key'));
+    }
+
+    public function testGetRegionBelowBoundaryKeyUsesGetPrevRegion(): void
+    {
+        $above = new RegionInfo(2, 1, 1, 1, 1, startKey: 'm');
+        $below = new RegionInfo(1, 1, 1, 1, 1, startKey: '', endKey: 'm');
+        $this->regionCache->method('getRegionBelow')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->with('m')->willReturn($above);
+        $this->pdClient->expects($this->once())->method('getPrevRegion')->with('m')->willReturn($below);
+
+        $this->assertSame($below, $this->resolver->getRegionBelow('m'));
+    }
+
+    public function testGetRegionBelowReturnsNullWhenThereIsNoRegionBelow(): void
+    {
+        $first = new RegionInfo(1, 1, 1, 1, 1, startKey: '', endKey: 'm');
+        $this->regionCache->method('getRegionBelow')->willReturn(null);
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->with('')->willReturn($first);
+        $this->pdClient->method('getPrevRegion')->with('')->willReturn(null);
+
+        $this->assertNull($this->resolver->getRegionBelow(''));
+    }
+
     public function testResolveStoreAddressReturnsAddress(): void
     {
         $store = new Store();

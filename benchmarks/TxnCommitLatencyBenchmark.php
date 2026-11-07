@@ -189,6 +189,11 @@ final class BenchPd implements PdClientInterface
         throw new RuntimeException("no region for key {$key}");
     }
 
+    public function getPrevRegion(string $key): ?RegionInfo
+    {
+        throw new RuntimeException('not used by the benchmark');
+    }
+
     public function getKeyspaceId(string $name): int
     {
         throw new RuntimeException('not used by the benchmark');
