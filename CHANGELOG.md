@@ -31,6 +31,10 @@ policy now classifies as internal.
 
 - `tests/Unit/Ci/WorkflowSupplyChainGuardTest.php` pins the SEC-13 hardening (issue #316): it fails when a workflow adds a `uses:` reference without a full 40-character commit SHA and a trailing version comment, when the CI workflow loses its top-level `permissions: contents: read` block, or when Dependabot stops watching the `github-actions` ecosystem. Local actions and `docker://` references are exempt, the check discovers every `.github/workflows/*.y*ml` so a new workflow cannot escape it, and a `uses:` line the parser cannot read fails instead of being skipped.
 
+### Docs
+
+- `docs/helpers/faq.md` records issue #227 (audit TXN-22) as a premise-expiry duplicate: the transaction `priority` option was reported as never written to the request `Context`, but the write path has carried it since #441 and the read path since #336 (`RegionContextFactory::fromRegionInfo()` / `resolveTarget()` and `TxnReader`), with regression tests in `TransactionTest` and `TxnKvClientTest`, so the audit import needed no source or test change. (#227)
+
 ## [v0.13.0] - 2026-11-07
 
 ### Changed
