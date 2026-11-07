@@ -1539,6 +1539,21 @@ final class RawKvClient
     }
 
     /**
+     * Scan multiple non-contiguous ranges with a client-side loop of
+     * per-range `RawScan` requests; this is not the `RawBatchScan` RPC.
+     *
+     * The RPC count is linear in the number of ranges and the regions they
+     * cover, because every range resolves and scans its own regions. The
+     * per-range sends are fanned out concurrently, bounded by
+     * `options['maxConcurrency']`, so wall-clock latencies overlap without
+     * changing the total work. See
+     * {@see RawKvScanner::batchScan()} for the full cost model.
+     *
+     * Returns one entry per range, each a list of
+     * `['key' => string, 'value' => ?string]` rows (`value` is `null` when
+     * `$keyOnly` is true). A list input keeps its order; non-sequential keys
+     * are re-indexed in ascending key order.
+     *
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
      *
