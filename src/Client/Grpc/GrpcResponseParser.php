@@ -10,22 +10,41 @@ use Google\Protobuf\Internal\Message;
 final class GrpcResponseParser
 {
     /**
-     * Maximum allowed protobuf message size in bytes.
-     * Messages larger than this will be rejected before decoding.
-     * Set to 0 or negative to disable the limit.
+     * Post-allocation size assertion for a decoded response, in bytes.
+     *
+     * This is **not** the control that bounds response memory. The effective
+     * receive limit is the `grpc.max_receive_message_length` channel argument
+     * set by {@see GrpcClient::channelArgs()} (configurable through
+     * `options['grpc']['maxReceiveMessageBytes']`, default 64 MB): grpc-core
+     * rejects an oversized frame before its payload is materialised as a PHP
+     * string. The check below runs only after that string exists, so it cannot
+     * prevent the allocation it appears to guard against (SEC-16, issue #319).
+     *
+     * It is kept as defence in depth: a caller can set it tighter than the
+     * transport limit to skip the second, larger allocation performed by
+     * protobuf decoding. Set to 0 or negative to disable it (default).
      */
     private static int $maxMessageSize = 0;
 
     /**
-     * Set the maximum allowed protobuf message size in bytes.
-     * Messages exceeding this limit will throw an InvalidArgumentException.
-     * Set to 0 or negative to disable the limit (default).
+     * Set the post-allocation response-size assertion in bytes.
+     *
+     * The value is a defence-in-depth bound checked after the gRPC event has
+     * already delivered the message as a PHP string; it does not prevent that
+     * allocation. Use `options['grpc']['maxReceiveMessageBytes']` to bound
+     * the payload in grpc-core instead (SEC-16, issue #319).
+     *
+     * Messages exceeding this limit throw an InvalidArgumentException. Set to
+     * 0 or negative to disable the assertion (default).
      */
     public static function setMaxMessageSize(int $bytes): void
     {
         self::$maxMessageSize = $bytes;
     }
 
+    /**
+     * Current post-allocation response-size assertion in bytes (0 = disabled).
+     */
     public static function getMaxMessageSize(): int
     {
         return self::$maxMessageSize;
@@ -83,7 +102,12 @@ final class GrpcResponseParser
      *                             it is the encoding of an all-defaults response.
      * @return T
      *
-     * @throws \InvalidArgumentException if the message exceeds the configured max size
+     * @throws \InvalidArgumentException if the message exceeds the configured
+     *                                   post-allocation assertion. This cannot
+     *                                   prevent the gRPC event from allocating
+     *                                   the payload string; the transport-level
+     *                                   bound is `grpc.max_receive_message_length`
+     *                                   (SEC-16, issue #319).
      * @throws GrpcException when a message is required but the event carries none
      */
     public static function deserialize(mixed $event, string $responseClass, bool $requireMessage = true): Message
@@ -110,6 +134,9 @@ final class GrpcResponseParser
             return $response;
         }
 
+        // Defence in depth, not the transport bound: the string is already
+        // allocated here. grpc-core enforces grpc.max_receive_message_length
+        // before this method is reached (SEC-16, issue #319).
         $messageLen = strlen($message);
         if (self::$maxMessageSize > 0 && $messageLen > self::$maxMessageSize) {
             throw new \InvalidArgumentException(sprintf(

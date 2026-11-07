@@ -95,7 +95,10 @@ time. See [Worktree-safe repositories](#worktree-safe-repositories).
 - Make the smallest correct change that satisfies the Definition of done.
 - Add or update tests. A bug fix starts with a test that fails.
 - Run the checks from `AGENTS.md` until they pass.
-- Update `CHANGELOG.md` under `[Unreleased]` and the docs.
+- Update `CHANGELOG.md` under `[Unreleased]` and the docs. Append the entry under the
+  existing heading that matches the change (`### Added`, `### Changed`, `### Fixed`, …);
+  do not start a second heading of the same type. `ChangelogStructureGuardTest` fails on a
+  repeated or out-of-order heading.
 - **Commit** with [Conventional Commits](https://www.conventionalcommits.org/)
   (`fix: handle empty response (#42)`). **Do not push.**
 - On a second or later round, first read `review.md` and fix every open point.

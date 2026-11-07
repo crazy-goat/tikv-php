@@ -115,12 +115,30 @@ Because the project name is unique per worktree and the tests run in the compose
 of several worktrees do not collide. `bin/worktree-teardown.sh` stops the stacks of all three file
 combinations (and the `test` profile); `bin/worktree-done.sh` calls it.
 
+The `php-client` and `php-test` images run as an unprivileged `app` user, and Compose builds that
+user with the host owner's `HOST_UID`/`HOST_GID` (default `1000`). The IDs matter because `.:/app`
+is a bind mount: Composer and PHPUnit must be able to write `vendor/` and `.phpunit.cache/` in the
+checkout. The `Makefile` and the E2E runner scripts export both from `id -u`/`id -g`, so `make` and
+`composer test:e2e` need no setup; a direct `docker compose` call needs them in the environment
+(`HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ...`), and changing them needs `make build`
+because they are build args. A host GID that collides with an Alpine system group falls back to a
+free GID for `app` (the bind mount is governed by the owner UID), a host UID that already exists is
+reused numerically, and `APP_UID=0` is refused. The base image is pinned by digest, and
+`.dockerignore` keeps local credentials (`**/*.pem`, `**/*.crt`, `**/*.key`, `**/*.p12`, …) and
+`**/.env*` files out of every layer. Existing checkouts whose `vendor/` and `.phpunit.cache/` were
+created by the old root container need a one-time `sudo chown -R "$(id -u):$(id -g)" vendor
+.phpunit.cache` (see `docs/helpers/faq.md`).
+
 ## CI
 
 `.github/workflows/ci.yml` runs on pull requests to `master` and on pushes to `master`. The
 `changes` job detects documentation-only changes and the `docs` job checks them fast. `lint`,
 the unit matrix, `grpc-unit-tests`, `integration-tests`, `e2e-tests` and `e2e-tests-apiv2` run only
-for code changes. `ci-ok` aggregates the results and is the check to require. The `lint` job does
+for code changes. None of them has a path filter of its own: a pull request that touches only
+`tests/Unit/**` still runs both E2E jobs, and `tests/Unit/Ci/CiWorkflowGateTest.php` fails when a
+narrower gate, a `paths` trigger filter (block or flow style) or a weakened `ci-ok` aggregation is
+reintroduced (issue #365). `ci-ok` aggregates the
+results and is the check to require. The `lint` job does
 the setup (PHP, Composer, hadolint), runs `composer audit --locked` and then `bin/lint.sh`. Workflow runs of external
 contributors need maintainer approval (repository setting); there is no custom actor gate.
 

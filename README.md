@@ -511,6 +511,27 @@ and shrinks as the budget is consumed. When the budget runs out the
 transaction fails with `LockWaitTimeoutException` instead of committing
 without the lock. See [Configuration](docs/configuration.md#pessimistic-lock-wait-timeout-txnkv).
 
+A pessimistic transaction can also take a lock explicitly, without writing a
+value:
+
+```php
+$txn->lockKeys('account:1', 'account:2');   // lock now, no value written
+$current = $txn->getForUpdate('account:1'); // lock + read in one round trip
+```
+
+`getForUpdate()` is the `SELECT ... FOR UPDATE` primitive: it returns the
+latest committed value at the lock's `for_update_ts` (not the snapshot value),
+and a missing key returns `null`. Both methods are pessimistic-only; an
+optimistic transaction throws `InvalidStateException`. The locks are released
+by `commit()` or `rollback()`: a key that was locked but never written is
+committed as an `Op::Lock` mutation, so a lock-only transaction commits
+normally instead of being rolled back.
+
+The value is read from the legacy `values` / `not_founds` response fields or,
+on servers that use the newer wake-up mode, from the per-key `results` field.
+If a server populates neither, `getForUpdate()` falls back to a snapshot
+`get()`, which costs a second round trip and returns the `startTs` value.
+
 #### Isolation, timestamps and status
 
 Snapshot isolation at `startTs`, a timestamp from PD's TSO. A transaction sees
@@ -1115,6 +1136,11 @@ make clean            # Clean everything (containers + volumes)
 make example          # Run basic example
 make shell            # Open development shell
 ```
+
+The Compose containers run as an unprivileged user, so the image is built with
+the host owner's UID/GID (`HOST_UID`/`HOST_GID`) to keep the bind-mounted
+checkout writable. `make` and the E2E scripts detect both automatically; set
+them explicitly only for a direct `docker compose` call, then rebuild.
 
 ## Examples
 

@@ -145,6 +145,43 @@ The `E2E-RawKV` and `E2E-TxnKV` testsuites require real TiKV nodes. Start
 the cluster with `make up` (PD on 2379, tikv1/2/3 on 20160/20161/20162),
 stop with `make down`. If state gets corrupted: `make clean && make up`.
 
+## The Compose image runs as a non-root user; match `HOST_UID`/`HOST_GID`
+
+`Dockerfile` creates an unprivileged `app` user and runs Composer, PHPUnit and
+the default `CMD` as it. `docker-compose.yml` bind-mounts the checkout at
+`/app`, so the image user must be the checkout owner or Composer cannot write
+`vendor/` and PHPUnit cannot write `.phpunit.cache/`. Compose builds the user
+from `HOST_UID`/`HOST_GID`; the `Makefile` and the E2E runner scripts fill both
+from `id -u` / `id -g`. A direct `docker compose build`/`run` on a host whose
+owner is not `1000` needs them in the environment, and changing them requires a
+rebuild because they are build args. The symptom of a mismatch is
+`Permission denied` under `/app` during `composer install` or a test run.
+
+A host GID that already exists in Alpine does not fail the build. macOS
+`staff` is GID 20 and Alpine owns several low GIDs, so the `app` group falls
+back to a free GID and the build prints a warning; the bind mount is governed
+by the owner UID, so writes still work. A host UID that already exists (for
+example `ntp` or `guest`) is reused numerically, and `USER` is numeric so no
+passwd entry is required. `APP_UID=0` is refused with an explicit error
+instead of silently building a root-running image.
+
+If you used the previous root-running image, `vendor/` and `.phpunit.cache/`
+in an existing checkout are root-owned and the first run as `app` fails with
+`Permission denied`. Fix it once:
+
+```bash
+sudo chown -R "$(id -u):$(id -g)" vendor .phpunit.cache
+```
+
+or remove both and let Composer and PHPUnit recreate them:
+
+```bash
+rm -rf vendor .phpunit.cache && composer install
+```
+
+The base image digest is pinned in `Dockerfile`; bump it together with the
+`alpine:3.21` tag.
+
 ## Protobuf `RepeatedField` is not a PHP array — `iterator_to_array()` before `array_map()`
 
 Proto getters returning repeated fields (`PrewriteRequest::getMutations()`,
@@ -1435,6 +1472,19 @@ and `BackoffTest` already asserted both the `[expo/2, expo]` range and
 non-constant values for all types. The #296 change adds only a
 NotLeader-specific pin and this note; no production code changed. Close such
 an audit import as a duplicate instead of re-implementing the jitter.
+
+The same happened to issue #320 (audit SEC-17, "pass the configured metrics
+instance through `RawKvClient::create()`"): 6911928 (#368) had already added
+`metrics: $bundle->metrics` to both `create()` methods and the region cache,
+retry executors and transactions. The acceptance criterion still open was the
+behavioural regression test — `getMetrics()` returning the injected instance
+proves the client property but not that the collaborators and the transport
+received the backend: a `GrpcClient` or resolver built with `NoOpMetrics`
+still passes the identity assertions while every counter goes nowhere.
+`MetricsWiringTest` drives one operation through each factory with
+`allowInsecure: false`, which fails closed in `getChannel()` right after
+`rpcStarted()`, and asserts the transport's `rpcStarted()` / `rpcCompleted()`
+for both factories plus the client-side `regionCacheMiss` on the RawKV path.
 
 ## A stray Markdown fence can become a legitimate closer — render the file before deleting it
 
