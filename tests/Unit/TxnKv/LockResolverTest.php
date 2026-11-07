@@ -21,6 +21,9 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
+use CrazyGoat\TiKV\Client\Observability\InMemoryTracer;
+use CrazyGoat\TiKV\Client\Observability\TraceCategory;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
@@ -91,6 +94,8 @@ class LockResolverTest extends TestCase
     private function createResolver(
         int $callerStartTs = self::CALLER_START_TS,
         ?callable $tso = null,
+        ?InMemoryMetrics $metrics = null,
+        ?InMemoryTracer $tracer = null,
     ): LockResolver {
         $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
@@ -108,6 +113,8 @@ class LockResolverTest extends TestCase
             $this->pdClient,
             $callerStartTs,
             logger: $this->logger,
+            metrics: $metrics ?? new InMemoryMetrics(),
+            tracer: $tracer ?? new InMemoryTracer(),
         );
     }
 
@@ -339,6 +346,26 @@ class LockResolverTest extends TestCase
         $request = $this->resolveLockRequests[0];
         $this->assertSame(1, (int) $request->getCommitVersion(), 'committed lock must carry the real commitTs');
         $this->assertSame(self::LOCK_TS, (int) $request->getStartVersion());
+    }
+
+    public function testResolveLockRecordsDetailedMetricsAndTrace(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->mockGrpcCallsAndCaptureResolve($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+        $metrics = new InMemoryMetrics();
+        $tracer = new InMemoryTracer();
+        $resolver = $this->createResolver(metrics: $metrics, tracer: $tracer);
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertSame(1, $metrics->getLockResolutions('resolved'));
+        $this->assertSame(0, $metrics->getLockResolutions('live'));
+        $this->assertSame(
+            ['lock_resolve_started', 'lock_resolve_completed'],
+            $tracer->eventNames(TraceCategory::TXN_LOCK_RESOLVE),
+        );
     }
 
     public function testResolveLockWithZeroCommitTsRollsBack(): void

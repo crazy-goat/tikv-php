@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Added
+
+- A dependency-free Prometheus exporter and structured tracing hooks (issue #434, GAP-20). `Observability\PrometheusMetrics` implements `MetricsInterface` and renders the Prometheus text exposition format (`PrometheusMetrics::CONTENT_TYPE`, `render()`), so exposing the client's counters and histograms needs no extra Composer package. The optional `Observability\DetailedMetricsInterface` extends the frozen base interface with retry backoff durations, per-store attempt outcomes, lock-resolution results and two-phase-commit phase timings; existing `MetricsInterface` implementations keep working unchanged because the client probes with `instanceof`. `Observability\TraceEventInterface` (passed as `options['tracer']`) emits structured events for gRPC calls (`TraceCategory::KV_REQUEST`), 2PC phases (`TXN_2PC`) and lock resolution (`TXN_LOCK_RESOLVE`), ready to bridge to OpenTelemetry; `InMemoryTracer` records them for tests. Documented in `README.md`, `docs/advanced.md` (including an OpenTelemetry example) and `docs/configuration.md`. (#434)
+
 ### Fixed
 
 - `TimestampOracle` now rejects a TSO response whose timestamp is present but has a non-positive physical component (issue #230, TXN-25). A `Timestamp` with `physical = 0` composed to timestamp 0, which TiKV reads as "no version": a transaction started with `startTs = 0` would read nothing and write locks that no correct resolver can reason about, and the failure surfaced far from its cause. `getTimestamp()`, `getTimestampBatch()` and `getLowResolutionTimestamp()` now throw `TiKvException('TSO response contained an invalid physical timestamp')` instead, consistent with the documented fail-closed contract. A zero logical counter with a valid physical part is still accepted. (#230)

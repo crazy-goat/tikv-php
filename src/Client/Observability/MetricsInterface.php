@@ -17,7 +17,14 @@ namespace CrazyGoat\TiKV\Client\Observability;
  * (e.g. "NotLeader", "ServerBusy"), and invalidations use their reason.
  * Implementations are free to bucket tags however they wish.
  *
+ * The interface is frozen: backends that can also record backoff durations,
+ * per-store outcomes, lock-resolution results and two-phase-commit timings
+ * implement {@see DetailedMetricsInterface} in addition. The client probes
+ * for that interface, so adding those signals never breaks an existing
+ * implementation.
+ *
  * @see NoOpMetrics for the default zero-cost implementation.
+ * @see DetailedMetricsInterface for the optional extended metric set.
  */
 interface MetricsInterface
 {
