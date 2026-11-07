@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- SST ingest now retries retryable region errors per region and reports partial progress (issue #197, RAW-12). `SstIngestor` runs each region group through `RetryExecutor` against a freshly resolved region, so a `NotLeader` or `EpochNotMatch` during a long bulk import no longer discards the whole run. The import is still **not atomic** across regions: a permanent failure after at least one group was applied now throws the new `IngestPartialFailureException`, whose `getAppliedRegionIds()` lists the regions that landed and whose `getPrevious()` carries the underlying error; with no group applied the original exception is rethrown. The retry loop shares one budget for the whole call (`retryDeadlineMs`, `maxBackoffMs`, ServerBusy budget). `RawKvClient::ingest()`'s docblock no longer claims normal mode is restored unconditionally — a killed process still strands every store in import mode, and `docs/operations.md` documents the partial-failure contract and manual recovery. `docs/error-handling.md`, `docs/troubleshooting.md` and `docs/helpers/faq.md` are updated, and the `RawKvClient` throws-annotation guard now requires the retry-budget annotation on `ingest()`.
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added

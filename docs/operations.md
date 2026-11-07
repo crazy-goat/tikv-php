@@ -1549,9 +1549,13 @@ not a second full `Pair[]` copy of every value.
 >
 > - Run it in a dedicated, supervised process with no execution-time limit
 >   (CLI, `max_execution_time = 0`), never inside a web request.
-> - Run batches in a size you can afford to re-run: `ingest()` is **not**
->   retried automatically — any region error or transport error aborts the
->   remaining regions and throws.
+> - Run batches in a size you can afford to re-run. Retryable region errors
+>   (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, …) and retryable transport
+>   errors are retried per region against a freshly resolved region, but the
+>   import is **not atomic**: a permanent failure aborts the remaining regions
+>   and throws `IngestPartialFailureException`, whose `getAppliedRegionIds()`
+>   lists the region groups that were already written. Re-run the whole call
+>   to converge (see below).
 > - Verify afterwards that all stores are back in normal mode.
 >
 > **Recovering a cluster stuck in import mode:** the switch-back is issued to
@@ -1566,6 +1570,30 @@ not a second full `Pair[]` copy of every value.
 > that store. (Stores skipped for a rejected address never entered import
 > mode — the import path rejects them too, before any RPC — so they need no
 > restore.)
+
+**Retries and partial failure:**
+
+Each region group runs through the client's retry executor. A retryable region
+error (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, `RegionNotFound`, …) or a
+retryable transport error is retried against a **freshly resolved region**, so
+a leader transfer or a split/merge during a long import is recovered
+transparently. The retry loop shares one budget for the whole `ingest()` call
+(`retryDeadlineMs`, `maxBackoffMs` and the ServerBusy budget, exactly as for
+other operations).
+
+The import remains **non-atomic across regions**. When a region group fails
+permanently (a fatal region error, an exhausted retry budget or a missing
+store), `ingest()` stops, switches every store back to normal mode and throws:
+
+- `IngestPartialFailureException` when at least one earlier region group was
+  already ingested — `getAppliedRegionIds()` lists those regions and
+  `getPrevious()` carries the original failure; or
+- the original exception (`RegionException`, `RetryBudgetExhaustedException`,
+  `StoreNotFoundException`, …) when nothing was applied yet.
+
+Re-running the **whole** call is the recommended recovery: SST ingestion is
+idempotent for identical key-value pairs. With a TTL the TTL restarts on every
+attempt, exactly as for `put()`.
 
 **Operational notes:**
 
