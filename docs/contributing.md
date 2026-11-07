@@ -67,8 +67,9 @@ Before you start developing, ensure you have:
 Read these files to understand the codebase:
 
 - `README.md` - Project overview and usage
-- `docs/architecture.md` - System architecture (if exists)
-- `docs/superpowers/plans/README.md` - Implementation roadmap
+- `docs/architecture.md` - System architecture
+- `docs/workflow.md` - Issue-to-merge development process
+- [GitHub Issues](https://github.com/crazy-goat/tikv-php/issues) - Roadmap and implementation plans
 - `composer.json` - Dependencies and scripts
 
 ### 2. Set Up Your Development Environment
@@ -298,11 +299,13 @@ docs/
 ├── operations.md        # Operations reference
 ├── advanced.md          # Advanced patterns
 ├── architecture.md      # System architecture
+├── error-handling.md    # Exception hierarchy and retry safety
 ├── troubleshooting.md   # Common issues
+├── workflow.md          # Issue-to-merge process
+├── release-workflow.md  # Release process
+├── development.md       # Implementation guide
 ├── contributing.md      # This file
-└── superpowers/         # Implementation plans
-    ├── plans/
-    └── specs/
+└── helpers/             # FAQ and recorded decisions
 ```
 
 ## Testing
@@ -613,7 +616,7 @@ public function getKeyTTL(string $key): ?int;
 - **Documentation**: Browse `docs/` directory
 - **Examples**: Check `examples/` directory
 - **Tests**: See `tests/` for usage patterns
-- **Plans**: See `docs/superpowers/plans/` for roadmap
+- **Roadmap**: See [GitHub Issues](https://github.com/crazy-goat/tikv-php/issues) for open work and implementation plans
 
 ### Communication
 
@@ -709,7 +712,6 @@ make shell
 ## Recognition
 
 Contributors will be:
-- Listed in CONTRIBUTORS.md
 - Mentioned in release notes
 - Credited in relevant documentation
 
