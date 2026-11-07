@@ -290,28 +290,12 @@ class MyOperationE2ETest extends TestCase
 - Update `README.md` usage section
 - Add example to `examples/` (if applicable)
 
-#### 9. Update Implementation Plans
+#### 9. Update the Changelog
 
-If this was a planned feature:
-
-```markdown
-# docs/superpowers/plans/XX-my-operation.md
-
-# My Operation Implementation
-
-## Status: ✅ COMPLETED
-
-## Implementation
-- [x] Proto message handling
-- [x] RawKvClient method
-- [x] Unit tests
-- [x] E2E tests
-- [x] Documentation
-- [x] Example
-
-## Notes
-Any special considerations...
-```
+Add an entry under `## [Unreleased]` in [`CHANGELOG.md`](../CHANGELOG.md), with
+the issue number in parentheses. Implementation plans live in
+[GitHub Issues](https://github.com/crazy-goat/tikv-php/issues), not in this
+repository.
 
 ### Pattern: Batch Operations
 
@@ -953,7 +937,7 @@ region count (1, 2, 5, 10, 20), because the whole point is how the two curves
 diverge.
 
 For other operations, create focused benchmark classes under
-`tests/Benchmark/`:
+`benchmarks/`:
 
 ```php
 <?php
