@@ -426,9 +426,9 @@ try {
 > pessimistic mode acquires each key's physical lock before `set()` or
 > `delete()` returns. A conflict, deadlock, or wait timeout therefore surfaces
 > at the write call. A failed eager lock statement triggers best-effort
-> cleanup before the exception is rethrown; if cleanup itself fails, the
-> transaction remains active but unwritable so the caller can retry
-> `rollback()`. A preceding pessimistic read's per-key `for_update_ts`
+> cleanup before the exception is rethrown; whether that cleanup succeeds or
+> fails, the transaction ends terminal (`RolledBack`, closed, issue #231), so
+> a retry needs a new transaction. A preceding pessimistic read's per-key `for_update_ts`
 > is reused by the corresponding write, and prewrite keeps
 > `DO_CONSTRAINT_CHECK` as a safety net for an intervening commit. For legacy
 > applications that require the old behavior, pass
