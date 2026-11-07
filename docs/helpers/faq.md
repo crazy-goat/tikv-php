@@ -445,10 +445,11 @@ SEC-03 (issue #306).
 
 ## The pessimistic-lock retry loop usually exits via the do-while condition, not the budget guard
 
-In `TwoPhaseCommitter::pessimisticLockBatch()` the per-attempt `remainingMs
-<= 0` guard looks like the retry-budget exit, but it is almost unreachable:
-`delayMs` is capped by `remainingMs` before sleeping, so `elapsedMs` lands
-exactly on `maxBackoffMs` and the loop leaves through the
+In `TwoPhaseCommitter::lockKeysInternal()` (called by
+`pessimisticLockBatch()` and the eager `lockKeys()`) the per-attempt
+`remainingMs <= 0` guard looks like the retry-budget exit, but it is almost
+unreachable: `delayMs` is capped by `remainingMs` before sleeping, so
+`elapsedMs` lands exactly on `maxBackoffMs` and the loop leaves through the
 `while ($elapsedMs < maxBackoffMs)` condition instead (issue #219, TXN-14).
 Both exits must be treated as "lock acquisition failed" — the fix throws
 `LockWaitTimeoutException` after the loop whenever `$needRetry` is still
@@ -456,6 +457,22 @@ true. Unit-test tip: pass a small `maxBackoffMs` (e.g. 100) to
 `createTransaction(['maxBackoffMs' => …])` to exercise budget exhaustion
 without sleeping the full default 20 s budget — and `maxBackoffMs = 0`
 hits the `remainingMs <= 0` guard after the very first locked response.
+
+The retry delay is `min(100 × 2^attempt, 10000)` ms, clipped to the
+remaining budget, so the sleeps grow 200, 400, 800 … and the last one
+never overshoots `maxBackoffMs`. The loop has no injectable clock, so the
+schedule is pinned from the `Pessimistic lock conflict, retrying` debug
+record's `delayMs` context rather than wall-clock timing
+(`TransactionTest::testPessimisticLockRetryDelayGrowsAndIsCappedByBudget`).
+
+`for_update_ts` deliberately does **not** advance on a retry
+(`TransactionTest::testPessimisticLockRetryKeepsForUpdateTsAcrossAttempts`).
+The audit issue that asked for a fresh PD timestamp per attempt (#337,
+TEST-17) assumed client-go's statement-retry semantics, but this loop only
+retries the RPC of one logical statement: a new `for_update_ts` after the
+wait would let a stale read-modify-write value pass the later prewrite
+constraint check. The caller has to retry the statement (a new read
+timestamp) instead.
 
 ## `PessimisticLockRequest.wait_timeout` has three meanings, and 0 is not "no wait"
 
@@ -1396,6 +1413,21 @@ and `BackoffTest` already asserted both the `[expo/2, expo]` range and
 non-constant values for all types. The #296 change adds only a
 NotLeader-specific pin and this note; no production code changed. Close such
 an audit import as a duplicate instead of re-implementing the jitter.
+
+## A stray Markdown fence can become a legitimate closer — render the file before deleting it
+
+Issue #381 (DOC-15) reported an orphan closing fence after the TLS "manual
+construction" note in `docs/configuration.md`, which made everything from
+`## Logging` to the end render as code. By the time the issue was picked the
+premise had expired: c3af3eb (#304/#524) replaced that note with a paragraph
+and a PHP example whose closing fence *was* the orphan, so the file has been
+balanced since 2026-09-09 and renders correctly.
+`tests/Unit/Docs/AtomicModeDocumentationGuardTest.php` already fails on an
+unterminated fence in every `docs/**/*.md` file and in `README.md`, so the
+acceptance criteria need no new guard. Lesson: `git log -S '<quoted phrase>'
+-- <file>` and render the file (or compare the `^#` lines with the parsed
+heading count) before deleting a fence an audit issue quotes — a later feature
+can turn a stray fence into a legitimate closer.
 
 ## Equal-jitter randomness can collapse the separating boundary in budget assertions — assert `<=` over more iterations, never strict `<`
 

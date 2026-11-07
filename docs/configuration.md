@@ -337,7 +337,11 @@ Two additional APIs reduce PD traffic where that is safe and explicit:
 
 Additionally, the pessimistic-lock path in `TwoPhaseCommitter` acquires
 one `for_update_ts` per locking pass instead of one per region, cutting
-one PD round trip per additional region.
+one PD round trip per additional region. The same timestamp is reused by
+every retry of that pass: only a new statement allocates a new read
+timestamp, so a retried lock cannot silently advance past a concurrent
+commit and let a stale read-modify-write pass the prewrite constraint
+check.
 
 ### Store Address Validation
 
@@ -775,6 +779,12 @@ $options = [
     ],
 ];
 ```
+
+When both forms are given for the same credential, the explicit file path wins:
+`caCertFile` takes priority over `caCertPem`, and a complete
+`clientCertFile` + `clientKeyFile` pair takes priority over
+`clientCertPem` + `clientKeyPem`. Supplying both is redundant rather than an
+error, but the file is the one that is read.
 
 ### Deprecated TLS Option Keys
 
