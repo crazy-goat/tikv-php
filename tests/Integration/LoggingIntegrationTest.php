@@ -378,9 +378,11 @@ class LoggingIntegrationTest extends TestCase
         $this->assertIsString($key);
         $this->assertSame(KeyRedactor::redact('contextkey'), $key);
         $this->assertMatchesRegularExpression('/\A#[0-9a-f]{16} \(10 bytes\)\z/', $key);
+        // The old default put the hex of the first 8 bytes in the token slot;
+        // the keyed hash must not reproduce that encoding (issue #279).
         $this->assertStringNotContainsString('contextkey', $key);
         $this->assertStringNotContainsString(bin2hex('contextkey'), $key);
-        $this->assertNotSame('contextkey', hex2bin(substr($key, 1, 16)));
+        $this->assertNotSame(bin2hex(substr('contextkey', 0, 8)), substr($key, 1, 16));
         $this->assertSame(0, $record->context['attempt']);
         $this->assertSame('EpochNotMatch', $record->context['backoffType']);
         $sleepMs = $record->context['sleepMs'];
