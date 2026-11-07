@@ -1831,7 +1831,9 @@ class RawKvClientTest extends TestCase
         $pair1->setValue('v1');
 
         $pair2 = new KvPair();
-        $pair2->setKey('k2');
+        // k1 is in [a,m), m1 is in [m,z): the flat response is split by the
+        // clipped range bounds, so the fixture keys must respect them.
+        $pair2->setKey('m1');
         $pair2->setValue('v2');
 
         $response = new RawBatchScanResponse();
@@ -1867,7 +1869,7 @@ class RawKvClientTest extends TestCase
         $this->assertCount(1, $result[0]);
         $this->assertSame('k1', $result[0][0]['key']);
         $this->assertCount(1, $result[1]);
-        $this->assertSame('k2', $result[1][0]['key']);
+        $this->assertSame('m1', $result[1][0]['key']);
         $this->assertSame(
             [['a', 'm'], ['m', 'z']],
             array_map(
@@ -1921,7 +1923,7 @@ class RawKvClientTest extends TestCase
 
                     $response = new RawBatchScanResponse();
                     $pair = new KvPair();
-                    $pair->setKey($request->getRanges()[0]->getStartKey() === 'a' ? 'k1' : 'k2');
+                    $pair->setKey($request->getRanges()[0]->getStartKey() === 'a' ? 'k1' : 'm2');
                     $pair->setValue('v');
                     $response->setKvs([$pair]);
 
@@ -1932,7 +1934,7 @@ class RawKvClientTest extends TestCase
         $result = $this->client->batchScan([['a', '']], 10);
 
         $this->assertCount(1, $result);
-        $this->assertSame(['k1', 'k2'], array_column($result[0], 'key'));
+        $this->assertSame(['k1', 'm2'], array_column($result[0], 'key'));
         $this->assertSame('m', $requests[1]->getRanges()[0]->getStartKey());
         $this->assertSame('', $requests[1]->getRanges()[0]->getEndKey());
     }
@@ -1964,7 +1966,7 @@ class RawKvClientTest extends TestCase
                     $requests[] = $request;
 
                     $pair = new KvPair();
-                    $pair->setKey($request->getRanges()[0]->getStartKey() === '' ? 'k1' : 'k2');
+                    $pair->setKey($request->getRanges()[0]->getStartKey() === '' ? 'k1' : 'm2');
                     $pair->setValue('v');
                     $response = new RawBatchScanResponse();
                     $response->setKvs([$pair]);
@@ -1975,7 +1977,7 @@ class RawKvClientTest extends TestCase
 
         $result = $this->client->batchScan([['', '']], 10);
 
-        $this->assertSame(['k1', 'k2'], array_column($result[0], 'key'));
+        $this->assertSame(['k1', 'm2'], array_column($result[0], 'key'));
         $this->assertSame('', $requests[0]->getRanges()[0]->getStartKey());
         $this->assertSame('m', $requests[0]->getRanges()[0]->getEndKey());
         $this->assertSame('m', $requests[1]->getRanges()[0]->getStartKey());

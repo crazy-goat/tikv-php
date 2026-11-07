@@ -315,6 +315,68 @@ final class RawKvScannerBatchScanTest extends TestCase
         self::assertSame([['a', 'm'], ['m', 'z']], $ranges);
     }
 
+    public function testBatchScanMergesRowsFromBothRegionsOfOneRange(): void
+    {
+        $region1 = $this->region(1, 'a', 'm');
+        $region2 = $this->region(2, 'm', 'z');
+        $this->stubRegions([$region1, $region2]);
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ): GrpcFuture {
+                    self::assertInstanceOf(RawBatchScanRequest::class, $request);
+                    $start = $request->getRanges()[0]->getStartKey();
+
+                    return GrpcFuture::completed($this->batchScanResponse(
+                        $start === 'a'
+                            ? [['a1', 'v1'], ['b1', 'v2']]
+                            : [['m1', 'v3'], ['n1', 'v4']],
+                    ));
+                },
+            );
+
+        $result = $this->scanner->batchScan([['a', 'z']], 10, false);
+
+        self::assertSame(['a1', 'b1', 'm1', 'n1'], array_column($result[0], 'key'));
+    }
+
+    public function testBatchScanMergesRowsFromBothRegionsOfAnUnboundedRange(): void
+    {
+        $region1 = $this->region(1, 'a', 'm');
+        $region2 = $this->region(2, 'm', '');
+        $this->stubRegions([$region1, $region2]);
+
+        $this->grpc->expects($this->exactly(2))
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ): GrpcFuture {
+                    self::assertInstanceOf(RawBatchScanRequest::class, $request);
+                    $start = $request->getRanges()[0]->getStartKey();
+
+                    return GrpcFuture::completed($this->batchScanResponse(
+                        $start === 'a'
+                            ? [['a1', 'v1']]
+                            : [['m1', 'v2'], ['n1', 'v3']],
+                    ));
+                },
+            );
+
+        $result = $this->scanner->batchScan([['a', '']], 10, false);
+
+        self::assertSame(['a1', 'm1', 'n1'], array_column($result[0], 'key'));
+    }
+
     public function testBatchScanKeyOnlyReturnsNullValues(): void
     {
         $this->stubRegions([$this->region(1, 'a', '')]);
