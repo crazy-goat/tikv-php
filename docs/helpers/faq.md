@@ -335,8 +335,11 @@ rule, so all of them declare `array-key`:
 correctness-of-the-declaration fix only, not an API change.
 
 Pinned by `tests/Unit/RawKv/RawKvBatchArrayKeyTest.php` (the BatchCommands
-multiplexer is the ext-grpc-free transport seam) and
-`tests/Unit/TxnKv/TxnReaderArrayKeyTest.php`.
+multiplexer is the ext-grpc-free transport seam), its public-boundary sibling
+`tests/Unit/RawKv/RawKvClientBatchGetArrayKeyTest.php` (issue #202, RAW-17 —
+the same finding as #261, filed separately by the audit; the production fix
+already shipped in #603, so only the client-level regression test was added)
+and `tests/Unit/TxnKv/TxnReaderArrayKeyTest.php`.
 
 ## There is no pre-push hook in this repo
 
@@ -1587,6 +1590,28 @@ the introduction and the removal. A duplicate docblock of the same shape still
 sits above `ApiV2GrpcClient::call()`
 (`src/Client/Grpc/ApiV2GrpcClient.php:57-66`, added by a1415aa0) — a separate
 finding, not part of this issue.
+
+The same premise expiry closed issue #227 (audit TXN-22, "the `priority`
+option is never written to the request `Context`"): the audit's line
+references are stale. `TxnKvClient::begin()` has read `options['priority']`
+since the option was introduced in 7404768 and passed it to `Transaction`;
+`TwoPhaseCommitter` has received it since it was split out of `Transaction`
+in 32f8948 (#173). The write path has set `Context.priority` since #441
+(`fc3c7c1`); the read path followed in #336 (`739b1c1`), which added the
+`priority` argument to `RegionContextFactory::fromRegionInfo()` and
+`resolveTarget()` and made `TxnReader` pass it at all three read
+context-building call sites. `begin(['priority' => 2])` therefore reaches
+`KvGet`, `KvBatchGet`, `KvScan`, `KvPrewrite`, `KvCommit`,
+`KvPessimisticLock`, `TxnHeartBeat` and both rollback RPCs; the
+lock-resolution RPCs stay Normal by design, because they resolve other
+transactions' locks. Pinned by
+`TransactionTest::testPriorityIsCarriedOnEveryRequestContext()`,
+`::testPriorityIsCarriedOnEveryReadRequestContext()`,
+`::testPriorityIsCarriedOnPessimisticLockContext()`,
+`::testPriorityIsCarriedOnRollbackContexts()` and
+`TxnKvClientTest::testBeginWithPriorityReachesTheRpcContext()`, so no source
+or test change is needed. The user-facing behaviour is documented in
+`docs/configuration.md#transaction-priority-txnkv`.
 
 ## A stray Markdown fence can become a legitimate closer — render the file before deleting it
 

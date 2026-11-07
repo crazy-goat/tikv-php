@@ -871,7 +871,9 @@ be restricted to a base directory.
 The optional `caCertBaseDir` and `clientCertBaseDir` options restrict **where
 the certificate files may live**: the path is canonicalized with `realpath()`
 before the comparison, so a `..` segment or a symlink cannot pull in a file
-from outside the base directory. `caCertBaseDir` guards `caCertFile`;
+from outside the base directory, and the check compares directory boundaries
+rather than a string prefix, so a sibling directory such as `/etc/tikv-attacker`
+does not pass a base of `/etc/tikv`. `caCertBaseDir` guards `caCertFile`;
 `clientCertBaseDir` guards both `clientCertFile` and `clientKeyFile`.
 
 ```php

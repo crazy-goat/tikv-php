@@ -13,6 +13,7 @@
 require __DIR__ . '/../vendor/autoload.php';
 
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
 
 $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', getenv('PD_ENDPOINTS')) : ['127.0.0.1:2379'];
 $client = RawKvClient::create($pdEndpoints);
@@ -73,7 +74,11 @@ try {
     // 5. Reverse Scan
     echo "5. Reverse Scan (descending order)\n";
     echo "   Note: startKey=upper bound (exclusive), endKey=lower bound (inclusive)\n";
-    $results = $client->reverseScan('scan:user:;', 'scan:user:000', limit: 3);
+    $results = $client->reverseScan(
+        RawKvSplitter::calculatePrefixEndKey('scan:user:'),
+        'scan:user:000',
+        limit: 3
+    );
     foreach ($results as $result) {
         echo "   {$result['key']} => {$result['value']}\n";
     }
