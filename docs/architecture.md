@@ -820,9 +820,12 @@ executes the per-region sub-scans concurrently, in windows of at most
 `options['maxConcurrency']` regions (default 16): every send in a window is
 issued before the first wait, and the responses are merged in key order
 (descending for a reverse scan). A bounded scan (`limit > 0`) walks the
-regions sequentially. The reverse path enumerates the region chain
-bottom-up (PD's `ScanRegions` only enumerates forwards), walks it top-down,
-and concatenates the per-region rows in descending order. A region or
+regions sequentially. The reverse path resolves its regions from the upper
+bound downwards in bounded batches (issue #198):
+`RegionCache::getRegionBelow()` serves the warm case and a miss asks PD for
+the region containing the cursor or, when the cursor sits on a region
+boundary, for the adjacent region below it through `GetPrevRegion`. It no
+longer collects the whole chain before reading the top region. A region or
 transport error, or a region that split after enumeration, falls back to
 the sequential retrying path.
 

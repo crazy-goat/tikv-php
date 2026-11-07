@@ -180,6 +180,29 @@ final class PdClient implements PdClientInterface
         return RegionInfoMapper::fromProto($region, $response->getLeader(), $this->codec);
     }
 
+    public function getPrevRegion(string $key): ?RegionInfo
+    {
+        $request = new GetRegionRequest();
+        $request->setHeader($this->createHeader());
+        $request->setRegionKey($this->codec->encodeRegionKey($key));
+
+        /** @var GetRegionResponse $response */
+        $response = $this->callWithClusterIdRetry(
+            'GetPrevRegion',
+            $request,
+            GetRegionResponse::class,
+        );
+
+        $region = $response->getRegion();
+        if (!$region instanceof \CrazyGoat\Proto\Metapb\Region) {
+            // No adjacent region below the key: the first region of the
+            // keyspace, or a gap. This is a normal answer, not an error.
+            return null;
+        }
+
+        return RegionInfoMapper::fromProto($region, $response->getLeader(), $this->codec);
+    }
+
     public function getKeyspaceId(string $name): int
     {
         $request = new LoadKeyspaceRequest();

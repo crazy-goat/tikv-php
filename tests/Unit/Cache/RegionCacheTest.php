@@ -291,6 +291,77 @@ class RegionCacheTest extends TestCase
         $this->assertSame([], (new RegionCache())->getRegionsInRange('a', 'z'));
     }
 
+    public function testGetRegionBelowReturnsTheRegionContainingAnInteriorKey(): void
+    {
+        $cache = new RegionCache();
+        $region1 = $this->makeRegion(1, 'a', 'm');
+        $region2 = $this->makeRegion(2, 'm', '');
+        $cache->put($region1);
+        $cache->put($region2);
+
+        // 'h' is inside [a, m): that region holds the greatest key below it.
+        $this->assertSame($region1, $cache->getRegionBelow('h'));
+    }
+
+    public function testGetRegionBelowReturnsTheRegionBelowABoundary(): void
+    {
+        $cache = new RegionCache();
+        $region1 = $this->makeRegion(1, 'a', 'm');
+        $region2 = $this->makeRegion(2, 'm', '');
+        $cache->put($region1);
+        $cache->put($region2);
+
+        $this->assertSame($region1, $cache->getRegionBelow('m'));
+        $this->assertSame($region2, $cache->getRegionBelow('z'));
+    }
+
+    public function testGetRegionBelowReturnsNullAtTheStartOfTheKeyspace(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->makeRegion(1, '', 'm'));
+
+        $this->assertNull($cache->getRegionBelow(''));
+    }
+
+    public function testGetRegionBelowSkipsAnEmptyRange(): void
+    {
+        $cache = new RegionCache();
+        $empty = $this->makeRegion(1, 'a', 'a');
+        $region = $this->makeRegion(2, '', 'a');
+        $cache->put($empty);
+        $cache->put($region);
+
+        // 'a' is the region's exclusive end, so the non-empty ['', 'a') is
+        // the one that actually holds keys below the cursor.
+        $this->assertSame($region, $cache->getRegionBelow('a'));
+    }
+
+    public function testGetRegionBelowReturnsNullAcrossAGap(): void
+    {
+        $cache = new RegionCache();
+        $lower = $this->makeRegion(1, 'k037', 'k038');
+        $upper = $this->makeRegion(3, 'k039', '');
+        $cache->put($lower);
+        $cache->put($upper);
+
+        // Region [k038, k039) is not cached: the region below the cursor is
+        // a gap, not [k037, k038), and the caller must resolve it through PD.
+        $this->assertNull($cache->getRegionBelow('k039'));
+        $this->assertNull($cache->getRegionBelow('k038-00'));
+        // The cached upper region still answers for a cursor above it.
+        $this->assertSame($upper, $cache->getRegionBelow('k040'));
+    }
+
+    public function testGetRegionBelowDropsAnExpiredEntry(): void
+    {
+        $cache = new TestableRegionCache(1000, ttlSeconds: 10);
+        $cache->put($this->makeRegion(1, '', 'a'));
+        $cache->setTime(2000);
+
+        $this->assertNull($cache->getRegionBelow('b'));
+        $this->assertNull($cache->getByKey('x'), 'the expired entry is dropped, not reported');
+    }
+
     public function testMultipleRegionsBinarySearch(): void
     {
         $cache = new RegionCache();

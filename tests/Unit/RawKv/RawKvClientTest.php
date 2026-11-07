@@ -1564,6 +1564,9 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('getByKey')->willReturnCallback(
             static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $lower : $upper,
         );
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::gt($key, 'm') ? $upper : $lower,
+        );
         $this->regionCache->method('put');
         $this->pdClient->method('scanRegions')->willReturn([$lower, $upper]);
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
