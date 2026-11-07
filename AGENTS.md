@@ -96,6 +96,12 @@ ports. TiKV and PD advertise their compose service names (`tikv1:20160`, `pd:237
 resolve inside the network, so the published host ports are for manual use of PD only (HTTP API,
 `curl`, gRPC to PD).
 
+Every published port is bound to `127.0.0.1`, never to `0.0.0.0`: the development cluster has no
+authentication and no transport security, so it must not be reachable from other hosts. A workflow
+that dials it from another machine needs an SSH tunnel or an explicit local override — do not drop
+the loopback prefix. `tests/Unit/Ci/DockerComposePortBindingTest.php` fails the build if a
+`docker-compose*.yml` publishes a port without it (issue #318, SEC-15).
+
 Host ports are variables: `PD_PORT` (2379), `TIKV1_PORT` (20160), `TIKV2_PORT` (20161),
 `TIKV3_PORT` (20162). `bin/worktree.sh` writes free ports and a unique `COMPOSE_PROJECT_NAME` to
 `.env.worktree` in each worktree. Load it before running compose or the E2E scripts:

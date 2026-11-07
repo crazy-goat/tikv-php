@@ -1683,6 +1683,23 @@ re-grouped (the retry only re-resolves the first key and fails closed once the
 budget is exhausted). That limitation is deliberate for this issue; fixing it
 means re-grouping the remaining keys inside the retried closure.
 
+## Compose ports bind to loopback, not `0.0.0.0` (issue #318, SEC-15)
+
+`docker-compose.yml` publishes PD and the three TiKV ports as
+`127.0.0.1:${PD_PORT:-2379}:2379` and the matching `TIKV*_PORT` entries. The short
+`"HOST:CONTAINER"` form without a host address binds to `0.0.0.0`, which exposes an
+unauthenticated, unencrypted development cluster to every host that can route to the
+machine. The published ports exist only for host-side manual work (`curl`, PD's HTTP
+API, the `PD_ENDPOINTS=localhost:...` E2E runner) and for the CI readiness probes; the
+E2E tests themselves run inside the compose network and reach `pd:2379` by service
+name, so the binding does not affect them.
+
+Do not make the host address configurable with a default of `0.0.0.0`: that recreates
+the exposure on any machine that does not set the variable. A workflow that really
+needs remote access should pass its own compose override or use an SSH tunnel.
+`tests/Unit/Ci/DockerComposePortBindingTest.php` pins the loopback prefix for every
+published port in every `docker-compose*.yml`.
+
 ## gRPC receive limit defaults to 64 MB, not the core's 4 MB (SEC-16, issue #319)
 
 `GrpcClient` sets `grpc.max_receive_message_length` on every channel from
