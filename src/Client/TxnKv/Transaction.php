@@ -18,11 +18,14 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\UndeterminedCommitException;
 use Psr\Log\LoggerInterface;
@@ -147,12 +150,85 @@ final class Transaction
          * the tracked lock expiry is never later than the real one (issue #429).
          */
         ?int $startedAtMs = null,
+        /**
+         * Maximum number of write-set entries; 0 = unlimited (issue #430).
+         */
+        private readonly int $maxTxnEntryCount = 0,
+        /**
+         * Maximum bytes of one write-set key+value entry; 0 = unlimited
+         * (issue #430).
+         */
+        private readonly int $maxTxnEntrySize = 0,
+        /**
+         * Maximum bytes of the whole write set; 0 = unlimited (issue #430).
+         */
+        private readonly int $maxTxnTotalSize = 0,
+        /**
+         * Maximum bytes of one prewrite/commit request per region (issue
+         * #430); defaults to client-go's `DefTxnCommitBatchSize`.
+         */
+        private readonly int $maxTxnBatchSize = TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
+        /**
+         * Maximum mutations/keys of one prewrite/commit request per region
+         * (issue #430); defaults to RawKV's `MAX_BATCH_LIMIT`.
+         */
+        private readonly int $maxTxnBatchCount = TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+        /**
+         * Maximum number of read-set entries; 0 = unlimited (issue #297).
+         */
+        private readonly int $maxReadSetEntries = 0,
+        /**
+         * Maximum bytes of the whole read set; 0 = unlimited (issue #297).
+         */
+        private readonly int $maxReadSetTotalSize = 0,
+        /**
+         * Whether get()/batchGet() retain their values in the read set
+         * (issue #297). Off by default: nothing in the commit path consumes
+         * it, so keeping it on the hot read path would grow without bound.
+         */
+        private readonly bool $trackReadSet = false,
+        /**
+         * Optional Context control fields applied to this transaction's
+         * requests (issue #426). Null (the default) applies none and leaves
+         * the serialized Context unchanged.
+         */
+        private readonly ?RequestContextOptions $requestContext = null,
+        /**
+         * Resource-control metadata carried on every request of this
+         * transaction (issue #427): the client-wide default with the
+         * begin() overrides applied. An empty instance leaves both
+         * resource-control fields unset.
+         */
+        private readonly ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
         if ($this->maxScanLimit < 1) {
             throw new InvalidArgumentException('maxScanLimit must be >= 1');
+        }
+        foreach (
+            [
+                'maxTxnEntryCount' => $this->maxTxnEntryCount,
+                'maxTxnEntrySize' => $this->maxTxnEntrySize,
+                'maxTxnTotalSize' => $this->maxTxnTotalSize,
+                'maxReadSetEntries' => $this->maxReadSetEntries,
+                'maxReadSetTotalSize' => $this->maxReadSetTotalSize,
+            ] as $name => $limit
+        ) {
+            if ($limit < 0) {
+                throw new InvalidArgumentException($name . ' must be >= 0');
+            }
+        }
+        foreach (
+            [
+                'maxTxnBatchSize' => $this->maxTxnBatchSize,
+                'maxTxnBatchCount' => $this->maxTxnBatchCount,
+            ] as $name => $limit
+        ) {
+            if ($limit < 1) {
+                throw new InvalidArgumentException($name . ' must be >= 1');
+            }
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
         if ($lockWaitTimeMs < 0) {
@@ -173,7 +249,15 @@ final class Transaction
                 ));
             }
         }
-        $this->state = new TransactionState($startedAtMs ?? $this->nowMs());
+        $this->state = new TransactionState(
+            startedAtMs: $startedAtMs ?? $this->nowMs(),
+            maxTxnEntryCount: $this->maxTxnEntryCount,
+            maxTxnEntrySize: $this->maxTxnEntrySize,
+            maxTxnTotalSize: $this->maxTxnTotalSize,
+            maxReadSetEntries: $this->maxReadSetEntries,
+            maxReadSetTotalSize: $this->maxReadSetTotalSize,
+            trackReadSet: $this->trackReadSet,
+        );
 
         $this->reader = new TxnReader(
             startTs: $this->startTs,
@@ -184,14 +268,11 @@ final class Transaction
             lockResolver: $this->lockResolver,
             regionCache: $this->regionCache,
             replicaReadPolicy: $this->replicaReadPolicy,
-            maxBackoffMs: $this->maxBackoffMs,
-            retryDeadlineMs: $this->retryDeadlineMs,
-            serverBusyBudgetMs: self::DEFAULT_SERVER_BUSY_BUDGET_MS,
-            metrics: $this->metrics,
             logger: $this->logger,
-            retryExecutor: $this->retryExecutor(),
-            classifier: $this->classifyError(...),
             priority: $this->priority,
+            metrics: $this->metrics,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
 
         $this->committer = new TwoPhaseCommitter(
@@ -212,6 +293,10 @@ final class Transaction
             lockWaitTimeMs: $this->lockWaitTimeMs,
             optimisticLockTtlMs: $this->optimisticLockTtlMs,
             pessimisticLockTtlMs: $this->pessimisticLockTtlMs,
+            maxTxnBatchSize: $this->maxTxnBatchSize,
+            maxTxnBatchCount: $this->maxTxnBatchCount,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
     }
 
@@ -270,11 +355,68 @@ final class Transaction
      * The read set has the same shape as the write set and the same coercion
      * (issue #261; see {@see getWriteSet()}).
      *
+     * Empty unless the transaction was created with `trackReadSet: true`;
+     * only `get()` and `batchGet()` populate it — `scan()` does not.
+     *
      * @return array<array-key, ?string>
      */
     public function getReadSet(): array
     {
         return $this->state->getReadSet();
+    }
+
+    /**
+     * Bytes currently held by the write set (issue #430).
+     *
+     * Every entry contributes its key length plus its value length; a delete
+     * contributes the key length only. The value is maintained incrementally,
+     * so it can be logged or exported as a metric on every write without
+     * re-walking the write set.
+     */
+    public function getWriteSetSize(): int
+    {
+        return $this->state->getWriteSetSize();
+    }
+
+    /**
+     * Number of entries currently held by the write set (issue #430).
+     */
+    public function getWriteSetCount(): int
+    {
+        return $this->state->getWriteSetCount();
+    }
+
+    /**
+     * Bytes currently held by the read set (issue #297).
+     *
+     * Every entry contributes its key length plus its value length; a
+     * not-found read contributes the key length only. The value is maintained
+     * incrementally, so it can be logged or exported as a metric on every
+     * read without re-walking the read set.
+     */
+    public function getReadSetSize(): int
+    {
+        return $this->state->getReadSetSize();
+    }
+
+    /**
+     * Number of entries currently held by the read set (issue #297).
+     */
+    public function getReadSetCount(): int
+    {
+        return $this->state->getReadSetCount();
+    }
+
+    /**
+     * Drop every tracked read and reset the read-set accounting (issue #297).
+     *
+     * Useful in a long-lived transaction built with `trackReadSet: true`:
+     * the transaction does not need its read set at commit, so a worker can
+     * release it after a batch of reads. A no-op when tracking is disabled.
+     */
+    public function clearReadSet(): void
+    {
+        $this->state->clearReadSet();
     }
 
     // ---------------------------------------------------------------
@@ -341,6 +483,8 @@ final class Transaction
         return $this->reader->batchGet(
             $keys,
             $this->state,
+            $this->retryExecutor(),
+            $this->classifyError(...),
         );
     }
 
@@ -365,7 +509,10 @@ final class Transaction
      *
      * @param int $limit Maximum rows to return; 0 = the whole range (capped
      *                   at {@see self::MAX_SCAN_LIMIT} rows, a larger range
-     *                   throws instead of truncating)
+     *                   throws instead of truncating). A negative value
+     *                   throws InvalidArgumentException before the scan RPC
+     *                   (a pessimistic transaction refreshes its read
+     *                   timestamp first)
      * @return array<array{key: string, value: ?string}>
      *
      * @throws InvalidArgumentException
@@ -467,12 +614,18 @@ final class Transaction
 
     /**
      * @throws InvalidStateException
+     * @throws TransactionTooLargeException when the write would exceed a
+     *         configured transaction size limit (issue #430); thrown before
+     *         the eager pessimistic lock RPC, so nothing reaches TiKV
      * @throws TiKvException if the pessimistic transaction cannot obtain a
      *         write timestamp or acquire its lock
      */
     public function set(string $key, string $value): void
     {
         $this->state->ensureWritable();
+        // Reject an oversized write before the eager pessimistic lock below
+        // sends any RPC (issue #430).
+        $this->state->assertWriteAllowed($key, $value);
         $this->keepPrimaryLockAlive();
         $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, $value);
@@ -480,12 +633,18 @@ final class Transaction
 
     /**
      * @throws InvalidStateException
+     * @throws TransactionTooLargeException when the write would exceed a
+     *         configured transaction size limit (issue #430); thrown before
+     *         the eager pessimistic lock RPC, so nothing reaches TiKV
      * @throws TiKvException if the pessimistic transaction cannot obtain a
      *         write timestamp or acquire its lock
      */
     public function delete(string $key): void
     {
         $this->state->ensureWritable();
+        // Reject an oversized write before the eager pessimistic lock below
+        // sends any RPC (issue #430).
+        $this->state->assertWriteAllowed($key, null);
         $this->keepPrimaryLockAlive();
         $this->preparePessimisticWrite($key);
         $this->state->setWrite($key, null);

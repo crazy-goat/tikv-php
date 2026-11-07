@@ -14,12 +14,15 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TxnReader;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\NullLogger;
 
 /**
  * The transactional half of issue #261's array-key contract.
@@ -117,6 +120,26 @@ final class TxnReaderArrayKeyTest extends TestCase
         );
     }
 
+    private function createRetryExecutor(): RetryExecutor
+    {
+        return new RetryExecutor(
+            20000,
+            60000,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            new NullLogger(),
+        );
+    }
+
+    /**
+     * @return callable(\CrazyGoat\TiKV\Client\Exception\TiKvException): ?BackoffType
+     */
+    private function classifier(): callable
+    {
+        return static fn (): ?BackoffType => null;
+    }
+
     /**
      * Answer KvBatchGet with one pair per requested key, echoing 'v:' . $key,
      * so the wire keys and the returned map keys are the same byte strings.
@@ -148,10 +171,12 @@ final class TxnReaderArrayKeyTest extends TestCase
     {
         $this->stubBatchGet();
 
-        $state = new TransactionState();
+        $state = new TransactionState(trackReadSet: true);
         $results = $this->createReader()->batchGet(
             ['1000', '01000', '1e3', '-5', '0', 'user:7'],
             $state,
+            $this->createRetryExecutor(),
+            $this->classifier(),
         );
 
         self::assertCount(6, $results);
@@ -176,6 +201,8 @@ final class TxnReaderArrayKeyTest extends TestCase
         $results = $this->createReader()->batchGet(
             ['1000', '01000', '1e3', '-5', '0', 'user:7'],
             new TransactionState(),
+            $this->createRetryExecutor(),
+            $this->classifier(),
         );
 
         $keyTypes = [];
@@ -228,6 +255,8 @@ final class TxnReaderArrayKeyTest extends TestCase
         $results = $this->createReader()->batchGet(
             ['1000', '01000', '1e3', 'user:7'],
             $state,
+            $this->createRetryExecutor(),
+            $this->classifier(),
         );
 
         self::assertSame('written-1000', $results['1000']);

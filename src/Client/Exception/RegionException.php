@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Exception;
 
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\Errorpb\StoreNotMatch;
+use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 
 final class RegionException extends TiKvException
@@ -15,12 +18,27 @@ final class RegionException extends TiKvException
      *     the proto Error oneof, or null when the error could not be mapped.
      *     When non-null the classifier can determine the correct BackoffType
      *     without inspecting the message text.
+     * @param EpochNotMatch|null $epochNotMatch The payload of an
+     *     EpochNotMatch error. TiKV puts the regions that now cover the
+     *     stale range in `current_regions`, so the retry can refresh the
+     *     region cache without a PD round trip (issue #246).
+     * @param RegionInfo|null $cachedRegion The region entry that produced
+     *     the error, captured by RegionErrorHandler::check() before it
+     *     invalidates the entry. EpochNotMatch carries no leader, so the
+     *     retry needs the stale entry's leader store to seed the new
+     *     regions. Null when the caller did not pass a cache.
+     * @param StoreNotMatch|null $storeNotMatch The payload of a
+     *     StoreNotMatch error. It names the store ID the request was sent to,
+     *     which is the store-cache entry the retry must drop (issue #247).
      */
     public function __construct(
         string $operation,
         string $message,
         public readonly ?NotLeader $notLeader = null,
         public readonly ?ErrorKind $errorKind = null,
+        public readonly ?EpochNotMatch $epochNotMatch = null,
+        public readonly ?RegionInfo $cachedRegion = null,
+        public readonly ?StoreNotMatch $storeNotMatch = null,
     ) {
         parent::__construct("{$operation} failed: {$message}");
     }
@@ -28,8 +46,13 @@ final class RegionException extends TiKvException
     /**
      * Factory method that builds a RegionException from a protobuf Error
      * message, automatically detecting the error kind from the oneof fields.
+     *
+     * $cachedRegion is the region entry that produced the error, when the
+     * caller has one; it is used by the EpochNotMatch cache-refresh path and
+     * as the StoreNotMatch fallback when the payload does not name the
+     * requested store (see the constructor docblock).
      */
-    public static function fromRegionError(Error $error): self
+    public static function fromRegionError(Error $error, ?RegionInfo $cachedRegion = null): self
     {
         $kind = self::detectErrorKind($error);
 
@@ -38,6 +61,9 @@ final class RegionException extends TiKvException
             message: $error->getMessage(),
             notLeader: $error->getNotLeader(),
             errorKind: $kind,
+            epochNotMatch: $error->getEpochNotMatch(),
+            cachedRegion: $cachedRegion,
+            storeNotMatch: $error->getStoreNotMatch(),
         );
     }
 

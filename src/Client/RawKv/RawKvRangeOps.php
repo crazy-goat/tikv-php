@@ -26,6 +26,8 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -46,6 +48,10 @@ final readonly class RawKvRangeOps
         private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
         private MetricsInterface $metrics = new NoOpMetrics(),
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -58,9 +64,17 @@ final readonly class RawKvRangeOps
      * At most {@see self::$maxConcurrency} requests are in flight at any
      * moment (issue #295).
      *
-     * Failure semantics differ from a sequential loop: region errors no
-     * longer abort at the first failing region but surface together as a
+     * Failure semantics differ from a sequential loop: a region whose retry
+     * budget is exhausted (or that returns a fatal region error) no longer
+     * aborts at the first failing region but surfaces together with the
+     * others as a
      * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException}.
+     * Retryable region errors carried on a response are retried per
+     * sub-range inside the wait phase (issue #566), so a leader transfer — or
+     * a split whose fresh region still covers the sub-range — recovers
+     * transparently; a split that leaves the fresh region smaller than the
+     * sub-range still fails closed via
+     * {@see self::assertRegionCoversRange()}.
      * deleteRange is idempotent, so retrying the whole operation remains safe.
      *
      * Retries re-resolve the region per attempt (issue #190), so the
@@ -69,11 +83,15 @@ final readonly class RawKvRangeOps
      */
     public function deleteRange(string $startKey, string $endKey, string $columnFamily = ''): void
     {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'deleteRange');
+
         if ($startKey === $endKey) {
             return;
         }
 
-        $executor = $this->createRetryExecutor();
+        // One range operation is one logical operation: every region shares
+        // one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         foreach ($regions as $region) {
             $this->regionCache->put($region);
@@ -107,8 +125,10 @@ final readonly class RawKvRangeOps
      * merge the per-region CRC64-XOR results. Requests are fanned out with
      * the same bounded concurrency as {@see self::deleteRange()} (issue #295).
      *
-     * Region errors surface as a
-     * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException};
+     * Region errors carried on a response are retried per sub-range in the
+     * wait phase (issue #566); only a fatal region error or an exhausted
+     * retry budget surfaces, as a
+     * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException}.
      * checksum is idempotent, so retrying the whole operation remains safe.
      *
      * As in {@see self::deleteRange()}, the `scanRegions()` result is
@@ -117,7 +137,11 @@ final readonly class RawKvRangeOps
      */
     public function checksum(string $startKey, string $endKey): ChecksumResult
     {
-        $executor = $this->createRetryExecutor();
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'checksum');
+
+        // One range operation is one logical operation: every region shares
+        // one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $regions = $this->pdClient->scanRegions($startKey, $endKey, 0);
         foreach ($regions as $region) {
             $this->regionCache->put($region);
@@ -162,6 +186,13 @@ final readonly class RawKvRangeOps
      * return an un-waited future so the batch executor can fan out all
      * regions' sends before awaiting any of them.
      *
+     * The first attempt is dispatched eagerly (fan-out is preserved), while
+     * the wait phase runs the whole dispatch+await cycle under the retry
+     * executor. A region error carried on the response — not only a thrown
+     * gRPC exception — is therefore retried per sub-range with cache
+     * invalidation, leader switching and backoff (issue #566, mirroring the
+     * #183 fix for the batch wrappers).
+     *
      * The original clipped `[startKey, endKey)` bounds are intentionally kept
      * when the region is re-resolved (issue #190): after a split the fresh
      * region may no longer cover them. The request fails loudly in that case
@@ -177,61 +208,74 @@ final readonly class RawKvRangeOps
         string $endKey,
         string $columnFamily = '',
     ): CheckedGrpcFuture {
-        /** @var CheckedGrpcFuture $future */
-        $future = $executor->execute($startKey, function () use (
+        $targetStoreId = null;
+
+        return CheckedGrpcFuture::fromRetryableDispatch(
+            function () use ($startKey, $endKey, $columnFamily, &$targetStoreId): CheckedGrpcFuture {
+                // Resolve the region on every attempt so retries pick up cache
+                // invalidation and leader switching (issue #190).
+                $region = $this->regionResolver->getRegionInfo($startKey);
+                $this->assertRegionCoversRange($region, $startKey, $endKey);
+                $targetStoreId = $region->leaderStoreId;
+                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+
+                $request = new RawDeleteRangeRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo(
+                    $region,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
+                ));
+                $request->setStartKey($startKey);
+                $request->setEndKey($endKey);
+                if ($columnFamily !== '') {
+                    $request->setCf($columnFamily);
+                }
+
+                $response = $this->grpc->callAsync(
+                    $address,
+                    'tikvpb.Tikv',
+                    'RawDeleteRange',
+                    $request,
+                    RawDeleteRangeResponse::class,
+                    $this->timeoutConfig->deleteRangeTimeoutMs,
+                );
+
+                return CheckedGrpcFuture::fromCallable(
+                    fn(): RawDeleteRangeResponse => $this->measure(
+                        'delete_range',
+                        $startKey,
+                        function () use ($response): RawDeleteRangeResponse {
+                            /** @var RawDeleteRangeResponse $resolved */
+                            $resolved = $response->wait();
+                            RegionErrorHandler::check($resolved);
+
+                            $error = $resolved->getError();
+                            if ($error !== '') {
+                                throw new RegionException('RawDeleteRange', $error);
+                            }
+
+                            return $resolved;
+                        },
+                    ),
+                    $response,
+                );
+            },
+            $executor,
             $startKey,
-            $endKey,
-            $columnFamily,
-        ): CheckedGrpcFuture {
-            // Resolve the region on every attempt so retries pick up cache
-            // invalidation and leader switching (issue #190).
-            $region = $this->regionResolver->getRegionInfo($startKey);
-            $this->assertRegionCoversRange($region, $startKey, $endKey);
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
-
-            $request = new RawDeleteRangeRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setStartKey($startKey);
-            $request->setEndKey($endKey);
-            if ($columnFamily !== '') {
-                $request->setCf($columnFamily);
-            }
-
-            $response = $this->grpc->callAsync(
-                $address,
-                'tikvpb.Tikv',
-                'RawDeleteRange',
-                $request,
-                RawDeleteRangeResponse::class,
-                $this->timeoutConfig->deleteRangeTimeoutMs,
-            );
-
-            return CheckedGrpcFuture::fromCallable(
-                fn(): RawDeleteRangeResponse => $this->measure(
-                    'delete_range',
-                    $startKey,
-                    function () use ($response): RawDeleteRangeResponse {
-                        /** @var RawDeleteRangeResponse $resolved */
-                        $resolved = $response->wait();
-                        RegionErrorHandler::check($resolved);
-
-                        $error = $resolved->getError();
-                        if ($error !== '') {
-                            throw new RegionException('RawDeleteRange', $error);
-                        }
-
-                        return $resolved;
-                    },
-                ),
-            );
-        });
-
-        return $future;
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
+        );
     }
 
     /**
      * Issue one RawChecksum send for a single clipped sub-range and return
      * an un-waited future (fan-out pattern, see deleteRangeWithRetry()).
+     *
+     * Response-borne region errors are retried in the wait phase exactly as
+     * in {@see self::deleteRangeWithRetry()} (issue #566): the first attempt
+     * is dispatched eagerly, every retry re-resolves the region and runs
+     * under the same retry executor.
      *
      * As in {@see self::deleteRangeWithRetry()}, the clipped bounds are kept
      * on re-resolution. A raw checksum read is silently clamped by the region
@@ -245,55 +289,67 @@ final readonly class RawKvRangeOps
         string $startKey,
         string $endKey,
     ): CheckedGrpcFuture {
-        /** @var CheckedGrpcFuture $future */
-        $future = $executor->execute($startKey, function () use ($startKey, $endKey): CheckedGrpcFuture {
-            // Resolve the region on every attempt so retries pick up cache
-            // invalidation and leader switching (issue #190).
-            $region = $this->regionResolver->getRegionInfo($startKey);
-            $this->assertRegionCoversRange($region, $startKey, $endKey);
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+        $targetStoreId = null;
 
-            $range = new KeyRange();
-            $range->setStartKey($startKey);
-            if ($endKey !== '') {
-                $range->setEndKey($endKey);
-            }
+        return CheckedGrpcFuture::fromRetryableDispatch(
+            function () use ($startKey, $endKey, &$targetStoreId): CheckedGrpcFuture {
+                // Resolve the region on every attempt so retries pick up cache
+                // invalidation and leader switching (issue #190).
+                $region = $this->regionResolver->getRegionInfo($startKey);
+                $this->assertRegionCoversRange($region, $startKey, $endKey);
+                $targetStoreId = $region->leaderStoreId;
+                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-            $request = new RawChecksumRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setAlgorithm(ChecksumAlgorithm::Crc64_Xor);
-            $request->setRanges([$range]);
+                $range = new KeyRange();
+                $range->setStartKey($startKey);
+                if ($endKey !== '') {
+                    $range->setEndKey($endKey);
+                }
 
-            $response = $this->grpc->callAsync(
-                $address,
-                'tikvpb.Tikv',
-                'RawChecksum',
-                $request,
-                RawChecksumResponse::class,
-                $this->timeoutConfig->checksumTimeoutMs,
-            );
+                $request = new RawChecksumRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo(
+                    $region,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
+                ));
+                $request->setAlgorithm(ChecksumAlgorithm::Crc64_Xor);
+                $request->setRanges([$range]);
 
-            return CheckedGrpcFuture::fromCallable(
-                fn(): RawChecksumResponse => $this->measure(
-                    'checksum',
-                    $startKey,
-                    function () use ($response): RawChecksumResponse {
-                        /** @var RawChecksumResponse $resolved */
-                        $resolved = $response->wait();
-                        RegionErrorHandler::check($resolved);
+                $response = $this->grpc->callAsync(
+                    $address,
+                    'tikvpb.Tikv',
+                    'RawChecksum',
+                    $request,
+                    RawChecksumResponse::class,
+                    $this->timeoutConfig->checksumTimeoutMs,
+                );
 
-                        $error = $resolved->getError();
-                        if ($error !== '') {
-                            throw new RegionException('RawChecksum', $error);
-                        }
+                return CheckedGrpcFuture::fromCallable(
+                    fn(): RawChecksumResponse => $this->measure(
+                        'checksum',
+                        $startKey,
+                        function () use ($response): RawChecksumResponse {
+                            /** @var RawChecksumResponse $resolved */
+                            $resolved = $response->wait();
+                            RegionErrorHandler::check($resolved);
 
-                        return $resolved;
-                    },
-                ),
-            );
-        });
+                            $error = $resolved->getError();
+                            if ($error !== '') {
+                                throw new RegionException('RawChecksum', $error);
+                            }
 
-        return $future;
+                            return $resolved;
+                        },
+                    ),
+                    $response,
+                );
+            },
+            $executor,
+            $startKey,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
+        );
     }
 
     /**

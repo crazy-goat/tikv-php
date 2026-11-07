@@ -3,6 +3,28 @@
 Frequently asked questions and recurring pitfalls in crazy-goat/tikv-php.
 Ordered roughly by how often they bite.
 
+## A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep
+
+Issue #569 describes `LockResolver` capping a lock-TTL `usleep()` at
+`maxBackoffMs`, but #206 removed that sleep: a live lock now raises
+`TxnRetryableException` and the caller's `RetryExecutor` owns the backoff.
+The remaining overshoot is the lock-resolution RPC time (`lockResolveTimeoutMs`
+defaults to 5 s and the TSO fetch to 3 s), not a sleep. The seam is
+`RetryBudget`: `RetryExecutor::beginOperation()` returns an executor whose
+`execute()` calls share one budget, and `RetryExecutor::currentBudget()` exposes
+that same object. `RetryBudget::remainingDeadlineMs()` computes the live value
+at call time, and `TwoPhaseCommitter` / `TxnReader` pass it into
+`LockResolver::resolveLock()` / `resolveLocks()`. `LockResolver` converts that
+value once into an absolute deadline and recomputes the live remaining time
+before every nested RPC, so the TSO fetch, `CheckTxnStatus`,
+`CheckSecondaryLocks` and `ResolveLock` share one budget instead of each
+starting from the full snapshot. Do not reintroduce a sleep in `LockResolver`:
+it would break the #206 resolve-then-retry contract. The budget is the single
+source of truth for the deadline; do not add a second context object next to
+it. The live value is computed at call time, so time spent inside the current
+attempt's RPC is already deducted; a snapshot taken before the attempt would
+overstate it.
+
 ## RetryExecutor unit tests that need zero-sleep retries: use DataIsNotReady or an explicit classifier
 
 Since issue #241 (REG-10) `EpochNotMatch` classifies as `BackoffType::EpochNotMatch`
@@ -38,6 +60,21 @@ Conversely a wall-clock `elapsedMs` lower bound must be provable from the
 sleeps alone (budget exhaustion implies > 50 ms of sleeps), not from
 scheduling overhead. The #241 tests in `RetryExecutorTest` are the reference
 implementation of this sizing.
+
+## The retry budget is per logical operation, not per execute() call
+
+Since issue #223 a client's fan-out entry points wrap their `RetryExecutor`
+in `beginOperation()`, so every `execute()` call for one scan, batch,
+transactional read, commit, rollback or range operation charges the same
+`maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline. A standalone
+`RetryExecutor` still resets the budget on every `execute()` call (issue
+#271), and `beginOperation()` on the same executor starts a new operation.
+Consequence for tests: a multi-region `RawKvScanner`/`RawKvRangeOps`/
+`TxnReader` operation shares one budget across regions (a later region gets
+no fresh budget after an earlier one spent it), while two calls to
+`execute()` on a bare executor each get a full budget. The attempt cap stays
+per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
+on ordinary one-retry-per-region traffic.
 
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
@@ -411,8 +448,9 @@ The remaining gap was the missing `wait_timeout` and the missing knob.
 
 ## Retry closures must re-resolve the region inside the loop — scans resolve on the sub-range start, reverse scans on the sub-range end
 
-`RetryExecutor` invalidates the region cache and switches leader hints on
-`NotLeader`/`EpochNotMatch`, but those updates only take effect if the
+`RetryExecutor` invalidates the region cache on routing errors
+(`NotLeader`/`EpochNotMatch`/`RegionNotFound`/`StoreNotMatch`/…) and switches
+leader hints on `NotLeader`, but those updates only take effect if the
 retried closure asks `RegionResolver::getRegionInfo()` again on every
 attempt. Scan closures (issue #267, GRPC-08) used to capture the
 `RegionInfo` resolved before the loop, so every retry re-sent the same
@@ -434,14 +472,16 @@ keeps a stale upper bound receives a partial success — re-clip or guard
 explicitly. The same stale-capture bug in `RawKvRangeOps`
 (deleteRange/checksum) was fixed by #190: resolution now happens inside the
 retry closure and the `scanRegions()` result is pre-populated into the
-region cache (so the first attempt is a cache hit). Remaining limitation:
-because of the #295 fan-out the retry closure only observes dispatch-phase
-failures; response-borne region errors surface at wait time as
-`BatchPartialFailureException`. Unlike `RawKvBatch` — whose response-borne
-region errors are now retried in the wait phase by #183 — this
-`RawKvRangeOps` wait-time path is still **unfixed** and remains an open gap;
-#236/#189 covered the batch wrappers, not `RawKvRangeOps`. A region that shrank
-after enumeration (a split) is also guarded by
+region cache (so the first attempt is a cache hit). Because of the #295
+fan-out the original retry closure only observed dispatch-phase failures:
+response-borne region errors surfaced at wait time as
+`BatchPartialFailureException`. Issue #566 closed that gap by moving
+`deleteRange`/`checksum` onto `CheckedGrpcFuture::fromRetryableDispatch()`
+(the #183 pattern used by the batch wrappers): the first attempt is still
+dispatched eagerly, while the wait phase runs the whole dispatch+await cycle
+under the retry executor, so a `NotLeader`/`EpochNotMatch`/… carried in the
+response is retried and the region is re-resolved on every attempt. A region
+that shrank after enumeration (a split) is also guarded by
 `RawKvRangeOps::assertRegionCoversRange()`: `deleteRange` fails closed, and
 `checksum` refuses a partial result — its data read is silently clamped by
 the region snapshot, so a truncated checksum would otherwise be XOR-merged
@@ -456,6 +496,22 @@ scan fix, the retry does not re-clip or re-group: after a split the
 re-resolved region may not cover the whole key group and the server
 keeps erroring until the budget is exhausted (documented limitation,
 same as the #500 lock path).
+
+## `RegionErrorHandler::check()` uses the same routing table but its own metric prefix
+
+`RegionErrorHandler::check()` is a second drop path beside the retry
+executor: TxnKV call sites pass their `$cache` and `$regionId`, so `check()`
+invalidates before the `RegionException` reaches `RetryExecutor`. Since
+issue #245 both paths gate the drop on the same
+`RetryExecutor::invalidatesRoutingKind()` table, so
+`ServerIsBusy`/`DiskFull`/`IsWitness`/`RecoveryInProgress` keep the cached
+entry there too. `check()` builds the `RegionException` first because the
+typed `ErrorKind` lives on it. The handler keeps its own reason prefix —
+`region_error:<kind>`, and plain `region_error` for an unclassified error —
+rather than `retry_region_error:<kind>`: the latter means "RetryExecutor
+dropped the entry before scheduling another attempt", while `check()` may run
+outside any retry executor. Do not collapse the two labels, and do not
+assume the executor owns every drop.
 
 ## PHPStan `ternary.alwaysFalse` fires for by-ref bool flags mutated in a sibling closure — sequence mocks instead
 
@@ -575,6 +631,13 @@ point, not just for the obvious upper bound — a negative wraps to a huge
 unsigned value. `batchScan`/`scanIterator` use a `<= 0` guard with their
 own ('eachLimit'/'batchSize' must be greater than 0) messages; the scan
 limit itself uses the 'Scan limit must be 0 or greater' message.
+
+Issue #310 was filed before the fix shipped in v0.4.0 (#332); by the time it
+was picked up, `scan(-1)` already threw. The remaining gap was that nothing
+asserted the rejection happens before the scan RPC (a pessimistic
+`Transaction::scan()` still fetches its read timestamp first), so #310 adds
+tests and docs, not a guard — check the code before implementing an audit
+finding (the same premise-expiry trap as #394 and #361 above).
 
 ## Metrics on a shared collaborator: nullable + accessor + in-place attach, and one sole owner per emission reason
 
@@ -1220,18 +1283,20 @@ retryable because the outcome is indeterminate; the idempotency split is
 REG-08's job, not the classifier's.
 
 
-## Jittered backoff makes "exact retry count" budget tests flaky — assert ranges with a shared-budget lower bound
+## Jittered backoff makes "exact retry count" budget tests flaky — assert the range that distinguishes the budget semantics
 
 When all `BackoffType`s became jittered (issue #242, equal jitter `[expo/2, expo]`), unit
 tests that asserted an **exact** retry/call count against a `maxBackoffMs` budget broke:
 randomly halved sleeps can squeeze one extra attempt into the same budget
-(`tests/Unit/RawKv/RetryBudgetSharedAcrossRegionsTest.php` went from always 6 calls to
-6–8). Fix pattern: assert the invariant the test actually cares about — the *lower* bound
-that distinguishes per-region from shared budgets (`>= 6`) plus a derived upper bound
-(`<= 8`) — not the exact count. Anything comparing budget-exhaustion attempt counts must
-now tolerate ±1 attempt per jittered exponential step. Also: `1 << $attempt` instead of
-`2 ** $attempt` keeps the exponent math int-typed so Rector's `RecastingRemovalRector`
-doesn't strip a needed `(int)` cast before `intdiv()`.
+(`tests/Unit/RawKv/RetryBudgetSharedAcrossRegionsTest.php` used to assert always 6 calls,
+then 6–8 under per-region budgets; since issue #223 the same file pins the shared budget
+at 4–5 calls and the per-region alternative at 6–8). Fix pattern: assert the invariant the
+test actually cares about — the bound that distinguishes the two semantics (`<= 5` for the
+shared budget, `>= 6` for per-region) plus a derived counter-bound — not the exact count.
+Anything comparing budget-exhaustion attempt counts must now tolerate ±1 attempt per
+jittered exponential step. Also: `1 << $attempt` instead of `2 ** $attempt` keeps the
+exponent math int-typed so Rector's `RecastingRemovalRector` doesn't strip a needed `(int)`
+cast before `intdiv()`.
 
 ## Budget carry-over detection becomes probabilistic under jittered backoff
 
@@ -1804,21 +1869,23 @@ must never parse keys out of `getMessage()`. A guard test
 key-bearing message (`for key`) but whose arguments lack a
 `KeyRedactor::redact()` invocation, so the pattern cannot silently return.
 
-## `KeyRedactor::redact()` output already contains quotes — pass it to an unquoted `%s`, and anchor key-redaction guards to the `sprintf()` argument list
+## `KeyRedactor::redact()` output is unquoted for non-empty keys — pass it to an unquoted `%s`, and anchor key-redaction guards to the `sprintf()` argument list
 
-Two lessons from the #269 (GRPC-10) review:
+Two lessons from the #269 (GRPC-10) review, updated for the keyed-hash format
+of #309 (SEC-06):
 
-1. **Doubled quotes in exception messages.** `KeyRedactor::redact()` already
-   starts with `"` and, for short keys (up to 8 bytes), also ends with `"`:
-   `"6b65795f61" (5 bytes)` vs `"757365725f656d61... (28 bytes)`. A template that also
-   quotes the placeholder (`for key "%s"`) renders
-   `... for key ""757365725f656d61... (28 bytes)"`. Pass the redacted value to an
+1. **Do not quote the redacted value a second time.** `KeyRedactor::redact()`
+   returns `#<16 hex chars> (<n> bytes)` for a non-empty key
+   (`#3c469e9d6c5875d3 (5 bytes)`) and `"" (0 bytes)` for an empty one. A
+   template that quotes the placeholder (`for key "%s"`) renders
+   `... for key "#3c469e9d6c5875d3 (5 bytes)"`; pass the redacted value to an
    *unquoted* `%s` (`for key %s`). Do not change `KeyRedactor`'s own output —
    log contexts store the value unwrapped and depend on the current shape.
-   The user-facing description of the whole redaction contract (the default
-   format, the places the redactor is applied, the process-global nature of
-   `setRedactor()` and the fact that values are never logged at all) lives
-   in [`configuration.md`](../configuration.md#log-redaction) (#400).
+   The user-facing description of the whole redaction contract (the keyed-hash
+   format, the process-scoped salt, the places the redactor is applied, the
+   one-shot `setRedactor()`/`setSalt()` setters and the fact that values are
+   never logged at all) lives in
+   [`configuration.md`](../configuration.md#log-redaction) (#400, #309).
 2. **Guard tests must scan the `sprintf()` argument list, not raw text.** The
    first cut matched the raw form with a text regex keyed off a positional
    bare `$key`; it stayed green only because the raw key was passed as the
@@ -1854,26 +1921,35 @@ The regression tests live in `TransactionTest` and use the shared
 asserts `['KvPessimisticLock']`, i.e. no `KvPrewrite`/`KvCommit`); there is
 also a first-variant-wins test for multi-error responses.
 
-## Range-op retries only see dispatch-phase failures — make both callAsync attempts throw in the regression test
+## Range-op retries: dispatch-phase re-resolve (#190) and response-borne retry (#566)
 
 `RawKvRangeOps::deleteRange()/checksum()` fan their per-region sends out
-through `callAsync()` and return an un-waited `CheckedGrpcFuture`; the wait
-happens later inside `BatchAsyncExecutor`, outside `RetryExecutor::execute()`.
-So moving `getRegionInfo($startKey)` inside the retry closure (#190) only
-helps for errors raised during *dispatch* (`callAsync()` itself or
-store-address resolution) — a region error carried on the response surfaces
-at wait time and is not retried per region at all (the documented fan-out
-trade-off). Proving the re-resolve in a pure-PHP `Unit` test therefore does
-**not** need a successful second future: let the first `callAsync()` throw a
-retryable `TiKvException('StaleCommand')` and the second throw a
-deliberately non-retryable one (`ErrorClassifier` leaves it unclassified, so
-the loop stops and the original exception propagates). Record the target
-address of each attempt and assert the pair — e.g.
-`['tikv1:20160', 'tikv2:20160']` — with `regionCache->getByKey()` stubbed
+through `callAsync()`. Since #190 the retry closure re-resolves
+`getRegionInfo($startKey)` on every attempt, which covers errors raised during
+*dispatch* (`callAsync()` itself or store-address resolution): the first
+`callAsync()` throws a retryable `TiKvException('StaleCommand')`, the retry
+re-resolves and sends to the new leader, and the test records the target
+address of each attempt — e.g. `['tikv1:20160', 'tikv2:20160']` — with
+`regionCache->getByKey()` stubbed
 `willReturnOnConsecutiveCalls($stale, $stale, null)` so the retry models the
 invalidation lookup before going to PD. No `\Grpc\Call` / resolved-future
 machinery is required, so the test stays in the `Unit` suite under `php -n`.
-The same harness covers the fail-closed shrink guard: let the
+
+Before #566 that dispatch-phase harness was the whole story: the wait happened
+later inside `BatchAsyncExecutor`, outside `RetryExecutor::execute()`, so a
+region error carried on the response surfaced at wait time and was not retried
+per region at all (the documented #295 fan-out trade-off). Issue #566 moved
+both wrappers onto `CheckedGrpcFuture::fromRetryableDispatch()` (the #183
+pattern): the first attempt is still dispatched eagerly, so the #295 fan-out is
+unchanged, while the wait phase runs the whole dispatch+await cycle under the
+operation-scoped retry executor (`beginOperation()`, #223) and re-resolves the
+region on every attempt. Response-borne coverage now lives in
+`RawKvRangeOpsRetryTest`
+(`testDeleteRangeRetriesResponseBorneNotLeaderAndSucceeds`,
+`testChecksumRetriesResponseBorneEpochNotMatchAndSucceeds`); the
+dispatch-phase harness above still covers #190.
+
+The same dispatch-phase harness covers the fail-closed shrink guard: let the
 post-invalidation `getRegion` return a smaller region (end key `k` for the
 request `a..z`); `assertRegionCoversRange()` fires before the second send, so
 expect exactly **one** `callAsync` and a `TiKvException` whose message
@@ -1909,8 +1985,9 @@ PHPStan L9 correlates the try/catch: at the rethrow check it already knows
 Test seam: drive the composition directly with `fromCallable()` futures (no
 `\Grpc\Call` mocks, no ext-grpc) and a real `RetryExecutor` over a mocked
 `RegionCacheInterface`; `NotLeader` with a hint must call `switchLeader`
-(not `invalidate`), `EpochNotMatch` must `invalidate`, and a non-retryable
-error must propagate after exactly one attempt.
+(not `invalidate`), an `EpochNotMatch` with an empty payload must
+`invalidate`, and a non-retryable error must propagate after exactly one
+attempt.
 `tests/Unit/Batch/CheckedGrpcFutureRetryableDispatchTest.php` is the
 reference. When a test pins dispatch counts through a dead endpoint, pass
 `maxAttempts: 1` (or a tiny `maxBackoffMs`) to stop the new wait-phase retry
@@ -1926,6 +2003,54 @@ that (and/or `grpc->callAsync`, exactly one per dispatch): with
 `maxAttempts: 2` both are exactly 2, while the old dispatch-only-retry code
 resolved once. Reference:
 `RawKvBatchTest::testBatchGetWithRetryReResolvesRegionOnEveryAttempt`.
+
+## EpochNotMatch `current_regions` has no leader — seed it from the stale cached entry (issue #246)
+
+`errorpb.EpochNotMatch.current_regions` is a `metapb.Region` list, and
+`metapb.Region` has **no leader field** (only `peers`, `region_epoch`, …).
+Mapping it through `RegionInfoMapper::fromProto($region, null, $codec)` yields
+`leaderStoreId = 0`, which `RegionCache::put()` deliberately refuses to cache
+(issue #576) — so the "avoid PD" path would silently do nothing. The leader
+must come from the stale cached entry's leader store: if that store is still
+one of the new region's peers, use the new peer on that store (same assumption
+as client-go's `onRegionEpochNotMatch`; a replica read may have been sent to a
+follower, but the cached leader is still the right seed). If the old leader
+store is gone from the new peer set, treat the payload as unusable and fall
+back to PD.
+
+Two more traps in the same path:
+
+- `RegionErrorHandler::check()` invalidates the TxnKV entry **before** the
+  `RegionException` reaches `RetryExecutor`, so the stale leader is already
+  gone from the cache. `check()` therefore captures `getById($regionId)` into
+  `RegionException::$cachedRegion` before invalidating; RawKV check sites pass
+  no cache, so the executor reads the entry with `getByKey($key)` instead.
+- The payload is all-or-nothing and must be *newer*. A same-ID region whose
+  epoch is not strictly newer is ignored by `RegionCache::put()` (issue #249),
+  so accepting it would retry the same stale routing until the budget runs
+  out; the executor rejects it and falls back to PD. A returned region that
+  does not contain the key is also a fallback, not a reason to cache the
+  partial payload. A successful executor-side refresh is a superseding
+  `put()`, so it emits no `regionInvalidated()` metric of its own (issue
+  #238); the `check()` drop above is counted separately. The executor's
+  fallback emits `retry_region_error:epoch_not_match` only where the stale
+  entry is still cached (e.g. RawKV); at TxnKV sites `check()` already
+  dropped it, so only `region_error:epoch_not_match` is emitted.
+
+## A refreshed EpochNotMatch can leave a prewrite group spanning regions — re-group before retry (issue #246)
+
+`prewriteWithRetry()` re-resolves only the group's first key. If a split
+happened after `groupMutationsByRegion()` built the group, the refreshed cache
+may now give a narrow left region while the group still contains keys at or
+after its **exclusive** end. Replaying that group to the left region produces a
+`KeyError.abort` with a message such as `Key 0100… is out of [region 14]
+[, 0100…)`, not another `EpochNotMatch`, so the retry loop cannot recover.
+The group must be re-grouped by resolving **every** mutation's key and sending
+one prewrite per region. Keep the primary sub-group first in the normal path
+and last for async commit; a split group cannot use 1PC. Unlike the
+pessimistic-lock/rollback re-groups (#503/#505), this one is local to the
+prewrite group, so the primary/secondary phase ordering is unchanged.
+Reference: `TransactionTest::testCommitPrewriteRegroupsGroupAfterSplitAtExclusiveEnd`.
 
 ## `limit: 0` scans paginate and are guarded, not capped (RAW-06, issue #191)
 

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\TxnKv;
 
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException;
 
 /**
  * Mutable state holder for a single transaction.
@@ -19,8 +20,22 @@ final class TransactionState
     /** @var array<array-key, ?string> key => value. null value means delete */
     private array $writeSet = [];
 
+    /**
+     * Bytes currently held by the write set: the sum of every entry's key
+     * length plus its value length (a delete contributes the key only).
+     * Maintained incrementally so the total-size limit costs O(1) per write
+     * (issue #430).
+     */
+    private int $writeSetBytes = 0;
+
     /** @var array<array-key, ?string> key => value read (for read-set tracking) */
     private array $readSet = [];
+
+    /**
+     * Bytes currently held by the read set, maintained incrementally like
+     * {@see $writeSetBytes} (issue #297).
+     */
+    private int $readSetBytes = 0;
 
     /** @var string[] keys pending a deferred pessimistic lock pass */
     private array $pendingLockKeys = [];
@@ -51,9 +66,29 @@ final class TransactionState
     /**
      * @param int $startedAtMs Client clock time (ms) at which the transaction
      *                         began; the base of the lock TTL (issue #429)
+     * @param int $maxTxnEntryCount Maximum number of write-set entries;
+     *                              0 = unlimited (issue #430)
+     * @param int $maxTxnEntrySize Maximum bytes of one key+value entry;
+     *                             0 = unlimited (issue #430)
+     * @param int $maxTxnTotalSize Maximum bytes of the whole write set;
+     *                             0 = unlimited (issue #430)
+     * @param int $maxReadSetEntries Maximum number of read-set entries;
+     *                               0 = unlimited (issue #297)
+     * @param int $maxReadSetTotalSize Maximum bytes of the whole read set,
+     *                                 measured as key length plus value
+     *                                 length; 0 = unlimited (issue #297)
+     * @param bool $trackReadSet Whether setReadValue() retains values;
+     *                           false by default (issue #297)
      */
-    public function __construct(private readonly int $startedAtMs = 0)
-    {
+    public function __construct(
+        private readonly int $startedAtMs = 0,
+        private readonly int $maxTxnEntryCount = 0,
+        private readonly int $maxTxnEntrySize = 0,
+        private readonly int $maxTxnTotalSize = 0,
+        private readonly int $maxReadSetEntries = 0,
+        private readonly int $maxReadSetTotalSize = 0,
+        private readonly bool $trackReadSet = false,
+    ) {
     }
 
     public function isActive(): bool
@@ -182,10 +217,23 @@ final class TransactionState
      *        the same canonical-decimal coercion as {@see getWriteSet()} applies
      *        here: a caller that hands back a `getWriteSet()` result must not
      *        be rejected by a narrower `string`-keyed declaration (issue #261).
+     *
+     * @throws TransactionTooLargeException when the replacement write set
+     *         exceeds one of the configured limits (issue #430)
      */
     public function setWriteSet(array $writeSet): void
     {
+        $bytes = 0;
+        foreach ($writeSet as $key => $value) {
+            $entrySize = $this->entrySize((string) $key, $value);
+            $this->assertEntrySizeWithinLimit($entrySize);
+            $bytes += $entrySize;
+        }
+        $this->assertCountWithinLimit(count($writeSet));
+        $this->assertTotalSizeWithinLimit($bytes);
+
         $this->writeSet = $writeSet;
+        $this->writeSetBytes = $bytes;
     }
 
     public function hasWriteSetKey(string $key): bool
@@ -198,14 +246,106 @@ final class TransactionState
         return $this->writeSet[$key] ?? null;
     }
 
+    /**
+     * Bytes held by the write set (issue #430).
+     *
+     * Every entry contributes its key length plus its value length; a delete
+     * (a null value) contributes the key length only.
+     */
+    public function getWriteSetSize(): int
+    {
+        return $this->writeSetBytes;
+    }
+
+    /**
+     * Number of entries in the write set (issue #430).
+     */
+    public function getWriteSetCount(): int
+    {
+        return count($this->writeSet);
+    }
+
+    /**
+     * Validate a write without applying it, so callers can reject an
+     * oversized write before doing any work (an eager pessimistic `set()`
+     * takes its server-side lock before buffering the value). Overwriting an
+     * existing key accounts for the entry it replaces, so a replace never
+     * leaks budget.
+     *
+     * @throws TransactionTooLargeException when the write would exceed one
+     *         of the configured limits (issue #430)
+     */
+    public function assertWriteAllowed(string $key, ?string $value): void
+    {
+        $entrySize = $this->entrySize($key, $value);
+        $this->assertEntrySizeWithinLimit($entrySize);
+
+        $exists = array_key_exists($key, $this->writeSet);
+        $oldEntrySize = $exists ? $this->entrySize($key, $this->writeSet[$key] ?? null) : 0;
+        $this->assertCountWithinLimit($exists ? count($this->writeSet) : count($this->writeSet) + 1);
+        $this->assertTotalSizeWithinLimit($this->writeSetBytes - $oldEntrySize + $entrySize);
+    }
+
+    /**
+     * @throws TransactionTooLargeException when the write would exceed one
+     *         of the configured limits (issue #430)
+     */
     public function setWrite(string $key, ?string $value): void
     {
+        $this->assertWriteAllowed($key, $value);
+
+        if (array_key_exists($key, $this->writeSet)) {
+            $this->writeSetBytes -= $this->entrySize($key, $this->writeSet[$key] ?? null);
+        }
+
         $this->writeSet[$key] = $value;
+        $this->writeSetBytes += $this->entrySize($key, $value);
     }
 
     public function clearWriteSet(): void
     {
         $this->writeSet = [];
+        $this->writeSetBytes = 0;
+    }
+
+    private function entrySize(string $key, ?string $value): int
+    {
+        return strlen($key) + ($value === null ? 0 : strlen($value));
+    }
+
+    private function assertEntrySizeWithinLimit(int $entrySize): void
+    {
+        if ($this->maxTxnEntrySize > 0 && $entrySize > $this->maxTxnEntrySize) {
+            throw TransactionTooLargeException::entrySize($entrySize, $this->maxTxnEntrySize);
+        }
+    }
+
+    private function assertCountWithinLimit(int $count): void
+    {
+        if ($this->maxTxnEntryCount > 0 && $count > $this->maxTxnEntryCount) {
+            throw TransactionTooLargeException::entryCount($count, $this->maxTxnEntryCount);
+        }
+    }
+
+    private function assertTotalSizeWithinLimit(int $bytes): void
+    {
+        if ($this->maxTxnTotalSize > 0 && $bytes > $this->maxTxnTotalSize) {
+            throw TransactionTooLargeException::totalSize($bytes, $this->maxTxnTotalSize);
+        }
+    }
+
+    private function assertReadCountWithinLimit(int $count): void
+    {
+        if ($this->maxReadSetEntries > 0 && $count > $this->maxReadSetEntries) {
+            throw TransactionTooLargeException::readSetCount($count, $this->maxReadSetEntries);
+        }
+    }
+
+    private function assertReadTotalSizeWithinLimit(int $bytes): void
+    {
+        if ($this->maxReadSetTotalSize > 0 && $bytes > $this->maxReadSetTotalSize) {
+            throw TransactionTooLargeException::readSetTotalSize($bytes, $this->maxReadSetTotalSize);
+        }
     }
 
     /**
@@ -252,14 +392,68 @@ final class TransactionState
         return $this->readSet;
     }
 
+    /**
+     * Validate a read without applying it, so setReadValue() can reject an
+     * oversized read set before retaining another value (issue #297).
+     * Re-reading a key accounts for the entry it replaces, so a second read
+     * never leaks budget.
+     *
+     * @throws TransactionTooLargeException when the read would exceed one
+     *         of the configured read-set limits
+     */
+    private function assertReadAllowed(string $key, ?string $value): void
+    {
+        $entrySize = $this->entrySize($key, $value);
+        $exists = array_key_exists($key, $this->readSet);
+        $oldEntrySize = $exists ? $this->entrySize($key, $this->readSet[$key] ?? null) : 0;
+
+        $this->assertReadCountWithinLimit($exists ? count($this->readSet) : count($this->readSet) + 1);
+        $this->assertReadTotalSizeWithinLimit($this->readSetBytes - $oldEntrySize + $entrySize);
+    }
+
+    /**
+     * Records a read only when read-set tracking is enabled (issue #297).
+     *
+     * @throws TransactionTooLargeException when the read would exceed one
+     *         of the configured read-set limits
+     */
     public function setReadValue(string $key, ?string $value): void
     {
+        if (!$this->trackReadSet) {
+            return;
+        }
+
+        $this->assertReadAllowed($key, $value);
+
+        if (array_key_exists($key, $this->readSet)) {
+            $this->readSetBytes -= $this->entrySize($key, $this->readSet[$key] ?? null);
+        }
+
         $this->readSet[$key] = $value;
+        $this->readSetBytes += $this->entrySize($key, $value);
     }
 
     public function clearReadSet(): void
     {
         $this->readSet = [];
+        $this->readSetBytes = 0;
+    }
+
+    /**
+     * Number of entries in the read set (issue #297).
+     */
+    public function getReadSetCount(): int
+    {
+        return count($this->readSet);
+    }
+
+    /**
+     * Bytes held by the read set: key length plus value length per entry
+     * (issue #297).
+     */
+    public function getReadSetSize(): int
+    {
+        return $this->readSetBytes;
     }
 
     // -- Pending Lock Keys --------------------------------------------------------

@@ -13,6 +13,13 @@ use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
 use Monolog\Formatter\LineFormatter;
 
+if (!class_exists(Logger::class)) {
+    fwrite(STDERR, "This example requires monolog/monolog, a dev-only dependency of this library.\n");
+    fwrite(STDERR, "Install it with: composer require monolog/monolog\n");
+    fwrite(STDERR, "Or pass any PSR-3 logger instead: the client itself only depends on psr/log.\n");
+    exit(1);
+}
+
 echo "TiKV PHP Client - PSR-3 Logging Example\n";
 echo "=======================================\n\n";
 
@@ -102,10 +109,12 @@ echo "   \$handler->setFormatter(new JsonFormatter());\n\n";
 
 echo "4. Key redaction:\n";
 echo "   - Raw keys are never written to the log context: the KeyRedactor\n";
-echo "     utility replaces every key with the first min(8, length) bytes as\n";
-echo "     lowercase hex plus the total byte length, e.g. \"6b65795f61\" (5 bytes).\n";
-echo "   - Use KeyRedactor::setRedactor() to provide a custom redaction\n";
-echo "     callable for your environment; the redactor is process-global.\n";
+echo "     utility replaces every key with a truncated keyed hash plus the\n";
+echo "     total byte length, e.g. #3c469e9d6c5875d3 (5 bytes). The salt is\n";
+echo "     random per process unless KeyRedactor::setSalt() configures one.\n";
+echo "   - Use KeyRedactor::setRedactor() before the first redaction to provide\n";
+echo "     a custom callable; the setter is one-shot and the redactor is\n";
+echo "     process-global.\n";
 echo "   - Avoid DEBUG level in production; keys contain tenant IDs,\n";
 echo "     user IDs, session tokens, etc. and can leak via logs.\n\n";
 

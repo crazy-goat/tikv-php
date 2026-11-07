@@ -35,13 +35,17 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
@@ -78,9 +82,17 @@ use Psr\Log\NullLogger;
  * primary lock once the elapsed time reaches half of the computed TTL (the
  * window resets after each heartbeat). One-phase commits are exempt: 1PC
  * leaves no lock, so a heartbeat would fail an already-committed transaction.
- * A lock can only be heartbeated between region prewrites — a single prewrite
- * RPC that by itself outlives the TTL cannot be kept alive (PHP has no timer);
- * the scaled TTL only narrows that window. Application-level long
+ * A lock can only be heartbeated at the points where control returns to PHP:
+ * after the primary region's prewrite and after the parallel secondary
+ * fan-out completes (plus the pessimistic pre-commit heartbeat); in a
+ * multi-region async commit the primary is prewritten last, so those two
+ * prewrite checks coincide. A single
+ * prewrite or commit RPC that by itself outlives the TTL cannot be kept alive
+ * (PHP has no timer), and neither can a slow commit phase after the last
+ * heartbeat; the scaled TTL only narrows that window. Keep
+ * {@see TimeoutConfig::$writeTimeoutMs} below the base lock TTL (or raise the
+ * TTL), see the "Lock TTLs and the Primary Lock Keepalive" section of
+ * docs/configuration.md. Application-level long
  * transactions — anything that keeps a transaction open between operations
  * — must call {@see \CrazyGoat\TiKV\Client\TxnKv\Transaction::heartbeat()}
  * themselves before the granted TTL elapses. Every lock TTL and every
@@ -143,6 +155,17 @@ final readonly class TwoPhaseCommitter
     private const ROLLBACK_MAX_REGROUPS = 10;
 
     /**
+     * Minimum remaining local pessimistic-lock budget (ms) for attempting a
+     * lock resolution. Below it the resolution is skipped and the loop's
+     * existing `LockWaitTimeoutException` path runs instead: a 1–10 ms gRPC
+     * deadline is almost certain to fail with `DEADLINE_EXCEEDED`, which
+     * would escape as `GrpcException` rather than the #219 lock timeout
+     * (issue #569, N4). The comparison is inclusive, so exactly 10 ms is
+     * already too short; 11 is the first budget that may attempt resolution.
+     */
+    private const MIN_LOCK_RESOLUTION_BUDGET_MS = 11;
+
+    /**
      * Default pessimistic-lock wait timeout handed to TiKV
      * (issue #443, DIV-07). It matches TiKV's own
      * `pessimistic-txn.wait-for-lock-timeout` default (1 s), so the default
@@ -179,6 +202,19 @@ final readonly class TwoPhaseCommitter
      */
     private const ASYNC_COMMIT_MAX_COMMIT_TS_GAP = 15000;
 
+    /**
+     * Default maximum bytes of one prewrite/commit request per region (issue
+     * #430). Mirrors client-go's `DefTxnCommitBatchSize` and client-java's
+     * `txnCommitBatchSize` (16 KiB).
+     */
+    public const DEFAULT_TXN_BATCH_SIZE = 16384;
+
+    /**
+     * Default maximum number of mutations/keys of one prewrite/commit request
+     * per region (issue #430). Mirrors RawKV's `MAX_BATCH_LIMIT` (512).
+     */
+    public const DEFAULT_TXN_BATCH_COUNT = 512;
+
     public function __construct(
         private int $startTs,
         private bool $pessimistic,
@@ -211,6 +247,14 @@ final readonly class TwoPhaseCommitter
         private int $optimisticLockTtlMs = self::DEFAULT_OPTIMISTIC_LOCK_TTL_MS,
         /** Pessimistic lock TTL in milliseconds (issue #429). */
         private int $pessimisticLockTtlMs = self::DEFAULT_PESSIMISTIC_LOCK_TTL_MS,
+        /** Maximum bytes of one prewrite/commit request per region (issue #430). */
+        private int $maxTxnBatchSize = self::DEFAULT_TXN_BATCH_SIZE,
+        /** Maximum mutations/keys of one prewrite/commit request per region (issue #430). */
+        private int $maxTxnBatchCount = self::DEFAULT_TXN_BATCH_COUNT,
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -235,7 +279,12 @@ final readonly class TwoPhaseCommitter
      */
     private function buildContext(RegionInfo $region): Context
     {
-        return RegionContextFactory::fromRegionInfo($region, priority: $this->priority);
+        return RegionContextFactory::fromRegionInfo(
+            $region,
+            priority: $this->priority,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+        );
     }
 
     private function nowMs(): int
@@ -299,6 +348,11 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): void {
+        // One commit() call is one logical operation: the prewrite and commit
+        // phases, and every region, share one retry budget. Reads that ran
+        // earlier in the transaction must not shorten it (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         $primary = $state->getPessimisticPrimaryKey() ?? $state->getPrimaryKey();
 
         if ($this->pessimistic) {
@@ -321,7 +375,12 @@ final readonly class TwoPhaseCommitter
         $lockTtlMs = $this->ttlWithUptimeMs($state, $baseLockTtlMs);
         $prewriteStartedAtMs = $this->nowMs();
         $primaryLockWritten = false;
-        $keysByRegion = $this->groupMutationsByRegion($mutations);
+        // Split every region's mutations into request-sized batches (issue
+        // #430). Each batch becomes its own group, so the existing per-region
+        // retry, fan-out and KeyError handling apply unchanged; the batch
+        // count also keeps 1PC single-batch only (a partially applied 1PC
+        // transaction must never be produced).
+        $keysByRegion = $this->splitMutationGroups($this->groupMutationsByRegion($mutations));
         $groupedMutationCount = 0;
         foreach ($keysByRegion as $regionData) {
             $groupedMutationCount += count($regionData['mutations']);
@@ -376,10 +435,12 @@ final readonly class TwoPhaseCommitter
         }
 
         /**
-         * Split the region groups into the primary region's group and the
+         * Split the request groups into the primary key's group and the
          * secondary groups, preserving $keysByRegion order (grouping
          * follows mutation order, so in the optimistic path the primary's
-         * region comes first — see the TXN-13 FAQ note).
+         * region comes first — see the TXN-13 FAQ note). A group is a
+         * size-bounded batch within one region (issue #430), so the primary
+         * group is the batch that carries the primary key.
          *
          * @var array{region: RegionInfo, mutations: Mutation[], isPrimary: bool, firstKey: string}|null $primaryGroup
          */
@@ -652,8 +713,10 @@ final readonly class TwoPhaseCommitter
 
         // Primary commit failures are not retried here: transport failures
         // leave the outcome undetermined, and post-commit-point errors must
-        // never trigger transaction rollback.
-        $this->commitKeys($allKeys, $state, $retryExecutor, $classifier);
+        // never trigger transaction rollback. Pass the primary derived above
+        // so the commit phase selects exactly the batch the prewrite phase
+        // treated as primary (issue #430 review, point 4).
+        $this->commitKeys($allKeys, $primary, $state, $retryExecutor, $classifier);
     }
 
     // ---------------------------------------------------------------
@@ -673,6 +736,11 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): void {
+        // One rollback() call is one logical operation: pessimistic rollback
+        // and the batch rollback, and every region, share one retry budget
+        // (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         // A transaction that reached the commit phase is committed in TiKV
         // and must never be rolled back (issue #215, TXN-10). The guard is
         // on the status, not on commitTs: commitTs is already set when the
@@ -715,8 +783,11 @@ final readonly class TwoPhaseCommitter
         callable $classifier,
         int $adviseLockTtlMs = 10000,
     ): int {
-        return $retryExecutor->execute($primary, function () use ($primary, $adviseLockTtlMs): int {
+        $targetStoreId = null;
+
+        return $retryExecutor->execute($primary, function () use ($primary, $adviseLockTtlMs, &$targetStoreId): int {
             $region = $this->regionResolver->getRegionInfo($primary);
+            $targetStoreId = $region->leaderStoreId;
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new TxnHeartBeatRequest();
@@ -753,7 +824,9 @@ final readonly class TwoPhaseCommitter
             }
 
             return (int) $response->getLockTtl();
-        }, $classifier);
+        }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+            return $targetStoreId;
+        });
     }
 
     /**
@@ -898,7 +971,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Issue (eagerly send) one region's prewrite without waiting for the
+     * Issue (eagerly send) one batch's prewrite without waiting for the
      * response (issue #291): the returned future's wait phase resolves the
      * response, runs the region-error check and the KeyError handling.
      *
@@ -921,6 +994,10 @@ final readonly class TwoPhaseCommitter
      *
      * @param Mutation[] $mutations
      * @param string[] $secondaries
+     * @param RetryBudget|null $budget Retry budget of the enclosing prewrite
+     *        loop, if any. Its live remaining deadline bounds both the
+     *        `KvPrewrite` RPC and the lock resolution triggered by a
+     *        `KeyError.locked` response (issue #569).
      */
     private function prewriteForRegionAsync(
         RegionInfo $region,
@@ -931,6 +1008,7 @@ final readonly class TwoPhaseCommitter
         bool $useOnePc = false,
         bool $useAsyncCommit = false,
         array $secondaries = [],
+        ?RetryBudget $budget = null,
     ): CheckedGrpcFuture {
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
         $request = $this->buildPrewriteRequest(
@@ -956,10 +1034,10 @@ final readonly class TwoPhaseCommitter
             'KvPrewrite',
             $request,
             PrewriteResponse::class,
-            $this->timeoutMs('write'),
+            $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
         );
 
-        return CheckedGrpcFuture::fromCallable(function () use ($future, $region): array {
+        return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $budget): array {
             /** @var PrewriteResponse $response */
             $response = $future->wait();
             // The prewrite runs under RetryExecutor via
@@ -979,7 +1057,7 @@ final readonly class TwoPhaseCommitter
 
             $errors = $response->getErrors();
             if (count($errors) > 0) {
-                $this->handlePrewriteErrors($errors);
+                $this->handlePrewriteErrors($errors, $budget);
             }
 
             return [
@@ -990,7 +1068,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Wrap one region group's prewrite in the retry executor, keeping the
+     * Wrap one batch's prewrite in the retry executor, keeping the
      * first attempt eagerly dispatched (client-side fan-out — see
      * CheckedGrpcFuture::fromRetryableDispatch) while retries run in the
      * wait phase with fresh region resolution.
@@ -1010,6 +1088,11 @@ final readonly class TwoPhaseCommitter
         callable $classifier,
     ): CheckedGrpcFuture {
         $firstKey = $group['firstKey'];
+        // The executor returned by beginOperation() owns the operation's
+        // budget; the prewrite's lock conflict reads the same object's live
+        // remaining deadline (issue #569).
+        $budget = $retryExecutor->currentBudget();
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
             function () use (
@@ -1021,8 +1104,39 @@ final readonly class TwoPhaseCommitter
                 $useOnePc,
                 $useAsyncCommit,
                 $secondaries,
+                $budget,
+                &$targetStoreId,
             ): CheckedGrpcFuture {
                 $region = $this->regionResolver->getRegionInfo($firstKey);
+                $targetStoreId = $region->leaderStoreId;
+                $keys = array_map(
+                    static fn (Mutation $mutation): string => $mutation->getKey(),
+                    $group['mutations'],
+                );
+
+                if (!$this->regionCoversAllKeys($region, $keys)) {
+                    // The group was formed against a pre-split layout (the
+                    // region changed between grouping and this attempt, or
+                    // the cache was refreshed from EpochNotMatch). Sending
+                    // the whole group to $region would put keys at/after its
+                    // exclusive end into the request, which TiKV rejects with
+                    // a KeyError. Re-group against the current layout and
+                    // prewrite each region separately instead (issue #246).
+                    // Several stores are addressed by that path, so there is
+                    // no single target to report.
+                    $targetStoreId = 0;
+
+                    return $this->prewriteSplitGroup(
+                        $group['mutations'],
+                        $group['isPrimary'],
+                        $lockTtlMs,
+                        $primary,
+                        $state,
+                        $useOnePc,
+                        $useAsyncCommit,
+                        $secondaries,
+                    );
+                }
 
                 return $this->prewriteForRegionAsync(
                     $region,
@@ -1033,12 +1147,160 @@ final readonly class TwoPhaseCommitter
                     $useOnePc,
                     $useAsyncCommit,
                     $secondaries,
+                    $budget,
                 );
             },
             $retryExecutor,
             $firstKey,
             $classifier,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
+    }
+
+    /**
+     * Prewrite a group whose keys no longer fit in one region.
+     *
+     * A group is built from the region cache before the prewrite phase. A
+     * split between that grouping and the first (or a retried) prewrite can
+     * leave the group spanning two or more regions; sending it to the first
+     * key's region puts keys at/after that region's exclusive end into the
+     * request, and TiKV answers with a KeyError such as "Key … is out of
+     * [region N] [.., end)". Re-resolve every mutation's key and send one
+     * prewrite per region instead. This is the prewrite counterpart of the
+     * pessimistic-lock and rollback regroup paths (#503/#505), but it is
+     * local to the group so the primary/secondary ordering remains intact.
+     *
+     * The sub-prewrites run sequentially: the primary sub-group is sent first
+     * in the normal path (its lock must be durable before any secondary
+     * lock), and last in the async-commit path (the primary is the commit
+     * decision barrier). A split group cannot use 1PC.
+     *
+     * @param Mutation[] $mutations
+     * @param string[] $secondaries
+     */
+    private function prewriteSplitGroup(
+        array $mutations,
+        bool $isPrimaryGroup,
+        int $lockTtlMs,
+        string $primary,
+        TransactionState $state,
+        bool $useOnePc,
+        bool $useAsyncCommit,
+        array $secondaries,
+    ): CheckedGrpcFuture {
+        $groups = [];
+        foreach ($mutations as $mutation) {
+            $key = $mutation->getKey();
+            // getRegionInfo() validates that the returned region contains
+            // the key (issue #253), so a stale entry ending exactly at the
+            // key cannot be used for it.
+            $region = $this->regionResolver->getRegionInfo($key);
+            // Include the range and epoch in the key: two resolutions can
+            // observe different versions of the same region ID if the cache
+            // is refreshed while this loop runs. Merging them by ID alone
+            // could send an old key to the newer, narrower range.
+            $groupKey = sprintf(
+                '%d:%s:%s:%d:%d',
+                $region->regionId,
+                bin2hex($region->startKey),
+                bin2hex($region->endKey),
+                $region->epochVersion,
+                $region->epochConfVer,
+            );
+            $groups[$groupKey] ??= ['region' => $region, 'mutations' => []];
+            $groups[$groupKey]['mutations'][] = $mutation;
+        }
+
+        if (count($groups) === 1) {
+            $only = array_values($groups)[0];
+
+            return $this->prewriteForRegionAsync(
+                $only['region'],
+                $only['mutations'],
+                $lockTtlMs,
+                $primary,
+                $state,
+                $useOnePc,
+                $useAsyncCommit,
+                $secondaries,
+            );
+        }
+
+        $primaryGroupKey = null;
+        foreach ($groups as $groupKey => $group) {
+            foreach ($group['mutations'] as $mutation) {
+                if ($mutation->getKey() === $primary) {
+                    $primaryGroupKey = $groupKey;
+                    break 2;
+                }
+            }
+        }
+
+        $ordered = [];
+        if ($isPrimaryGroup && $primaryGroupKey !== null) {
+            if ($useAsyncCommit) {
+                foreach ($groups as $groupKey => $group) {
+                    if ($groupKey !== $primaryGroupKey) {
+                        $ordered[] = $group;
+                    }
+                }
+                $ordered[] = $groups[$primaryGroupKey];
+            } else {
+                $ordered[] = $groups[$primaryGroupKey];
+                foreach ($groups as $groupKey => $group) {
+                    if ($groupKey !== $primaryGroupKey) {
+                        $ordered[] = $group;
+                    }
+                }
+            }
+        } else {
+            $ordered = array_values($groups);
+        }
+
+        return CheckedGrpcFuture::fromCallable(function () use (
+            $ordered,
+            $primary,
+            $lockTtlMs,
+            $state,
+            $useAsyncCommit,
+            $secondaries,
+        ): array {
+            $minCommitTs = 0;
+            $onePcCommitTs = 0;
+
+            foreach ($ordered as $group) {
+                $isPrimarySubGroup = false;
+                foreach ($group['mutations'] as $mutation) {
+                    if ($mutation->getKey() === $primary) {
+                        $isPrimarySubGroup = true;
+                        break;
+                    }
+                }
+
+                $subAsyncCommit = $useAsyncCommit && $isPrimarySubGroup;
+                /** @var array{minCommitTs: int, onePcCommitTs: int} $result */
+                $result = $this->prewriteForRegionAsync(
+                    $group['region'],
+                    $group['mutations'],
+                    $lockTtlMs,
+                    $primary,
+                    $state,
+                    false,
+                    $subAsyncCommit,
+                    $subAsyncCommit ? $secondaries : [],
+                )->waitForExecutor();
+
+                $minCommitTs = max($minCommitTs, $result['minCommitTs']);
+                $onePcCommitTs = max($onePcCommitTs, $result['onePcCommitTs']);
+            }
+
+            return [
+                'minCommitTs' => $minCommitTs,
+                'onePcCommitTs' => $onePcCommitTs,
+            ];
+        });
     }
 
     /**
@@ -1078,8 +1340,11 @@ final readonly class TwoPhaseCommitter
 
     /**
      * @param iterable<KeyError> $errors
+     * @param RetryBudget|null $budget Retry budget of the enclosing prewrite
+     *        loop. Its live remaining deadline bounds the lock resolution
+     *        triggered by a `KeyError.locked` response (issue #569).
      */
-    private function handlePrewriteErrors(iterable $errors): void
+    private function handlePrewriteErrors(iterable $errors, ?RetryBudget $budget = null): void
     {
         foreach ($errors as $keyError) {
             $deadlock = $keyError->getDeadlock();
@@ -1091,7 +1356,11 @@ final readonly class TwoPhaseCommitter
             if ($locked !== null) {
                 $rawPrimary = $locked->getPrimaryLock();
                 $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
-                $this->lockResolver->resolveLock($lockPrimary, $locked);
+                $this->lockResolver->resolveLock(
+                    $lockPrimary,
+                    $locked,
+                    $budget?->remainingDeadlineMs() ?? 0,
+                );
                 throw new TxnRetryableException(
                     'Lock conflict during prewrite, resolved - retry',
                     BackoffType::TxnLock,
@@ -1178,9 +1447,16 @@ final readonly class TwoPhaseCommitter
      * rejected with a "primary not committed" error.
      *
      * @param string[] $keys
+     * @param string $primary The transaction's primary key, derived by
+     *        {@see commit()} as the pessimistic primary when one exists and
+     *        the first write key otherwise. Passing it keeps the commit
+     *        phase's primary batch identical to the prewrite phase's, even
+     *        when the two derivations would disagree (issue #430 review,
+     *        point 4).
      */
     private function commitKeys(
         array $keys,
+        string $primary,
         TransactionState $state,
         RetryExecutor $retryExecutor,
         callable $classifier,
@@ -1189,7 +1465,8 @@ final readonly class TwoPhaseCommitter
             return;
         }
 
-        $keysByRegion = $this->groupStringsByRegion($keys);
+        // Split each region's keys into request-sized batches (issue #430).
+        $keysByRegion = $this->splitKeyGroups($this->groupStringsByRegion($keys));
 
         if ($keysByRegion === []) {
             throw new InvalidStateException(
@@ -1197,24 +1474,25 @@ final readonly class TwoPhaseCommitter
             );
         }
 
-        $primary = $state->getPrimaryKey();
-
-        // Resolve the primary's region so we can commit it first.
-        $primaryRegionId = null;
-        foreach ($keysByRegion as $regionId => $regionData) {
-            if (in_array($primary, $regionData['keys'], true)) {
-                $primaryRegionId = $regionId;
+        // Resolve the batch that carries the primary key so we can commit it
+        // first. A region may need more than one commit request now, so the
+        // primary is identified by its batch, not by its region. $primary is
+        // the same value the prewrite phase used (issue #430 review, point 4).
+        $primaryBatchIndex = null;
+        foreach ($keysByRegion as $index => $batch) {
+            if (in_array($primary, $batch['keys'], true)) {
+                $primaryBatchIndex = $index;
                 break;
             }
         }
 
         // Fail closed (issue #326): reaching this point without finding the
-        // primary key in any resolved region group means the primary was
+        // primary key in any resolved key group means the primary was
         // dropped or the caller passed a key list without it. Committing an
-        // arbitrary region first "as if" it were the primary would break the
+        // arbitrary batch first "as if" it were the primary would break the
         // primary-first invariant above; throw instead of silently promoting
-        // a random region to primary.
-        if ($primaryRegionId === null) {
+        // a random batch to primary.
+        if ($primaryBatchIndex === null) {
             throw new InvalidStateException(sprintf(
                 'Primary key %s was not found in any resolved region group;'
                 . ' refusing to commit an arbitrary region as primary',
@@ -1225,11 +1503,11 @@ final readonly class TwoPhaseCommitter
         // Commit the primary first. Failures here are fatal: do not retry.
         // No RetryExecutor wraps this call, so commitForRegion must handle
         // NotLeader drops itself (issue #474 review round 3).
-        $primaryRegionData = $keysByRegion[$primaryRegionId];
+        $primaryBatch = $keysByRegion[$primaryBatchIndex];
         try {
             $this->commitForRegionAsync(
-                $primaryRegionData['region'],
-                $primaryRegionData['keys'],
+                $primaryBatch['region'],
+                $primaryBatch['keys'],
                 $state,
                 notLeaderOwnedByRetryExecutor: false,
             )->waitForExecutor();
@@ -1243,7 +1521,7 @@ final readonly class TwoPhaseCommitter
             $state->setStatus(TransactionStatus::Undetermined);
             $state->close();
             $this->logger->error('Primary commit outcome undetermined (transport failure)', [
-                'regionId' => $primaryRegionData['region']->regionId,
+                'regionId' => $primaryBatch['region']->regionId,
                 'error' => $e->getMessage(),
             ]);
             throw new UndeterminedCommitException(
@@ -1259,32 +1537,33 @@ final readonly class TwoPhaseCommitter
         // trigger a rollback of a committed transaction.
         $state->setStatus(TransactionStatus::Committed);
 
-        // Remove the primary region from outstanding work; commit remaining
-        // secondary regions in parallel (issue #291): every region's first
-        // attempt is dispatched before any wait begins, so their
-        // server-side latencies overlap. The primary's commit has already
-        // been acknowledged above, which is the protocol's ordering
+        // Remove the primary batch from outstanding work; commit the
+        // remaining batches — including other batches of the primary's
+        // region, which are secondary commits — in parallel (issue #291):
+        // every batch's first attempt is dispatched before any wait begins,
+        // so their server-side latencies overlap. The primary's commit has
+        // already been acknowledged above, which is the protocol's ordering
         // requirement.
-        unset($keysByRegion[$primaryRegionId]);
+        unset($keysByRegion[$primaryBatchIndex]);
 
         if ($keysByRegion === []) {
             return;
         }
 
         $regionCalls = [];
-        foreach ($keysByRegion as $regionId => $regionData) {
-            $region = $regionData['region'];
-            $regionKeys = $regionData['keys'];
+        foreach ($keysByRegion as $batch) {
+            $region = $batch['region'];
+            $regionKeys = $batch['keys'];
             $firstKey = $regionKeys[0] ?? '';
 
-            $regionCalls[$regionId] = fn(): CheckedGrpcFuture => $this->secondaryCommitSwallowing(
+            $regionCalls[] = fn(): CheckedGrpcFuture => $this->secondaryCommitSwallowing(
                 $region,
                 $regionKeys,
                 $firstKey,
                 $state,
                 $retryExecutor,
                 $classifier,
-                $regionId,
+                $region->regionId,
             );
         }
 
@@ -1308,7 +1587,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * One secondary region's commit for the #291 fan-out: the dispatch
+     * One secondary batch's commit for the #291 fan-out: the dispatch
      * phase runs the (eagerly-sent) retryable future's constructor; the
      * WAIT phase — this method's returned future — swallows and logs the
      * region's failure.
@@ -1358,7 +1637,7 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Wrap one region's commit in the retry executor for the secondary
+     * Wrap one batch's commit in the retry executor for the secondary
      * fan-out (issue #291), keeping the first attempt eagerly dispatched
      * (client-side fan-out — see CheckedGrpcFuture::fromRetryableDispatch)
      * while retries run in the wait phase.
@@ -1373,16 +1652,25 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): CheckedGrpcFuture {
+        $targetStoreId = 0;
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            fn(): CheckedGrpcFuture => $this->commitForRegionAsync($region, $keys, $state),
+            function () use ($region, $keys, $state, &$targetStoreId): CheckedGrpcFuture {
+                $targetStoreId = $region->leaderStoreId;
+
+                return $this->commitForRegionAsync($region, $keys, $state);
+            },
             $retryExecutor,
             $firstKey,
             $classifier,
+            targetStoreId: static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
     /**
-     * Issue (eagerly send) one region's commit without waiting for the
+     * Issue (eagerly send) one batch's commit without waiting for the
      * response; the returned future's wait phase runs the region-error
      * check and the KeyError handling.
      *
@@ -1602,8 +1890,13 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): CheckedGrpcFuture {
+        // See prewriteWithRetry(): the rollback's lock-conflict path must
+        // respect the same wall-clock deadline as the retry loop (issue #569).
+        $budget = $retryExecutor->currentBudget();
+        $targetStoreId = null;
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, $budget, &$targetStoreId): CheckedGrpcFuture {
                 // Resolve the region on every attempt so cache
                 // invalidation and leader switching performed by the
                 // retry executor take effect (issue #502): a stale
@@ -1627,6 +1920,7 @@ final readonly class TwoPhaseCommitter
                         $firstKey,
                     );
                 }
+                $targetStoreId = $region->leaderStoreId;
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $request = new BatchRollbackRequest();
@@ -1645,10 +1939,10 @@ final readonly class TwoPhaseCommitter
                     'KvBatchRollback',
                     $request,
                     BatchRollbackResponse::class,
-                    $this->timeoutMs('write'),
+                    $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
                 );
 
-                return CheckedGrpcFuture::fromCallable(function () use ($future, $region) {
+                return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $budget) {
                     /** @var BatchRollbackResponse $response */
                     $response = $future->wait();
                     RegionErrorHandler::check(
@@ -1660,7 +1954,7 @@ final readonly class TwoPhaseCommitter
 
                     $error = $response->getError();
                     if ($error !== null) {
-                        $this->handleRollbackError($error);
+                        $this->handleRollbackError($error, $budget);
                     }
 
                     return $response;
@@ -1669,10 +1963,34 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
-    private function handleRollbackError(KeyError $error): void
+    /**
+     * Translate a KeyError returned by a rollback RPC into an exception, or
+     * an intentional success when the lock is already gone.
+     *
+     * `txn_not_found` and `txn_lock_not_found` are the only variants that
+     * mean there is nothing left to clean up: the transaction (or its lock)
+     * was never written, or another resolver already rolled it back. TiKV's
+     * own rollback path returns success when the lock is missing (it
+     * collapses an existing rollback record and returns `Ok`), so these two
+     * variants are defensive; they are normally returned by
+     * `CheckTxnStatus`/`Commit`.
+     *
+     * Every other variant means the server did not confirm the rollback and
+     * must fail closed (issue #559): falling through used to let
+     * `rollback()` clear the write set and report `RolledBack` while the
+     * locks stayed in TiKV until their TTL expired.
+     *
+     * @param RetryBudget|null $budget Retry budget of the enclosing rollback
+     *        loop. Its live remaining deadline bounds the lock resolution
+     *        triggered by a `locked` KeyError (issue #569).
+     */
+    private function handleRollbackError(KeyError $error, ?RetryBudget $budget = null): void
     {
         $locked = $error->getLocked();
         if ($locked !== null) {
@@ -1680,11 +1998,42 @@ final readonly class TwoPhaseCommitter
             $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
             // Active locks propagate a retryable exception; after they expire,
             // retry rollback so the rollback RPC can be attempted again.
-            $this->lockResolver->resolveLock($lockPrimary, $locked);
+            $this->lockResolver->resolveLock(
+                $lockPrimary,
+                $locked,
+                $budget?->remainingDeadlineMs() ?? 0,
+            );
             throw new TxnRetryableException(
                 'Lock encountered during rollback, resolved - retry',
                 BackoffType::TxnLock,
             );
+        }
+
+        // `abort` is the one compatibility string that must never be
+        // swallowed by a structured variant: the transaction is known to
+        // have failed for good, so retrying the rollback cannot help.
+        $abort = $error->getAbort();
+        if ($abort !== '') {
+            throw new TransactionConflictException(
+                'Abort during rollback: ' . $abort,
+            );
+        }
+
+        // The lock (or the whole transaction) is already gone: there is
+        // nothing left to roll back, so this is an intentional success.
+        // Checked before the compatibility `retryable` string because TiKV
+        // co-sets `retryable` with `txn_lock_not_found` (newer releases);
+        // the structured variant is the more precise signal.
+        if ($error->getTxnNotFound() !== null || $error->getTxnLockNotFound() !== null) {
+            return;
+        }
+
+        // A structured conflict is a definite failure, not a transient lock
+        // wait. TiKV co-sets `retryable` with `conflict`, so this branch must
+        // precede the compatibility string (same mapping as prewrite and
+        // pessimistic lock).
+        if ($error->getConflict() !== null) {
+            throw new TransactionConflictException('Write conflict during rollback');
         }
 
         $retryable = $error->getRetryable();
@@ -1695,12 +2044,9 @@ final readonly class TwoPhaseCommitter
             );
         }
 
-        $abort = $error->getAbort();
-        if ($abort !== '') {
-            throw new TransactionConflictException(
-                'Abort during rollback: ' . $abort,
-            );
-        }
+        throw new TiKvException(
+            'Rollback failed: ' . KeyErrorDescriber::describe($error),
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1771,18 +2117,21 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Dispatch every region's FIRST pessimistic-lock attempt in parallel
-     * (issue #291): all sends are issued before any response is processed.
+     * Dispatch every region batch's FIRST pessimistic-lock attempt in
+     * parallel (issue #291): all sends are issued before any response is
+     * processed.
      *
-     * isFirstLock is true only for the first group of the pass: the flag
-     * marks the transaction's very first pessimistic lock RPC, and in the
-     * conflict-free sequential order exactly the first group's RPC carried
-     * it (later groups saw isFirstLock=false after the first group locked
-     * successfully). A bool parameter rather than an inline read of the
-     * caller's loop-carried local: PHPStan L9 narrows the local to its
-     * literal initializer at the dispatch site (the loop-carried mutation
-     * happens in the processing loop below), the same narrowing trap as the
-     * regroup counters (issue #503 review).
+     * `is_first_lock` describes the batch that holds the transaction's
+     * primary lock (issue #225): TiKV uses the flag to decide whether the
+     * transaction can be skipped by the deadlock detector, so it may be set
+     * only on the request whose mutations contain the primary key. It is not
+     * tied to the first region or the first request: a region's keys can be
+     * split into several size-bounded batches (the #430 limits), and the
+     * primary can sit in any of them. A bool parameter rather than an inline
+     * read of the caller's loop-carried local: PHPStan L9 narrows the local
+     * to its literal initializer at the dispatch site (the loop-carried
+     * mutation happens in the processing loop below), the same narrowing
+     * trap as the regroup counters (issue #503 review).
      *
      * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
      * @param int $waitTimeoutMs effective wait timeout for the first attempt
@@ -1796,7 +2145,6 @@ final readonly class TwoPhaseCommitter
         int $waitTimeoutMs,
         int $lockTtlMs,
     ): array {
-        $firstGroupIndex = array_key_first($keysByRegion);
         $firstAttempts = [];
         $mutationsByGroup = [];
         foreach ($keysByRegion as $groupIndex => $regionData) {
@@ -1818,7 +2166,7 @@ final readonly class TwoPhaseCommitter
                 $groupMutations,
                 $primary,
                 $forUpdateTs,
-                $isFirstLock && $groupIndex === $firstGroupIndex,
+                $isFirstLock && in_array($primary, $groupKeys, true),
                 $waitTimeoutMs,
                 $lockTtlMs,
             );
@@ -1918,9 +2266,12 @@ final readonly class TwoPhaseCommitter
             $state->addPessimisticLockAttempt($key);
         }
 
-        // The first successful lock request in the transaction is the only
-        // one that carries is_first_lock. Derive it from acknowledged locks,
-        // not from the caller's local state, so eager calls share one flag.
+        // `is_first_lock` may be carried only by the batch that holds the
+        // primary lock, and only while the transaction has not acknowledged
+        // a pessimistic lock yet (issue #225). Keep the pass-level bool for
+        // the whole pass: a retry of the primary batch must keep the flag
+        // even when an earlier batch of the same fan-out was acknowledged
+        // first. Eager calls derive it the same way.
         $isFirstLock = !$state->hasAcknowledgedPessimisticLocks();
         $pendingKeys = $keys;
         // Each re-group restores a full retry budget for the re-grouped
@@ -1933,7 +2284,11 @@ final readonly class TwoPhaseCommitter
         $regroups = [];
 
         while ($pendingKeys !== []) {
-            $keysByRegion = $this->groupStringsByRegion($pendingKeys);
+            // Split each region's keys into size- and count-bounded request
+            // batches (the same #430 limits prewrite and commit use), so a
+            // large pessimistic-lock pass cannot produce one oversized
+            // request per region and the primary can sit in a later batch.
+            $keysByRegion = $this->splitKeyGroups($this->groupStringsByRegion($pendingKeys));
             $pendingKeys = [];
 
             // The caller supplies the timestamp for this logical locking
@@ -1943,7 +2298,7 @@ final readonly class TwoPhaseCommitter
             // prewrite and rollback.
             $state->updateMaxForUpdateTs($forUpdateTs);
 
-            // Dispatch every region's FIRST pessimistic-lock attempt in
+            // Dispatch every region batch's FIRST pessimistic-lock attempt in
             // parallel (issue #291): all sends are issued before any region's
             // response is processed, so the lock-free common case costs one
             // round trip regardless of region count. Responses are then
@@ -2020,7 +2375,7 @@ final readonly class TwoPhaseCommitter
                                     $mutations,
                                     $primary,
                                     $forUpdateTs,
-                                    $isFirstLock,
+                                    $isFirstLock && in_array($primary, $regionKeys, true),
                                     $this->effectiveLockWaitTimeoutMs($elapsedMs),
                                     $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                                 );
@@ -2084,16 +2439,26 @@ final readonly class TwoPhaseCommitter
                                         $lockPrimary = (string) ($rawPrimary !== '' ? $rawPrimary : $locked->getKey());
                                         // This per-region lock loop performs bounded retries;
                                         // NotLeader handling remains local. A live lock is not
-                                        // resolved; retry the request within this loop.
-                                        try {
-                                            $this->lockResolver->resolveLock(
-                                                $lockPrimary,
-                                                $locked,
-                                                notLeaderOwnedByRetryExecutor: false,
-                                            );
-                                        } catch (TxnRetryableException $e) {
-                                            if ($e->backoffType !== BackoffType::TxnLock) {
-                                                throw $e;
+                                        // resolved; retry the request within this loop. The
+                                        // remaining lock-wait budget also caps the resolver's
+                                        // own RPCs, so lock resolution cannot outlive the loop
+                                        // (issue #569). Below the floor, skip resolution
+                                        // entirely: a 1–10 ms gRPC deadline would surface as
+                                        // `GrpcException` instead of the loop's
+                                        // `LockWaitTimeoutException` (N4).
+                                        $remainingLockBudgetMs = $this->maxBackoffMs - $elapsedMs;
+                                        if ($remainingLockBudgetMs >= self::MIN_LOCK_RESOLUTION_BUDGET_MS) {
+                                            try {
+                                                $this->lockResolver->resolveLock(
+                                                    $lockPrimary,
+                                                    $locked,
+                                                    $remainingLockBudgetMs,
+                                                    notLeaderOwnedByRetryExecutor: false,
+                                                );
+                                            } catch (TxnRetryableException $e) {
+                                                if ($e->backoffType !== BackoffType::TxnLock) {
+                                                    throw $e;
+                                                }
                                             }
                                         }
                                         $needRetry = true;
@@ -2220,7 +2585,6 @@ final readonly class TwoPhaseCommitter
                     }
 
                     $state->markPessimisticLocksAcquired($regionKeys);
-                    $isFirstLock = false;
                 }
             } catch (\Throwable $e) {
                 // A failed lock pass leaves the transaction without a
@@ -2394,8 +2758,13 @@ final readonly class TwoPhaseCommitter
         RetryExecutor $retryExecutor,
         callable $classifier,
     ): CheckedGrpcFuture {
+        // See prewriteWithRetry(): the rollback's lock-conflict path must
+        // respect the same wall-clock deadline as the retry loop (issue #569).
+        $budget = $retryExecutor->currentBudget();
+        $targetStoreId = null;
+
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys, $forUpdateTs): CheckedGrpcFuture {
+            function () use ($firstKey, $regionKeys, $forUpdateTs, $budget, &$targetStoreId): CheckedGrpcFuture {
                 // Resolve the region on every attempt so cache
                 // invalidation and leader switching performed by the
                 // retry executor take effect (issue #502) — see
@@ -2409,6 +2778,7 @@ final readonly class TwoPhaseCommitter
                         $firstKey,
                     );
                 }
+                $targetStoreId = $region->leaderStoreId;
                 $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
                 $request = new PessimisticRollbackRequest();
@@ -2427,10 +2797,10 @@ final readonly class TwoPhaseCommitter
                     'KVPessimisticRollback',
                     $request,
                     PessimisticRollbackResponse::class,
-                    $this->timeoutMs('write'),
+                    $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget),
                 );
 
-                return CheckedGrpcFuture::fromCallable(function () use ($future, $region) {
+                return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $budget) {
                     /** @var PessimisticRollbackResponse $response */
                     $response = $future->wait();
                     RegionErrorHandler::check(
@@ -2442,7 +2812,7 @@ final readonly class TwoPhaseCommitter
 
                     $errors = $response->getErrors();
                     foreach ($errors as $keyError) {
-                        $this->handleRollbackError($keyError);
+                        $this->handleRollbackError($keyError, $budget);
                     }
 
                     return $response;
@@ -2451,6 +2821,9 @@ final readonly class TwoPhaseCommitter
             $retryExecutor,
             $firstKey,
             $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -2507,12 +2880,78 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
+     * Split each region's mutations into size- and count-bounded request
+     * batches (issue #430).
+     *
+     * The size of a mutation is its key length plus its value length — the
+     * payload the server carries — so the split tracks the wire cost that can
+     * trigger `RaftEntryTooLarge` without adding request-framing noise. A
+     * single mutation larger than the limit still forms a batch of its own
+     * (the splitter never drops items), which lets the server's own limit
+     * reject it rather than silently truncating the transaction.
+     *
+     * @param array<int, array{region: RegionInfo, mutations: Mutation[]}> $keysByRegion
+     * @return list<array{region: RegionInfo, mutations: Mutation[]}>
+     */
+    private function splitMutationGroups(array $keysByRegion): array
+    {
+        $batches = [];
+        foreach ($keysByRegion as $regionData) {
+            $regionBatches = RawKvSplitter::splitIntoBatches(
+                $regionData['mutations'],
+                $this->maxTxnBatchCount,
+                $this->maxTxnBatchSize,
+                static fn(Mutation $mutation): int => strlen($mutation->getKey()) + strlen($mutation->getValue()),
+            );
+            foreach ($regionBatches as $mutations) {
+                $batches[] = [
+                    'region' => $regionData['region'],
+                    'mutations' => $mutations,
+                ];
+            }
+        }
+
+        return $batches;
+    }
+
+    /**
      * @param string[] $keys
      * @return array<int, array{region: RegionInfo, keys: string[]}>
      */
     private function groupStringsByRegion(array $keys): array
     {
         return RegionGrouper::groupKeysByRegionBatch($keys, $this->regionResolver);
+    }
+
+    /**
+     * Split each region's key list into size- and count-bounded request
+     * batches (issue #430). Used by the commit phase, whose request carries
+     * only keys, and by the pessimistic-lock phase, whose mutations carry
+     * keys with an empty value (issue #225); in both cases the payload size
+     * of an item is its key length.
+     *
+     * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
+     * @return list<array{region: RegionInfo, keys: string[]}>
+     */
+    private function splitKeyGroups(array $keysByRegion): array
+    {
+        $batches = [];
+        foreach ($keysByRegion as $regionData) {
+            $regionBatches = RawKvSplitter::splitIntoBatches(
+                $regionData['keys'],
+                $this->maxTxnBatchCount,
+                $this->maxTxnBatchSize,
+                static fn(string $key): int => strlen($key),
+            );
+            foreach ($regionBatches as $keys) {
+                $batches[] = [
+                    'region' => $regionData['region'],
+                    'keys' => $keys,
+                ];
+            }
+        }
+
+        return $batches;
     }
 
     // ---------------------------------------------------------------
@@ -2526,5 +2965,30 @@ final readonly class TwoPhaseCommitter
             'batch_write' => $this->timeoutConfig->batchWriteTimeoutMs,
             default => null,
         };
+    }
+
+    /**
+     * Per-RPC deadline capped by the operation's live remaining retry budget
+     * (issue #569).
+     *
+     * The configured timeout is the upper bound: an in-flight prewrite or
+     * rollback must not outlive the retry deadline the executor is enforcing
+     * around it. A null configured timeout keeps the gRPC-layer default; a
+     * disabled or absent budget leaves the configured value unchanged. The
+     * result is at least 1 ms because 0 means "no deadline" to the gRPC
+     * layer, which is the unbounded behaviour this guard exists to prevent.
+     */
+    private function timeoutMsWithinBudget(?int $configuredMs, ?RetryBudget $budget): ?int
+    {
+        if ($configuredMs === null) {
+            return null;
+        }
+
+        $remainingMs = $budget?->remainingDeadlineMs() ?? 0;
+        if ($remainingMs <= 0) {
+            return $configuredMs;
+        }
+
+        return max(1, min($configuredMs, $remainingMs));
     }
 }

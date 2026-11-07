@@ -276,6 +276,9 @@ RegionException: EpochNotMatch
 
 **Solution:**
 - Client automatically retries
+- When TiKV supplies `current_regions`, the client refreshes the region cache
+  from that payload instead of asking PD for the region again; an empty or
+  unusable payload falls back to invalidate-and-resolve-through-PD
 - If persistent, check TiKV cluster health:
   ```bash
   # Check PD logs
@@ -440,9 +443,11 @@ TiKvException: PD GetRegion returned no region for key
 TiKvException: TSO request failed: gRPC error: ...
 TiKvException: TSO response missing timestamp
 TransactionConflictException: Heartbeat failed: retryable: ...
-TxnRetryableException: Heartbeat failed: locked key "6b657931..."
+TxnRetryableException: Heartbeat failed: locked key #a3f5c8e1d4b79026 (4 bytes)
 TiKvException: Heartbeat failed: TxnNotFound
 ```
+(the `#…` token is the keyed-hash redaction of the primary key; the 16 hex
+characters depend on the process salt, so the exact value differs per process)
 
 **What it means:** Failures raised directly as the base class instead of a
 subclass: PD answered a region lookup with no region (fail-closed routing),
@@ -635,9 +640,11 @@ $client = RawKvClient::create($pdEndpoints);
 InvalidArgumentException: ...
 ```
 
-**What it means:** Input validation failed *before* any RPC was sent —
-empty/oversized keys or values, negative or too-large scan limits, bad
-option values. Note this class extends `\InvalidArgumentException`
+**What it means:** Input validation failed *before* the operation sent its
+request to TiKV — empty/oversized keys or values, negative or too-large scan
+limits, bad option values. (A pessimistic `Transaction::scan()` refreshes its
+read timestamp through PD first, so that TSO request may already have been
+sent; the scan RPC is not.) Note this class extends `\InvalidArgumentException`
 directly and is **not** a `TiKvException`, so `catch (TiKvException)` will
 not catch it.
 
@@ -694,7 +701,7 @@ after `close()`; create a fresh client if needed.
 Other real messages thrown as `InvalidStateException`:
 
 - `CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))` — call `$client->setAtomicForCAS(true)` before `compareAndSwap()`/`putIfAbsent()`
-- `Transaction is not active` — transaction already committed/rolled back; start a new one
+- `Transaction is not active` — transaction already committed or rolled back (including a live transaction rolled back by `TxnKvClient::close()`); start a new one
 - `Write set is empty, no primary key` — `commit()` on a transaction with no buffered writes
 - `commitTs must be set before committing; commit() must run first.`
 - `TLS config is required for TLS credentials`
@@ -716,8 +723,8 @@ regions were never dispatched or their results were cancelled.
 **Likely cause:** The batch is too large for `batchDeadlineMs` (60000 ms by
 default), or TiKV nodes are slow or unreachable. Raise `batchDeadlineMs` in
 `options['timeout']`, or set it to `0` to disable the batch deadline.
-`getContext()['pendingRegions']` lists every region without a result, including
-the regions of windows that never started.
+`getContext()['pendingRegions']` lists every fan-out slot without a result,
+including the slots of windows that never started.
 
 **Solution:** A read (`batchGet`, scan, checksum) applies nothing, so retry the
 whole operation. Raise `batchDeadlineMs` in `options['timeout']` if the batch is
@@ -792,13 +799,15 @@ touched; re-probe after an interval rather than tight-looping.
 
 **Error:**
 ```
-RetryBudgetExhaustedException: Retry attempt cap (30) exhausted for key "757365725f656d61... (28 bytes)
-RetryBudgetExhaustedException: Retry deadline (30000 ms) exhausted for key "757365725f656d61... (28 bytes)
+RetryBudgetExhaustedException: Retry attempt cap (30) exhausted for key #7d0f4a2c9e816b35 (28 bytes)
+RetryBudgetExhaustedException: Retry deadline (30000 ms) exhausted for key #7d0f4a2c9e816b35 (28 bytes)
 ```
 (the two messages come from the same class; since issue #269 the key is
-redacted by `KeyRedactor` — a short hex prefix plus the byte length, so the
-example above is literal in shape — and never shown verbatim. Use
-`RetryBudgetExhaustedException::getRawKey()` if your code needs the raw key.)
+redacted by `KeyRedactor` — a truncated keyed hash plus the byte length, so
+the example above is literal in shape; the 16 hex characters depend on the
+process salt and differ between processes — and the key is never shown
+verbatim. Use `RetryBudgetExhaustedException::getRawKey()` if your code needs
+the raw key.)
 
 **What it means:** The internal retry loop gave up: either the attempt cap
 (30 by default) or the wall-clock deadline (30000 ms by default,

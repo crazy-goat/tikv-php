@@ -15,6 +15,7 @@ use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
@@ -47,7 +48,16 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
     /** @var list<ResolveLockRequest> */
     private array $resolves = [];
 
+    /** @var list<array{method: string, timeoutMs: ?int}> */
+    private array $callTimeouts = [];
+
     private object $readResponse;
+
+    /** @var list<object> Per-read responses; falls back to $readResponse. */
+    private array $readResponses = [];
+
+    /** When set, KvCheckTxnStatus throws it instead of answering. */
+    private ?GrpcException $lockFailure = null;
 
     protected function setUp(): void
     {
@@ -57,6 +67,9 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->methods = [];
         $this->resolves = [];
+        $this->callTimeouts = [];
+        $this->readResponses = [];
+        $this->lockFailure = null;
 
         $region = new RegionInfo(1, 1, 1, 1, 1, '', '');
         $store = new Store();
@@ -70,9 +83,20 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         $this->regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
         $this->grpc->method('call')->willReturnCallback(
-            function (string $address, string $service, string $method, mixed $request): object {
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+                ?string $responseClass = null,
+                ?int $timeoutMs = null,
+            ): object {
                 $this->methods[] = $method;
+                $this->callTimeouts[] = ['method' => $method, 'timeoutMs' => $timeoutMs];
                 if ($method === 'KvCheckTxnStatus') {
+                    if ($this->lockFailure instanceof GrpcException) {
+                        throw $this->lockFailure;
+                    }
                     $status = new CheckTxnStatusResponse();
                     $status->setCommitVersion(3000);
                     return $status;
@@ -82,7 +106,7 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
                     $this->resolves[] = $request;
                     return new ResolveLockResponse();
                 }
-                return $this->readResponse;
+                return array_shift($this->readResponses) ?? $this->readResponse;
             },
         );
     }
@@ -97,11 +121,18 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
             new TimeoutConfig(),
             new LockResolver($this->grpc, $this->regionResolver, $this->regionCache, $this->pdClient, 1000),
             $this->regionCache,
-            classifier: static fn(\Throwable $e): ?BackoffType => null,
         );
     }
 
-    private function executor(): RetryExecutor
+    /**
+     * @return callable(\CrazyGoat\TiKV\Client\Exception\TiKvException): ?BackoffType
+     */
+    private function classifier(): callable
+    {
+        return static fn (): ?BackoffType => null;
+    }
+
+    private function executor(int $deadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS): RetryExecutor
     {
         return new RetryExecutor(
             1000,
@@ -110,6 +141,7 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
             $this->grpc,
             $this->regionResolver,
             new \Psr\Log\NullLogger(),
+            deadlineMs: $deadlineMs,
         );
     }
 
@@ -185,7 +217,12 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
         $this->readResponse = $response;
 
         try {
-            $this->reader()->batchGet(['k1', 'k2', 'k3'], new TransactionState());
+            $this->reader()->batchGet(
+                ['k1', 'k2', 'k3'],
+                new TransactionState(),
+                $this->executor(),
+                $this->classifier(),
+            );
             $this->fail('Expected a retry request');
         } catch (TxnRetryableException $e) {
             $this->assertSame(BackoffType::TxnLock, $e->backoffType);
@@ -216,9 +253,75 @@ final class TxnReaderBatchLockResolutionTest extends TestCase
 
         $this->expectException(TxnRetryableException::class);
         try {
-            $this->reader()->batchGet(['k0', 'k1', 'k2'], new TransactionState());
+            $this->reader()->batchGet(
+                ['k0', 'k1', 'k2'],
+                new TransactionState(),
+                $this->executor(),
+                $this->classifier(),
+            );
         } finally {
             $this->assertSame(['k1', 'k2'], $this->resolvedKeys());
+        }
+    }
+
+    /**
+     * Regression (issue #248, P1): the lock's primary is usually in another
+     * region than the key being read. A transport failure of the lock RPC must
+     * close the channel that actually failed — the address carried on the
+     * GrpcException — not the read's own store.
+     */
+    public function testLockResolutionTransportFailureClosesTheLockRpcTargetStore(): void
+    {
+        $locked = new ScanResponse();
+        $locked->setPairs([$this->lockedPair('k1')]);
+        $this->readResponses = [$locked];
+        $this->readResponse = new ScanResponse();
+
+        // The read runs against 127.0.0.1:20160 (store 1); lock resolution
+        // talks to the primary's store, which is the address that failed.
+        $this->lockFailure = new GrpcException('connection reset', 14, 'primary-store:20160');
+
+        $this->grpc->expects($this->once())
+            ->method('closeChannel')
+            ->with('primary-store:20160');
+
+        $this->scanAll();
+    }
+
+    /**
+     * The read's retry budget caps the lock-resolution RPCs too (issue #569):
+     * a lock conflict encountered during a scan must not spend the configured
+     * 5 s lock-resolution timeout after the operation's deadline is nearly
+     * spent.
+     */
+    public function testLockResolutionRpcTimeoutIsCappedByTheReadRetryDeadline(): void
+    {
+        $response = new ScanResponse();
+        $response->setPairs([$this->lockedPair('k1')]);
+        $this->readResponse = $response;
+
+        try {
+            $this->reader()->scan(
+                'k0',
+                'k9',
+                10,
+                new TransactionState(),
+                $this->executor(500),
+                static fn (): null => null,
+            );
+        } catch (TxnRetryableException) {
+            // Expected: the lock was resolved and the read must be retried.
+        }
+
+        $lockCalls = array_values(array_filter(
+            $this->callTimeouts,
+            static fn (array $call): bool => in_array($call['method'], ['KvCheckTxnStatus', 'KvResolveLock'], true),
+        ));
+        self::assertNotEmpty($lockCalls);
+        foreach ($lockCalls as $call) {
+            self::assertNotNull($call['timeoutMs']);
+            self::assertGreaterThan(0, $call['timeoutMs']);
+            self::assertLessThanOrEqual(500, $call['timeoutMs']);
         }
     }
 }

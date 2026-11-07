@@ -328,14 +328,14 @@ for a `RegionException` carrying a *routing* `ErrorKind`, so the non-routing
 kinds (`RaftEntryTooLarge`, `FlashbackInProgress`, `FlashbackNotPrepared`, …)
 and any non-`RegionException` fatal error leave the cache alone — those say the
 request reached the right region and the region refused it, so dropping the
-entry would buy a re-resolve and nothing else. And its `match` has **no**
+entry would buy a re-resolve and nothing else. And the shared `match` has **no**
 `default` arm: PHPStan reports `match.unhandled` at level 9, so a new
 `ErrorKind` cannot be added without deciding here.
 
 Both gates were measured, not assumed (a scratch copy of the tree with
 `case ScratchSentinel = 'scratch_sentinel';` added to `ErrorKind`, then
 deleted). `match.unhandled` fires in exactly three places — `RetryExecutor.php`
-(`invalidatesRoutingOnFatal()`), `ErrorClassifier.php` (`classifyByKind()`) and
+(`invalidatesRoutingKind()`), `ErrorClassifier.php` (`classifyByKind()`) and
 `ErrorClassifierTest.php` (`errorClassForKind()`) — i.e. **every `match` over
 `ErrorKind`**, in production and in tests alike. The routing table in
 `RetryExecutorFatalInvalidationTest` is a hand-written array literal, so
@@ -356,20 +356,48 @@ across 11 tests in `LockResolverTest`, `RawKvScannerTest`, `TxnReaderTest` and
 asserting `method_exists(Error::class, 'has' . PascalCase($kind->value))` for
 every case would turn that scatter into a legible failure.
 
-The retryable path is deliberately untouched: it still invalidates for every
-retryable error, and #245 (REG-14 — a separate open milestone issue with its
-own acceptance criteria) is what will route it through this same predicate. Do
-not "finish" that narrowing here; the predicate is public and static precisely
-so that PR has a seam to reuse instead of a third copy of the list.
+The retryable path now uses the same table (issue #245, REG-14):
+`RetryExecutor` gates its pre-retry drop on `invalidatesRoutingOnRetry()`, which
+calls `invalidatesRoutingKind()` for a typed kind and invalidates
+conservatively when the error carries none (a `GrpcException` transport failure
+or a message-classified exception). `ServerIsBusy`, `DiskFull`, `IsWitness`
+and `RecoveryInProgress` retry without touching the cache; before #245 every
+retryable error dropped the entry and forced a PD `GetRegion` per attempt. The
+fatal and retryable paths share the one `match`; do not add a third copy of the
+list under either name. `RegionErrorHandler::check()` uses the same table too:
+it builds the `RegionException` first and gates its own drop on
+`invalidatesRoutingKind()`, keeping the handler-specific `region_error:<kind>`
+reason because it is a separate drop path, not the pre-retry executor path.
 
-That seam is a compatibility commitment, not a convenience: `RetryExecutor` is
-a documented user-constructible collaborator (`docs/configuration.md`), so
-`invalidatesRoutingOnFatal()`'s name and signature are semver-visible. #245 may
-still prefer to move the decision into `ErrorClassifier` — it needs the
-*kind*, not the exception — and such a relocation stays compatible with the
-commitment, because what callers are promised is the routing/non-routing table,
-not the class it lives in. Do not add a third copy of the list under either
-name.
+The kind-level predicate is a compatibility commitment, not a convenience:
+`RetryExecutor` is a documented user-constructible collaborator
+(`docs/configuration.md`), so `invalidatesRoutingOnFatal()`'s name and
+signature are semver-visible. Moving the table into `ErrorClassifier` — it
+needs the *kind*, not the exception — stays compatible with the commitment,
+because what callers are promised is the routing/non-routing table, not the
+class it lives in.
+
+## `notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)
+
+`LockResolver` is reached from two kinds of call site: executor-owned ones
+(prewrite and rollback after #213/#502, and the `TxnReader` read retries) and
+direct ones (the pessimistic-lock `do-while` in `TwoPhaseCommitter`, which has
+no enclosing `RetryExecutor`). The flag is therefore an argument of
+`resolveLock()` / `resolveLocks()`, not a constant and not something the
+resolver can derive from the method it is in. It must reach **every**
+`RegionErrorHandler::check()` on the lock-resolution path — `KvCheckTxnStatus`,
+`KvCheckSecondaryLocks`, the batch `KvResolveLock`, and the async-commit
+finalization in `resolveAsyncCommitLocks()`. The async-commit path used to
+hardcode `false`, so at executor-owned sites a `NotLeader` was self-invalidated
+by `check()` instead of being handed to `handleNotLeader()`: the cache entry was
+gone before the hint could be applied, so valid-hint leader switching was
+defeated and the next attempt had to re-resolve through PD (#474). The issue
+text calls this a double-count of `regionInvalidated('not_leader')`, but with
+the current cache `invalidate()` is a no-op on an ID that is already gone, so
+the observable harm is the lost hint switch, not a second metric. Do not flip
+the constant to `true` either — the pessimistic-lock loop still needs `false`
+to drop a stale entry before its local retry (issue #568, pinned by
+`OnePhaseAsyncCommitTest::testAsyncCommitResolveNotLeader*`).
 
 ## A class of bug gets a seam, a rule and a fixture — not three site patches (issue #180)
 
@@ -711,9 +739,12 @@ retried forever"), and `PdClient` has already spent the one rotation that can
 help before the exception escapes. The only text matches that can reclassify it
 are PD prose naming `RegionNotFound` / `NotLeader`, and retrying *those* is
 defensible (a PD-side region miss is a routing miss). Adding an explicit
-`PdException` arm would move that decision into a list #245 is about to
-narrow, so it is recorded here instead: if #245 narrows the retryable path,
-this is the place to decide whether a PD-level region miss stays retryable.
+`PdException` arm would move that decision into the routing list, so it is
+recorded here instead: #245 narrowed the retryable path's invalidation by
+typed kind, but a `PdException` carries no `ErrorKind`, so it still falls
+through to the message fallback and, when retried, invalidates conservatively.
+A PD-level region miss therefore stays retryable (and cache-dropping), which
+is the decision recorded here.
 
 ## Every gRPC call carries a finite deadline, and PD/TSO/lock-resolution time out separately from the store RPCs (issue #260)
 
@@ -735,7 +766,7 @@ Two decisions from #260 that should not be "simplified" away:
    the failure modes are: a hung metadata plane takes every region lookup and
    every transaction begin down **simultaneously** — one blackholed PD, the
    whole process pool — whereas a slow store is a per-region problem the
-   `RetryExecutor` already handles against a per-region budget. A shared
+   `RetryExecutor` already handles against an operation-scoped retry budget. A shared
    field would force one value that is simultaneously too tight for a large
    scan and too loose for a TSO fetch. The values are threaded at the call
    site, not in `callWithClusterIdRetry()`'s signature: one helper, ten call
@@ -977,6 +1008,23 @@ Two smaller rules the same fix settled:
   pushed up to 10 240 elements onto the VM stack per region; a foreach append
   costs nothing and reads the same.
 
+## An unbounded reverse scan fans out like the forward one, but every reverse shrink falls back (issue #555)
+
+`reverseScan(limit: 0)` reuses `RawKvScanner::scanSegmentsInParallel()` with
+`$reverse = true`: the clipped segments are already in descending order, every
+window dispatches its sends before awaiting, and the responses are
+concatenated in that order, so the descending result order is restored without
+a sort. The two directions differ in where a split-after-enumeration hole
+lands. A forward segment that shrank leaves `[freshEnd, segmentEnd)` *after*
+its coverage; only the final segment has the sequential continuation, so a
+non-final shrink falls back to the whole sequential page. A reverse segment
+that shrank leaves `[freshEnd, scanStart)` *above* its coverage, between it
+and the next-higher segment; appending a continuation would break the
+descending order, and `executeReverseScanForSubRange()` already knows how to
+splice that part in, so **every** reverse shrink falls back to the sequential
+page. The bounded reverse path (`limit > 0`) is deliberately unchanged and
+stays sequential.
+
 ## The parallel prewrite reports its aggregated failure, it does not throw it (issue #431, GAP-17)
 
 The prewrite fan-out (issue #291, PERF-04) collects every failing region into
@@ -1069,6 +1117,35 @@ README ("Connection Lifetime and Transport Ownership") and
 `docs/configuration.md` ("Sharing One Transport Between Clients" plus the
 manual-construction snippet). Keep them in sync — the contradiction #407 had to
 fix was a snippet sitting next to the rule and breaking it.
+
+## A client rolls back its live transactions before releasing the transport (issue #226)
+
+`TxnKvClient` tracks the transactions it began through `WeakReference` and, in
+`close()`, rolls back the ones still `Active` before it clears the region cache
+and closes the owned transport and the PD client. The order is the point: PHP
+does not guarantee destruction order, so relying on `Transaction::__destruct()`
+alone left the rollback racing a closed transport, and the locks lived until
+their TTL expired.
+
+Three decisions inside it:
+
+1. **Weak tracking, not ownership.** A strong list would keep an abandoned
+   transaction (and its write set) alive until the client itself died;
+   `WeakReference` only lets `close()` reach transactions the caller still
+   holds. References to finished transactions are pruned on `begin()`.
+2. **Rollback, not invalidation.** A committed or rolled back transaction is
+   skipped by its status; a live one goes through the public
+   `Transaction::rollback()`, so `close()` and the destructor share one
+   implementation and the existing error handling. `close()` does not invent a
+   second "client closed" state for transactions — a successful rollback closes
+   the transaction through its own state machine.
+3. **The shared-transport case is handled too.** A client that does not own the
+   transport (`options['grpcClient']`) still owns the transactions it began, so
+   it attempts the rollback before releasing its other resources; the transport
+   itself is still never closed by the client. Finishing transactions
+   explicitly stays the contract: a rollback failure inside `close()` is logged
+   (`close()` never throws), and with a shared transport the transaction can
+   still be used afterwards.
 
 ## The transaction mode is stated explicitly, but `begin()` keeps its pessimistic default (issue #439)
 
@@ -1222,6 +1299,41 @@ Cache lifetime tests: `TxnKvClientTest::testTransactionsShareOneResolvedStatusCa
 `LockResolverBatchTest::testCachedRollbackSkipsSecondaryCheckForAsyncCommitLock` pins the
 cache-hit path for async-commit locks.
 
+## An errored `CheckTxnStatus` response is not a status (#224)
+
+`CheckTxnStatusResponse` carries `region_error`, `error` (a plain `KeyError`,
+not a oneof) and the status fields (`lock_ttl`, `commit_version`, `action`).
+The status fields are only meaningful when neither error is set: an errored
+response leaves `commit_version = 0`, which `LockResolver::checkTxnStatus()`
+used to log and then return, so `resolveLock()` read it as "not committed" and
+sent `KvResolveLock` at commit ts 0 — a destructive rollback of a transaction
+whose outcome was never determined (TXN-19).
+
+The rule is: **only a successful response may drive the commit/rollback
+decision.** A region error already throws `RegionException` (the retry
+executor retries routing kinds), a gRPC failure already throws
+`GrpcException`, and a `KeyError` now throws `TxnRetryableException` with
+`BackoffType::TxnLock`. It is deliberately retryable rather than fatal: a
+status check can fail transiently and the next attempt may succeed, while the
+caller's retry budget bounds the loop. The message uses
+`KeyErrorDescriber::describe()` rather than `serializeToJsonString()`, so a raw
+lock key cannot leak into the exception text. Pinned by
+`LockResolverTest::testErroredCheckTxnStatusIsRetryableAndNeverRollsBack()`,
+`::testRegionErrorDuringCheckTxnStatusIsRetriedAndSuccessfulResponseDecides()`
+and `::testGenuineNotCommittedResponseStillRollsBack()`.
+
+The async-commit secondary check follows the same rule.
+`CheckSecondaryLocksResponse.error` is rethrown as a retryable
+`TxnRetryableException`, and a `RegionException` while grouping the
+secondaries propagates to the caller's executor. Before, an errored response
+left `locks` empty, which `checkSecondaryLocks()` read as "rolled back" and
+resolved at commit ts 0; a grouping failure returned `null` and fell through to
+the same TTL/rollback path. Both are destructive for an undetermined
+async-commit transaction. Pinned by
+`OnePhaseAsyncCommitTest::testErroredCheckSecondaryLocksIsRetryableAndResolvesNothing()`,
+`::testRegionErrorWhileGroupingSecondariesPropagates()` and
+`::testGenuineRolledBackSecondaryResolvesAtCommitTsZero()`.
+
 ## Atomic mode and plain writes use different TiKV paths (#399)
 
 `setAtomicForCAS(true)` makes `put()`, `delete()`, `batchPut()` and
@@ -1353,3 +1465,168 @@ the missing part.
    partial failure: an early return would report a failed cleanup as a success, `rollback()`
    would mark the state `RolledBack` and close it, and nobody would retry.
 8. Not covered: the experimental BatchCommands multiplex path is bounded per call only.
+
+## Transaction size limits are opt-in, request batching is on by default (#430)
+
+Two different failure modes share one issue, and they get two different defaults.
+
+1. **Write-set limits are opt-in (`0` = unlimited).** client-go's `SetEntrySizeLimit` is opt-in
+   too, and any non-zero default would break existing applications whose transactions are larger
+   than the chosen value. The limits are checked in `TransactionState` (entry count, entry bytes,
+   total bytes), incrementally, and overwriting a key subtracts the entry it replaces.
+   `Transaction::set()`/`delete()` call `assertWriteAllowed()` before the eager pessimistic lock,
+   so a rejected write sends no RPC.
+2. **Batching is always on.** The defaults (16 KiB and 512 items per region) match client-go's
+   `DefTxnCommitBatchSize` and RawKV's `MAX_BATCH_LIMIT`; both are far above the normal
+   transaction, so a small transaction still sends one prewrite, one pessimistic lock and one
+   commit per region. The splitter is `RawKvSplitter::splitIntoBatches()`, the same generic
+   helper the RawKV batch paths use.
+3. **A batch is a group, not a special case inside the RPC loop.** Splitting before the
+   primary/secondary grouping lets the existing retry, fan-out, KeyError and region-error
+   machinery apply unchanged. The batch that carries the primary key is still prewritten last for
+   async commit and committed first in 2PC; the other batches of the primary's region are ordinary
+   secondary commits after the commit point.
+4. **1PC stays single-batch.** A 1PC prewrite commits its keys inside the prewrite. Splitting a 1PC
+   transaction into several prewrites would commit a prefix and then fail, so `$onePc` requires
+   exactly one batch, not merely one region. Async commit is safe across batches because only the
+   primary batch carries `use_async_commit` and the secondaries list, and it is prewritten last.
+5. **Size function:** a prewrite mutation is key length + value length, a commit key is key
+   length. Request framing, `Context`, `primary_lock` and the async `secondaries` list are
+   deliberately excluded, matching the payload TiKV's `RaftEntryTooLarge` guard measures; an
+   async primary prewrite can therefore exceed the budget, and a single item larger than the
+   limit still forms its own batch so the server rejects it instead of the client silently
+   dropping it.
+
+## `is_first_lock` belongs to the batch that holds the primary lock (#225)
+
+TiKV uses `PessimisticLockRequest.is_first_lock` to decide whether a
+transaction can be skipped by the deadlock detector: a transaction holding no
+other lock cannot be part of a cycle. The flag therefore describes the batch
+that contains the transaction's primary lock, not the first region batch or
+the first request of a fan-out.
+
+The pessimistic-lock pass derives the pass-level bool once from
+`TransactionState::hasAcknowledgedPessimisticLocks()` and sets the wire flag
+only on the batch whose keys contain the primary
+(`in_array($primary, $keys, true)`). The bool is deliberately not cleared when
+an earlier batch succeeds: the fan-out dispatches all first attempts before
+any response is processed, and a retry of the primary batch must keep the
+flag. At most one batch per pass carries it, and no batch carries it when the
+transaction already acknowledged a lock (for example the second eager `set()`
+of a transaction).
+
+The pass also splits each region's keys with the #430
+`maxTxnBatchSize`/`maxTxnBatchCount` limits, so the primary can genuinely sit
+in a later batch of the first region or in a later region; the flag follows
+the primary instead of the iteration position. That batching is why the
+regression tests can construct the shape the old
+`$isFirstLock && $groupIndex === $firstGroupIndex` rule got wrong.
+
+## Reversed RawKV ranges are rejected before any RPC (#343)
+
+`scan()`, `scanIterator()`, `batchScan()`, `deleteRange()` and `checksum()` take
+`[startKey, endKey)`; `reverseScan()` takes `[upper bound, lower bound)`. A reversed range is
+rejected with `InvalidArgumentException` before PD or a store is contacted instead of being
+clipped to an empty result. Clipping was silent for `reverseScan()` (the old docs advertised the
+empty result) and undefined for the forward operations, so the most common mistake looked like
+"no rows". `startKey == endKey` with a non-empty end key stays a valid empty range. An empty end
+key is the +infinity sentinel for forward operations (`scan('', '')` covers the whole keyspace)
+and the keyspace start for `reverseScan()`, so `reverseScan('', '')` is empty.
+`deleteRange('', '')` keeps its explicit no-op guard rather than deleting the whole keyspace.
+
+## Rollback KeyErrors fail closed; only `txn_not_found` / `txn_lock_not_found` are success (#559)
+
+`TwoPhaseCommitter::handleRollbackError()` is shared by `batchRollback()` and
+`pessimisticRollbackAll()`, so both rollback RPCs (`KvBatchRollback` and
+`KVPessimisticRollback`) get the same mapping. It ends with an unconditional
+`TiKvException` carrying the variant name from the shared `KeyErrorDescriber`,
+mirroring the prewrite fail-closed fix (#214): an unhandled variant must never
+let `rollback()` clear the write set and report `RolledBack` while the server
+did not confirm the rollback. Before #559 the handler had only `locked`,
+`retryable` and `abort` branches and every other variant fell out of the
+method, so the retry executor saw a successful closure.
+
+Two variants are deliberately *not* errors:
+
+- `txn_not_found`: there is no lock and no commit record for the transaction,
+  so there is nothing to clean up.
+- `txn_lock_not_found`: the lock is already gone (another resolver rolled it
+  back, or the prewrite never happened), which is exactly the state a rollback
+  is trying to reach.
+
+TiKV's own rollback path returns success when the lock is missing (`cleanup()`
+collapses an existing rollback record and returns `Ok`), so both variants are
+defensive on this path — they are normally returned by `CheckTxnStatus` and
+`Commit`. client-go is stricter (`actionCleanup::handleSingleBatch()` treats
+every `BatchRollback` `KeyError` as a failure); this client keeps the two
+"already gone" variants as success because they cannot leave a lock behind,
+and throws for everything else. The transaction stays `Active` (rollback
+started, writes and commit blocked) after a thrown variant, so the caller can
+retry `rollback()`; the regression tests pin both the success and the
+fail-closed paths in `TransactionTest`.
+
+`KeyError` is a flat message, not a oneof envelope: TiKV co-sets the
+compatibility `retryable` string with `conflict` (all supported releases) and
+with `txn_lock_not_found` (newer releases). The precedence is therefore:
+`locked`, `abort`, the two "already gone" success variants, `conflict`, then
+`retryable`. `abort` sits before the success/conflict/retryable branches so a
+fatal abort cannot be swallowed. A structured `conflict` maps to
+`TransactionConflictException` — the same mapping as prewrite and pessimistic
+lock — and is not retried even when `retryable` is co-set; only a bare
+`retryable` string is retried. This precedence was review point 1: the
+original #559 branch checked `retryable` first, so a real `txn_lock_not_found`
+payload (which newer TiKV co-tags) threw a retryable exception instead of
+succeeding, and a real `conflict` payload was retried instead of failing.
+
+## Resource-control E2E observation limit (issue #427)
+
+The issue's E2E criterion asks for traffic attributed to a configured
+resource group. `tests/E2E/ResourceControlRawKvE2ETest.php` and
+`tests/E2E/ResourceControlTxnKvE2ETest.php` create a group through PD's
+resource-manager HTTP API, run grouped RawKV/TxnKV traffic with
+`resourceGroup`/`resourceGroupTag`, and read the group back.
+
+They assert that the group still exists in RU mode and that the grouped
+requests succeed — not that `ru_consumption` grew. Reason: PD's
+`ru_consumption` is filled from the resource-manager token-bucket stream,
+which a resource-manager client (TiDB) feeds; TiKV itself only consumes the
+request priority from `Context.resource_control_context` and a native TiKV
+client is not a resource-manager client. With the docker-compose cluster the
+field therefore stays empty even though the request carries the group. The
+wire-level assertion (both fields land on the `Context`) lives in the Unit
+suite, where the captured request is available. Do not "fix" this by
+asserting zero/empty RU: that would pin an unrelated server behaviour.
+
+## A CAS transport failure is indeterminate only after the request is sent (issue #537)
+
+`CasIndeterminateException` is thrown at the `RawCompareAndSwap` call site, not
+from the retry classifier. That placement is the decision: the same
+`GrpcException` type can come from region or store resolution (PD unreachable)
+*before* the request is sent, and that failure is definitive — no swap was
+attempted. Wrapping every `GrpcException` the retry executor sees would make a
+definitive failure look indeterminate, which is exactly what a lock caller must
+not be told.
+
+Four consequences to keep:
+
+1. **The classifier still rethrows a bare `GrpcException`.** That path is now
+   only reachable for pre-write failures; it preserves the "not retried"
+   behaviour of #239 and keeps the definitive failure typed as it was.
+2. **The typed exception carries the original as `previous`.** It extends
+   `TiKvException`, not `GrpcException` (`GrpcException` is `final`), so
+   `getGrpcStatusCode()` is the accessor for the status code; callers that need
+   the original object still get it from `getPrevious()`.
+3. **Region errors are unchanged.** `NotLeader`, `EpochNotMatch`, … are rejected
+   before the write is proposed and stay retryable; a retried-and-succeeded
+   region error still returns a `CasResult`, and an exhausted retry budget still
+   surfaces as `RetryBudgetExhaustedException` / `RegionException`, never as an
+   indeterminate CAS. The `UndeterminedResult` kind is the documented exception:
+   it says the result is unknown but is still retried today — a known limitation
+   of the current classifier, not changed by this issue.
+4. **Application-level gRPC rejections stay definitive.** `UNAUTHENTICATED`,
+   `PERMISSION_DENIED`, `INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED`, … mean the
+   server refused the request before applying it, so they keep the plain
+   `GrpcException`; only statuses that can arrive after the server received the
+   request (`DEADLINE_EXCEEDED`, `UNAVAILABLE`, `ABORTED`, `INTERNAL`,
+   `UNKNOWN`, `CANCELLED`, `DATA_LOSS`, unrecognised codes) become
+   indeterminate.

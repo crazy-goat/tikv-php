@@ -118,7 +118,7 @@ final class StubRegionCache implements RegionCacheInterface
      *
      * @return list<RegionInfo>
      */
-    public function getRegionsInRange(string $startKey, string $endKey): array
+    public function getCachedChain(string $startKey, string $endKey): array
     {
         $regions = [];
         $cursor = $startKey;
@@ -126,7 +126,7 @@ final class StubRegionCache implements RegionCacheInterface
         while (true) {
             $region = $this->getByKey($cursor);
             if (!$region instanceof RegionInfo) {
-                return [];
+                return $regions;
             }
             $regions[] = $region;
 
@@ -134,10 +134,32 @@ final class StubRegionCache implements RegionCacheInterface
                 return $regions;
             }
             if (KeyOrder::lte($region->endKey, $cursor)) {
-                return [];
+                return $regions;
             }
             $cursor = $region->endKey;
         }
+    }
+
+    public function getRegionsInRange(string $startKey, string $endKey): array
+    {
+        $regions = $this->getCachedChain($startKey, $endKey);
+        $last = $regions === [] ? null : $regions[count($regions) - 1];
+        if (
+            $last instanceof RegionInfo
+            && ($last->endKey === '' || ($endKey !== '' && KeyOrder::gte($last->endKey, $endKey)))
+        ) {
+            return $regions;
+        }
+
+        return [];
+    }
+
+    /**
+     * @return array<int, RegionInfo>
+     */
+    public function getCachedRegions(): array
+    {
+        return $this->regions;
     }
 
     public function put(RegionInfo $region): void

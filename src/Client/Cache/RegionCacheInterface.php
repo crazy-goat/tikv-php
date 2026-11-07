@@ -33,6 +33,24 @@ interface RegionCacheInterface
     public function getById(int $regionId): ?RegionInfo;
 
     /**
+     * Return the contiguous run of cached regions starting at the region that
+     * contains $startKey and advancing by end key until the first gap, the
+     * end of the range, or an unbounded region.
+     *
+     * Unlike {@see self::getRegionsInRange()}, a partial answer is *not*
+     * discarded: the returned list is what the cache can serve locally, and
+     * the consumer scans only the remainder from PD (issue #425). An empty
+     * array means the cache does not hold the region containing $startKey.
+     *
+     * As with {@see self::getRegionsInRange()}, an empty $endKey means
+     * +infinity and an expired entry is dropped by the lookup rather than
+     * reported.
+     *
+     * @return list<RegionInfo> regions in ascending startKey order
+     */
+    public function getCachedChain(string $startKey, string $endKey): array;
+
+    /**
      * Return the contiguous chain of cached regions covering the half-open
      * key range [startKey, endKey), in ascending startKey order.
      *
@@ -49,6 +67,28 @@ interface RegionCacheInterface
      * @return list<RegionInfo>
      */
     public function getRegionsInRange(string $startKey, string $endKey): array;
+
+    /**
+     * Snapshot of every region the cache currently holds, keyed by region ID.
+     *
+     * This is the enumeration seam used by the region-cache refresher
+     * (issue #425): a tick re-queries PD for each cached region and folds the
+     * answers back through {@see self::put()}. Two details are part of the
+     * contract:
+     *
+     * - the answer is a *snapshot*; later cache mutations do not affect it;
+     * - an entry whose TTL has already elapsed but which no lookup has dropped
+     *   yet is included, because a refresh is exactly what can revive it.
+     *   A refresh that only saw live entries could not warm a cache that sat
+     *   idle for longer than the TTL.
+     *
+     * The returned regions are leader-aware, exactly like
+     * {@see self::getById()}: a `switchLeader()` applied since the entry was
+     * stored is reflected in `leaderStoreId` / `leaderPeerId`.
+     *
+     * @return array<int, RegionInfo> regionId => region
+     */
+    public function getCachedRegions(): array;
 
     /**
      * Store a region in the cache.

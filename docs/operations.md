@@ -11,7 +11,12 @@ Complete reference for all TiKV RawKV operations supported by the PHP client.
 5. [TTL Operations](#ttl-operations)
 6. [Atomic Operations](#atomic-operations)
 7. [Data Integrity](#data-integrity)
-8. [Bulk Import (SST Ingest)](#bulk-import-sst-ingest)
+8. [Error Handling](#error-handling)
+9. [Limits](#limits)
+10. [Connection lifecycle and process model](#connection-lifecycle-and-process-model)
+11. [Cluster and lifecycle](#cluster-and-lifecycle)
+12. [Best Practices](#best-practices)
+13. [Bulk Import (SST Ingest)](#bulk-import-sst-ingest)
 
 ## Basic CRUD Operations
 
@@ -100,7 +105,7 @@ if ($client->get('lock:resource') !== null) {
 > **Batch operations are not atomic.** Keys are grouped by region and each
 > region's keys are split further into sub-batches (at most 512 keys or 16 KB
 > per RPC), then all sub-batches are dispatched concurrently. If any
-> sub-batch fails — after the client's own per-sub-batch retry budget is
+> sub-batch fails — after the operation's shared retry budget is
 > exhausted — the client throws
 > [`BatchPartialFailureException`](error-handling.md): an **unknown subset**
 > of the batch has already been applied. Do not assume the exception means
@@ -215,11 +220,20 @@ $client->batchDelete(['key1', 'key2', 'key3']);
 $oldSessions = ['session:abc', 'session:def', 'session:ghi'];
 $client->batchDelete($oldSessions);
 
-// Delete by pattern (using scan + batch delete)
-$results = $client->scanPrefix('temp:');
-$keysToDelete = array_column($results, 'key');
-if (!empty($keysToDelete)) {
-    $client->batchDelete($keysToDelete);
+// Delete by pattern: collect keys through the lazy iterator and delete in
+// batches, so memory stays flat. A bare scanPrefix('temp:') would buffer the
+// whole prefix and throw ScanLimitExceededException past
+// options['maxScanRows'] (default 100000).
+$batch = [];
+foreach ($client->scanPrefixIterator('temp:') as $key => $_) {
+    $batch[] = $key;
+    if (count($batch) >= 500) {
+        $client->batchDelete($batch);
+        $batch = [];
+    }
+}
+if ($batch !== []) {
+    $client->batchDelete($batch);
 }
 ```
 
@@ -297,12 +311,34 @@ in-flight futures are cancelled, so the applied subset is likewise unknown.
 
 ## Scanning Operations
 
+### Range bounds
+
+Every range operation takes a half-open `[startKey, endKey)` range. An empty
+`endKey` means "unbounded": +infinity for `scan()`, `scanPrefix()`,
+`batchScan()`, `deleteRange()` and `checksum()`, and the start of the keyspace
+for `reverseScan()`, whose arguments are `[upper bound, lower bound)`. An
+empty `startKey` is valid for a forward range (it means the start of the
+keyspace).
+
+A **reversed** range is rejected with `InvalidArgumentException` before any PD
+or store RPC: `startKey > endKey` for the forward operations (`scan()`,
+`scanIterator()`, `batchScan()`, `deleteRange()`, `checksum()`) and
+`startKey < endKey` for `reverseScan()`, whose first argument is the upper
+bound. `startKey == endKey` with a non-empty `endKey` is a valid empty range:
+it returns no rows and deletes nothing. Because an empty `endKey` is the
+unbounded sentinel, `scan('', '')` and `batchScan([['', '']])` cover the whole
+keyspace, while `deleteRange('', '')` keeps its explicit no-op guard and
+`reverseScan('', '')` is empty (both bounds are the keyspace minimum). This
+turns the most common reverse-scan mistake into an error instead of a silent
+empty result. The comparison is bytewise, so `scan('20', '100')` is rejected
+even though PHP would compare the numeric strings in the other order.
+
 ### Scan
 
 Range scan over keys:
 
 ```php
-$results = $client->scan('startKey', 'endKey', limit: 100, keyOnly: false);
+$results = $client->scan('startKey', 'stopKey', limit: 100, keyOnly: false);
 // Returns: [['key' => 'k1', 'value' => 'v1'], ['key' => 'k2', 'value' => 'v2'], ...]
 ```
 
@@ -369,7 +405,8 @@ equals the limit may be truncated.
 **Example:**
 
 ```php
-// Get the whole prefix into memory (limit: 0 is the default)
+// Get the whole prefix into memory (limit: 0 is the default; the result is
+// buffered and capped by options['maxScanRows'], default 100000)
 $users = $client->scanPrefix('user:');
 
 // Get all products in a category
@@ -390,10 +427,12 @@ foreach ($client->scanPrefixIterator('user:') as $key => $value) {
 ### Iterating Large Ranges
 
 A bounded `scan()` / `scanPrefix()` / `reverseScan()` call accepts at most
-`RawKvClient::MAX_SCAN_LIMIT` (10240) rows per RPC. Passing `limit: 0` does
-**not** cap the result at 10240: the client pages internally (10240 rows per
-RPC) and returns the complete range. That is convenient, but the whole result
-is still buffered in one PHP array, so an unbounded scan is guarded by
+`RawKvClient::MAX_SCAN_LIMIT` (10240) rows per RPC. A negative limit is
+rejected with `InvalidArgumentException` before any RPC is sent. Passing
+`limit: 0` does **not** cap the result at 10240: the client pages internally
+(10240 rows per RPC) and returns the complete range. That is convenient, but
+the whole result is still buffered in one PHP array, so an unbounded scan is
+guarded by
 `options['maxScanRows']` (default `RawKvClient::DEFAULT_MAX_SCAN_ROWS` =
 100000) — exceeding it throws `ScanLimitExceededException` rather than
 silently truncating. The guard is evaluated per internally fetched page
@@ -461,11 +500,11 @@ follows:
 - **Rewindable** — calling `rewind()` (e.g. running the same `foreach` twice)
   restarts the iteration from the original start key and re-scans from the
   beginning; it does not cache results.
-- **Exceptions** — `batchSize` is validated synchronously in the factory call
-  (plus `ClientClosedException` if the client is closed), but the actual scan
-  RPCs happen lazily during iteration: `RegionException` and `GrpcException`
-  can be thrown mid-`foreach`, and the underlying scans use the same automatic
-  retry logic as `scan()`.
+- **Exceptions** — `batchSize` and the range order are validated synchronously
+  in the factory call (plus `ClientClosedException` if the client is closed),
+  but the actual scan RPCs happen lazily during iteration: `RegionException`
+  and `GrpcException` can be thrown mid-`foreach`, and the underlying scans use
+  the same automatic retry logic as `scan()`.
 - **No reverse iterator** — there is no descending counterpart; for reverse
   reads use `reverseScan()`. `limit: 0` returns the whole range by paging
   internally (guarded by `options['maxScanRows']`, checked per fetched page);
@@ -501,6 +540,14 @@ scan (`limit > 0`) returns at most `limit` rows, so a result whose count
 equals the limit may be truncated. There is no reverse iterator — for a large
 reverse range raise the guard deliberately or page the range in the caller.
 
+An unbounded reverse scan whose page spans several regions issues the
+per-region reads **concurrently**, in windows of at most
+`options['maxConcurrency']` regions (default 16), and concatenates them in
+descending key order — the same fan-out as an unbounded forward scan. A
+region or transport error, or a region that split after enumeration, falls
+back to the sequential retrying path. A bounded reverse scan
+(`limit > 0`) stays sequential.
+
 **Example:**
 
 ```php
@@ -526,10 +573,10 @@ $messages = $client->reverseScan($newest . "\x00", 'msg:user:123:', limit: 5);
 - `endKey` = lower bound (inclusive) — the **second** argument
 - Results are in descending order
 
-Passing the bounds the other way round is the most common mistake here: the
-range is empty, the call succeeds, and you get an empty array with no error. If
-a reverse scan returns nothing, check that the first argument sorts after the
-second.
+Passing the bounds the other way round is the most common mistake here. It is
+rejected with `InvalidArgumentException` before any RPC instead of returning a
+silent empty array: the first argument must sort after the second. An empty
+`endKey` (the second argument) means "down to the start of the keyspace".
 
 ### Batch Scan
 
@@ -545,7 +592,9 @@ $results = $client->batchScan($ranges, eachLimit: 50, keyOnly: false);
 ```
 
 **Parameters:**
-- `ranges` (array<array{0: string, 1: string}>): Array of [startKey, endKey] pairs
+- `ranges` (array<array{0: string, 1: string}>): Array of `[startKey, endKey]`
+  pairs; an empty `endKey` means +infinity. A reversed range rejects the whole
+  call with `InvalidArgumentException` before any RPC.
 - `eachLimit` (int): Maximum results per range (required)
 - `keyOnly` (bool, optional): Return only keys
 
@@ -580,12 +629,14 @@ foreach ($dailyLogs as $day => $logs) {
 Delete all keys in a range:
 
 ```php
-$client->deleteRange('startKey', 'endKey');
+$client->deleteRange('startKey', 'stopKey');
 ```
 
 **Parameters:**
 - `startKey` (string): Start of range (inclusive)
-- `endKey` (string): End of range (exclusive)
+- `endKey` (string): End of range (exclusive); an empty `endKey` deletes to the
+  end of the keyspace. A reversed range throws `InvalidArgumentException`
+  before any RPC.
 
 **Returns:** `void`
 
@@ -602,7 +653,7 @@ $client->deleteRange('log:2023-01-01', 'log:2024-01-01');
 $client->deleteRange('data:user:123:', 'data:user:123;');
 ```
 
-**Warning:** This operation is not atomic across regions. If it fails partway through, some keys may be deleted and others not. The same partial-failure rules as the [batch operations](#partial-failure-and-recovery) apply: `deleteRange` also throws `BatchPartialFailureException`, and because deletes are idempotent the whole range operation may simply be re-issued.
+**Warning:** This operation is not atomic across regions. If it fails partway through, some keys may be deleted and others not. The same partial-failure rules as the [batch operations](#partial-failure-and-recovery) apply: `deleteRange` also throws `BatchPartialFailureException`, and because deletes are idempotent the whole range operation may simply be re-issued. Retryable region errors carried in a region's response (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, …) are retried per region before the operation gives up: a leader transfer, or a split whose fresh region still covers the sub-range, is retried transparently; a split that leaves the fresh region smaller than the sub-range still fails closed (via `assertRegionCoversRange()`, reported as a `BatchPartialFailureException`).
 
 ### Delete Prefix
 
@@ -836,6 +887,20 @@ $result = $client->compareAndSwap('counter', '5', '6');
 - `swapped` (bool): True if swap succeeded
 - `previousValue` (?string): Previous value (null if key didn't exist)
 
+**Indeterminate outcome:** a transport failure on the CAS request itself
+(deadline exceeded, connection reset, `UNAVAILABLE`) throws
+`CasIndeterminateException` instead of a bare `GrpcException`: the swap may
+already have been applied and the client deliberately does not retry a
+non-idempotent write. The original `GrpcException` is preserved as
+`getPrevious()`. Re-read the key and decide from its current value; never
+treat this exception as "not swapped". Region errors are still retried
+automatically, and a failure that happens before the request is sent (for
+example PD unreachable during region resolution) stays a plain
+`GrpcException` and means the swap definitively did not happen. An
+application-level rejection of the request itself (`UNAUTHENTICATED`,
+`PERMISSION_DENIED`, `INVALID_ARGUMENT`, …) also stays a plain
+`GrpcException`: the server refused it, so no swap happened.
+
 **Example:**
 
 ```php
@@ -893,6 +958,11 @@ $existing = $client->putIfAbsent('lock:resource', 'owner-123');
 - `ttl` (int, optional): TTL for the value
 
 **Returns:** `?string` - null if inserted, existing value if key already exists
+
+An inserted value is confirmed only by a `null` return. A thrown
+`CasIndeterminateException` means the outcome is unknown — the value may have
+been stored — so a distributed-lock caller must not interpret it as "lock not
+acquired"; re-read the key first (see [Compare And Swap](#compare-and-swap-cas)).
 
 **Example:**
 
@@ -953,7 +1023,7 @@ Compute CRC64-XOR checksum over a key range:
 ```php
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
 
-$checksum = $client->checksum('data:start', 'data:end');
+$checksum = $client->checksum('data:a', 'data:z');
 // Returns: ChecksumResult object
 ```
 
@@ -990,6 +1060,11 @@ if ($before->checksum === $after->checksum &&
 - Data migration verification
 - Backup integrity checks
 - Data consistency validation
+
+Retryable region errors carried in a per-region response are retried per
+sub-range with backoff and region-cache invalidation (issue #566). Only a
+fatal region error or an exhausted retry budget aborts the call — as a
+`BatchPartialFailureException`, never as a partial checksum.
 
 ## Error Handling
 
@@ -1030,12 +1105,12 @@ The client enforces these limits. The constants are public on `RawKvClient`.
 | Maximum key size | 8 MiB (8388608 bytes) | `MAX_KEY_SIZE` | Client, before any RPC. Throws `InvalidArgumentException` |
 | Maximum value size | 4 MiB (4194304 bytes) | `MAX_VALUE_SIZE` | Client, before any RPC. Throws `InvalidArgumentException` |
 | Minimum key size | 1 byte | `MIN_KEY_SIZE` | An empty key throws `InvalidArgumentException` |
-| Maximum scan limit | 10240 rows per RPC | `MAX_SCAN_LIMIT` | Client. See [Scan](#scan) |
+| Maximum scan limit | 10240 rows per RPC | `MAX_SCAN_LIMIT` | Client, before any RPC. A negative limit throws `InvalidArgumentException`; `limit: 0` means the whole range, paged internally. See [Scan](#scan) |
 | Keys per batch RPC | 512 | `MAX_BATCH_LIMIT` | Automatic split. No error |
 | Bytes per batch RPC | 16384 bytes (16 KiB) | `MAX_BATCH_GET_SIZE`, `MAX_BATCH_PUT_SIZE`, `MAX_BATCH_DELETE_SIZE` | Automatic split. No error |
 | Batch fan-out deadline | 60000 ms | `TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS` | Client, `batchDeadlineMs`. Throws `BatchDeadlineExceededException`. `0` disables it |
 
-The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs the whole retry loop of one region (up to 30000 ms, plus one per-call timeout). The worst case is `batchDeadlineMs` plus one region's full retry loop. The experimental BatchCommands transport does not use the batch deadline.
+The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs that region's share of the operation's retry budget; all regions of a batch share one `RetryExecutor` budget (issue #223), so `retryDeadlineMs` bounds the fan-out as a whole (up to 30000 ms, plus one per-call timeout). The worst case is `batchDeadlineMs` plus the operation's remaining retry deadline. The experimental BatchCommands transport does not use the batch deadline.
 
 `InvalidArgumentException` is `CrazyGoat\TiKV\Client\Exception\InvalidArgumentException`.
 Its message names the size and the method, for example `Value size (5242880) exceeds maximum allowed size (4194304) in put`.
@@ -1057,6 +1132,318 @@ The client sends the sub-batches in parallel. A batch is not atomic. See [Batch 
 
 The TxnKV client has no key or value size check of its own. The `MAX_KEY_SIZE` and `MAX_VALUE_SIZE` constants apply to RawKV only.
 A transactional scan has its own cap of 10240 rows. See [Scan](#scan).
+
+## Connection lifecycle and process model
+
+The client is **not thread-safe**: its caches are plain mutable state with no
+locking. Use one instance at a time per PHP process, build a fresh one in each
+forked child, and never share an instance between threads or processes.
+
+### What a client holds
+
+| State | Default | Behaviour |
+|---|---|---|
+| gRPC channel cache | one channel per address, soft cap **64**, idle TTL **600000 ms** (10 minutes) | LRU eviction when a new address needs a slot; idle channels are swept on a cache miss and, rate-limited, on a cache hit |
+| Region cache | **10000** entries, TTL **600 s** plus up to **60 s** of jitter | LRU eviction at the cap; an entry is dropped on a region error or when a newer region supersedes its range |
+| PD client | store cache (**128** entries), TSO pool (**64** timestamps) | endpoint rotation, cluster-ID cache, timestamp batching |
+
+The channel cap is **soft**: eviction never closes a channel that still
+carries in-flight calls, so a batch that fans out over more stores than the
+cap holds grows the cache past 64 while the calls are in flight. It stays
+above the cap after they settle: it only shrinks on a later cache miss (idle
+channels are evicted down to the cap) or when the idle TTL drops them (the
+overshoot is logged at warning level). Raise `maxChannels` when that warning
+appears.
+
+Both caches only pay off when the client instance is reused. `maxChannels`
+and `idleTtlMs` are `create()` options — see
+[Channel Pool](configuration.md#channel-pool-maxchannels-idlettlms). The
+region-cache sizing is **not** exposed by `create()`: `ttlSeconds`,
+`jitterSeconds` and `maxEntries` are constructor arguments of `RegionCache`,
+so only a client assembled by hand can change them:
+
+```php
+$client = new RawKvClient(
+    $pdClient,
+    $grpcClient,
+    new RegionCache(ttlSeconds: 60),
+    ownsGrpcClient: false, // the transport is the application's
+);
+```
+
+`create()` always builds the default. A hand-assembled client closes the
+transport it was given unless you pass `ownsGrpcClient: false` — see
+[Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients).
+A `RegionCache` passed to the constructor is still cleared by `close()` (the
+client has no ownership flag for it), so do not share one between clients
+that you close independently. The same applies to the `PdClient`: `close()`
+always closes it (there is no `ownsPdClient` flag), resetting its store
+cache, TSO pool and leader-discovery state.
+
+### Long-running workers and CLI daemons (recommended)
+
+Create one client at startup, reuse it for the life of the process, and call
+`close()` on shutdown. Channels and region entries stay warm, so steady-state
+traffic does not pay a PD lookup per key.
+
+```php
+$client = RawKvClient::create(['127.0.0.1:2379']);
+
+try {
+    while ($job = $queue->next()) {
+        $client->put($job->key, $job->value);
+    }
+} finally {
+    $client->close();
+}
+```
+
+A worker that can be quiet for longer than `idleTtlMs` does not need to
+reconnect: call `reapIdleChannels()` from its own tick to drop the cached
+handles that have been idle longer than `idleTtlMs`. The next request reopens
+a handle if it needs one. Dropping a handle is not a reconnect: ext-grpc's
+persistent table keeps the channel warm until the process ends or the
+per-target persist bound drops the entry.
+
+The same tick can keep the region cache fresh. `refreshRegionCache()` re-queries
+PD for a bounded slice of the cached regions at most once per
+`options['regionCacheRefreshMs']` (default `0`, i.e. the non-forced refresh is
+disabled — refreshing is opt-in), so a split or leader transfer is learned
+before a user request has to fail and retry for it. Call
+`preloadRegions([['start', 'end'], ...])` once at boot to resolve the keys a
+long-running worker will touch without serving a read. Both are no-ops after
+`close()`, never throw on a PD failure (the failure is logged and the old entry
+is kept), and start no timer of their own. See
+[Region Cache Refresh and Preload](configuration.md#region-cache-refresh-and-preload)
+for the cost, the per-tick bound and the interval guidance.
+
+Scans use the same warm cache without extra configuration: RawKV scans and
+TxnKV `Transaction::scan()` read contiguous cached regions locally and ask PD
+only for the uncovered gaps, so a scan-heavy worker does not put PD on the
+path of every request once the cache is warm
+([Scan-path Region Cache Use](configuration.md#scan-path-region-cache-use)).
+
+### PHP-FPM and other per-request runtimes
+
+A client created per request starts with a **cold region cache**, so the
+first operation that touches a region pays a PD lookup for it
+(`GetRegion` / `ScanRegions`). The PHP-side channel handles are rebuilt too,
+but the TCP connections need not be: ext-grpc keeps a process-global
+persistent channel per target, so a later request served by the same FPM
+worker can reuse the connection — the region cache (and the PHP-side handle
+cache) cannot survive the request, the connection can
+([What the shared channel really is](configuration.md#what-the-shared-channel-really-is)).
+
+Create the client lazily and keep it as a singleton for the request lifetime
+(a DI container scoped to the request is fine). Do not create more than one
+client per request: each one carries its own region cache, so a second client
+repeats every PD lookup and, if it builds its own transport, doubles the
+channel handles. A client cannot be persisted between requests — PHP resets
+userland state, and a live channel is not serializable.
+
+### `close()` semantics
+
+`close()` releases the client's resources in guarded steps: `TxnKvClient`
+first rolls back the transactions it began that are still active
+(`RawKvClient` has no transactions), then the client clears the region cache,
+closes the gRPC transport if the client owns it, and closes the PD client
+(always — there is no ownership flag for it). The transaction rollback runs
+while the region cache, transport and PD client are still usable, so an
+abandoned transaction does not leave its locks behind until the TTL expires.
+A failing step is logged at error level and does not stop the others, so:
+
+- `close()` is **idempotent** — a second call does nothing;
+- `close()` **never throws**.
+
+A rollback that fails during `close()` is logged and the transaction stays
+active; its destructor keeps the existing best-effort rollback fallback. A
+transaction that already committed or rolled back is not rolled back again.
+The rollback is a real RPC, so `close()` can block while it retries; its
+retry budget is the transaction's usual one. The rollback is attempted for a
+client that shares the application's transport (`options['grpcClient']`)
+too — the client owns its transactions even when it does not own the
+transport. The transport itself is still never closed in that case.
+
+For a client that owns its transport, `close()` is **not graceful**: it
+closes the channels that still carry in-flight calls, so an operation that is
+running when the client is closed fails — finish outstanding operations
+before calling `close()`, or expect them to fail. A client built with
+`options['grpcClient']` does not close the shared transport, so its in-flight
+calls continue (and become the application's responsibility when it closes
+the transport).
+
+`__destruct()` calls `close()`, so a forgotten `close()` is not a leak: the
+caches and handles are released when the object is destroyed. In a
+long-running process, still call `close()` explicitly so resources are
+released at a known point instead of at an arbitrary destructor.
+
+For a client that owns its transport, `close()` releases this client's
+channel handles, not necessarily the TCP connection: ext-grpc's persistent
+table keeps the channel warm until the process ends or the per-target persist
+bound drops the entry, and a channel created beyond that bound is private to
+its handle, so closing it can release the underlying channel (see
+[What the shared channel really is](configuration.md#what-the-shared-channel-really-is)).
+A client built with `options['grpcClient']` closes no transport at all — the
+application closes the transport it supplied (see
+[Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients)).
+
+After `close()`, the client's own operations that talk to the cluster throw
+`ClientClosedException`. The lifecycle methods and client-local getters and
+setters remain callable: `close()`, `reapIdleChannels()`,
+`refreshRegionCache()` / `preloadRegions()` (both no-ops after close),
+`getMetrics()`, `setAtomicForCAS()` / `isAtomicForCAS()`, `setColumnFamily()` /
+`getColumnFamily()` and `getClusterId()` (which returns `null` after close
+because the PD client resets the cached cluster ID). A `Transaction` obtained
+before `close()` holds the transport and the PD client directly and does not
+check the client's closed flag. `TxnKvClient::close()` rolls back the
+transactions it began while they are still active, so a successfully rolled
+back transaction is closed and cannot be used afterwards. If that rollback
+fails, the transaction stays active: with an owned transport its RPCs then
+fail with `InvalidStateException`; with a shared transport they can still
+reach TiKV. Finish open transactions before closing the client (see below).
+
+### Transactions
+
+An active `Transaction` is rolled back by its destructor when it goes out of
+scope, and a failed destructor rollback is logged. `TxnKvClient::close()` is a
+second safety net: it rolls back the transactions it began that are still
+active before it releases the transport. That is still not the contract:
+
+- call `commit()` or `rollback()` explicitly. Destructor and `close()` timing
+  are not guaranteed, and either rollback is a real RPC that can block
+  shutdown while it retries;
+- until the rollback succeeds or the lock TTL expires, the transaction's
+  server-side locks stay in place and block other writers;
+- a rollback that fails inside `close()` is only logged — `close()` never
+  throws — so the locks stay until the transaction's destructor succeeds or
+  their TTL expires. Do not rely on `close()` to clean up transactions:
+  finish them explicitly before closing the client.
+
+## Cluster and lifecycle
+
+These methods report on the cluster the client is connected to and configure the
+client instance. None of them touches user data. `healthCheck()` is the only one
+that sends an RPC and the only one that can throw a library exception; the rest
+are local accessors and setters that throw nothing. `TxnKvClient` has
+the same three cluster-level methods (`healthCheck()`, `getClusterId()` and
+`getMetrics()`); the column-family and atomic-mode settings are RawKV-only.
+
+### Health and cluster identity
+
+**Signatures:**
+
+```php
+public function healthCheck(): ?int;
+public function getClusterId(): ?int;
+public function getMetrics(): MetricsInterface;
+```
+
+**`healthCheck()`** issues a PD `GetMembers` RPC through
+`PdClientInterface::ping()` and returns the cluster ID PD reports. It touches no
+user data and cannot fail with a "no region" error.
+
+- **Returns:** the cluster ID, or `null` when PD answered but the response
+  carried no cluster-ID header ("reachable, identity unknown"). Both are a
+  successful probe.
+- **Throws:** `ClientClosedException` when the client has been closed, and
+  `HealthCheckException` for every other failure (PD unreachable, a gRPC
+  transport error, or a PD-level error in the response header). The underlying
+  exception is available through `getPrevious()`; a `PdException` there names
+  the failing RPC in its public `$method` property, carries the raw
+  `pdpb.ErrorType` in its public `$errorType` property and its enum name from
+  `getErrorTypeName()`.
+- **What it proves:** the client is open and can reach a configured PD endpoint
+  that accepts `GetMembers`. A successful probe also records the current PD
+  leader reported by PD (when its address matches the configured endpoints) and
+  caches the cluster ID, so subsequent PD and TSO RPCs target that leader.
+- **What it does not prove:** anything about the TiKV data path. It does not
+  contact a store, resolve a region, or read/write a key, so it can stay green
+  while every data operation fails — a down store, a missing region leader, a
+  degraded write path. It is a PD readiness probe, not a TiKV data-path probe.
+
+If a readiness check must also cover the data path, pair the PD probe with one
+shallow read of a key your deployment maintains:
+
+```php
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+
+try {
+    $client->healthCheck();                            // PD is reachable
+    $healthy = $client->get('health:canary') !== null; // region + store are reachable
+} catch (TiKvException $e) {
+    // HealthCheckException, ClientClosedException, or a data-path failure
+    $healthy = false;
+}
+```
+
+The read exercises region resolution and the read path; it still does not prove
+that writes work. Do not use a synthetic write/delete as a probe: at probe
+frequency it adds continuous write traffic to the cluster, and it fails whenever
+the write path is degraded even though the cluster is reachable. Monitor the
+write path through your application's own traffic and the counters exposed by
+`getMetrics()`.
+
+**`getClusterId()`** returns the cluster ID the client has already learned, or
+`null` when it has not learned one yet. It is a cached accessor: it sends no RPC
+and throws nothing. The ID is learned from the first PD response whose header
+carries it, or explicitly by `healthCheck()`. After `close()` it returns `null`
+because closing the PD client resets the cache.
+
+**`getMetrics()`** returns the metrics backend in use: the instance passed via
+`options['metrics']`, or the no-op default (`NoOpMetrics`) when none was
+configured. It is that same object, not a copy, so an `InMemoryMetrics` instance
+can be inspected after operations. It sends no RPC, throws nothing, and remains
+callable after `close()`.
+
+### Column family and atomic mode
+
+**Signatures:**
+
+```php
+public function setColumnFamily(string $cf): self;    // fluent, returns the client
+public function getColumnFamily(): string;
+public function setAtomicForCAS(bool $enabled): self; // see Atomic Operations
+public function isAtomicForCAS(): bool;
+```
+
+**Column family.** `setColumnFamily()` sets the TiKV column family of the
+client instance and `getColumnFamily()` reads it back. `''` — the default —
+means TiKV's default column family; the client does not send a `cf` field for an
+empty string. Any other value is sent verbatim as the `cf` field of every
+subsequent key/value request of that client: single-key CRUD, CAS, the batch
+operations, scans (including both iterators) and delete-range operations. The
+setting is **per client instance**, not per call, so it applies to all later
+operations until it is changed. `setColumnFamily()` returns the client and
+performs no validation; TiKV rejects an unknown column family on the first
+request that uses it. The setting lives on the client instance: a new client
+instance starts at `''`, so re-apply it.
+
+Two exceptions to "every operation":
+
+- `checksum()` and `ingest()` have no column-family parameter and always
+  operate on the default column family.
+- With `options['apiVersion' => 2]` the transport clears the `cf` field on every
+  RawKV request (API V2 treats an explicit column family as deprecated and uses
+  the keyspace's default), so `setColumnFamily()` has no effect on an API V2
+  client.
+
+`scanIterator()` and `scanPrefixIterator()` capture the column family when they
+are created; after changing it, create a new iterator. `TxnKvClient` has no
+column-family setting: transactions use the default column family.
+
+**Atomic mode.** `setAtomicForCAS()` / `isAtomicForCAS()` are the same kind of
+client-instance switch; the flag is off by default and `compareAndSwap()` /
+`putIfAbsent()` require it. See
+[Atomic Mode](#atomic-mode-setatomicforcas--isatomicforcas) for the full scope.
+
+```php
+$client->setColumnFamily('write');   // all later key/value operations
+$client->put('user:1', $payload);    // RawPut carries cf = 'write'
+$cf = $client->getColumnFamily();    // 'write'; '' is the default CF
+
+$client->setColumnFamily('');        // back to TiKV's default CF
+$atomic = $client->isAtomicForCAS(); // false unless setAtomicForCAS(true)
+```
 
 ## Best Practices
 
@@ -1123,17 +1510,31 @@ positive integer).
 **How it works** (see `src/Client/RawKv/SstIngestor.php`):
 
 1. Keys are sorted client-side (`ksort(..., SORT_STRING)` — SST data must be
-   sorted), converted to `import_sstpb.Pair` messages and grouped by region
-   (batch region resolution against PD).
-2. For each region the pairs are streamed to the region leader via the TiKV
-   ImportSST **`RawWrite`** client-streaming RPC (1024 pairs per chunk, first
-   message carries the SST metadata: UUID, key range, region epoch, CRC32),
-   and the resulting SST is committed with the **`Ingest`** RPC.
+   sorted) and grouped by region (batch region resolution against PD). Only
+   the keys are copied; the values stay in the caller's array.
+2. For each region the data is streamed lazily to the region leader via the
+   TiKV ImportSST **`RawWrite`** client-streaming RPC: the first message
+   carries the SST metadata (UUID, key range, region epoch, CRC32), then one
+   data chunk per 1024 keys or 4 MiB of key-plus-value payload, whichever
+   comes first. Each chunk's `import_sstpb.Pair` messages are
+   built on demand and released when the next chunk is requested, so the
+   payload is not held as a full `Pair[]` array plus a full request array plus
+   the serialised messages. The resulting SST is committed with the
+   **`Ingest`** RPC.
 
 This bypasses the normal Raft write path and writes pre-sorted data directly
 into regions, giving far higher throughput than `batchPut()` on large loads.
 Keys are validated like every other write (non-empty, key/value size limits);
-an empty array is a no-op.
+an empty array is a no-op. The opt-in
+`options['maxIngestSize']` cap (`0` = unlimited, set on
+`RawKvClient::create()`) bounds the whole payload in bytes and rejects an
+oversized call with `IngestTooLargeException` before the cluster is switched
+into import mode or any RPC is sent. Even with a cap, the caller's input array
+is held in memory for the whole call, so split very large imports into
+batches yourself. The streamed copy is bounded: at most one chunk (1024
+pairs or 4 MiB of key-plus-value bytes) is materialised, so a 100 MB ingest
+holds the caller's payload plus the key list and roughly one 4 MiB chunk,
+not a second full `Pair[]` copy of every value.
 
 > **Cluster-wide side effect — read before running in production.** For the
 > duration of the call **every** TiKV store in the cluster is switched into

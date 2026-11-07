@@ -33,9 +33,13 @@ use CrazyGoat\TiKV\Client\Region\RegionGrouper;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
+use CrazyGoat\TiKV\Client\Region\RegionScanSource;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
@@ -76,13 +80,7 @@ final readonly class TxnReader
         private RegionCacheInterface $regionCache,
         /** Read preference for reads (issue #421); commits always target the leader. */
         private ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
-        private int $maxBackoffMs = 20000,
-        private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
-        private int $serverBusyBudgetMs = 60000,
-        private MetricsInterface $metrics = new NoOpMetrics(),
         private LoggerInterface $logger = new NullLogger(),
-        private ?RetryExecutor $retryExecutor = null,
-        private ?\Closure $classifier = null,
         /**
          * Kvrpcpb CommandPri carried on every read request's Context
          * (issue #336). Normal (0) is the proto3 default and is not
@@ -90,6 +88,12 @@ final readonly class TxnReader
          * original wire bytes.
          */
         private int $priority = CommandPri::Normal,
+        /** Metrics backend for scan-path region-cache hit/miss counters (issue #425). */
+        private MetricsInterface $metrics = new NoOpMetrics(),
+        /** Optional Context control fields applied to every read (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every read request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
@@ -111,11 +115,19 @@ final readonly class TxnReader
             return $state->getWriteSetValue($key);
         }
 
+        // One get() call is one logical operation: a fresh budget, never the
+        // one a previous read or the commit phase spent (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+        // The same budget bounds lock resolution triggered by a locked key
+        // (issue #569).
+        $budget = $retryExecutor->currentBudget();
+
         $excludedStore = null;
+        $targetStoreId = null;
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $state, &$excludedStore): ?string {
+            function () use ($key, $state, &$excludedStore, &$targetStoreId, $budget): ?string {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
@@ -123,8 +135,11 @@ final readonly class TxnReader
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
                     priority: $this->priority,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
                 $request = new GetRequest();
@@ -161,7 +176,7 @@ final readonly class TxnReader
 
                 $error = $response->getError();
                 if ($error instanceof KeyError) {
-                    $this->handleReadKeyError($error, $key, 'Get');
+                    $this->handleReadKeyError($error, $key, 'Get', $budget);
                 }
 
                 if ($response->getNotFound()) {
@@ -173,12 +188,24 @@ final readonly class TxnReader
                 $state->setReadValue($key, $value);
                 return $value;
             },
-            $classifier
+            $classifier,
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
     /**
      * Batch-read multiple keys.
+     *
+     * Every per-region `KvBatchGet` dispatch+wait cycle runs under the
+     * transaction's retry executor, with the same classifier as `get()` and
+     * `scan()`: a region error (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`,
+     * …) invalidates or switches the cached region and the region is
+     * re-resolved before the retry (issue #222). The first attempt of every
+     * region is still dispatched eagerly, before any response is awaited, so
+     * the client-side fan-out of issue #291 is preserved; the retries run
+     * inside {@see RetryExecutor::execute()}.
      *
      * The returned map inherits PHP's array-key semantics: a canonical
      * decimal-integer key is returned under its `int` form, every other key
@@ -200,8 +227,14 @@ final readonly class TxnReader
     public function batchGet(
         array $keys,
         TransactionState $state,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
     ): array {
         $keys = $this->normalizeKeysToStrings($keys, 'batchGet');
+
+        // One batchGet() call is one logical operation: every region shares
+        // one retry budget (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
 
         $results = [];
         $remaining = [];
@@ -214,7 +247,7 @@ final readonly class TxnReader
         }
 
         if ($remaining !== []) {
-            $remoteResults = $this->batchGetFromTiKV($remaining, $state);
+            $remoteResults = $this->batchGetFromTiKV($remaining, $state, $retryExecutor, $classifier);
             // Do not use array_merge(): it renumbers integer keys, which
             // silently drops numeric-string key results ("12345" is stored
             // as int key 12345 and would move to index 0).
@@ -265,6 +298,10 @@ final readonly class TxnReader
         callable $classifier,
         int $maxScanLimit = 10240,
     ): array {
+        // One scan() call is one logical operation: every page and region
+        // shares one retry budget (issue #223).
+        $retryExecutor = $retryExecutor->beginOperation();
+
         // `limit: 0` means "the whole range"; the scan budget is the cap and
         // a range that exceeds it must fail loudly instead of returning a
         // truncated result (issue #440).
@@ -273,28 +310,21 @@ final readonly class TxnReader
 
         $results = [];
         $remaining = $limit;
-        $cursor = $startKey;
         $batchSize = RegionScanBatch::forRowBudget($limit);
 
         $clipper = new RegionRangeClipper();
-        while ($remaining > 0) {
-            $regions = array_values($this->pdClient->scanRegions($cursor, $endKey, $batchSize));
-            if ($regions === []) {
-                break;
-            }
+        // The cache is read first and PD is asked only for the gaps (issue
+        // #425), so a warm cache turns every page of a transactional scan
+        // into zero PD round trips. The source trims a batch to the cursor a
+        // merge may have moved it to, exactly as the old loop did.
+        $source = new RegionScanSource(
+            $this->pdClient,
+            $this->regionCache,
+            $this->metrics,
+            'txn_scan',
+        );
 
-            foreach ($regions as $region) {
-                $this->regionCache->put($region);
-            }
-
-            $batchCount = count($regions);
-            $lastEndKey = $regions[$batchCount - 1]->endKey;
-
-            // A region that starts below the cursor is the region a merge
-            // produced after the previous batch was enumerated: the part
-            // below the cursor was read already (RegionScanBatch::trimToCursor()).
-            $regions = RegionScanBatch::trimToCursor($regions, $cursor);
-
+        foreach ($source->batches($startKey, $endKey, $batchSize) as $regions) {
             foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
                 $regionResults = $this->executeScanForRegion(
                     $scanStart,
@@ -310,34 +340,9 @@ final readonly class TxnReader
 
                 $remaining -= count($regionResults);
                 if ($remaining <= 0) {
-                    break;
+                    break 2;
                 }
             }
-
-            if ($remaining <= 0) {
-                break;
-            }
-
-            if ($lastEndKey === '') {
-                // The last region of the keyspace: nothing follows it.
-                break;
-            }
-            if ($endKey !== '' && KeyOrder::gte($lastEndKey, $endKey)) {
-                // The requested range is covered.
-                break;
-            }
-            if (KeyOrder::lte($lastEndKey, $cursor)) {
-                // No forward progress: stop instead of asking PD for the same
-                // page again.
-                break;
-            }
-            if ($batchCount < $batchSize) {
-                // PD answered with fewer regions than requested, so the range
-                // holds no more.
-                break;
-            }
-
-            $cursor = $lastEndKey;
         }
 
         if ($wholeRange && $remaining <= 0) {
@@ -423,6 +428,8 @@ final readonly class TxnReader
     private function batchGetFromTiKV(
         array $keys,
         TransactionState $state,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
     ): array {
         $results = [];
         $resolved = $this->regionResolver->batchResolveRegions($keys);
@@ -451,6 +458,8 @@ final readonly class TxnReader
 
             $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetForRegionWithRetry(
                 $regionKeys,
+                $retryExecutor,
+                $classifier,
             );
         }
 
@@ -486,34 +495,45 @@ final readonly class TxnReader
 
     /**
      * Eagerly dispatch the first regional request and retry its wait phase
-     * when response-borne errors require lock resolution (issue #210).
+     * when response-borne errors require lock resolution (issue #210) or a
+     * retryable region error (issue #222).
+     *
+     * `fromRetryableDispatch()` is the fan-out-preserving form of
+     * {@see RetryExecutor::execute()}: the first attempt is sent during the
+     * dispatch phase so every region's RPC overlaps, while the wait phase
+     * runs the dispatch+wait cycle inside the executor. That is why the
+     * per-region call is not wrapped in a blocking `execute()` here — doing
+     * so would serialise the regions and undo issue #291.
      *
      * @param string[] $regionKeys
+     * @param callable(TiKvException): ?BackoffType $classifier
      */
     private function batchGetForRegionWithRetry(
         array $regionKeys,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
     ): CheckedGrpcFuture {
         $firstKey = $regionKeys[0] ?? '';
-        $retryExecutor = $this->retryExecutor ?? new RetryExecutor(
-            $this->maxBackoffMs,
-            $this->serverBusyBudgetMs,
-            $this->regionCache,
-            $this->grpc,
-            $this->regionResolver,
-            $this->logger,
-            deadlineMs: $this->retryDeadlineMs,
-            metrics: $this->metrics,
-        );
-        $classifier = $this->classifier ?? static fn (TiKvException $e): ?BackoffType => null;
+        // The same operation budget bounds lock resolution triggered by a
+        // locked key in any region of this batch (issue #569).
+        $budget = $retryExecutor->currentBudget();
+        $targetStoreId = 0;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            fn (): CheckedGrpcFuture => $this->batchGetForRegionAsync(
-                $this->regionResolver->getRegionInfo($firstKey),
-                $regionKeys,
-            ),
+            function () use ($firstKey, $regionKeys, &$targetStoreId, $budget): CheckedGrpcFuture {
+                return $this->batchGetForRegionAsync(
+                    $this->regionResolver->getRegionInfo($firstKey),
+                    $regionKeys,
+                    $targetStoreId,
+                    $budget,
+                );
+            },
             $retryExecutor,
             $firstKey,
             $classifier,
+            static function () use (&$targetStoreId): int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -527,13 +547,18 @@ final readonly class TxnReader
     private function batchGetForRegionAsync(
         RegionInfo $region,
         array $regionKeys,
+        int &$targetStoreId = 0,
+        ?RetryBudget $budget = null,
     ): CheckedGrpcFuture {
         $target = RegionContextFactory::resolveTarget(
             $region,
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
             priority: $this->priority,
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
         );
+        $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
         $request = new BatchGetRequest();
@@ -550,7 +575,7 @@ final readonly class TxnReader
             $this->timeoutMs('batch_read'),
         );
 
-        return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $regionKeys) {
+        return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $regionKeys, $budget) {
             /** @var BatchGetResponse $response */
             $response = $future->wait();
             // The wait-boundary RetryExecutor is the sole NotLeader owner
@@ -565,7 +590,7 @@ final readonly class TxnReader
 
             $error = $response->getError();
             if ($error instanceof KeyError) {
-                $this->handleReadKeyError($error, $regionKeys[0] ?? '', 'BatchGet');
+                $this->handleReadKeyError($error, $regionKeys[0] ?? '', 'BatchGet', $budget);
             }
 
             $pairErrors = [];
@@ -576,7 +601,7 @@ final readonly class TxnReader
                     $pairErrors[] = [$pairError, $fallbackKey];
                 }
             }
-            $this->handleReadKeyErrors($pairErrors, 'BatchGet');
+            $this->handleReadKeyErrors($pairErrors, 'BatchGet', $budget);
 
             return $response;
         }, $future);
@@ -597,9 +622,15 @@ final readonly class TxnReader
      * {@see handleReadKeyError()}.
      *
      * @param list<array{KeyError, string}> $pairErrors each error with its fallback key
+     * @param RetryBudget|null $budget retry budget of the enclosing read
+     *        operation; its remaining deadline bounds the lock resolution
+     *        (issue #569)
      */
-    private function handleReadKeyErrors(array $pairErrors, string $operation): void
-    {
+    private function handleReadKeyErrors(
+        array $pairErrors,
+        string $operation,
+        ?RetryBudget $budget = null,
+    ): void {
         $locks = [];
         foreach ($pairErrors as [$error, $fallbackKey]) {
             $locked = $error->getLocked();
@@ -612,12 +643,12 @@ final readonly class TxnReader
         }
 
         if ($locks !== []) {
-            $this->lockResolver->resolveLocks($locks);
+            $this->lockResolver->resolveLocks($locks, $budget?->remainingDeadlineMs() ?? 0);
             throw new TxnRetryableException($this->lockRetryMessage($operation), BackoffType::TxnLock);
         }
 
         foreach ($pairErrors as [$error, $fallbackKey]) {
-            $this->handleReadKeyError($error, $fallbackKey, $operation);
+            $this->handleReadKeyError($error, $fallbackKey, $operation, $budget);
         }
     }
 
@@ -630,6 +661,7 @@ final readonly class TxnReader
         KeyError $error,
         string $fallbackKey,
         string $operation,
+        ?RetryBudget $budget = null,
     ): never {
         $locked = $error->getLocked();
         if ($locked !== null) {
@@ -637,7 +669,11 @@ final readonly class TxnReader
             $primary = $rawPrimary !== ''
                 ? $rawPrimary
                 : ($locked->getKey() !== '' ? $locked->getKey() : $fallbackKey);
-            $this->lockResolver->resolveLock($primary, $locked);
+            $this->lockResolver->resolveLock(
+                $primary,
+                $locked,
+                $budget?->remainingDeadlineMs() ?? 0,
+            );
             throw new TxnRetryableException($this->lockRetryMessage($operation), BackoffType::TxnLock);
         }
 
@@ -674,6 +710,9 @@ final readonly class TxnReader
         $pending = $limit;
         $cursorStart = $startKey;
         $emptyReattempts = 0;
+        // The same operation budget bounds lock resolution triggered by a
+        // locked key in any page of this scan (issue #569).
+        $budget = $retryExecutor->currentBudget();
 
         while (true) {
             // Resolve on the current start key: the sub-range starts inside
@@ -681,6 +720,7 @@ final readonly class TxnReader
             // needs re-clipping after a split.
             $freshEndKey = '';
             $excludedStore = null;
+            $targetStoreId = null;
             $batch = $retryExecutor->execute($cursorStart, function () use (
                 $cursorStart,
                 $endKey,
@@ -688,6 +728,8 @@ final readonly class TxnReader
                 $maxScanLimit,
                 &$excludedStore,
                 &$freshEndKey,
+                &$targetStoreId,
+                $budget,
             ): array {
                 // Resolve the region on every attempt so cache invalidation
                 // and leader switching performed by the retry executor take
@@ -700,8 +742,11 @@ final readonly class TxnReader
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
                     priority: $this->priority,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
                 $freshEndKey = $fresh->endKey;
 
@@ -749,7 +794,7 @@ final readonly class TxnReader
 
                 $error = $response->getError();
                 if ($error instanceof KeyError) {
-                    $this->handleReadKeyError($error, $cursorStart, 'Scan');
+                    $this->handleReadKeyError($error, $cursorStart, 'Scan', $budget);
                 }
 
                 $subResults = [];
@@ -764,10 +809,12 @@ final readonly class TxnReader
                         'value' => $pair->getValue(),
                     ];
                 }
-                $this->handleReadKeyErrors($pairErrors, 'Scan');
+                $this->handleReadKeyErrors($pairErrors, 'Scan', $budget);
 
                 return $subResults;
-            }, $classifier);
+            }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            });
 
             foreach ($batch as $row) {
                 $results[] = $row;

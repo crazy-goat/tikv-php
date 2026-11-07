@@ -13,10 +13,12 @@ Complete guide to configuring the TiKV PHP Client for development and production
 7. [Batch Commands Multiplexing (Experimental)](#batch-commands-multiplexing-experimental)
 8. [Fast Commit Modes (TxnKV)](#fast-commit-modes-txnkv)
 9. [Transaction Priority (TxnKV)](#transaction-priority-txnkv)
-10. [Retry and Backoff](#retry-and-backoff)
-11. [Caching](#caching)
-12. [Timeouts](#timeouts)
-13. [Production Configuration](#production-configuration)
+10. [Resource Control (Resource Groups)](#resource-control-resource-groups)
+11. [Request Context Controls (issue #426, GAP-12)](#request-context-controls-issue-426-gap-12)
+12. [Retry and Backoff](#retry-and-backoff)
+13. [Caching](#caching)
+14. [Timeouts](#timeouts)
+15. [Production Configuration](#production-configuration)
 
 ## Basic Configuration
 
@@ -36,6 +38,7 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadMode;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
 
@@ -46,15 +49,17 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::INFO));
 // Client options
 $options = [
     // Concurrency cap for operations that fan out per-region/per-store RPCs
-    // (batchScan, deleteRange/deletePrefix/checksum, SST store-mode
-    // switches): at most this many units (ranges, regions or stores) are in
-    // flight at once. Default: 16. Must be >= 1.
+    // (an unbounded scan()/scanPrefix()/reverseScan() page, batchScan,
+    // deleteRange/deletePrefix/checksum, SST store-mode switches): at most
+    // this many units (ranges, regions or stores) are in flight at once.
+    // Default: 16. Must be >= 1.
     'maxConcurrency' => 16,
     // Row cap for an unbounded scan (scan()/scanPrefix()/reverseScan() with
     // limit: 0, issue #191). limit: 0 returns the whole range by paging
     // internally (up to RawKvClient::MAX_SCAN_LIMIT = 10240 rows per RPC), so
-    // the whole result is buffered in one PHP array. The guard is evaluated
-    // once per fetched page (after that page is buffered), so it is
+    // the whole result is buffered in one PHP array. A negative limit is
+    // rejected with InvalidArgumentException before any RPC. The guard is
+    // evaluated once per fetched page (after that page is buffered), so it is
     // page-granular rather than a strict per-row memory bound: when it is
     // smaller than the page size a whole page is read before the throw, and
     // ScanLimitExceededException's getScannedRows() can exceed getMaxRows().
@@ -62,6 +67,13 @@ $options = [
     // scanIterator()/scanPrefixIterator() are unaffected. Default: 100000.
     // Must be >= 1.
     'maxScanRows' => 100000,
+    // Payload cap for one RawKvClient::ingest() call (issue #297): the sum of
+    // every key and value length, in bytes. 0 (default) = unlimited.
+    // Exceeding it throws IngestTooLargeException before the cluster is
+    // switched into import mode and before any RPC, so the caller can split
+    // the batch. Unlike maxScanRows this is a whole-payload guard, not a
+    // page-granular one.
+    'maxIngestSize' => 0,
     // GC safe-point validation at TxnKvClient::begin() (issue #422): when
     // true (default), a fresh start timestamp below the cluster's GC safe
     // point throws TxnAbortedByGcException immediately instead of failing
@@ -95,14 +107,50 @@ $options = [
     // 1 disables pooling (one Tso RPC per call). Must be >= 1 and <= 1000.
     // See "Timestamp Batching and Pooling" below.
     'tsoPoolSize' => 64,
+    // Expected PD cluster ID (issue #308, SEC-05). When set, every PD/TSO
+    // response must carry a cluster ID equal to this value; a mismatch or a
+    // missing cluster-ID header throws TiKvException before any data-path
+    // request. Independently of this option, an established cluster ID can
+    // never be overwritten by a value parsed out of an error string. Default:
+    // unset = learn and adopt the first ID PD reports. Must be a positive int.
+    // See "Cluster Identity Verification" below.
+    'expectedClusterId' => 123456789,
     // Replica read preference (issue #421): an instance of
     // ReplicaReadPolicy controlling which peer serves read requests.
     // Default: leader-only (unchanged behaviour). See "Replica Reads".
     'replicaRead' => new ReplicaReadPolicy(ReplicaReadMode::PreferLeader),
+    // Optional kvrpcpb.Context control fields (issue #426): isolation level,
+    // not-fill-cache, server-side max execution duration, request source,
+    // resource group tag/name and busy threshold. Applied to every request
+    // this client sends. Omitted: none of the fields is written, so the
+    // serialized Context stays byte-for-byte unchanged. See "Request Context
+    // Controls" below.
+    'requestContext' => new RequestContextOptions(
+        notFillCache: true,
+        requestSource: RequestContextOptions::DEFAULT_REQUEST_SOURCE,
+    ),
     // Experimental BatchCommands stream multiplexing for the RawKV batch
     // fan-outs (issue #418). Must be a boolean, default false. See
     // "Batch Commands Multiplexing" below.
     'batchCommands' => false,
+    // Minimum interval between two non-forced refreshRegionCache() calls, in
+    // milliseconds (issue #425). The method is the PHP-process-model
+    // replacement for client-go's background runner: a long-running worker
+    // calls it from its own tick and it re-queries PD for the cached regions
+    // at most once per interval. 0 (the default) disables the throttled
+    // refresh, so an application that does not opt in pays no extra PD
+    // traffic; a forced refresh still works. Must be >= 0. See "Region Cache
+    // Refresh and Preload" below.
+    'regionCacheRefreshMs' => 60000,
+    // Resource control (issue #427): the TiKV resource group every request
+    // belongs to, and an opaque tag used for query attribution. Both are
+    // optional and default to unset, which sends neither field. The name
+    // must be 1-64 characters of letters, digits, underscores or hyphens;
+    // the tag must be a non-empty string. TxnKvClient::begin() accepts the
+    // same two keys per transaction and overrides them individually. See
+    // "Resource Control (Resource Groups)" below.
+    'resourceGroup' => 'tenant-a',
+    'resourceGroupTag' => 'nightly-job',
     'tls' => [
         'caCertFile' => '/path/to/ca.crt',
         'clientCertFile' => '/path/to/client.crt',
@@ -193,6 +241,58 @@ an empty result: `scanRegions()` can no longer answer `[]` for a failed
 really was deleted. A leader URL PD advertises that is not one of the
 configured endpoints is ignored, so a rogue or rewritten PD member list cannot
 redirect traffic.
+
+### Cluster Identity Verification (issue #308, SEC-05)
+
+By default the client learns its cluster ID from the first PD response header
+and adopts it: whatever cluster answers the configured endpoint becomes the
+cluster the client talks to. That is convenient for a first connection, but it
+also means a DNS-poisoned, stale or on-path PD — or simply a staging
+configuration pointed at production — is indistinguishable from the intended
+cluster, and it becomes the authority for region routing and store addresses.
+
+Set `options['expectedClusterId']` to pin the cluster identity:
+
+```php
+$client = RawKvClient::create(
+    ['127.0.0.1:2379'],
+    options: ['expectedClusterId' => 7123456789012345678],
+);
+```
+
+The value is the ID PD reports (`getClusterId()` / `healthCheck()`), for
+example from `pd-ctl cluster` or a trusted client. When it is set:
+
+- every PD response must carry a cluster ID equal to it; a different ID
+  throws `TiKvException` (`Cluster ID mismatch: expected X, server reported
+  Y`) before the response reaches the caller and before any data-path request
+  is issued, and a response with no cluster-ID header at all throws
+  `TiKvException` (`Cluster ID missing: expected X, response carried none`) —
+  a server cannot bypass the check by omitting the header;
+- a cluster ID parsed out of a `mismatch cluster id, need X but got Y` gRPC
+  error string is validated the same way before the retry that adopts it, so a
+  server cannot steer the client onto an ID of its choosing;
+- `TimestampOracle` applies the same checks to TSO response headers and TSO
+  cluster-id mismatch errors, so the timestamp path cannot be redirected
+  either.
+
+Independently of the option, once a cluster ID has been established, an
+error string naming a different ID is rejected instead of silently
+overwriting it. That no-overwrite rule is unconditional: it also applies when
+`expectedClusterId` is unset, because the issue requires it.
+
+An absent or explicitly `null` option keeps the historical initial
+learn-and-adopt behaviour: the first cluster ID PD reports is adopted.
+Existing deployments that relied on an error string replacing an already
+established ID do change — intentionally. The option must be a positive
+integer; any other type, `0` or a negative value throws
+`InvalidArgumentException` at client creation. The value must fit in a PHP
+`int`: PD cluster IDs are `uint64`, and the protobuf runtime clamps a decoded
+value above `PHP_INT_MAX` to `PHP_INT_MAX`, so a cluster whose ID exceeds
+that bound cannot be pinned through this option. This is a partial control on
+its own: it detects a wrong cluster but does not authenticate the server —
+genuine server authentication comes from TLS (`allowInsecure: false` plus a
+verified CA, see the TLS section below).
 
 ### Timestamp Batching and Pooling (issues #420, #292)
 
@@ -453,6 +553,13 @@ application, so closing one client cannot break the other clients sharing it.
 A client that built its own transport (the normal case) closes it in
 `close()` as before.
 
+A `TxnKvClient` still owns the transactions it began when the transport is
+shared: `close()` rolls the still-active ones back before releasing its other
+resources, so the rollback can reach TiKV even though the client does not
+close the transport. Finish transactions explicitly anyway — a rollback that
+fails during `close()` is only logged (see
+[`close()` semantics](operations.md#close-semantics)).
+
 Because the supplied transport was configured by the application, the
 transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
 `grpc`) cannot be combined with it — they would configure a transport the
@@ -470,7 +577,15 @@ the same underlying channel and the same TCP connection (see below).
 
 Sharing the transport shares the **channels** only. Every client keeps its own
 region cache and its own store-address cache, so the two clients do not warm
-each other's caches.
+each other's caches. Store addresses are cached for 600 s plus up to 60 s of
+jitter; a `StoreNotMatch` region error or a retryable transport failure against
+a store evicts that store's entry early, so a TiKV pod that was rescheduled to
+a new address is found again on the next attempt instead of after the TTL
+(issue #247). The `closeChannel()` that follows a transport failure targets the
+store the failed attempt used — a replica-read follower, or the leader the
+attempt resolved — rather than whatever the region cache names as the leader
+when the error is handled, and it runs only for `UNAVAILABLE`, not for a
+`DEADLINE_EXCEEDED` on a slow but healthy connection (issue #248).
 
 `options['metrics']` is a **client-side** option and is always applied: it
 backs the client-side counters (region cache, retries). The transport's own
@@ -662,12 +777,18 @@ $tlsConfig = $builder->build();
 $grpc = new GrpcClient($logger, $tlsConfig);
 // The store cache is the fourth argument of PdClient. It is mandatory: when
 // you omit it, PdClient creates a default StoreCache. Pass your own to set
-// the TTL, the size or the logger.
+// the TTL, the size or the logger. A StoreNotMatch region error or a
+// transport failure against a store drops that store's entry, so the next
+// request re-resolves the address through PD (issue #247).
 $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
 // The client closes the transport it was given in close() — pass
 // ownsGrpcClient: false to keep the ownership with the application.
-$client = new RawKvClient($pdClient, $grpc);
+// Pass the same storeCache, or a StoreNotMatch / transport failure cannot
+// drop the stale address: the client's resolver has no cache to invalidate
+// while PdClient keeps serving that entry. Omitting storeCache disables
+// early invalidation.
+$client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 ```
 
 > **Note:** the manual path above is for the rare case where the client has
@@ -860,30 +981,49 @@ The client writes these levels:
 Region cache hits and misses are **not** INFO records. A logger at the `INFO` level does not show them.
 
 Keys in the log details are redacted — see
-[Log Redaction](#log-redaction) for the exact format.
+[Log Redaction](#log-redaction) for the format.
 
 ### Log Redaction
 
 The client never writes a raw key it holds into the log context: every key
 it formats for a log line or an exception message passes through
-[`KeyRedactor`](../src/Client/Util/KeyRedactor.php), which replaces it with
-the first `min(8, length)` bytes as lowercase hex plus the total length of
-the key:
+[`KeyRedactor`](../src/Client/Util/KeyRedactor.php), which replaces it with a
+truncated keyed hash and the total length of the key:
 
 | Key | Logged as |
 |---|---|
-| `key_a` (5 bytes) | `"6b65795f61" (5 bytes)` |
-| `user:session` (12 bytes) | `"757365723a736573... (12 bytes)` |
+| `key_a` (5 bytes) | `#3c469e9d6c5875d3 (5 bytes)` |
+| `user:session` (12 bytes) | `#60303ae22b998861 (12 bytes)` |
 | empty key | `"" (0 bytes)` |
 
-That is the exact output of the code, not a paraphrase of it. A key of 8
-bytes or fewer is hex-encoded in full and quoted on both sides; a longer key
-is quoted only at the front, and its 16-character hex prefix is followed by
-`...` **without a closing quote**. The byte count is the length of the whole
-key, not of the prefix. The shape is pinned by the unit tests — do not
-"repair" the missing quote when you copy these strings, and do not quote the
-redacted value a second time in a message template (pass it to an unquoted
-`%s`; see [`helpers/faq.md`](helpers/faq.md)).
+The digest is the first 16 hex characters (64 bits) of
+`hash_hmac('sha256', $key, $salt)`. The salt is 32 random bytes generated on
+first use, so the same key produces the same token for the lifetime of the
+process — log correlation still works — while two processes (or two restarts)
+produce different tokens. The digest is one-way: unlike the old hex prefix it
+cannot be decoded back into the key, including for keys of 8 bytes or fewer.
+The byte count is the length of the whole key. The examples above show the
+shape only: the actual digest depends on the process salt, so do not copy
+them as literal values.
+
+Configure a fixed salt when tokens must be comparable across processes or
+restarts. Use a high-entropy secret, for example 32 random bytes encoded as
+hex:
+
+```php
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+
+KeyRedactor::setSalt(getenv('TIKV_LOG_REDACTION_SALT') ?: null);
+```
+
+`setSalt(null)` restores the default (a fresh random salt per process); an empty
+string is rejected. Call it before the first redaction: `setSalt()` throws
+`LogicException` once a key has been redacted, because changing the salt
+afterwards would break the in-process correlation the token exists for.
+
+The redacted form is not quoted: pass it to an unquoted `%s` in a message
+template (the empty-key form still carries its own quotes; see
+[`helpers/faq.md`](helpers/faq.md)).
 
 **Values are never logged at all** — not redacted, not truncated. The client
 puts no value into any log context or exception message, so there is nothing
@@ -927,26 +1067,36 @@ code needs the raw key, read it from the typed accessor instead of parsing
 it out of a message — `RetryBudgetExhaustedException::getRawKey()` and
 `LockWaitTimeoutException::getKey()`.
 
-#### Installing a stricter redactor
+#### Installing a custom redactor
 
 `KeyRedactor::setRedactor()` replaces the default redactor:
 
 ```php
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 
+$secret = getenv('TIKV_LOG_REDACTION_SECRET');
+if ($secret === false || $secret === '') {
+    throw new \RuntimeException('TIKV_LOG_REDACTION_SECRET must be set');
+}
+
 KeyRedactor::setRedactor(
-    fn (string $key): string => 'sha256:' . substr(hash('sha256', $key), 0, 16)
+    fn (string $key): string => 'hmac:' . substr(hash_hmac('sha256', $key, $secret), 0, 16)
 );
 ```
 
-The callable receives the raw key and returns the string that is logged in
-its place. Install a hash when an 8-byte prefix is still sensitive in your
-key scheme — the prefix alone can leak a tenant identifier. Pass `null` to
-restore the default:
+The default is already a keyed SHA-256 hash with a per-process CSPRNG salt, so
+override it only when you need to match an existing token scheme (a prefix, a
+different digest length, or an HMAC secret your log pipeline already uses).
+If you only need tokens that are comparable across processes or restarts, use
+`KeyRedactor::setSalt()` above instead.
 
-```php
-KeyRedactor::setRedactor(null);
-```
+The callable receives the raw key and returns the string that is logged in
+its place. Install it once, before the first client is created and before the
+first key is redacted. The setter is one-shot: it throws `LogicException`
+after the first `redact()` call, so a debug helper or a dependency cannot
+silently replace the redactor once the client is running. There is no way to
+restore the default in a running process; configure the redactor at
+bootstrap.
 
 > **The redactor is process-global.** `KeyRedactor::setRedactor()` is a
 > static method and the custom callable is held in a static property, so it
@@ -1031,7 +1181,7 @@ When an operation takes longer than its threshold, the client emits a PSR-3
 | Context field  | Meaning                                                                                                                                                     |
 |----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `operation`    | The operation type: `read`, `write`, `batch_read`, `batch_write`, `scan`, `delete_range` or `checksum`.                                                      |
-| `key`          | The redacted key (`KeyRedactor::redact()`) — the first 8 bytes in hex plus the total length, with an ellipsis after the hex when the key is longer than 8 bytes, e.g. `"7573657231" (5 bytes)` for a short key and `"757365725f656d61... (28 bytes)` for a longer one. It is the key the operation is anchored on: the key itself for a single-key read or write, the **first key of the batch** for a batch operation, and the key the range starts at for a scan or range operation (the exclusive upper bound for a reverse scan, the start of the per-region sub-range when the range spans regions). |
+| `key`          | The redacted key (`KeyRedactor::redact()`) — a truncated keyed hash plus the total length, e.g. `#3c469e9d6c5875d3 (5 bytes)`; the digest depends on the process salt. It is the key the operation is anchored on: the key itself for a single-key read or write, the **first key of the batch** for a batch operation, and the key the range starts at for a scan or range operation (the exclusive upper bound for a reverse scan, the start of the per-region sub-range when the range spans regions). |
 | `duration_ms`  | The measured duration in milliseconds, rounded to two decimals.                                                                                               |
 | `threshold_ms` | The threshold that was exceeded, in milliseconds.                                                                                                            |
 
@@ -1039,7 +1189,7 @@ An emitted line therefore looks like this (the prefix depends on the logger's
 formatter):
 
 ```
-WARNING  Slow TiKV operation  {"operation":"scan","key":"\"7573657231\" (5 bytes)","duration_ms":1420.5,"threshold_ms":1000}
+WARNING  Slow TiKV operation  {"operation":"scan","key":"#3c469e9d6c5875d3 (5 bytes)","duration_ms":1420.5,"threshold_ms":1000}
 ```
 
 The duration is measured around the RPC: for the batch fan-outs it covers the
@@ -1139,8 +1289,10 @@ retry/region-error semantics) happens when:
   (`RawCompareAndSwap`, `RawGetKeyTTL`, `RawChecksum`, `KvGC`, `KvImport`,
   and every other unary RPC outside the map above);
 - the multiplexed response carries a region error — those entries are
-  re-dispatched on the unary path, whose retry executor invalidates the
-  region cache and re-resolves on every attempt;
+  re-dispatched on the unary path, whose retry executor re-resolves on every
+  attempt and invalidates the region cache only when the error is a routing
+  error (`EpochNotMatch`, `RegionNotFound`, `StoreNotMatch`, …), not for
+  `ServerIsBusy`-style store overload;
 - the stream layer fails (peer closed the stream, drain deadline expired).
 
 Properties and limitations of the current implementation:
@@ -1182,7 +1334,7 @@ $txn = $client->begin([
 
 | Mode               | When it applies                                                            | What it saves                                  |
 |--------------------|----------------------------------------------------------------------------|------------------------------------------------|
-| `enable1Pc`        | Transaction touches a **single region** and has ≤ 128 keys.                 | The commit phase and the PD `getTimestamp()` round trip. |
+| `enable1Pc`        | Transaction fits in a **single prewrite batch**: one region, ≤ 128 keys, and within [`maxTxnBatchSize`/`maxTxnBatchCount`](#transaction-size-limits-and-request-batching-txnkv). | The commit phase and the PD `getTimestamp()` round trip. |
 | `enableAsyncCommit`| Transaction has ≤ 256 keys (any number of regions).                        | The commit phase (the PD round trip stays implicit in prewrite's `min_commit_ts`). |
 
 Details:
@@ -1194,7 +1346,7 @@ Details:
   prewrite), the client silently falls back to the normal two-phase path.
 - Async commit sets `use_async_commit`, the secondary keys and
   `max_commit_ts` (start timestamp + a bounded TSO gap) on the primary
-  region's prewrite, and derives the commit timestamp as the maximum of the
+  batch's prewrite, and derives the commit timestamp as the maximum of the
   returned `min_commit_ts` values (no extra increment — TiKV writes the data
   at `min_commit_ts`, so a reader whose snapshot ts equals it must see the
   write). The transaction is committed once the primary lock
@@ -1205,10 +1357,10 @@ Details:
   `min_commit_ts` values (client-go's recovery protocol: an undecided
   transaction whose secondaries are all still locked is help-committed at
   `max(min_commit_ts)` rather than stalled until the lock TTL expires).
-  The prewrite loop prewrites the primary region last (the commit-decision
+  The prewrite loop prewrites the primary batch last (the commit-decision
   barrier, client-go parity). When TiKV declines, the client falls back to
   two-phase commit.
-- If both options are set, one-phase commit is tried first (single region
+- If both options are set, one-phase commit is tried first (single batch
   only); async commit covers multi-region small transactions.
 - Both modes remain safe under TiKV's own server-side guards — the server
   never applies an unsafe fast commit, it just answers with a decline and the
@@ -1270,6 +1422,76 @@ If a heartbeat fails, the operation throws the typed exception of
 The usual cause is a lock that is already gone. In that case, roll the
 transaction back.
 
+### A single prewrite or commit RPC can outlive the lock TTL
+
+The automatic keepalive has one inherent limit: it can only send a heartbeat
+at a point where control returns to PHP. Those points are
+
+1. at the start of `commit()` for a pessimistic transaction, before the
+   prewrite phase,
+2. after the primary region's prewrite has been acknowledged, and
+3. after the parallel fan-out of the secondary prewrites has completed.
+
+In the default two-phase path those are two separate checks. A multi-region
+async commit deliberately prewrites the primary **last** (the primary lock is
+the commit-decision barrier), so its primary prewrite follows the fan-out and
+the two points coincide: it checks once, after the primary prewrite, and not
+again when the fan-out returns.
+
+There is no heartbeat **inside** a `KvPrewrite` or `KvCommit` call: the gRPC
+call blocks in the extension and PHP has no timer that could run while it is
+in flight. Nor is there one between the individual secondary batches, because
+they are dispatched in parallel and the committer waits for the whole fan-out
+before checking the clock. If one RPC — or the gap between the last prewrite
+heartbeat and the primary commit, plus that commit RPC — takes longer than the
+lock TTL, the lock expires and a concurrent reader may resolve (roll back) the
+transaction. The later commit then fails with `TxnLockNotFound`. A
+single-region transaction **that fits in one request batch** (the default for
+small write sets) is the simplest case: it has exactly one prewrite RPC and
+therefore no between-RPC point at which a heartbeat could be sent. A larger
+single-region write set is split into a primary batch plus secondary batches
+in the same region and gets the same batch-boundary checks as a multi-region
+transaction, but no individual request can be heartbeated mid-flight.
+
+Four settings determine whether that can happen:
+
+| Setting | Effect |
+|---|---|
+| `optimisticLockTtlMs` / `pessimisticLockTtlMs` | The base lock lifetime. Optimistic locks use `min(optimisticLockTtlMs + 10 ms × mutations, 120000)`, where the mutation count is the **whole write set**, not one batch; pessimistic locks use `pessimisticLockTtlMs`. The value sent with the request is `min(uptime + base, 3600000)`, so a lock created at the start of prewrite expires roughly `base` milliseconds later (less only when the transaction has already run for more than `3600000 − base`). |
+| `writeTimeoutMs` (default `5000`) | The gRPC deadline of **each** `KvPrewrite` and `KvCommit` attempt. One attempt can occupy the wire for at most this long. With the defaults, an optimistic transaction with fewer than ~200 mutations has a base TTL below `writeTimeoutMs` (`3000 + 10 × mutations`), so a single slow prewrite can outlive it. |
+| Retry budget (`retryDeadlineMs`, default `30000`; `maxBackoffMs`, default `20000` sleep budget) | A region's prewrite may be attempted more than once. Each attempt gets its own `writeTimeoutMs`, and the retries share the `commit()` operation's wall-clock deadline, so one region can consume several timeout windows before it succeeds or fails. |
+| `batchDeadlineMs` (default `60000`) | The wall-clock deadline of the parallel secondary-prewrite fan-out (and of the secondary commit fan-out). It can exceed the lock TTL and does not itself extend any lock. |
+
+Guidance:
+
+- **Keep the per-RPC timeout below the lock TTL.** Set `writeTimeoutMs`
+  comfortably below the effective base TTL, ideally below half of it (the
+  point at which a heartbeat becomes due). For an optimistic transaction the
+  default TTL is small, so either raise `optimisticLockTtlMs` (for example to
+  `10000`, comfortably above the default `writeTimeoutMs` of `5000`) or lower
+  `writeTimeoutMs`. `pessimisticLockTtlMs` defaults to `30000`, which already
+  covers the default write timeout.
+- **Make each request small.** `maxTxnBatchSize` and `maxTxnBatchCount` split
+  a region's prewrite into smaller requests (see
+  [Transaction Size Limits and Request Batching](#transaction-size-limits-and-request-batching-txnkv)).
+  A smaller request finishes sooner and is less likely to outlive the TTL.
+  Batching does **not** create extra heartbeat points: the secondary batches
+  are sent in parallel and the heartbeat is checked only after all of them
+  have returned.
+- **Raise the TTL for a slow store or a large transaction.** The optimistic
+  base TTL can be raised to `120000` ms and heartbeats extend a lock up to one
+  hour (`MAX_TXN_TTL_MS`). Size it for the worst case of the whole prewrite
+  phase — store latency, any retry windows, and the fan-out — not for the
+  average request.
+- **Do not rely on a heartbeat to rescue a hung RPC.** `writeTimeoutMs` is the
+  only bound on one call; once the deadline fires, the attempt has already
+  consumed that much of the lock's lifetime.
+
+One-phase commit leaves no lock, and async commit carries the commit decision
+on the primary lock during prewrite, so 1PC has no lock to expire and async
+commit has no separate primary `KvCommit` RPC. Both still perform prewrites,
+so the per-RPC timeout guidance above applies to them too.
+
 ## Pessimistic Lock Wait Timeout (TxnKV)
 
 A pessimistic-lock request tells TiKV how long it may block on a contended
@@ -1302,6 +1524,101 @@ server-side waits of the attempts — the budget counts the client's backoff
 sleeps, not the time the lock RPCs themselves take. Lower the value to keep a
 PHP worker slot free; raise it to let TiKV park the request instead of
 answering early and having the client send it again.
+
+## Transaction Size Limits and Request Batching (TxnKV)
+
+A transaction buffers its write set in the PHP worker until `commit()`, so a
+runaway write set can exhaust `memory_limit` and leave locks behind; and one
+region with many mutations produces a single prewrite/commit request that TiKV
+can reject with `RaftEntryTooLarge`. Both are configurable per transaction on
+`begin()` (issue #430):
+
+```php
+$txn = $client->begin([
+    'maxTxnEntryCount' => 10000,   // entries, 0 = unlimited (default)
+    'maxTxnEntrySize'  => 1048576, // key+value bytes, 0 = unlimited
+    'maxTxnTotalSize'  => 4194304, // whole write set, 0 = unlimited
+    'trackReadSet'     => true,    // opt in to the read set (default false)
+    'maxReadSetEntries' => 100000, // read-set entries, 0 = unlimited
+    'maxReadSetTotalSize' => 8388608, // whole read set, 0 = unlimited
+    'maxTxnBatchSize'  => 16384,   // bytes per prewrite/commit request
+    'maxTxnBatchCount' => 512,     // mutations/keys per request
+]);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `maxTxnEntryCount` | `0` (unlimited) | Maximum number of write-set entries. |
+| `maxTxnEntrySize` | `0` (unlimited) | Maximum bytes of one entry, measured as key length plus value length. A delete contributes the key length only. |
+| `maxTxnTotalSize` | `0` (unlimited) | Maximum bytes of the whole write set: the sum of every entry's key plus value length. |
+| `trackReadSet` | `false` | Opt in to the read set populated by `get()`/`batchGet()`. Disabled by default because nothing in the commit path consumes it. Must be a bool. |
+| `maxReadSetEntries` | `0` (unlimited) | Maximum number of tracked read-set entries. Has no effect unless `trackReadSet` is true. |
+| `maxReadSetTotalSize` | `0` (unlimited) | Maximum bytes of the whole tracked read set: key length plus value length per entry. A not-found read contributes the key length only. Has no effect unless `trackReadSet` is true. |
+| `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite, pessimistic-lock or commit request per region: key plus value length for a prewrite mutation, key length for a pessimistic-lock mutation or a commit key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
+| `maxTxnBatchCount` | `512` | Maximum payload items — mutations (prewrite or pessimistic lock) or keys (commit) — of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
+
+The size limits are **opt-in** (`0` = unlimited) because there is no single
+correct value for every application; set them for untrusted or unbounded
+workloads. Exceeding one throws `TransactionTooLargeException`. A write is
+rejected from `set()`/`delete()` **before** it is buffered and before any RPC —
+in a pessimistic transaction that means before the eager lock request, so a
+rejected write leaves no server-side lock. A read is rejected from
+`get()`/`batchGet()` before the fetched value is retained in the read set; the
+RPC has already happened by then, because the value's size is only known after
+the response arrives. The bound applies to what the transaction **retains**,
+not to the peak of one call: a single `get()` response or a whole `KvBatchGet`
+response is received in full before the check runs, so the peak of one read can
+exceed `maxReadSetTotalSize` even though the value is not added to the map. The exception names the limit
+(`getLimitName()`), the configured value (`getLimit()`) and the value the
+operation would have produced (`getActual()`). Overwriting (or re-reading) an
+existing key accounts for the entry it replaces, so a replace does not consume
+additional budget.
+
+`Transaction::getWriteSetSize()` / `getWriteSetCount()` and
+`Transaction::getReadSetSize()` / `getReadSetCount()` return the current bytes
+and entry counts, so a transaction can be logged or exported as a metric
+without walking `getWriteSet()` / `getReadSet()`.
+
+Read-set tracking is **off by default**, so a transaction that only reads does
+not retain the read **values**. Memory can still grow slightly: a pessimistic
+transaction records one read timestamp per distinct key read
+(`readTsByKey`) until that key is written or the transaction ends.
+`get()` and `batchGet()` populate the read-set map only when
+`trackReadSet` is true; `scan()` never populates it, so a scan-heavy
+transaction is not covered by the read-set limits at all (scans are bounded by
+`Transaction::MAX_SCAN_LIMIT` instead). For a long-lived worker that opts in and
+performs many large reads, set `maxReadSetEntries` and/or
+`maxReadSetTotalSize`, or call `Transaction::clearReadSet()` after a batch of
+reads, instead of allowing the transaction to grow until `memory_limit` is
+exhausted.
+
+Batching is always on. `TwoPhaseCommitter` splits each region's prewrite
+mutations, pessimistic-lock keys and commit keys with
+`RawKvSplitter::splitIntoBatches()` into requests bounded by both
+`maxTxnBatchSize` and `maxTxnBatchCount` **in payload terms**: key plus value
+bytes for a prewrite mutation, key bytes for a pessimistic-lock mutation or a
+commit key, and item count. The bound does not cover request framing,
+`Context`, `primary_lock` or the async `secondaries` list, so an async primary
+prewrite can exceed `maxTxnBatchSize`; a single mutation larger than the budget
+still forms its own batch. The primary key's batch is still committed first;
+the remaining batches — including other batches of the primary's region — are
+secondary commits and are fanned out in parallel. Pessimistic-lock requests
+use the same split, and `is_first_lock` is set only on the batch whose
+mutations contain the primary key, not on the first region batch (issue #225).
+One-phase commit remains limited to a single batch (a transaction split across
+several 1PC prewrites would be partially committed), and async commit carries
+its decision on the batch that holds the primary key. A batch that fails before
+the commit point still fails the whole transaction; after the primary commit,
+secondary-batch failures are logged and the transaction stays committed,
+exactly as for whole secondary regions.
+
+Batching bounds each **request**, not the prewrite phase. The secondary
+batches of all regions are dispatched in parallel, and the prewrite heartbeat
+is checked only after the whole fan-out returns, so a smaller batch reduces
+the duration of one `KvPrewrite` but does not add a heartbeat opportunity
+between batches. If a single request can take longer than the lock TTL, lower
+`writeTimeoutMs` or raise the lock TTL as well — see
+[A single prewrite or commit RPC can outlive the lock TTL](#a-single-prewrite-or-commit-rpc-can-outlive-the-lock-ttl).
 
 ## Transaction Priority (TxnKV)
 
@@ -1338,6 +1655,127 @@ path uses the default or `'priority' => 2`.
 
 The value is forwarded to TiKV unchanged — it is not validated, so use one
 of the three values above.
+
+## Resource Control (Resource Groups)
+
+TiKV clusters can be split into **resource groups** through PD's resource
+manager: each group has its own Request Unit quota, and TiKV enforces it only
+for requests that carry the group name. The client participates with two
+option keys, on both `RawKvClient::create()` / `TxnKvClient::create()` and —
+for TxnKV — per transaction in `begin()`:
+
+```php
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+
+$raw = RawKvClient::create(['127.0.0.1:2379'], options: [
+    'resourceGroup' => 'tenant-a',
+    'resourceGroupTag' => 'nightly-job',
+]);
+
+$txn = TxnKvClient::create(['127.0.0.1:2379'], options: [
+    'resourceGroup' => 'tenant-a',
+])->begin([
+    'resourceGroup' => 'tenant-a-batch', // overrides the client default
+    'resourceGroupTag' => 'import-2026-11-06',
+]);
+```
+
+| Option | Wire field | Meaning |
+|---|---|---|
+| `resourceGroup` | `Context.resource_control_context.resource_group_name` | The resource group the request belongs to. 1–64 characters: letters, digits, `_` and `-`. |
+| `resourceGroupTag` | `Context.resource_group_tag` | Opaque bytes for query attribution (for example a job or statement identifier). Must be non-empty when set. |
+
+Both keys are optional. When they are unset, neither field is written to the
+`Context`, so the serialized request is byte-identical to a request from
+before this feature existed. Only the fields that are configured are set;
+`begin()` overrides each key independently, so a transaction can change its
+group while still inheriting the client-wide tag (and vice versa).
+
+The fields reach **every** RPC built by the client: RawKV reads, writes, CAS,
+batch operations, scans, range deletes/checksums and SST ingest; TxnKV reads,
+prewrite, pessimistic locks, commit, heartbeat, rollback and lock resolution.
+This gives attribution and server-side quota enforcement. It does **not**
+perform client-side Request Unit accounting: the client does not read
+`ExecDetailsV2`/`RUV2` from responses and does not feed a local token bucket,
+so flow control remains entirely server-side (a larger follow-on, not part of
+the current option).
+
+Group names are validated locally against PD's naming rule; the tag is
+forwarded as opaque bytes. The client does not verify that the group exists:
+the cluster decides what happens to an unknown name — TiKV normally falls
+back to the default/uncontrolled behaviour rather than returning an error.
+
+`options['requestContext']` (below) can also carry `resourceGroupTag` and
+`resourceGroupName`. The two option sets are independent and both reach the
+wire: `resourceGroup` / `resourceGroupTag` are applied first, and a
+non-default value of the same field in `requestContext` wins when both are
+set. A client that uses only `resourceGroup` / `resourceGroupTag` keeps the
+behaviour described above.
+
+## Request Context Controls (issue #426, GAP-12)
+
+`options['requestContext']` on `RawKvClient::create()` and
+`TxnKvClient::create()` takes a
+`CrazyGoat\TiKV\Client\Region\RequestContextOptions` object. It populates the
+optional control fields of `kvrpcpb.Context` on every request the client
+sends. The object is immutable and has no mutable setters: build a new one to
+change a value.
+
+```php
+use CrazyGoat\Proto\Kvrpcpb\IsolationLevel;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+
+$client = RawKvClient::create(['127.0.0.1:2379'], options: [
+    'requestContext' => new RequestContextOptions(
+        isolationLevel: IsolationLevel::SI,
+        notFillCache: true,                       // full scan must not evict the block cache
+        maxExecutionDurationMs: 2000,             // TiKV stops working on an abandoned request
+        requestSource: 'nightly-export',          // load attribution in TiKV metrics
+        resourceGroupTag: 'analytics',
+        busyThresholdMs: 100,
+        resourceGroupName: 'batch',
+    ),
+]);
+```
+
+| Field | `Context` field | Default | Effect |
+|---|---|---|---|
+| `isolationLevel` | `isolation_level` | `IsolationLevel::SI` (0) | TxnKV read isolation: `SI`, `RC` or `RCCheckTS`. |
+| `notFillCache` | `not_fill_cache` | `false` | Keeps the request out of TiKV's block cache, so a scan does not evict the working set. |
+| `maxExecutionDurationMs` | `max_execution_duration_ms` | `0` (unset) | Server-side execution bound in milliseconds. It is **not** derived from `timeout`: a client-side deadline still leaves TiKV working on an abandoned request, so set it explicitly. Must be between 0 and 3 600 000. |
+| `requestSource` | `request_source` | `''` (unset) | Label TiKV records against the request. `RequestContextOptions::DEFAULT_REQUEST_SOURCE` (`'tikv-php'`) is provided for attribution but is **opt-in**: applying it by default would change the bytes of every request. |
+| `resourceGroupTag` | `resource_group_tag` | `''` (unset) | Tag read by the resource manager. |
+| `busyThresholdMs` | `busy_threshold_ms` | `0` (unset) | Server-side busy threshold in milliseconds. Must be between 0 and 3 600 000. |
+| `resourceGroupName` | `resource_control_context.resource_group_name` | `''` (unset) | Resource manager group name. |
+
+Every field defaults to its proto3 default and is written only when it differs
+from that default, so a client without `requestContext` sends exactly the same
+bytes as before. The values are validated when the object is constructed; an
+unknown isolation level or an out-of-range duration throws
+`InvalidArgumentException`.
+
+**Transaction-level override (TxnKV).** `TxnKvClient::begin()` accepts a
+`requestContext` option that replaces the client-level object for that
+transaction only. It must be a `RequestContextOptions` instance or `null`;
+`null` disables the client-level controls for the transaction. The
+transaction-level value wins over the client-level one (it is a replacement,
+not a field-level merge).
+
+```php
+$txn = $txnClient->begin([
+    'requestContext' => new RequestContextOptions(notFillCache: true),
+]);
+```
+
+The controls reach both clients' reads and writes: RawKV `RawGet`,
+`RawPut`, `RawDelete`, `RawBatchGet`, `RawBatchPut`, `RawBatchDelete`,
+`RawScan`, `RawDeleteRange`, `RawChecksum`, `RawCAS`, `RawGetKeyTTL`,
+`Ingest`; TxnKV `KvGet`, `KvBatchGet`, `KvScan`, pessimistic lock, prewrite,
+commit, heartbeat, rollback and the lock-resolution RPCs. `priority` is not
+part of this object: it keeps its own transaction option (see
+[Transaction Priority](#transaction-priority-txnkv)).
+
 ## Retry and Backoff
 
 ### Automatic Retry
@@ -1367,6 +1805,20 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > sleeping cannot overshoot it — but an in-flight RPC cannot be interrupted.
 > Example: `retryDeadlineMs => 1000` with a gRPC call that runs 5 s ⇒ real
 > occupancy ≈ 6 s (the deadline is enforced when that RPC returns).
+
+> **Lock resolution (TxnKV):** a `KeyError.locked` conflict during prewrite,
+> rollback or a transactional read is resolved inside the retry loop, so its
+> `KvCheckTxnStatus` (and the PD TSO fetch it performs),
+> `KvCheckSecondaryLocks` and `KvResolveLock` calls are capped by the
+> operation's **remaining** retry deadline. The resolver converts that
+> remaining budget into one absolute deadline at its entry, so the nested
+> RPCs share the same live budget and none is given a deadline beyond the
+> operation's `retryDeadlineMs`. A live lock is still reported as a retryable
+> error (the executor owns the backoff) and the resolver never sleeps for the
+> lock TTL; the executor's own deadline check raises
+> `RetryBudgetExhaustedException` when the budget is spent. With
+> `retryDeadlineMs => 0` the configured `lockResolveTimeoutMs` / `tsoTimeoutMs`
+> apply unchanged.
 
 > **Worker occupancy note:** `serverBusyBudgetMs` is effectively a
 > worker-occupancy setting — it caps how long ONE operation may block a PHP
@@ -1432,13 +1884,24 @@ since issue #241):
 | Bound | Default | Description |
 |-------|---------|-------------|
 | `maxAttempts` | `30` | Maximum number of times the operation is invoked before the executor gives up. |
-| `deadlineMs` | `30000` (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`; `0` disables) | Wall-clock deadline from the start of the call. Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget); the executor terminates when it is reached, regardless of `sleepMs`. |
+| `deadlineMs` | `30000` (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`; `0` disables) | Wall-clock deadline from the start of the operation. Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget); the executor terminates when it is reached, regardless of `sleepMs`. |
 
 When either bound is reached the executor throws
 `RetryBudgetExhaustedException` (extends `TiKvException`). This exception
 exposes `attempts()` and `elapsedOrBackoffMs()` for diagnostics, and
 `getRawKey()` for the un-redacted key (the key is redacted in the message —
 see issue #269).
+
+The time budgets (`maxBackoffMs`, `serverBusyBudgetMs` and `deadlineMs`) are
+scoped to **one logical operation** (issue #223, TXN-18):
+`RetryExecutor::beginOperation()` returns an executor whose `execute()`
+calls share one budget, and the client's fan-out operations (`scan()`,
+`batchGet()`, `commit()`, `deleteRange()`, `checksum()`, …) use one for all
+their regions and pages. A later operation starts from zero, so a read-heavy
+transaction cannot starve its commit, while a single operation's fan-out is
+bounded by one budget instead of one per region. `maxAttempts` stays per
+retry loop (one region/page), so a wide fan-out does not exhaust it on
+ordinary one-retry-per-region traffic.
 
 ### Custom Retry (Advanced)
 
@@ -1483,6 +1946,12 @@ $result = $executor->execute(
 );
 ```
 
+For a user-level fan-out that must share one budget, call
+`$executor = $executor->beginOperation()` once and pass the returned
+executor to every `execute()` call of that logical operation; call
+`beginOperation()` again for the next operation. A standalone executor keeps
+the per-call reset described above.
+
 Note that `maxAttempts` (default 30) and `deadlineMs` (default 30000,
 `0` disables) are constructor parameters of `RetryExecutor` and are **not**
 settable through `RawKvClient::create()` options — `create()` only exposes
@@ -1502,9 +1971,92 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 ```
 
 **Cache behavior**:
-- Cache entries expire automatically on region errors
+- Cache entries are invalidated on routing errors
 - `NotLeader` errors update the cache with new leader info
-- `EpochNotMatch` errors invalidate affected regions
+- `EpochNotMatch` errors refresh the affected regions from TiKV's
+  `current_regions` payload when it is usable, so the retry needs no PD
+  `GetRegion`; an empty, undecodable, leaderless, older-epoch or
+  non-covering payload invalidates the region and falls back to PD
+  (issue #246)
+- `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` keep the
+  cached region — the request reached the right region, so the retry reuses it
+- Both scan paths read the cache first and ask PD only for the uncovered
+  ranges, including TxnKV's `Transaction::scan()` (issue #425) — see
+  [Scan-path Region Cache Use](#scan-path-region-cache-use)
+
+### Region Cache Refresh and Preload
+
+PHP has no background threads, so the client starts no timer and no loop. Two
+explicit methods cover the two use cases a long-lived worker has (issue #425):
+
+```php
+$client = RawKvClient::create(
+    ['127.0.0.1:2379'],
+    options: ['regionCacheRefreshMs' => 60000],
+);
+
+// At worker boot: resolve and cache the regions a job will touch, without
+// serving a user read. Each pair is a half-open [startKey, endKey) range; ''
+// as the end key means +infinity.
+$client->preloadRegions([['user:1000', 'user:2000'], ['job:', 'job;']]);
+
+// From the worker's own tick (the same place reapIdleChannels() is called):
+$refreshed = $client->refreshRegionCache();
+```
+
+`refreshRegionCache(bool $force = false)` re-queries PD for a bounded slice
+of the cached regions through `GetRegion` on each region's start key:
+
+- a newer epoch or leader updates the entry in place and refreshes its TTL;
+- a split or merge that produced another region ID stores the replacement and
+  drops the superseded entry silently (a superseding update, not an
+  error-driven invalidation — no `regionInvalidated()` metric);
+- a PD answer that does not cover the entry's start key drops the entry, so
+  the next request resolves it again.
+
+A non-forced call performs at most one refresh per `regionCacheRefreshMs`
+and returns `0` when the interval has not elapsed. The default is `0`
+(disabled, so a plain refresh is a no-op), so refreshing is opt-in; `60000`
+(one minute) is a reasonable tick interval, and the first call after client
+creation always refreshes. `$force = true` performs a one-off refresh
+regardless of the interval. `preloadRegions()` works independently of the
+option.
+
+One tick refreshes at most `RegionCacheWarmer::DEFAULT_MAX_REGIONS_PER_REFRESH`
+(128) entries, round-robin: successive ticks continue where the previous one
+stopped, so a large cache is fully refreshed over several ticks without any
+single tick turning into thousands of sequential PD round trips. The first PD
+failure aborts the tick (one `getRegion()` already walks every configured PD
+endpoint, so retrying the remaining entries only repeats the failure); the
+entries keep their cached values.
+
+Both methods are non-throwing on a PD failure: the failure is logged at
+warning level and the affected cache entries are kept as they were. A
+malformed or reversed range is a programmer error and throws
+`InvalidArgumentException` before any RPC. Both are no-ops after `close()`.
+The interval is measured on a monotonic clock, so a wall-clock step cannot
+delay a tick.
+
+Refresh cost is one PD round trip per refreshed entry, bounded per tick as
+above, so size `regionCacheRefreshMs` against the cache size. A short interval
+on a worker with a large warm cache sends more PD traffic than the cache
+saves.
+
+### Scan-path Region Cache Use
+
+Both scan paths read the region cache first:
+
+- **RawKV** (`scan()`, `scanPrefix()`, `reverseScan()`, `batchScan()` and the
+  iterators) and **TxnKV** (`Transaction::scan()`) enumerate regions through
+  the cache. A contiguous cached run is served locally; PD is asked only for
+  the uncovered gap, starting at the gap's first key, and the answer is cached
+  for the next page and the next scan.
+- A split or merge the client has not seen yet is still handled by the usual
+  region-error retry (the stale entry is invalidated from `EpochNotMatch`,
+  then the retry re-resolves the gap through PD).
+- The scan path increments the same counters as point lookups, labelled
+  `scan` (RawKV) and `txn_scan` (TxnKV), so `regionCacheHit()` /
+  `regionCacheMiss()` cover it (see [Metrics and Observability](#metrics-and-observability)).
 
 ### Store Cache
 
@@ -1518,8 +2070,8 @@ Store addresses are also cached:
 Monitor cache performance via logs. The region cache writes these records (PSR-3 message and context):
 
 ```
-DEBUG  Region cache hit    {"key":"\"7573657231\" (5 bytes)","regionId":123}
-DEBUG  Region cache miss   {"key":"\"7573657231\" (5 bytes)"}
+DEBUG  Region cache hit    {"key":"#3c469e9d6c5875d3 (5 bytes)","regionId":123}
+DEBUG  Region cache miss   {"key":"#3c469e9d6c5875d3 (5 bytes)"}
 INFO   Region invalidated  {"regionId":123}
 ```
 
@@ -1562,6 +2114,8 @@ $client = RawKvClient::create(
 );
 ```
 
+`checksumTimeoutMs` sizes `checksum()`, which reads a whole key range and is the operation most likely to need a longer deadline. `ingestTimeoutMs` sizes the SST ingest RPCs (the `SwitchMode` fan-out, the `RawWrite` stream and `Ingest`). Both are read from `options['timeout']` like every other key, so neither is a fixed deadline.
+
 The last three are **metadata-plane** deadlines and are configured separately from the
 store-RPC ones above because they address different failure modes: a hung PD (a
 blackholed connection, a PD process that accepts but never answers) takes down every
@@ -1570,7 +2124,10 @@ per-region problem the retry executor already handles. `pdTimeoutMs` covers
 `GetRegion` / `ScanRegions` / `GetStore` / `GetAllStores` / `GetMembers` /
 `LoadKeyspace` and the GC safe-point RPCs; `tsoTimeoutMs` covers every `Tso` RPC
 (so also the timestamp `checkTxnStatus()` fetches); `lockResolveTimeoutMs` covers
-`KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`.
+`KvCheckTxnStatus` / `KvCheckSecondaryLocks` / `KvResolveLock`. When lock
+resolution runs inside a retry loop, both the TSO and the lock-resolution
+deadline are further capped by that loop's remaining `retryDeadlineMs`; the
+configured value is the upper bound, not an independent budget.
 
 Every gRPC call carries a deadline. `GrpcClientInterface::call()`'s `$timeoutMs`
 argument of `null` means the library default (30 s); a non-positive value is a
@@ -1581,11 +2138,11 @@ When a timeout is exceeded, the gRPC call throws `GrpcException` which is caught
 
 ### Default Timeouts
 
-By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
+By default all timeouts are set to sensible values (5s for reads/writes, 10s for batch, 20s for scans, 30s for delete-range and checksum, 60s for SST ingest, 3s for PD and TSO, 5s for lock resolution). Every timeout except `batchDeadlineMs` must be greater than `0`: a `0` (or a negative value) is rejected when the `TimeoutConfig` is built, and again when it is passed through `options['timeout']` — the error names the offending key. Use a large finite value instead of disabling a deadline. `batchDeadlineMs` is the one exception: `0` disables the overall batch deadline.
 
 `batchDeadlineMs` is finite by default (`TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS`, 60000 ms). When it is above `0`, it must not be less than any per-call timeout that a batch fan-out uses: `writeTimeoutMs`, `batchReadTimeoutMs`, `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs`, `checksumTimeoutMs` and `ingestTimeoutMs` (`readTimeoutMs` is not in the list: only point reads use it). If it is less, the `TimeoutConfig` constructor throws an `InvalidArgumentException` that names both fields. One wait is not interrupted by the deadline, so a deadline that is less than one call cannot be honoured. Such a setting has no meaning.
 
-The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs the whole retry loop of one region (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus one region's full retry loop. For scans the deadline applies per region batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
+A batch that answers within a positive `batchDeadlineMs` is unaffected: the deadline is a ceiling, not a minimum. The batch deadline is checked at dispatch boundaries and at wait boundaries. It is not checked during one blocking wait. One wait on a retryable call runs that region's share of the operation's retry budget; all regions of a batch share one `RetryExecutor` budget (issue #223), so `retryDeadlineMs` bounds the fan-out as a whole (up to `RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`, 30000 ms, plus one per-call timeout). The worst case is therefore `batchDeadlineMs` plus the operation's remaining retry deadline. For scans the batch deadline applies per region batch (up to `RegionScanBatch::MAX_REGIONS` regions), not per `scan()` call. One deadline covers all windows of a batch: a batch with many windows cannot run for the deadline times the number of windows.
 
 Every key of the table above is configurable under its own name — the mapping is
 derived from `TimeoutConfig`'s constructor, so a field that is added to the
@@ -1714,6 +2271,8 @@ readiness/liveness checks, etc.:
 try {
     $clusterId = $client->healthCheck();   // int|null
     // $clusterId is non-null when PD responded with a cluster-id header.
+    // With options['expectedClusterId'] set, a response without a cluster-id
+    // header is an error (wrapped in HealthCheckException), not null.
 } catch (\CrazyGoat\TiKV\Client\Exception\HealthCheckException $e) {
     // PD was unreachable, returned a non-OK gRPC status, or answered with a
     // PD-level error in the response header (issue #234). The underlying
@@ -1763,22 +2322,27 @@ The library emits the following counter tags:
 | `rpcStarted()`                 | `'tikvpb.Tikv/KvGet'`      | One outbound gRPC call was dispatched             |
 | `rpcCompleted()`               | `'tikvpb.Tikv/KvGet'`      | gRPC call returned (success or error); carries duration (ms) |
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
-| `regionCacheHit()`             | `'region_resolution'`      | Region was found in the cache                     |
-| `regionCacheMiss()`            | `'region_resolution'`      | Region was not in the cache, had to query PD      |
-| `regionInvalidated()`          | `'region_error'`, `'not_leader'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader region error (`RegionErrorHandler`), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on other retryable errors, a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), or post-resolve cleanup in `LockResolver`. Invalidating an ID that is not cached emits nothing. |
+| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache; the scan labels are emitted once per cache-served run of regions |
+| `regionCacheMiss()`            | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was not in the cache, had to query PD; the scan labels are emitted once per `ScanRegions` call |
+| `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'`, `'refresh'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), post-resolve cleanup in `LockResolver`, or a `refreshRegionCache()` tick that found PD no longer maps the entry's start key to its cached range (a refresh that supersedes the entry with a newer answer is a `put()` and emits nothing). Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
 
 For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
 
 Reasons are mutually exclusive per drop; the current source emits
-`'region_error'`, `'not_leader'`, `'retry_region_error'`,
-`'fatal_region_error'`, and `'lock_resolve'`
+`'region_error:<kind>'`, `'region_error'` (unclassified handler error),
+`'not_leader'`, `'retry_region_error:<kind>'`, `'retry_region_error'`
+(unclassified retryable error), `'fatal_region_error'`, and `'lock_resolve'`
 when those paths actually remove a region. A NotLeader response whose hinted
-peer is still valid only switches the cached leader and emits nothing.
+peer is still valid only switches the cached leader and emits nothing, and a
+non-routing error keeps the cached region on both the handler and the retry
+executor paths.
 At executor-owned call sites, NotLeader drops are owned exclusively by the
 retry loop's leader handling: `RegionErrorHandler::check()` leaves the region
 cached so it can switch to a valid hint. Call sites without a surrounding
 retry executor pass `notLeaderOwnedByRetryExecutor: false` and self-invalidate
-with the same `'not_leader'` reason.
+with the same `'not_leader'` reason. `LockResolver` takes the flag from its
+caller and threads it through every region-error check it performs, including
+the async-commit finalization (`resolveAsyncCommitLocks()`, issue #568).
 
 `InMemoryMetrics` ships the same counters in-process, suitable for tests
 and benchmarks — see `getRpcStarted()`, `getRpcSucceeded()`, `getRetries()`,
@@ -1794,32 +2358,33 @@ $metrics = $client->getMetrics();     // returns whatever was injected
 
 The client maintains persistent gRPC channels:
 
-- Channels are reused across requests
-- Automatic connection management
-- No explicit connection pool configuration needed
+- Channel handles are cached and reused for the life of the client; ext-grpc's
+  persistent table can also reuse the underlying connection across PHP-FPM
+  requests served by the same worker
+- Connection management is automatic: a channel in a failed state is replaced
+  on the next request
+- The defaults need no configuration
 
 The pool caches 64 channels by default — the `maxChannels` cap of `GrpcClient`.
-The cap is **soft**: a channel that still carries calls is never closed,
+The cap is **soft**: eviction never closes a channel that still carries calls,
 because closing it would destroy those calls. When every cached channel is
 busy — a batch that fans out over more stores than the cap holds — the pool
-grows past the cap until the calls settle, and the overshoot is logged at
-warning level:
+grows past the cap while the calls are in flight, and the overshoot is logged
+at warning level:
 
 ```
 Channel cache at capacity but all channels are busy; exceeding soft cap
 ```
 
 That warning is the signal that the workload touches more stores than the cap
-allows. The pool does not shrink back on its own when the calls settle: the
-eviction removes one least-recently-used idle channel per new address, and a
-channel that stays unused is dropped after the idle TTL (10 minutes by
-default). `maxChannels` is a constructor argument of `GrpcClient`; a client
-built by `RawKvClient::create()` uses the default of 64, because the factory
-does not expose the knob yet.
+allows. The pool does not shrink back on its own when the calls settle: on a
+later cache miss the least-recently-used idle channels are evicted down to
+the cap, and a channel that stays unused is dropped after the idle TTL
+(10 minutes by default). `maxChannels` and `idleTtlMs` are `create()`
+options; the defaults are 64 and 600000 ms — see
+[Channel Pool](#channel-pool-maxchannels-idlettlms) and
+[Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model).
 
-The pool itself is configurable when the defaults do not fit: `maxChannels`
-caps the number of open channels and `idleTtlMs` sets how long an unused one
-is kept — see [Channel Pool](#channel-pool-maxchannels-idlettlms).
 ### Resource Limits
 
 Consider PHP's resource limits:
@@ -1830,20 +2395,26 @@ memory_limit = 256M
 max_execution_time = 300
 ```
 
-For long-running processes (workers, daemons):
+For long-running processes (workers, daemons), create the client once and
+reuse it for the life of the process. Closing and recreating it throws away
+the region cache and the channel handles. Reap idle channel handles from the
+worker tick instead:
 
 ```php
-// Periodic cleanup in long-running processes
+$client = RawKvClient::create($pdEndpoints, logger: $logger);
+
 while (true) {
     // Process work
-    
-    // Optional: Force reconnection periodically
+
+    // Drop channel handles that have been idle longer than idleTtlMs
     if ($iteration % 1000 === 0) {
-        $client->close();
-        $client = RawKvClient::create($pdEndpoints, logger: $logger);
+        $client->reapIdleChannels();
     }
 }
 ```
+
+See [Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model)
+for the cache defaults and the PHP-FPM guidance.
 
 ## Configuration Checklist
 

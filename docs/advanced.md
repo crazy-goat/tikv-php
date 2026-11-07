@@ -17,46 +17,38 @@ Production-ready patterns and advanced usage of the TiKV PHP Client.
 
 #### Long-Running Processes
 
-For daemons, workers, and long-running scripts:
+For daemons, workers, and long-running scripts, create one client at startup
+and reuse it for the life of the process. Closing and recreating it throws
+away the region cache and the channel handles — and it does not necessarily
+give you fresh connections: ext-grpc keeps the underlying channel in its
+process-global persistent table (one per target), so only a channel created
+beyond that per-target bound is private to its handle and released with it.
+See
+[Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model).
 
 ```php
 class TiKvWorker
 {
     private RawKvClient $client;
-    private int $operationsCount = 0;
-    private const RECONNECT_AFTER = 10000;
-    
+
     public function __construct(array $pdEndpoints)
     {
-        $this->connect($pdEndpoints);
-    }
-    
-    private function connect(array $pdEndpoints): void
-    {
         $this->client = RawKvClient::create($pdEndpoints);
-        $this->operationsCount = 0;
     }
-    
+
     public function processJob($job): void
     {
-        // Periodic reconnection to prevent stale connections
-        if ($this->operationsCount >= self::RECONNECT_AFTER) {
-            $this->client->close();
-            $this->connect(['127.0.0.1:2379']);
-        }
-        
-        try {
-            // Process job
-            $this->client->put($job['key'], $job['value']);
-            $this->operationsCount++;
-        } catch (TiKvException $e) {
-            // Reconnect on error
-            $this->client->close();
-            $this->connect(['127.0.0.1:2379']);
-            throw $e;
-        }
+        // The client retries retryable errors internally and reopens a
+        // channel by itself; do not close it on every TiKvException.
+        $this->client->put($job['key'], $job['value']);
     }
-    
+
+    public function tick(): void
+    {
+        // Drop channel handles that have been idle longer than idleTtlMs.
+        $this->client->reapIdleChannels();
+    }
+
     public function shutdown(): void
     {
         $this->client->close();
@@ -64,48 +56,15 @@ class TiKvWorker
 }
 ```
 
-#### Connection Pooling (Simulated)
+#### Connection Pooling
 
-While the client doesn't have explicit connection pooling, gRPC channels are reused:
-
-```php
-class TiKvPool
-{
-    private array $clients = [];
-    private array $config;
-    
-    public function __construct(array $config)
-    {
-        $this->config = $config;
-    }
-    
-    public function acquire(): RawKvClient
-    {
-        // Return existing client or create new one
-        foreach ($this->clients as $client) {
-            // Simple round-robin
-            return $client;
-        }
-        
-        $client = RawKvClient::create($this->config['endpoints']);
-        $this->clients[] = $client;
-        return $client;
-    }
-    
-    public function release(RawKvClient $client): void
-    {
-        // In PHP, we typically don't release - just reuse
-    }
-    
-    public function closeAll(): void
-    {
-        foreach ($this->clients as $client) {
-            $client->close();
-        }
-        $this->clients = [];
-    }
-}
-```
+The client has an explicit gRPC channel pool: it caches one channel per
+address, uses `maxChannels` (default 64) as a soft cap, and evicts a channel
+that has been idle for `idleTtlMs` (default 600000 ms). A long-lived client
+reuses those channels across operations; you do not need to pool clients
+yourself. See
+[Channel Pool](configuration.md#channel-pool-maxchannels-idlettlms) and
+[Connection lifecycle and process model](operations.md#connection-lifecycle-and-process-model).
 
 ### Caching Strategies
 
@@ -435,9 +394,9 @@ foreach ($client->scanPrefixIterator('log:2024-01-', batchSize: 1000, keyOnly: t
 
 The iterator fetches a page of up to `batchSize` rows (default `1024`, bounds
 `1 <= batchSize <= 10240`) per underlying `scan()` call and continues from
-after the page's last key until the range is exhausted. `batchSize` is
-validated immediately; scan RPCs (and their `RegionException` / `GrpcException`
-failures) happen lazily during iteration. The iterator is rewindable —
+after the page's last key until the range is exhausted. `batchSize` and the
+range order are validated immediately; scan RPCs (and their `RegionException` /
+`GrpcException` failures) happen lazily during iteration. The iterator is rewindable —
 `rewind()` re-scans from the original start key — and there is no reverse
 variant. Full semantics: [Iterating Large Ranges](operations.md#iterating-large-ranges).
 
@@ -449,7 +408,10 @@ most `options['maxConcurrency']` regions (default 16): each window is dispatched
 with the remaining page budget, awaited, trimmed in key order, and the next
 window is only sent while budget remains. A region/transport error (or a region
 that split after enumeration) transparently falls back to the sequential
-retrying path. Because the complete result is still held in memory, an
+retrying path. The same fan-out applies to an unbounded `reverseScan()`:
+its per-region sends run concurrently in windows of at most
+`options['maxConcurrency']` regions, and the rows are concatenated in
+descending key order. Because the complete result is still held in memory, an
 unbounded scan is guarded by `options['maxScanRows']` (default 100000) and
 throws `ScanLimitExceededException` once the accumulated rows exceed that —
 never a silent truncation. The guard is checked per fetched page (after the
@@ -499,9 +461,14 @@ if ($page !== []) {
 #### Parallel Scanning
 
 ```php
+// Bounded parallel sample: batchScan() returns at most $limitPerRange rows
+// from each range, so this is not a complete export. For a complete read,
+// iterate each range with scanIterator() (or raise the limit and page on the
+// last key you received).
 function parallelScan(
     RawKvClient $client,
     string $prefix,
+    int $limitPerRange = 10000,
     int $workers = 4
 ): array {
     // Divide key space into ranges
@@ -520,7 +487,7 @@ function parallelScan(
     // Scan ranges in parallel (using batchScan).
     // The ranges are fanned out concurrently, capped by
     // options['maxConcurrency'] (default 16, must be >= 1).
-    $results = $client->batchScan($ranges, eachLimit: 10000);
+    $results = $client->batchScan($ranges, eachLimit: $limitPerRange);
     
     // Merge results
     return array_merge(...$results);
@@ -561,6 +528,11 @@ Built-in retry budgets (full reference incl. per-error backoff strategies:
 | Cumulative backoff budget (`maxBackoffMs`) | 20 000 ms | the original `TiKvException` | client constructor argument |
 | ServerBusy sleep budget (`serverBusyBudgetMs`) | 60 000 ms (`RawKvClient::DEFAULT_SERVER_BUSY_BUDGET_MS`) | the original `TiKvException` | `RawKvClient` constructor argument (fixed at 60 s on the transactional API) |
 | Wall-clock deadline (`retryDeadlineMs`) | 30 000 ms, `0` disables (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`) | `RetryBudgetExhaustedException` | `options['retryDeadlineMs']` on `RawKvClient::create()` / `TxnKvClient::create()` |
+
+The three time/backoff budgets are scoped to **one logical operation**
+(issue #223): all regions and pages of one `scan()`, `batchGet()` or
+`commit()` share them, and a later operation starts from zero. The attempt
+cap is per retry loop (one region/page).
 
 What you should handle at the application level instead:
 
@@ -717,7 +689,7 @@ The interface has six methods (full reference with emitted tag examples:
 | `retryAttempted()`     | A retryable error triggers another attempt                |
 | `regionCacheHit()`     | A region was served from the client's region cache        |
 | `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
-| `regionInvalidated()`  | A region was dropped from the cache (e.g. `retry_region_error`, `fatal_region_error`) |
+| `regionInvalidated()`  | A region was dropped from the cache (e.g. `region_error:epoch_not_match`, `retry_region_error:epoch_not_match`, `fatal_region_error`); non-routing errors keep the entry, and a successful executor-side `EpochNotMatch` `current_regions` refresh is a superseding `put()` that emits nothing of its own (issue #246) |
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
 
@@ -818,62 +790,49 @@ echo $metrics->getRetries('NotLeader');                 // retries tagged with t
 
 ### Health Checks
 
+Use the purpose-built `healthCheck()` instead of probing with a write and a
+delete. It issues a PD `GetMembers` RPC, touches no user data, and does not
+depend on any region being available:
+
 ```php
-class TiKvHealthChecker
-{
-    private RawKvClient $client;
-    private string $healthKey;
-    
-    public function __construct(RawKvClient $client)
-    {
-        $this->client = $client;
-        $this->healthKey = 'health:check:' . uniqid();
-    }
-    
-    public function check(): array
-    {
-        $start = microtime(true);
-        $checks = [
-            'write' => false,
-            'read' => false,
-            'delete' => false,
-            'latency_ms' => 0,
-        ];
-        
-        try {
-            // Test write
-            $this->client->put($this->healthKey, 'ok');
-            $checks['write'] = true;
-            
-            // Test read
-            $value = $this->client->get($this->healthKey);
-            $checks['read'] = $value === 'ok';
-            
-            // Test delete
-            $this->client->delete($this->healthKey);
-            $value = $this->client->get($this->healthKey);
-            $checks['delete'] = $value === null;
-            
-            $checks['latency_ms'] = (microtime(true) - $start) * 1000;
-            $checks['healthy'] = $checks['write'] && $checks['read'] && $checks['delete'];
-        } catch (Exception $e) {
-            $checks['error'] = $e->getMessage();
-            $checks['healthy'] = false;
-        }
-        
-        return $checks;
-    }
-}
+use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
+use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 
-// Usage in monitoring endpoint
-$health = new TiKvHealthChecker($client);
-$status = $health->check();
-
-if (!$status['healthy']) {
-    // Alert on-call, log to monitoring system
-    error_log("TiKV health check failed: " . json_encode($status));
+try {
+    $clusterId = $client->healthCheck();   // ?int; null = PD answered without a cluster ID
+} catch (ClientClosedException $e) {
+    // close() was called; the probe did not run
+} catch (HealthCheckException $e) {
+    // PD unreachable or rejected GetMembers; $e->getPrevious() is the cause
 }
 ```
+
+`healthCheck()` proves that the client is open and that PD answers. It does
+**not** exercise the TiKV write path: it never resolves a region, reads or
+writes a key, so a cluster whose stores are down or whose write path is degraded
+can still pass. If a readiness probe has to cover reads too, pair the PD probe
+with one shallow read of a key your deployment maintains:
+
+```php
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+
+try {
+    $client->healthCheck();                            // PD is reachable
+    $healthy = $client->get('health:canary') !== null; // region + store are reachable
+} catch (TiKvException $e) {
+    $healthy = false;
+}
+```
+
+The read exercises region resolution and the read path; it still does not prove
+that writes work. Do not use a synthetic write/delete as a probe: at probe
+frequency it adds continuous write traffic to the cluster, and it fails whenever
+the write path is degraded even though the cluster is reachable. Monitor the
+write path through your application's own traffic and the counters exposed by
+`getMetrics()`.
+
+See [Operations → Cluster and lifecycle](operations.md#cluster-and-lifecycle)
+for the signatures, return values and exceptions.
 
 ## Security
 

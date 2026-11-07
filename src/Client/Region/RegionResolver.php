@@ -5,8 +5,13 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Region;
 
 use Closure;
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
+use CrazyGoat\Proto\Metapb\Peer;
+use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
@@ -14,6 +19,7 @@ use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
@@ -90,6 +96,19 @@ final readonly class RegionResolver
      *     allowlist path and applies the privilege-port guard (>= 1024) on
      *     the default PD-derived policy path; when set, the port must be
      *     listed in both paths. Ignored when $storeHostPolicy is set.
+     * @param CodecInterface|null $codec Codec for the region boundaries
+     *     carried by TiKV's EpochNotMatch payload (issue #246). PD answers
+     *     are decoded by the PdClient; this one is needed for regions that
+     *     never pass through PD. V1 TxnKV passes the memory-comparable
+     *     codec; V1 RawKV passes the passthrough `CodecV1(Mode::Raw)`. null
+     *     means the boundaries are already in user-key space: API V2's
+     *     ApiV2GrpcClient decodes every response region boundary before the
+     *     error reaches this class.
+     * @param StoreCacheInterface|null $storeCache Store-address cache to
+     *     drop on evidence that a cached address is wrong (issue #247).
+     *     Optional so hand-built resolvers and tests stay valid; when null
+     *     the address is re-resolved only when PdClient itself invalidates
+     *     its cache.
      */
     public function __construct(
         private PdClientInterface $pdClient,
@@ -100,6 +119,8 @@ final readonly class RegionResolver
         private LoggerInterface $logger = new NullLogger(),
         private array $pdEndpoints = [],
         private ?array $allowedStorePorts = null,
+        private ?CodecInterface $codec = null,
+        private ?StoreCacheInterface $storeCache = null,
     ) {
     }
 
@@ -136,6 +157,93 @@ final readonly class RegionResolver
         $this->regionCache->put($region);
 
         return $region;
+    }
+
+    /**
+     * Map the regions carried by an EpochNotMatch error onto RegionInfo DTOs
+     * so a retry can refresh the cache without a PD round trip (issue #246).
+     *
+     * `metapb.Region` has no leader field, so each new region inherits the
+     * stale cached entry's leader store when that store is still one of its
+     * peers. The cached entry's leader is the store the request was routed
+     * to for a leader read (a replica read may have gone to a follower, but
+     * the cached leader is still the right seed), which is the same
+     * assumption client-go makes in `onRegionEpochNotMatch`; if the leader
+     * moved to a store that is not among the new region's peers, the payload
+     * is not usable and the caller falls back to PD. A same-ID region whose
+     * epoch is not strictly newer than the cached one is also rejected:
+     * `RegionCache::put()` would ignore it, and retrying with the same stale
+     * routing information can only loop.
+     *
+     * An empty array means "the payload cannot be used safely"; the caller
+     * keeps the existing invalidate-and-resolve-through-PD fallback. The
+     * mapping is all-or-nothing: a single undecodable or leaderless region
+     * rejects the payload rather than caching a partial layout.
+     *
+     * @return list<RegionInfo>
+     */
+    public function regionsFromEpochNotMatch(EpochNotMatch $payload, ?RegionInfo $staleRegion): array
+    {
+        if (!$staleRegion instanceof RegionInfo || $staleRegion->leaderStoreId === 0) {
+            return [];
+        }
+
+        $currentRegions = $payload->getCurrentRegions();
+        if (count($currentRegions) === 0) {
+            return [];
+        }
+
+        $regions = [];
+        try {
+            foreach ($currentRegions as $protoRegion) {
+                $leader = $this->leaderPeerOnStore($protoRegion, $staleRegion->leaderStoreId);
+                if (!$leader instanceof Peer) {
+                    return [];
+                }
+
+                $region = RegionInfoMapper::fromProto($protoRegion, $leader, $this->codec);
+                if ($region->leaderStoreId === 0) {
+                    return [];
+                }
+
+                if ($region->regionId === $staleRegion->regionId && !$this->isNewerEpoch($region, $staleRegion)) {
+                    return [];
+                }
+
+                $regions[] = $region;
+            }
+        } catch (\Throwable $e) {
+            // An undecodable boundary (malformed MCE group, key from another
+            // keyspace, …) must not replace the original region error. The
+            // caller invalidates and asks PD, which is the safe fallback.
+            $this->logger->warning('Ignoring EpochNotMatch current_regions: cannot map region payload', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+
+        return $regions;
+    }
+
+    private function leaderPeerOnStore(Region $region, int $storeId): ?Peer
+    {
+        foreach ($region->getPeers() as $peer) {
+            if ((int) $peer->getStoreId() === $storeId) {
+                return $peer;
+            }
+        }
+
+        return null;
+    }
+
+    private function isNewerEpoch(RegionInfo $region, RegionInfo $staleRegion): bool
+    {
+        if ($region->epochVersion !== $staleRegion->epochVersion) {
+            return $region->epochVersion > $staleRegion->epochVersion;
+        }
+
+        return $region->epochConfVer > $staleRegion->epochConfVer;
     }
 
     /**
@@ -454,6 +562,41 @@ final readonly class RegionResolver
         $this->validateStoreAddress($address, $storeId);
 
         return $address;
+    }
+
+    /**
+     * Drop a store from the address cache so the next
+     * {@see resolveStoreAddress()} asks PD for a fresh `GetStore` instead of
+     * reusing a stale address (issue #247, REG-16).
+     *
+     * A `StoreNotMatch` region error or a transport failure against a store
+     * proves the cached address may be wrong: a rescheduled TiKV pod keeps
+     * the same store ID but can come back at a different address. Without
+     * this drop the entry survives for its whole TTL (660 s with the
+     * defaults) and every retry closes the channel to the dead endpoint and
+     * immediately reopens one to the same endpoint.
+     *
+     * A store ID <= 0 is ignored: an unset protobuf field must not evict an
+     * unrelated entry. `$reason` is logged only after a real drop, so a
+     * hand-built resolver without a store cache (or an ID that is not cached)
+     * does not log an invalidation that did not happen. `$reason` matches the
+     * cause next to the region invalidation reason.
+     */
+    public function invalidateStore(int $storeId, string $reason): void
+    {
+        if ($storeId <= 0 || !$this->storeCache instanceof StoreCacheInterface) {
+            return;
+        }
+        if (!$this->storeCache->get($storeId) instanceof Store) {
+            return;
+        }
+
+        $this->storeCache->invalidate($storeId);
+
+        $this->logger->info('Invalidated store address cache', [
+            'storeId' => $storeId,
+            'reason' => $reason,
+        ]);
     }
 
     /**

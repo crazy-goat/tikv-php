@@ -20,6 +20,8 @@ use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Psr\Log\LoggerInterface;
@@ -35,24 +37,32 @@ final readonly class RawKvCrud
         private ?SlowLogConfig $slowLogConfig = null,
         /** Read preference for reads (issue #421); writes always target the leader. */
         private ReplicaReadPolicy $replicaReadPolicy = new ReplicaReadPolicy(),
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
     }
 
     public function get(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): ?string
     {
         $excludedStore = null;
+        $targetStoreId = null;
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $columnFamily, &$excludedStore): ?string {
+            function () use ($key, $columnFamily, &$excludedStore, &$targetStoreId): ?string {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
                     $this->replicaReadPolicy,
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
                 $request = new RawGetRequest();
@@ -88,7 +98,10 @@ final readonly class RawKvCrud
                 }
 
                 return $response->getValue();
-            }
+            },
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 
@@ -100,37 +113,57 @@ final readonly class RawKvCrud
         bool $forCas = false,
         string $columnFamily = '',
     ): void {
-        $retryExecutor->execute($key, function () use ($key, $value, $ttl, $forCas, $columnFamily): null {
-            $region = $this->regionResolver->getRegionInfo($key);
-            $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
+        $targetStoreId = null;
 
-            $request = new RawPutRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
-            $request->setKey($key);
-            $request->setValue($value);
-            if ($ttl > 0) {
-                $request->setTtl($ttl);
-            }
-            if ($forCas) {
-                $request->setForCas(true);
-            }
-            if ($columnFamily !== '') {
-                $request->setCf($columnFamily);
-            }
+        $retryExecutor->execute(
+            $key,
+            function () use (
+                $key,
+                $value,
+                $ttl,
+                $forCas,
+                $columnFamily,
+                &$targetStoreId,
+            ): null {
+                $region = $this->regionResolver->getRegionInfo($key);
+                $targetStoreId = $region->leaderStoreId;
+                $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
-            $response = $this->measure('write', $key, fn(): RawPutResponse => $this->grpc->call(
-                $address,
-                'tikvpb.Tikv',
-                'RawPut',
-                $request,
-                RawPutResponse::class,
-                $this->timeoutMs('write'),
-            ));
-            /** @var RawPutResponse $response */
-            RegionErrorHandler::check($response);
+                $request = new RawPutRequest();
+                $request->setContext(RegionContextFactory::fromRegionInfo(
+                    $region,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
+                ));
+                $request->setKey($key);
+                $request->setValue($value);
+                if ($ttl > 0) {
+                    $request->setTtl($ttl);
+                }
+                if ($forCas) {
+                    $request->setForCas(true);
+                }
+                if ($columnFamily !== '') {
+                    $request->setCf($columnFamily);
+                }
 
-            return null;
-        });
+                $response = $this->measure('write', $key, fn(): RawPutResponse => $this->grpc->call(
+                    $address,
+                    'tikvpb.Tikv',
+                    'RawPut',
+                    $request,
+                    RawPutResponse::class,
+                    $this->timeoutMs('write'),
+                ));
+                /** @var RawPutResponse $response */
+                RegionErrorHandler::check($response);
+
+                return null;
+            },
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
+        );
     }
 
     public function delete(
@@ -139,12 +172,19 @@ final readonly class RawKvCrud
         bool $forCas = false,
         string $columnFamily = '',
     ): void {
-        $retryExecutor->execute($key, function () use ($key, $forCas, $columnFamily): null {
+        $targetStoreId = null;
+
+        $retryExecutor->execute($key, function () use ($key, $forCas, $columnFamily, &$targetStoreId): null {
             $region = $this->regionResolver->getRegionInfo($key);
+            $targetStoreId = $region->leaderStoreId;
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawDeleteRequest();
-            $request->setContext(RegionContextFactory::fromRegionInfo($region));
+            $request->setContext(RegionContextFactory::fromRegionInfo(
+                $region,
+                requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
+            ));
             $request->setKey($key);
             if ($forCas) {
                 $request->setForCas(true);
@@ -165,24 +205,30 @@ final readonly class RawKvCrud
             RegionErrorHandler::check($response);
 
             return null;
+        }, targetStoreId: static function () use (&$targetStoreId): ?int {
+            return $targetStoreId;
         });
     }
 
     public function getKeyTTL(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): ?int
     {
         $excludedStore = null;
+        $targetStoreId = null;
 
         return $retryExecutor->execute(
             $key,
-            function () use ($key, $columnFamily, &$excludedStore): ?int {
+            function () use ($key, $columnFamily, &$excludedStore, &$targetStoreId): ?int {
                 $region = $this->regionResolver->getRegionInfo($key);
                 $target = RegionContextFactory::resolveTarget(
                     $region,
                     $this->replicaReadPolicy,
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
                 $request = new RawGetKeyTTLRequest();
@@ -221,7 +267,10 @@ final readonly class RawKvCrud
 
                 $ttl = (int) $response->getTtl();
                 return $ttl > 0 ? $ttl : null;
-            }
+            },
+            targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            },
         );
     }
 

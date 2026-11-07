@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\KeyNotInRegion;
 use CrazyGoat\Proto\Kvrpcpb\Context;
@@ -15,6 +16,8 @@ use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
+use CrazyGoat\Proto\Metapb\Region;
+use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Tikvpb\BatchCommandsRequest;
 use CrazyGoat\Proto\Tikvpb\BatchCommandsResponse;
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
@@ -119,6 +122,43 @@ final class ApiV2MessageTransformerTest extends TestCase
         $this->assertSame('key', $decodedNotInRegion->getKey());
         $this->assertSame('start', $decodedNotInRegion->getStartKey());
         $this->assertSame('end', $decodedNotInRegion->getEndKey());
+    }
+
+    /**
+     * The EpochNotMatch cache-refresh path (issue #246) passes a null codec
+     * to RegionResolver because this transformer has already decoded the
+     * response region boundaries. Pin that transport contract: if it ever
+     * stops decoding current_regions, the resolver would cache encoded
+     * boundaries as if they were user keys.
+     */
+    public function testResponseDecodesEpochNotMatchCurrentRegions(): void
+    {
+        $codec = new CodecV2(Mode::Txn, 42, 'tenant-a');
+        $transformer = new ApiV2MessageTransformer($codec, Mode::Txn);
+
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(2);
+        $region = new Region();
+        $region->setId(7);
+        $region->setStartKey($codec->encodeRegionKey('a'));
+        $region->setEndKey($codec->encodeRegionKey('m'));
+        $region->setRegionEpoch($epoch);
+
+        $payload = new EpochNotMatch();
+        $payload->setCurrentRegions([$region]);
+        $error = new Error();
+        $error->setEpochNotMatch($payload);
+        $response = new RawGetResponse();
+        $response->setRegionError($error);
+
+        $decoded = $transformer->transformResponse($response, 'tikvpb.Tikv');
+        $decodedPayload = $decoded->getRegionError()?->getEpochNotMatch();
+        $this->assertInstanceOf(EpochNotMatch::class, $decodedPayload);
+        $decodedRegion = $decodedPayload->getCurrentRegions()[0];
+        $this->assertInstanceOf(Region::class, $decodedRegion);
+        $this->assertSame('a', $decodedRegion->getStartKey());
+        $this->assertSame('m', $decodedRegion->getEndKey());
     }
 
     public function testOutOfKeyspaceResponseRaisesTypedException(): void

@@ -26,8 +26,12 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionRangeClipper;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RegionScanBatch;
+use CrazyGoat\TiKV\Client\Region\RegionScanSource;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Google\Protobuf\Internal\Message;
@@ -79,6 +83,10 @@ final readonly class RawKvScanner
          */
         private int $scanPageSize = self::MAX_SCAN_LIMIT,
         private MetricsInterface $metrics = new NoOpMetrics(),
+        /** Optional Context control fields applied to every request (issue #426). */
+        private ?RequestContextOptions $requestContext = null,
+        /** Resource-control metadata carried on every request (issue #427). */
+        private ResourceControl $resourceControl = new ResourceControl(),
     ) {
         if ($this->maxScanRows < 1) {
             throw new InvalidArgumentException('maxScanRows must be >= 1');
@@ -107,17 +115,29 @@ final readonly class RawKvScanner
      * whose count equals the limit may be truncated (issue #440). The
      * unbounded, constant-memory alternative is {@see self::scanIterator()}.
      *
+     * A reversed range (`startKey` sorts after a non-empty `endKey`) is
+     * rejected before any RPC.
+     *
      * @return array<array{key: string, value: ?string}>
+     *
+     * @throws InvalidArgumentException When the range is reversed
+     * @throws RetryBudgetExhaustedException When the shared retry budget is
+     *         exhausted
+     * @throws TiKvException When a region lookup fails closed or the scan RPC
+     *         fails
      */
     public function scan(string $startKey, string $endKey, int $limit, bool $keyOnly, string $columnFamily = ''): array
     {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'scan');
         $limit = $this->validateScanLimit($limit);
 
-        if ($limit === 0) {
-            return $this->scanUnbounded($startKey, $endKey, $keyOnly, $columnFamily);
-        }
+        // One logical scan shares one retry budget across its pages and
+        // regions; a later scan() call starts a fresh one (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
 
-        $executor = $this->createRetryExecutor();
+        if ($limit === 0) {
+            return $this->scanUnbounded($executor, $startKey, $endKey, $keyOnly, $columnFamily);
+        }
 
         return $this->scanRangeSequentially($executor, $startKey, $endKey, $limit, $keyOnly, $columnFamily);
     }
@@ -131,13 +151,17 @@ final readonly class RawKvScanner
      *
      * @return array<array{key: string, value: ?string}>
      */
-    private function scanUnbounded(string $startKey, string $endKey, bool $keyOnly, string $columnFamily): array
-    {
+    private function scanUnbounded(
+        RetryExecutor $executor,
+        string $startKey,
+        string $endKey,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
         $results = [];
         $cursor = $startKey;
 
         while (true) {
-            $executor = $this->createRetryExecutor();
             $page = $this->scanPage($executor, $cursor, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
 
             if ($page === []) {
@@ -279,68 +303,19 @@ final readonly class RawKvScanner
      * Enumerate the regions covering the key range [startKey, endKey) in
      * bounded batches.
      *
-     * The region cache is consulted first: when it already holds the
-     * complete chain the range is served locally, so a paginated scan issues
-     * no PD RPC per page (issue #293). Only an incomplete chain — a cold or
-     * partially warm cache, or a gap — falls back to PD, and then only for
-     * $batchSize regions at a time (issue #282): asking PD for the whole
-     * range answers with every region of the keyspace, which is tens of
-     * megabytes for a query that reads one region.
-     *
-     * The batches are yielded lazily, so a consumer that is satisfied by the
-     * first batch never triggers the next PD call. The next batch starts at
-     * the last region's end key, compared bytewise (issue #186).
+     * Delegates to {@see RegionScanSource}, which serves contiguous cached
+     * runs locally and asks PD only for the uncovered gap at the cursor
+     * (issue #425). The batches are yielded lazily, so a consumer satisfied
+     * by the first batch never triggers the next PD call (issue #282/#293).
      *
      * @param int $batchSize number of regions to request per PD call
      * @return \Generator<int, list<RegionInfo>>
      */
     private function regionBatches(string $startKey, string $endKey, int $batchSize): \Generator
     {
-        $cursor = $startKey;
+        $source = new RegionScanSource($this->pdClient, $this->regionCache, $this->metrics);
 
-        while (true) {
-            $cached = $this->regionCache->getRegionsInRange($cursor, $endKey);
-            if ($cached !== []) {
-                // The cache holds the complete chain for the range, so this is
-                // the last batch and PD is not consulted at all.
-                yield RegionScanBatch::trimToCursor($cached, $cursor);
-
-                return;
-            }
-
-            $batch = array_values($this->pdClient->scanRegions($cursor, $endKey, $batchSize));
-            if ($batch === []) {
-                return;
-            }
-
-            foreach ($batch as $region) {
-                $this->regionCache->put($region);
-            }
-
-            yield RegionScanBatch::trimToCursor($batch, $cursor);
-
-            $lastEndKey = $batch[count($batch) - 1]->endKey;
-            if ($lastEndKey === '') {
-                // The last region of the keyspace: nothing follows it.
-                return;
-            }
-            if ($endKey !== '' && KeyOrder::gte($lastEndKey, $endKey)) {
-                // The requested range is covered.
-                return;
-            }
-            if (KeyOrder::lte($lastEndKey, $cursor)) {
-                // No forward progress: stop instead of asking PD for the same
-                // page again.
-                return;
-            }
-            if (count($batch) < $batchSize) {
-                // PD answered with fewer regions than requested, so the range
-                // holds no more.
-                return;
-            }
-
-            $cursor = $lastEndKey;
-        }
+        yield from $source->batches($startKey, $endKey, $batchSize);
     }
 
     /**
@@ -360,7 +335,17 @@ final readonly class RawKvScanner
      * no reverse iterator; the unbounded, constant-memory alternative for a
      * forward range is {@see self::scanIterator()}.
      *
+     * An unbounded reverse scan fans the per-region reads of a page out
+     * concurrently, in windows of at most {@see self::$maxConcurrency}
+     * regions (issue #555); a bounded scan stays sequential.
+     *
+     * A reversed range (`startKey` sorts before a non-empty `endKey`) is
+     * rejected before any RPC. An empty `endKey` is the start of the keyspace
+     * (not +infinity), so `reverseScan('', '')` is an empty range.
+     *
      * @return array<array{key: string, value: ?string}>
+     *
+     * @throws InvalidArgumentException When the range is reversed
      */
     public function reverseScan(
         string $startKey,
@@ -369,13 +354,27 @@ final readonly class RawKvScanner
         bool $keyOnly,
         string $columnFamily = '',
     ): array {
+        RegionRangeClipper::assertReverseRangeOrder($startKey, $endKey, 'reverseScan');
         $limit = $this->validateScanLimit($limit);
 
-        if ($limit === 0) {
-            return $this->reverseScanUnbounded($startKey, $endKey, $keyOnly, $columnFamily);
+        // [end, start) == ['', '') is empty: an empty start key is the
+        // keyspace minimum, not an unbounded upper bound. Return before the
+        // region enumeration — the clipper cannot skip this case because its
+        // empty-end sentinel also marks a region whose end is unbounded.
+        if ($startKey === '' && $endKey === '') {
+            return [];
         }
 
-        return $this->reverseScanPage($startKey, $endKey, $limit, $keyOnly, $columnFamily);
+        // One logical reverse scan shares one retry budget across its pages
+        // and regions; a later reverseScan() call starts a fresh one
+        // (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
+
+        if ($limit === 0) {
+            return $this->reverseScanUnbounded($executor, $startKey, $endKey, $keyOnly, $columnFamily);
+        }
+
+        return $this->reverseScanPage($executor, $startKey, $endKey, $limit, $keyOnly, $columnFamily);
     }
 
     /**
@@ -385,13 +384,26 @@ final readonly class RawKvScanner
      *
      * @return array<array{key: string, value: ?string}>
      */
-    private function reverseScanUnbounded(string $startKey, string $endKey, bool $keyOnly, string $columnFamily): array
-    {
+    private function reverseScanUnbounded(
+        RetryExecutor $executor,
+        string $startKey,
+        string $endKey,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
         $results = [];
         $upper = $startKey;
 
         while (true) {
-            $page = $this->reverseScanPage($upper, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
+            $page = $this->reverseScanPage(
+                $executor,
+                $upper,
+                $endKey,
+                $this->scanPageSize,
+                $keyOnly,
+                $columnFamily,
+                parallel: true,
+            );
 
             if ($page === []) {
                 break;
@@ -418,8 +430,8 @@ final readonly class RawKvScanner
     }
 
     /**
-     * Scan one bounded reverse page over the clipped regions. The wire range
-     * is [endKey, startKey); enumerate it through the region cache like the
+     * Scan one reverse page over the clipped regions. The wire range is
+     * [endKey, startKey); enumerate it through the region cache like the
      * forward scan, then walk it in reverse.
      *
      * PD's `ScanRegions` enumerates a range from its **lower** bound only,
@@ -430,54 +442,65 @@ final readonly class RawKvScanner
      * region of the keyspace at once, which can exceed the gRPC receive
      * limit outright.
      *
+     * A bounded reverse scan walks the clipped segments one after another.
+     * An unbounded page (`$parallel`) fans them out like the forward
+     * {@see self::scanSegmentsInParallel()} (issue #555): the sends of one
+     * window are all issued before any response is awaited, and the
+     * descending segment order is restored before the rows are concatenated.
+     *
      * @param int $limit positive page budget (never the `0` "unbounded"
      *                   sentinel: the public API routes `limit: 0` to
      *                   {@see self::reverseScanUnbounded()}). Passing `0`
      *                   here would set no request limit and silently read an
      *                   unbounded region.
+     * @param bool $parallel fan the page's segments out concurrently; only
+     *                       the unbounded page loop sets this, the bounded
+     *                       path stays sequential
      *
      * @return array<array{key: string, value: ?string}>
      */
     private function reverseScanPage(
+        RetryExecutor $executor,
         string $startKey,
         string $endKey,
         int $limit,
         bool $keyOnly,
         string $columnFamily,
+        bool $parallel = false,
     ): array {
         assert($limit > 0, 'reverseScanPage() requires a positive page budget; use reverseScanUnbounded() for limit 0');
-
-        $executor = $this->createRetryExecutor();
 
         $regions = array_reverse(
             $this->resolveScanRegions($endKey, $startKey, RegionScanBatch::MAX_REGIONS),
         );
 
-        $results = [];
-        $remaining = $limit;
-
         $clipper = new RegionRangeClipper();
-        foreach ($clipper->clipReverse($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
-            $regionResults = $this->executeScanForRegion(
-                $executor,
-                $scanStart,
-                $scanEnd,
-                $remaining,
-                $keyOnly,
-                true,
-                $columnFamily,
-            );
-            foreach ($regionResults as $row) {
-                $results[] = $row;
-            }
-
-            $remaining -= count($regionResults);
-            if ($remaining <= 0) {
-                break;
-            }
+        /** @var list<array{RegionInfo, string, string}> $segments */
+        $segments = iterator_to_array($clipper->clipReverse($regions, $startKey, $endKey), false);
+        if ($segments === []) {
+            return [];
         }
 
-        return $results;
+        if ($parallel && count($segments) > 1) {
+            return $this->scanSegmentsInParallel(
+                $executor,
+                $segments,
+                $endKey,
+                $limit,
+                $keyOnly,
+                $columnFamily,
+                true,
+            );
+        }
+
+        return $this->scanSegmentsSequentially(
+            $executor,
+            $segments,
+            $limit,
+            $keyOnly,
+            $columnFamily,
+            true,
+        );
     }
 
     /**
@@ -502,8 +525,10 @@ final readonly class RawKvScanner
      * method's caps: `limit = 0` returns the whole prefix (paginated
      * internally, guarded by {@see self::$maxScanRows}, which throws
      * {@see ScanLimitExceededException} instead of truncating), and a bounded
-     * scan returns at most `limit` rows (issue #440). The unbounded,
-     * constant-memory alternative is {@see self::scanPrefixIterator()}.
+     * scan returns at most `limit` rows (issue #440). A negative `limit` is
+     * rejected before any RPC (see {@see self::validateScanLimit()}). The
+     * unbounded, constant-memory alternative is
+     * {@see self::scanPrefixIterator()}.
      *
      * @return array<array{key: string, value: ?string}>
      */
@@ -543,8 +568,13 @@ final readonly class RawKvScanner
      * Scan the given clipped sub-ranges one after another, subtracting each
      * region's yield from the remaining limit.
      *
+     * This is the bounded forward and reverse path, and the fallback of the
+     * concurrent page fan-out when a region error, a transport error or a
+     * split after enumeration makes the dispatched sends untrustworthy.
+     *
      * @param list<array{RegionInfo, string, string}> $segments
      * @param int $limit positive row budget
+     * @param bool $reverse true scans each segment [start, end) descending
      * @return array<array{key: string, value: ?string}>
      */
     private function scanSegmentsSequentially(
@@ -553,6 +583,7 @@ final readonly class RawKvScanner
         int $limit,
         bool $keyOnly,
         string $columnFamily,
+        bool $reverse = false,
     ): array {
         assert($limit > 0, 'scanSegmentsSequentially() requires a positive row budget');
 
@@ -566,7 +597,7 @@ final readonly class RawKvScanner
                 $scanEnd,
                 $remaining,
                 $keyOnly,
-                false,
+                $reverse,
                 $columnFamily,
             );
             foreach ($regionResults as $row) {
@@ -584,14 +615,16 @@ final readonly class RawKvScanner
 
     /**
      * Scan the clipped regions of an unbounded page concurrently, in bounded
-     * windows of at most {@see self::$maxConcurrency} regions (issue #293).
+     * windows of at most {@see self::$maxConcurrency} regions (issues #293
+     * and #555).
      *
      * Within a window every region's RawScan send is issued before any
      * response is awaited, so the regions' server-side latencies overlap;
-     * the window's responses are concatenated in region order and charged
-     * against the page budget. A further window is never dispatched once the
-     * budget is spent (the loop is gated on the remaining budget) and every
-     * region is given the *remaining* budget, so the fan-out holds at most
+     * the window's responses are concatenated in region order (descending
+     * for a reverse scan) and charged against the page budget. A further
+     * window is never dispatched once the budget is spent (the loop is
+     * gated on the remaining budget) and every region is given the
+     * *remaining* budget, so the fan-out holds at most
      * `maxConcurrency x limit` rows. Dispatch is still windowed by
      * {@see BatchAsyncExecutor}, so the previous unbounded "every region
      * with the full limit" behaviour is gone. Region ranges are disjoint, so
@@ -601,25 +634,35 @@ final readonly class RawKvScanner
      * are awaited outside a per-region retry loop): the whole page falls back
      * to {@see self::scanSegmentsSequentially()} — which re-resolves and
      * retries properly — on any failure, on a response that is not a
-     * {@see RawScanResponse}, or on a non-final region that shrank after
-     * enumeration (which would leave a hole before the next segment). Reads
-     * are idempotent, so discarding a partial concurrent result is safe.
+     * {@see RawScanResponse}, or on a region that shrank after enumeration
+     * (which would leave a hole in the page). Reads are idempotent, so
+     * discarding a partial concurrent result is safe. A forward scan detects
+     * a shrink on every segment but the final one (the final one has a
+     * continuation below); a reverse scan detects it on every segment,
+     * because the missing part lies above the segment and only the
+     * sequential reverse path can splice it back in order.
      *
      * The batch deadline spans all windows. A {@see BatchDeadlineExceededException}
      * is never a reason to fall back (the sequential path has no deadline): it
      * is rethrown with the configured deadline.
      *
      * @param list<array{RegionInfo, string, string}> $segments
-     * @param string $scanEnd exclusive end of the range the segments cover
+     *        clipped sub-ranges in scan order (ascending for forward,
+     *        descending for reverse)
+     * @param string $rangeEnd exclusive end of the forward range the segments
+     *        cover; unused by a reverse scan, whose split continuation lives
+     *        in {@see self::executeReverseScanForSubRange()}
+     * @param bool $reverse true scans each segment [start, end) descending
      * @return array<array{key: string, value: ?string}>
      */
     private function scanSegmentsInParallel(
         RetryExecutor $executor,
         array $segments,
-        string $scanEnd,
+        string $rangeEnd,
         int $limit,
         bool $keyOnly,
         string $columnFamily,
+        bool $reverse = false,
     ): array {
         $results = [];
         $remaining = $limit;
@@ -659,6 +702,7 @@ final readonly class RawKvScanner
                     $remaining,
                     $keyOnly,
                     $columnFamily,
+                    $reverse,
                     &$freshEnds,
                     $index,
                 ): CheckedGrpcFuture {
@@ -669,7 +713,7 @@ final readonly class RawKvScanner
                         $remaining,
                         $keyOnly,
                         $columnFamily,
-                        false,
+                        $reverse,
                         $freshEnds[$index],
                     );
                 };
@@ -694,31 +738,73 @@ final readonly class RawKvScanner
                     ],
                 );
             } catch (TiKvException) {
-                return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+                return $this->scanSegmentsSequentially(
+                    $executor,
+                    $segments,
+                    $limit,
+                    $keyOnly,
+                    $columnFamily,
+                    $reverse,
+                );
             }
 
             ksort($responses);
 
             foreach ($responses as $index => $response) {
                 if (!$response instanceof RawScanResponse || $response->getRegionError() !== null) {
-                    return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+                    return $this->scanSegmentsSequentially(
+                        $executor,
+                        $segments,
+                        $limit,
+                        $keyOnly,
+                        $columnFamily,
+                        $reverse,
+                    );
                 }
 
                 $freshEnd = $freshEnds[$index] ?? '';
-                $segmentEnd = $segments[$index][2];
+                $currentSegmentEnd = $segments[$index][2];
 
-                // A non-final region that shrank after enumeration (split)
-                // leaves a hole [freshEnd, segmentEnd): the next dispatched
-                // segment starts at segmentEnd, not at the fresh end key.
-                // Fall back to the sequential path, which re-resolves the
-                // region and continues past the split. The final segment is
-                // handled by the continuation below.
-                if (
+                if ($reverse) {
+                    // A reverse segment shrank when the fresh region's end
+                    // key dropped below the segment's upper bound: the send
+                    // was clipped to [scanEnd, freshEnd), so the part above
+                    // it would be dropped. Only the sequential reverse path
+                    // can splice the missing part back in descending order
+                    // (executeReverseScanForSubRange() continues past the
+                    // split), so re-run the whole page through it.
+                    if (
+                        $freshEnd !== ''
+                        && KeyOrder::lt($freshEnd, $segments[$index][1])
+                    ) {
+                        return $this->scanSegmentsSequentially(
+                            $executor,
+                            $segments,
+                            $limit,
+                            $keyOnly,
+                            $columnFamily,
+                            true,
+                        );
+                    }
+                } elseif (
                     $index !== $segmentCount - 1
                     && $freshEnd !== ''
-                    && KeyOrder::lt($freshEnd, $segmentEnd)
+                    && KeyOrder::lt($freshEnd, $currentSegmentEnd)
                 ) {
-                    return $this->scanSegmentsSequentially($executor, $segments, $limit, $keyOnly, $columnFamily);
+                    // A non-final forward region that shrank after enumeration
+                    // (split) leaves a hole [freshEnd, segmentEnd): the next
+                    // dispatched segment starts at segmentEnd, not at the
+                    // fresh end key. Fall back to the sequential path, which
+                    // re-resolves the region and continues past the split.
+                    // The final segment is handled by the continuation below.
+                    return $this->scanSegmentsSequentially(
+                        $executor,
+                        $segments,
+                        $limit,
+                        $keyOnly,
+                        $columnFamily,
+                        false,
+                    );
                 }
 
                 $batch = $this->parseScanPairs($response, $keyOnly);
@@ -735,23 +821,26 @@ final readonly class RawKvScanner
             }
         }
 
-        // Rare split-after-enumeration of the final region: it shrank, so
-        // continue from its fresh end key instead of dropping the remainder.
-        // Only when the final segment was actually consumed and the budget is
-        // not spent; passing the real remaining budget (never 0, which the
+        // Rare split-after-enumeration of the final forward region: it shrank,
+        // so continue from its fresh end key instead of dropping the
+        // remainder. A reverse shrink is handled by the fallback above (its
+        // missing part is above the segment, not below the range). Only when
+        // the final segment was actually consumed and the budget is not
+        // spent; passing the real remaining budget (never 0, which the
         // downstream executeScanForRegion() would read as "unbounded") bounds
         // the continuation wire read.
         if (
-            $lastIndex === $segmentCount - 1
+            !$reverse
+            && $lastIndex === $segmentCount - 1
             && $remaining > 0
             && $lastFreshEnd !== ''
             && KeyOrder::gt($lastFreshEnd, $segments[$lastIndex][1])
-            && ($scanEnd === '' || KeyOrder::lt($lastFreshEnd, $scanEnd))
+            && ($rangeEnd === '' || KeyOrder::lt($lastFreshEnd, $rangeEnd))
         ) {
             $rest = $this->executeScanForRegion(
                 $executor,
                 $lastFreshEnd,
-                $scanEnd,
+                $rangeEnd,
                 $remaining,
                 $keyOnly,
                 false,
@@ -783,9 +872,12 @@ final readonly class RawKvScanner
      *
      * At most {@see self::$maxConcurrency} requests are in flight at any
      * moment, and the returned outer array preserves input range order.
+     * Every range is validated before the first send; a reversed range
+     * rejects the whole call.
      *
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
+     * @throws InvalidArgumentException When a range is reversed
      * @throws \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException When any range fails
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly, string $columnFamily = ''): array
@@ -806,12 +898,15 @@ final readonly class RawKvScanner
             ));
         }
 
-        $executor = $this->createRetryExecutor();
+        // One batchScan() call is one logical operation: every range and
+        // region shares one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
         $clipper = new RegionRangeClipper();
 
         $calls = [];
         foreach ($ranges as $index => $range) {
             [$startKey, $endKey] = $range;
+            RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'batchScan');
             $calls[$index] = fn(): CheckedGrpcFuture => $this->scanRangeAsync(
                 $executor,
                 $clipper,
@@ -841,13 +936,20 @@ final readonly class RawKvScanner
         return $results;
     }
 
+    /**
+     * @param (callable(): void)|null $guard Invoked before every page fetch
+     *        (see {@see ScanIterator::__construct()})
+     */
     public function scanIterator(
         string $startKey,
         string $endKey,
         int $batchSize,
         bool $keyOnly,
         string $columnFamily = '',
+        ?callable $guard = null,
     ): ScanIterator {
+        RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'scanIterator');
+
         return new ScanIterator(
             $this->scan(...),
             $startKey,
@@ -855,14 +957,20 @@ final readonly class RawKvScanner
             $batchSize,
             $keyOnly,
             $columnFamily,
+            $guard,
         );
     }
 
+    /**
+     * @param (callable(): void)|null $guard Invoked before every page fetch
+     *        (see {@see ScanIterator::__construct()})
+     */
     public function scanPrefixIterator(
         string $prefix,
         int $batchSize,
         bool $keyOnly,
         string $columnFamily = '',
+        ?callable $guard = null,
     ): ScanIterator {
         return new ScanIterator(
             $this->scan(...),
@@ -871,6 +979,7 @@ final readonly class RawKvScanner
             $batchSize,
             $keyOnly,
             $columnFamily,
+            $guard,
         );
     }
 
@@ -913,6 +1022,7 @@ final readonly class RawKvScanner
         while (true) {
             $freshEndKey = '';
             $excludedStore = null;
+            $targetStoreId = null;
             $batch = $executor->execute($cursorStart, function () use (
                 $cursorStart,
                 $endKey,
@@ -921,6 +1031,7 @@ final readonly class RawKvScanner
                 $columnFamily,
                 &$excludedStore,
                 &$freshEndKey,
+                &$targetStoreId,
             ): array {
                 // Resolve the region on every attempt: a stale captured
                 // region would otherwise reproduce the original error on
@@ -931,8 +1042,11 @@ final readonly class RawKvScanner
                     $this->replicaReadPolicy,
                     $this->regionResolver->getStore(...),
                     excludedStoreId: $excludedStore,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
                 );
                 $excludedStore = null;
+                $targetStoreId = $target->storeId;
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
                 $freshEndKey = $fresh->endKey;
 
@@ -988,6 +1102,8 @@ final readonly class RawKvScanner
                 }
 
                 return $subResults;
+            }, targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
             });
 
             foreach ($batch as $row) {
@@ -1040,6 +1156,7 @@ final readonly class RawKvScanner
         $resolutionKey = $endKey;
         $freshEndKey = '';
         $excludedStore = null;
+        $targetStoreId = null;
         $batch = $executor->execute($resolutionKey, function () use (
             $startKey,
             $endKey,
@@ -1049,6 +1166,7 @@ final readonly class RawKvScanner
             $columnFamily,
             &$excludedStore,
             &$freshEndKey,
+            &$targetStoreId,
         ): array {
             // Resolve the region on every attempt: a stale captured region
             // would otherwise reproduce the original error on each retry.
@@ -1058,8 +1176,11 @@ final readonly class RawKvScanner
                 $this->replicaReadPolicy,
                 $this->regionResolver->getStore(...),
                 excludedStoreId: $excludedStore,
+                requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
             );
             $excludedStore = null;
+            $targetStoreId = $target->storeId;
             $address = $this->regionResolver->resolveStoreAddress($target->storeId);
             $freshEndKey = $fresh->endKey;
 
@@ -1112,6 +1233,8 @@ final readonly class RawKvScanner
             }
 
             return $subResults;
+        }, targetStoreId: static function () use (&$targetStoreId): ?int {
+            return $targetStoreId;
         });
 
         // If the fresh region covers only [endKey, freshEndKey), the higher
@@ -1309,6 +1432,7 @@ final readonly class RawKvScanner
         ?string &$freshEndKey,
     ): CheckedGrpcFuture {
         $freshEndKey = '';
+        $targetStoreId = null;
         // The resolution key mirrors the sequential paths: forward scans
         // resolve on the sub-range start, reverse scans on its end (the
         // lower bound), see executeReverseScanForSubRange().
@@ -1324,6 +1448,7 @@ final readonly class RawKvScanner
             $reverse,
             $resolutionKey,
             &$freshEndKey,
+            &$targetStoreId,
         ): CheckedGrpcFuture {
             // Resolve the region on every attempt so retries pick up cache
             // invalidation and leader switching (issue #267).
@@ -1332,7 +1457,10 @@ final readonly class RawKvScanner
                 $fresh,
                 $this->replicaReadPolicy,
                 $this->regionResolver->getStore(...),
+                requestContext: $this->requestContext,
+                resourceControl: $this->resourceControl,
             );
+            $targetStoreId = $target->storeId;
             $address = $this->regionResolver->resolveStoreAddress($target->storeId);
             $freshEndKey = $fresh->endKey;
 
@@ -1390,6 +1518,8 @@ final readonly class RawKvScanner
                     fn(): Message => $response->wait(),
                 ),
             );
+        }, targetStoreId: static function () use (&$targetStoreId): ?int {
+            return $targetStoreId;
         });
 
         return $future;
@@ -1430,6 +1560,11 @@ final readonly class RawKvScanner
      * internally — issue #191), while an explicit limit above the per-RPC
      * {@see self::MAX_SCAN_LIMIT} is rejected because one RawScan RPC cannot
      * exceed it.
+     *
+     * A negative limit is rejected before it can reach
+     * {@see RawScanRequest::setLimit()}, a `uint32` protobuf field where
+     * `-1` serialises to `4294967295` and turns the scan effectively
+     * unbounded (issue #332).
      */
     private function validateScanLimit(int $limit): int
     {

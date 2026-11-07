@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Retry;
 
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
@@ -11,10 +12,12 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 
@@ -52,6 +55,12 @@ final readonly class RetryExecutor
         private int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS,
         private int $deadlineMs = self::DEFAULT_RETRY_DEADLINE_MS,
         private MetricsInterface $metrics = new NoOpMetrics(),
+        /**
+         * Budget shared by every execute() call on this instance, or null for
+         * a standalone executor whose calls each start a fresh budget. Only
+         * {@see self::beginOperation()} sets it; see {@see RetryBudget}.
+         */
+        private ?RetryBudget $budget = null,
     ) {
         if ($maxAttempts < 1) {
             throw new \InvalidArgumentException('maxAttempts must be >= 1');
@@ -65,19 +74,33 @@ final readonly class RetryExecutor
      * @template T
      * @param callable(): T $operation
      * @param (callable(TiKvException): ?BackoffType)|null $classifier Custom error classifier
+     * @param (callable(): ?int)|null $targetStoreId Provider of the store ID
+     *        the FAILED attempt was actually addressed to. Pass it for reads
+     *        that may target a follower (`ReplicaReadPolicy`): a transport
+     *        failure then closes and invalidates that follower's address
+     *        instead of the cached leader's (issue #247). Without it the
+     *        executor falls back to the cached region's leader, which is
+     *        correct for leader-only operations.
      * @return T
      */
-    public function execute(string $key, callable $operation, ?callable $classifier = null): mixed
-    {
-        // Per-invocation retry state lives in locals, not instance fields:
+    public function execute(
+        string $key,
+        callable $operation,
+        ?callable $classifier = null,
+        ?callable $targetStoreId = null,
+    ): mixed {
+        // Retry budget lives in a RetryBudget object, not in instance fields:
         // a single executor is reused across many operations, and
-        // maxBackoffMs/serverBusyBudgetMs are documented as per-operation
-        // limits, so every call must start with a full budget. Keeping them
-        // local also makes execute() reentrant (issue #271).
-        $totalBackoffMs = 0;
-        $serverBusyBackoffMs = 0;
+        // maxBackoffMs/serverBusyBudgetMs/deadlineMs are documented as
+        // per-operation limits, so every operation must start with a full
+        // budget. A standalone executor (budget === null) starts a fresh one
+        // per call, preserving issue #271's per-execute() reset; an executor
+        // returned by beginOperation() shares one budget across every call of
+        // one logical operation's fan-out (issue #223). Keeping the state in
+        // an object also makes execute() reentrant.
+        $budget = $this->budget ?? $this->newBudget();
         $attempt = 0;
-        $startTimeMs = $this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0;
+        $startTimeMs = $budget->startTimeMs();
         $lastError = null;
 
         while (true) {
@@ -93,7 +116,7 @@ final readonly class RetryExecutor
                     'key' => KeyRedactor::redact($key),
                     'attempt' => $attempt,
                     'maxAttempts' => $this->maxAttempts,
-                    'totalBackoffMs' => $totalBackoffMs,
+                    'totalBackoffMs' => $budget->totalBackoffMs(),
                 ]);
                 throw new RetryBudgetExhaustedException(
                     sprintf(
@@ -102,7 +125,7 @@ final readonly class RetryExecutor
                         KeyRedactor::redact($key),
                     ),
                     $attempt,
-                    $totalBackoffMs,
+                    $budget->totalBackoffMs(),
                     $lastError,
                     rawKey: $key,
                 );
@@ -159,37 +182,110 @@ final readonly class RetryExecutor
                         throw $e;
                     }
 
-                    // Issue #245 (REG-14, still open) will narrow this branch
-                    // too — the retryable path currently invalidates for EVERY
-                    // retryable error, including non-routing ones such as
-                    // ServerIsBusy / DiskFull / IsWitness /
-                    // RecoveryInProgress. Its fix is to route this decision
-                    // through self::invalidatesRoutingOnFatal() as well; until
-                    // then the behaviour here is deliberately unchanged.
-                    $cached = $this->regionCache->getByKey($key);
-                    if ($cached instanceof RegionInfo) {
-                        // The cache itself emits regionInvalidated() with
-                        // reason 'retry_region_error' — do not emit here too.
-                        $this->regionCache->invalidate($cached->regionId, 'retry_region_error');
-                        $this->logger->info('Invalidated region on retry', [
-                            'key' => KeyRedactor::redact($key),
-                            'regionId' => $cached->regionId,
-                        ]);
+                    // Issue #246 (REG-15): an EpochNotMatch usually carries
+                    // the regions that now cover the stale range in
+                    // `current_regions`. Refresh the cache from that payload
+                    // instead of dropping the entry and paying a PD
+                    // GetRegion on the next attempt. The payload path is
+                    // all-or-nothing: an empty, undecodable, leaderless,
+                    // older-epoch or non-covering payload falls through to
+                    // the ordinary invalidation below.
+                    //
+                    // Issue #245 (REG-14): only a routing error means the
+                    // cached region may be wrong. A non-routing retryable
+                    // error (ServerIsBusy, DiskFull, IsWitness,
+                    // RecoveryInProgress, …) reached the region that owns the
+                    // key, so dropping the entry would only force a PD round
+                    // trip on every attempt — a load spike on top of an
+                    // already degraded cluster. An unclassified error (a
+                    // transport failure or a message-only classification)
+                    // still invalidates conservatively.
+                    if (
+                        !$this->refreshRegionCacheFromEpochNotMatch($e, $key)
+                        && self::invalidatesRoutingOnRetry($e)
+                    ) {
+                        $cached = $this->regionCache->getByKey($key);
+                        // Issue #247 (REG-16): the region cache and the store
+                        // address cache are separate. A transport failure may
+                        // have hit a follower (replica read), not the cached
+                        // leader, so the provider is authoritative when the
+                        // caller supplies one. Fall back to the cached
+                        // leader only for leader-targeted operations.
+                        $failedStoreId = $this->targetStoreIdOf($targetStoreId)
+                            ?? ($cached instanceof RegionInfo ? $cached->leaderStoreId : null);
 
-                        if ($e instanceof GrpcException) {
-                            try {
-                                $address = $this->regionResolver->resolveStoreAddress($cached->leaderStoreId);
-                                $this->grpc->closeChannel($address);
-                            } catch (StoreNotFoundException) {
+                        if ($cached instanceof RegionInfo) {
+                            // The cache itself emits regionInvalidated() with
+                            // the kind-tagged reason — do not emit here too.
+                            $this->regionCache->invalidate(
+                                $cached->regionId,
+                                $this->retryInvalidationReason($e),
+                            );
+                            $this->logger->info('Invalidated region on retry', [
+                                'key' => KeyRedactor::redact($key),
+                                'regionId' => $cached->regionId,
+                                'errorKind' => $e instanceof RegionException ? $e->errorKind?->value : null,
+                            ]);
+                        }
+
+                        if (
+                            $e instanceof GrpcException
+                            && $this->indicatesBrokenConnection($e)
+                        ) {
+                            // The exception carries the address the failed
+                            // attempt was sent to (set by GrpcClient /
+                            // GrpcFuture at throw time). That is authoritative
+                            // even when the RPC was nested inside the retried
+                            // operation — lock resolution talks to the
+                            // primary's region, not the read's/write's region
+                            // (issue #248). Fall back to the provider/cached
+                            // leader only for exceptions that predate the
+                            // field or synthetic test failures.
+                            $failedAddress = $e->targetAddress;
+                            if ($failedAddress === null && $failedStoreId !== null) {
+                                // Resolve the channel address BEFORE dropping
+                                // the store entry: resolveStoreAddress() reads
+                                // the store cache, and invalidating first
+                                // would force a PD GetStore just to close a
+                                // channel.
+                                try {
+                                    $failedAddress = $this->regionResolver->resolveStoreAddress($failedStoreId);
+                                } catch (StoreNotFoundException) {
+                                }
+                            }
+
+                            if ($failedAddress !== null) {
+                                $this->grpc->closeChannel($failedAddress);
                             }
                         }
+
+                        // A StoreNotMatch says the address the request went
+                        // to is wrong; a transport failure says the address
+                        // it could not reach may be wrong (a rescheduled pod
+                        // keeps the store ID and changes the address). Drop
+                        // that entry so the next attempt asks PD instead of
+                        // retrying the same dead endpoint for the rest of its
+                        // 660 s TTL.
+                        //
+                        // The region may already be gone here: TxnKV call
+                        // sites run RegionErrorHandler::check() before the
+                        // executor sees the exception, so the StoreNotMatch
+                        // payload's request_store_id (or the target/region
+                        // captured for this attempt) is the fallback.
+                        $this->invalidateStoreForRetry(
+                            $e,
+                            $cached instanceof RegionInfo
+                                ? $cached
+                                : ($e instanceof RegionException ? $e->cachedRegion : null),
+                            $failedStoreId,
+                        );
                     }
                 }
 
                 $sleepMs = $backoffType->sleepMs($attemptBeforeInspection);
 
                 if ($backoffType === BackoffType::ServerBusy) {
-                    $serverBusyBackoffMs += $sleepMs;
+                    $serverBusyBackoffMs = $budget->addServerBusy($sleepMs);
                     if ($serverBusyBackoffMs > $this->serverBusyBudgetMs) {
                         $this->logger->error('ServerBusy budget exhausted', [
                             'key' => KeyRedactor::redact($key),
@@ -200,7 +296,7 @@ final readonly class RetryExecutor
                         throw $e;
                     }
                 } else {
-                    $totalBackoffMs += $sleepMs;
+                    $totalBackoffMs = $budget->addBackoff($sleepMs);
                     if ($totalBackoffMs > $this->maxBackoffMs) {
                         $this->logger->error('Retry budget exhausted', [
                             'key' => KeyRedactor::redact($key),
@@ -217,7 +313,7 @@ final readonly class RetryExecutor
                     'attempt' => $attemptBeforeInspection,
                     'backoffType' => $backoffType->name,
                     'sleepMs' => $sleepMs,
-                    'totalBackoffMs' => $totalBackoffMs,
+                    'totalBackoffMs' => $budget->totalBackoffMs(),
                 ]);
 
                 $this->metrics->retryAttempted($backoffType->name);
@@ -239,6 +335,63 @@ final readonly class RetryExecutor
                 $attempt++;
             }
         }
+    }
+
+    /**
+     * Start one logical operation and return an executor whose execute()
+     * calls all charge the same retry budget (issue #223, TXN-18).
+     *
+     * The client's fan-out operations call this once at their public entry
+     * point and pass the returned executor down: every region and page of one
+     * `scan()`, `batchGet()`, `commit()` (and so on) therefore shares one
+     * `maxBackoffMs`, one `serverBusyBudgetMs` and one wall-clock deadline,
+     * instead of getting a fresh budget per region. A later operation calls
+     * beginOperation() again (or uses a standalone executor) and starts from
+     * zero, so it cannot inherit the earlier operation's attempts or elapsed
+     * time.
+     *
+     * Calling this on an executor that already has a budget deliberately
+     * starts a NEW budget: each call marks a new logical operation.
+     */
+    public function beginOperation(): self
+    {
+        return new self(
+            $this->maxBackoffMs,
+            $this->serverBusyBudgetMs,
+            $this->regionCache,
+            $this->grpc,
+            $this->regionResolver,
+            $this->logger,
+            $this->maxAttempts,
+            $this->deadlineMs,
+            $this->metrics,
+            $this->newBudget(),
+        );
+    }
+
+    /**
+     * Budget shared by the execute() calls of the current logical operation,
+     * or null for a standalone executor (whose execute() calls each start a
+     * fresh budget).
+     *
+     * A caller that needs the live remaining deadline while an operation runs
+     * — lock resolution is the first user (issue #569) — must use an executor
+     * returned by {@see self::beginOperation()} and read
+     * {@see RetryBudget::remainingDeadlineMs()} from this budget. The object
+     * is the same one execute() charges, so there is no second source of
+     * truth for the deadline.
+     */
+    public function currentBudget(): ?RetryBudget
+    {
+        return $this->budget;
+    }
+
+    private function newBudget(): RetryBudget
+    {
+        return new RetryBudget(
+            $this->deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0,
+            $this->deadlineMs,
+        );
     }
 
     /**
@@ -290,6 +443,52 @@ final readonly class RetryExecutor
     }
 
     /**
+     * Whether an ErrorKind means the CACHED REGION that produced the error may
+     * be wrong, i.e. whether the region-cache entry must be dropped.
+     *
+     * This is the single routing/non-routing table, shared by the fatal path
+     * (invalidatesRoutingOnFatal(), issue #233) and the retryable path
+     * (invalidatesRoutingOnRetry(), issue #245). A non-routing kind means the
+     * request reached the region that owns the key and the region rejected the
+     * request itself — a busy/overloaded store, a full disk, a witness peer,
+     * recovery in progress, an oversized entry, a flashback, … — or the retry
+     * must pick a different peer. The cached entry is correct, so keep it.
+     *
+     * The match has no `default` arm, so PHPStan reports match.unhandled at
+     * level 9 and a new ErrorKind case cannot be added without deciding here.
+     */
+    public static function invalidatesRoutingKind(ErrorKind $kind): bool
+    {
+        return match ($kind) {
+            ErrorKind::KeyNotInRegion,
+            ErrorKind::EpochNotMatch,
+            ErrorKind::RegionNotFound,
+            ErrorKind::StoreNotMatch,
+            ErrorKind::NotLeader,
+            ErrorKind::RegionNotInitialized => true,
+
+            // The request DID reach the region that owns the key; the region
+            // rejected the request itself or the retry must pick a different
+            // peer. The cached entry is correct, so keep it.
+            ErrorKind::RaftEntryTooLarge,
+            ErrorKind::FlashbackInProgress,
+            ErrorKind::FlashbackNotPrepared,
+            ErrorKind::ServerIsBusy,
+            ErrorKind::DiskFull,
+            ErrorKind::IsWitness,
+            ErrorKind::RecoveryInProgress,
+            ErrorKind::StaleCommand,
+            ErrorKind::DataIsNotReady,
+            ErrorKind::ReadIndexNotReady,
+            ErrorKind::ProposalInMergingMode,
+            ErrorKind::MaxTimestampNotSynced,
+            ErrorKind::MismatchPeerId,
+            ErrorKind::BucketVersionNotMatch,
+            ErrorKind::UndeterminedResult => false,
+        };
+    }
+
+    /**
      * Whether a FATAL (non-retryable) error must still drop the cached region
      * the request was routed through (issue #233, REG-02).
      *
@@ -319,25 +518,16 @@ final readonly class RetryExecutor
      * …), an InvalidStoreAddressException or a TxnAbortedByGcException says
      * nothing about which region the key lives in — they are credentials, a PD
      * answer and a GC verdict respectively — so dropping the entry would only
-     * trade one re-resolve for another. This is a decision, not an omission: the
-     * non-routing kinds below are enumerated for the same reason.
+     * trade one re-resolve for another. A RegionException without a typed kind
+     * carries no routing verdict either. This is a decision, not an omission.
      *
-     * The match has no `default` arm, so PHPStan reports match.unhandled at
-     * level 9 and a new ErrorKind case cannot be added without deciding
-     * here. The set is wider than "fatal today" on purpose: of the six
-     * routing kinds only KeyNotInRegion classifies as fatal, so the other
-     * five are here to keep the predicate correct if that classification
-     * changes, and to serve issue #245 (REG-14), which will route the
-     * retryable path's invalidation through this same match. A custom
-     * $classifier cannot make any of them fatal either — returning null from
-     * it falls through to ErrorClassifier::classify(), which maps every one
-     * of them to a BackoffType.
-     *
-     * ErrorKind::NotLeader is listed for completeness and for that #245 seam,
-     * not because it can reach a fatal path today: handleNotLeader() returns
-     * BackoffType::NotLeader for ANY RegionException carrying a notLeader
-     * oneof, before the custom classifier is ever consulted, so control never
-     * enters the fatal block and the predicate is never asked about it.
+     * The routing/non-routing table itself lives in invalidatesRoutingKind(),
+     * shared with the retryable path. ErrorKind::NotLeader is in that table
+     * for completeness, not because it can reach a fatal path today:
+     * handleNotLeader() returns BackoffType::NotLeader for ANY RegionException
+     * carrying a notLeader oneof, before the custom classifier is ever
+     * consulted, so control never enters the fatal block and this predicate is
+     * never asked about it.
      */
     public static function invalidatesRoutingOnFatal(TiKvException $e): bool
     {
@@ -354,34 +544,213 @@ final readonly class RetryExecutor
             return false;
         }
 
-        return match ($kind) {
-            ErrorKind::KeyNotInRegion,
-            ErrorKind::EpochNotMatch,
-            ErrorKind::RegionNotFound,
-            ErrorKind::StoreNotMatch,
-            ErrorKind::NotLeader,
-            ErrorKind::RegionNotInitialized => true,
+        return self::invalidatesRoutingKind($kind);
+    }
 
-            // The request DID reach the region that owns the key; the region
-            // rejected the request itself (an oversized entry, a flashback in
-            // progress, a busy/overloaded store) or the retry must pick a
-            // different peer. The cached entry is correct, so keep it.
-            ErrorKind::RaftEntryTooLarge,
-            ErrorKind::FlashbackInProgress,
-            ErrorKind::FlashbackNotPrepared,
-            ErrorKind::ServerIsBusy,
-            ErrorKind::DiskFull,
-            ErrorKind::IsWitness,
-            ErrorKind::RecoveryInProgress,
-            ErrorKind::StaleCommand,
-            ErrorKind::DataIsNotReady,
-            ErrorKind::ReadIndexNotReady,
-            ErrorKind::ProposalInMergingMode,
-            ErrorKind::MaxTimestampNotSynced,
-            ErrorKind::MismatchPeerId,
-            ErrorKind::BucketVersionNotMatch,
-            ErrorKind::UndeterminedResult => false,
-        };
+    /**
+     * Whether a RETRYABLE error must drop the cached region before the next
+     * attempt (issue #245, REG-14).
+     *
+     * Only a routing error is evidence about the cached region. A non-routing
+     * kind (ServerIsBusy, DiskFull, IsWitness, RecoveryInProgress, …) means
+     * the request reached the right region, so the entry stays and the retry
+     * reuses it — otherwise every attempt would force a PD GetRegion at
+     * exactly the moment the cluster is under stress.
+     *
+     * An error without a typed ErrorKind (a GrpcException transport failure, a
+     * message-classified TiKvException, or a kind-less RegionException)
+     * invalidates conservatively: an unclassified error may be a routing
+     * error, and keeping a stale entry would repeat the misroute until its TTL
+     * expires. This is deliberately the opposite default from
+     * invalidatesRoutingOnFatal(), where an unclassified error must not drop a
+     * region it cannot be shown to be about.
+     */
+    public static function invalidatesRoutingOnRetry(TiKvException $e): bool
+    {
+        if (!$e instanceof RegionException) {
+            return true;
+        }
+
+        $kind = $e->errorKind;
+        if (!$kind instanceof ErrorKind) {
+            return true;
+        }
+
+        return self::invalidatesRoutingKind($kind);
+    }
+
+    /**
+     * Replace the stale cached region with the regions TiKV returned in an
+     * EpochNotMatch payload (issue #246, REG-15).
+     *
+     * Returns true only when the whole payload was usable and at least one
+     * returned region contains the key; then the cache is updated and the
+     * caller must NOT invalidate the entry. Any other outcome returns false
+     * and leaves the ordinary invalidate-and-resolve-through-PD fallback in
+     * charge. The cache update itself is not an error-driven drop: `put()`
+     * removes the superseded overlapping entries silently, exactly as for a
+     * PD scan (issue #238), so no regionInvalidated() metric is emitted for
+     * a successful refresh. A fallback still uses
+     * 'retry_region_error:epoch_not_match'.
+     */
+    private function refreshRegionCacheFromEpochNotMatch(TiKvException $e, string $key): bool
+    {
+        if (!$e instanceof RegionException || $e->errorKind !== ErrorKind::EpochNotMatch) {
+            return false;
+        }
+
+        $payload = $e->epochNotMatch;
+        if (!$payload instanceof EpochNotMatch) {
+            return false;
+        }
+
+        // RegionErrorHandler::check() captures the entry before invalidating
+        // it at TxnKV call sites; RawKV checks run without a cache, so the
+        // entry is still there. Either way the leader store is needed to
+        // seed the new regions, because metapb.Region carries no leader.
+        $staleRegion = $e->cachedRegion ?? $this->regionCache->getByKey($key);
+        $regions = $this->regionResolver->regionsFromEpochNotMatch($payload, $staleRegion);
+        if ($regions === []) {
+            $this->logger->info('EpochNotMatch current_regions unusable; falling back to PD', [
+                'key' => KeyRedactor::redact($key),
+            ]);
+
+            return false;
+        }
+
+        $coveringRegion = null;
+        foreach ($regions as $region) {
+            if (KeyOrder::inRange($key, $region->startKey, $region->endKey)) {
+                $coveringRegion = $region;
+                break;
+            }
+        }
+
+        if (!$coveringRegion instanceof RegionInfo) {
+            $this->logger->info('EpochNotMatch current_regions do not cover key; falling back to PD', [
+                'key' => KeyRedactor::redact($key),
+            ]);
+
+            return false;
+        }
+
+        foreach ($regions as $region) {
+            $this->regionCache->put($region);
+        }
+
+        $this->logger->info('Region cache refreshed from EpochNotMatch current_regions', [
+            'key' => KeyRedactor::redact($key),
+            'regionId' => $coveringRegion->regionId,
+            'regionIds' => array_map(
+                static fn (RegionInfo $region): int => $region->regionId,
+                $regions,
+            ),
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Metric reason for a retryable routing invalidation.
+     *
+     * The label names the triggering ErrorKind so a dashboard can separate,
+     * for example, an epoch change from a region miss:
+     * 'retry_region_error:epoch_not_match'. An unclassified error keeps the
+     * historical 'retry_region_error' label, which also keeps existing
+     * dashboards working for the transport/message-only paths.
+     */
+    private function retryInvalidationReason(TiKvException $e): string
+    {
+        if ($e instanceof RegionException && $e->errorKind instanceof ErrorKind) {
+            return 'retry_region_error:' . $e->errorKind->value;
+        }
+
+        return 'retry_region_error';
+    }
+
+    /**
+     * Drop the store-address cache entry that a retryable error invalidated
+     * (issue #247, REG-16).
+     *
+     * Two errors are evidence about the STORE address rather than the region:
+     *
+     * - `StoreNotMatch`: TiKV answered because the request reached the wrong
+     *   store. The payload names the store ID the request carried, which is
+     *   the cache entry to drop. When the payload is absent (a hand-built
+     *   exception or a server that left the fields unset), the cached
+     *   region's leader store is the best remaining answer.
+     * - a `GrpcException`: the transport could not reach the store. The
+     *   address may be stale because a rescheduled TiKV pod keeps its store
+     *   ID and comes back on a new address; closing the channel alone makes
+     *   every retry reopen it against the same dead endpoint.
+     *
+     * Non-routing retryable errors (`ServerIsBusy`, `DiskFull`, …) never
+     * reach this method, so a busy but correctly addressed store keeps its
+     * cached address (issue #245).
+     *
+     * `$cached` is the region the request was routed through, when known.
+     * RegionErrorHandler::check() may already have removed it at TxnKV call
+     * sites, in which case the StoreNotMatch payload still names the store.
+     * `$failedStoreId` is the store the failed attempt actually targeted
+     * (from the caller's ReplicaReadTarget), when known.
+     */
+    private function invalidateStoreForRetry(
+        TiKvException $e,
+        ?RegionInfo $cached,
+        ?int $failedStoreId,
+    ): void {
+        if ($e instanceof RegionException && $e->errorKind === ErrorKind::StoreNotMatch) {
+            $storeId = (int) ($e->storeNotMatch?->getRequestStoreId() ?? 0);
+            if ($storeId <= 0) {
+                $storeId = $failedStoreId ?? ($cached instanceof RegionInfo ? $cached->leaderStoreId : 0);
+            }
+
+            $this->regionResolver->invalidateStore($storeId, 'store_not_match');
+
+            return;
+        }
+
+        if ($e instanceof GrpcException) {
+            $storeId = $failedStoreId ?? ($cached instanceof RegionInfo ? $cached->leaderStoreId : null);
+            if ($storeId !== null) {
+                $this->regionResolver->invalidateStore($storeId, 'transport_error');
+            }
+        }
+    }
+
+    /**
+     * Read the caller's failed-attempt target store ID.
+     *
+     * A non-positive or non-int answer means "not known" — an unset protobuf
+     * field or a caller that did not resolve a target must not evict store 0.
+     */
+    private function targetStoreIdOf(?callable $provider): ?int
+    {
+        if ($provider === null) {
+            return null;
+        }
+
+        $storeId = $provider();
+
+        return is_int($storeId) && $storeId > 0 ? $storeId : null;
+    }
+
+    /**
+     * Whether a gRPC failure is evidence that the channel itself is broken
+     * (issue #248, REG-17).
+     *
+     * A `DEADLINE_EXCEEDED` on a slow but healthy connection is a retryable
+     * transport failure (issue #240), but tearing the channel down for it
+     * forces a re-handshake on every slow scan and adds connection churn
+     * under load. Only UNAVAILABLE says the connection could not be used at
+     * all; the issue's acceptance criteria make that the only status that
+     * closes a channel. The store-address invalidation is deliberately not
+     * gated by this: a stale address is worth re-resolving even after a
+     * timeout.
+     */
+    private function indicatesBrokenConnection(GrpcException $e): bool
+    {
+        return $e->grpcStatusCode === GrpcStatusCode::Unavailable->value;
     }
 
     /**
@@ -389,8 +758,8 @@ final readonly class RetryExecutor
      *
      * Split from the retry decision on purpose — see
      * self::invalidatesRoutingOnFatal(). The retryable path's own
-     * invalidation is deliberately NOT reused or narrowed here; routing it
-     * through the same predicate is issue #245's job.
+     * invalidation uses the same kind table through
+     * self::invalidatesRoutingOnRetry() (issue #245).
      */
     private function invalidateRegionForFatalError(TiKvException $e, string $key): void
     {

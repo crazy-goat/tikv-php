@@ -7,7 +7,10 @@ namespace CrazyGoat\TiKV\Client\TxnKv;
 use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -22,8 +25,11 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Region\RegionCacheWarmer;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
+use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -64,10 +70,54 @@ final class TxnKvClient
     public const OPT_REPLICA_READ = 'replicaRead';
 
     /**
+     * options[] key for the client-wide resource group (issue #427). Every
+     * transaction begun by this client inherits it unless begin() overrides
+     * it. Sent as `Context.resource_control_context.resource_group_name`.
+     * Default: unset = no resource-control fields. The name must be 1 to 64
+     * characters of letters, digits, underscores or hyphens.
+     */
+    public const OPT_RESOURCE_GROUP = ResourceControl::OPTION_RESOURCE_GROUP;
+
+    /**
+     * options[] key for the client-wide opaque resource-group tag (issue
+     * #427), sent as `Context.resource_group_tag`. Default: unset = the
+     * field is not sent. Must be a non-empty string.
+     */
+    public const OPT_RESOURCE_GROUP_TAG = ResourceControl::OPTION_RESOURCE_GROUP_TAG;
+
+    /**
+     * options[] key for the optional `kvrpcpb.Context` control fields
+     * (issue #426, GAP-12): a
+     * {@see \CrazyGoat\TiKV\Client\Region\RequestContextOptions} instance
+     * carrying the isolation level, not-fill-cache flag, server-side
+     * max-execution duration, request source, resource group tag, busy
+     * threshold and resource group name applied to every request the
+     * transactions of this client send. Omitted or null (the default)
+     * applies none of them and leaves the serialized Context unchanged.
+     *
+     * A transaction may replace it through the `requestContext` option of
+     * {@see self::begin()}; the transaction-level value wins.
+     */
+    public const OPT_REQUEST_CONTEXT = 'requestContext';
+
+    /**
      * options[] key for the GC safe-point cache refresh interval in
      * milliseconds (issue #422). Default 30000 (30s). Must be >= 1.
      */
     public const OPT_GC_SAFE_POINT_REFRESH_MS = 'gcSafePointRefreshMs';
+
+    /**
+     * options[] key for the region-cache refresh interval in milliseconds
+     * (issue #425). A long-running worker calls
+     * {@see TxnKvClient::refreshRegionCache()} from its own tick; the method
+     * performs at most one refresh per interval. 0 (the default) disables the
+     * throttled refresh entirely, so nothing changes for an application that
+     * does not opt in; a forced refresh still works. Must be >= 0.
+     */
+    public const OPT_REGION_CACHE_REFRESH_MS = 'regionCacheRefreshMs';
+
+    /** Default region-cache refresh interval: disabled (issue #425). */
+    public const DEFAULT_REGION_CACHE_REFRESH_MS = RegionCacheWarmer::DEFAULT_REFRESH_INTERVAL_MS;
 
     /**
      * begin() options[] key for one-phase commit (issue #419): a
@@ -121,6 +171,71 @@ final class TxnKvClient
     public const OPT_PESSIMISTIC_LOCK_TTL_MS = 'pessimisticLockTtlMs';
 
     /**
+     * begin() options[] key for the maximum number of entries in the
+     * transaction's write set (issue #430). 0 (default) = unlimited.
+     * Exceeding the limit throws
+     * {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
+     * from set()/delete() before any RPC is issued.
+     */
+    public const OPT_MAX_TXN_ENTRY_COUNT = 'maxTxnEntryCount';
+
+    /**
+     * begin() options[] key for the maximum bytes of one write-set entry,
+     * measured as key length plus value length (issue #430). 0 (default) =
+     * unlimited. A delete contributes its key length only.
+     */
+    public const OPT_MAX_TXN_ENTRY_SIZE = 'maxTxnEntrySize';
+
+    /**
+     * begin() options[] key for the maximum bytes of the whole write set,
+     * measured as the sum of every entry's key plus value length (issue
+     * #430). 0 (default) = unlimited.
+     */
+    public const OPT_MAX_TXN_TOTAL_SIZE = 'maxTxnTotalSize';
+
+    /**
+     * begin() options[] key for the maximum number of entries in the
+     * transaction's read set (issue #297). 0 (default) = unlimited.
+     * Exceeding the limit throws
+     * {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
+     * from get()/batchGet() before the fetched value is retained.
+     */
+    public const OPT_MAX_READ_SET_ENTRIES = 'maxReadSetEntries';
+
+    /**
+     * begin() options[] key for the maximum bytes of the whole read set,
+     * measured as the sum of every entry's key plus value length (issue
+     * #297). 0 (default) = unlimited.
+     */
+    public const OPT_MAX_READ_SET_TOTAL_SIZE = 'maxReadSetTotalSize';
+
+    /**
+     * begin() options[] key for read-set tracking (issue #297). Defaults to
+     * false: `get()`/`batchGet()` do not retain values in `getReadSet()`,
+     * because nothing in the commit path consumes the read set and keeping it
+     * on the hot read path makes a long-lived transaction's memory grow
+     * without bound. Must be a bool. Passing true opts in to the map and to
+     * the `maxReadSetEntries` / `maxReadSetTotalSize` limits.
+     */
+    public const OPT_TRACK_READ_SET = 'trackReadSet';
+
+    /**
+     * begin() options[] key for the maximum bytes of one prewrite/commit
+     * request per region (issue #430). Default:
+     * {@see TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE} (16384, client-go's
+     * `DefTxnCommitBatchSize`). Must be >= 1.
+     */
+    public const OPT_MAX_TXN_BATCH_SIZE = 'maxTxnBatchSize';
+
+    /**
+     * begin() options[] key for the maximum mutations/keys of one
+     * prewrite/commit request per region (issue #430). Default:
+     * {@see TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT} (512, RawKV's
+     * `MAX_BATCH_LIMIT`). Must be >= 1.
+     */
+    public const OPT_MAX_TXN_BATCH_COUNT = 'maxTxnBatchCount';
+
+    /**
      * options[] key for the maximum staleness (ms) of the low-resolution
      * TSO timestamp cache (issue #420, GAP-06). Used only by
      * staleness-tolerant consumers (lock resolution `current_ts`);
@@ -156,6 +271,19 @@ final class TxnKvClient
 
     private bool $closed = false;
     private readonly RegionResolver $regionResolver;
+
+    /** Opt-in region-cache refresh and preload (#425). */
+    private readonly RegionCacheWarmer $regionCacheWarmer;
+
+    /**
+     * Transactions begun by this client that have not been closed yet,
+     * tracked weakly so tracking does not extend their lifetime. close()
+     * rolls the still-active ones back before releasing the transport and
+     * PD client they depend on (issue #226, TXN-21).
+     *
+     * @var list<\WeakReference<Transaction>>
+     */
+    private array $liveTransactions = [];
 
     /**
      * Final transaction outcomes shared by the LockResolver of every
@@ -219,6 +347,11 @@ final class TxnKvClient
             replicaReadPolicy: self::resolveReplicaReadPolicy($options),
             metrics: $bundle->metrics,
             ownsGrpcClient: $bundle->ownsGrpcClient,
+            codec: $bundle->codec,
+            regionCacheRefreshMs: self::resolveRegionCacheRefreshMs($options),
+            storeCache: $bundle->storeCache,
+            requestContext: self::resolveRequestContext($options),
+            resourceControl: ResourceControl::fromOptions($options),
         );
     }
 
@@ -263,7 +396,51 @@ final class TxnKvClient
          * to every transaction. Test seam (issue #429); defaults to the wall clock.
          */
         private readonly ?Closure $clock = null,
+        /**
+         * Key codec supplied by the construction path. The derived
+         * EpochNotMatch payload codec (issue #246) is V1 TxnKV's
+         * memory-comparable codec. For API V2 this property is `CodecV2`,
+         * but the derived payload codec is null because `ApiV2GrpcClient`
+         * already decodes response region boundaries; applying the V2 codec
+         * again would fail or corrupt the cached range.
+         */
+        private readonly ?CodecInterface $codec = new CodecV1(Mode::Txn),
+        /**
+         * Minimum interval between two non-forced
+         * {@see self::refreshRegionCache()} calls, in milliseconds (issue
+         * #425). 0 (the default) disables the throttled refresh; see
+         * {@see self::OPT_REGION_CACHE_REFRESH_MS}.
+         */
+        int $regionCacheRefreshMs = self::DEFAULT_REGION_CACHE_REFRESH_MS,
+        /**
+         * Pre-built warmer (test seam). When null, the client builds one from
+         * its PD client, region cache and logger.
+         */
+        ?RegionCacheWarmer $regionCacheWarmer = null,
+        /**
+         * Store-address cache the retry executor drops when a StoreNotMatch
+         * or a transport failure proves the cached address wrong (issue
+         * #247). Null for a hand-built client: the resolver then has no
+         * store cache to invalidate.
+         */
+        private readonly ?StoreCacheInterface $storeCache = null,
+        /**
+         * Optional Context control fields applied to every request of every
+         * transaction (issue #426). Null (the default) leaves the serialized
+         * Context byte-for-byte unchanged; begin() may replace it per
+         * transaction.
+         */
+        private readonly ?RequestContextOptions $requestContext = null,
+        /**
+         * Client-wide resource-control metadata (issue #427), inherited by
+         * every transaction and overridable per begin() call. Empty by
+         * default, which sends no resource-control field.
+         */
+        private readonly ResourceControl $resourceControl = new ResourceControl(),
     ) {
+        if ($regionCacheRefreshMs < 0) {
+            throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
+        }
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
@@ -279,6 +456,10 @@ final class TxnKvClient
             // cache in place — never rebind or clone it.
             $this->regionCache->attachMetricsIfAbsent($this->metrics);
         }
+        // ApiV2GrpcClient already decodes response region boundaries, so a
+        // V2 codec must not be applied to an EpochNotMatch payload a second
+        // time (issue #246).
+        $payloadCodec = $this->codec instanceof CodecV2 ? null : $this->codec;
         $this->regionResolver = $regionResolver
             ?? new RegionResolver(
                 $this->pdClient,
@@ -289,7 +470,11 @@ final class TxnKvClient
                 $this->logger,
                 $this->pdEndpoints,
                 $this->allowedStorePorts,
+                $payloadCodec,
+                $this->storeCache,
             );
+        $this->regionCacheWarmer = $regionCacheWarmer
+            ?? new RegionCacheWarmer($this->pdClient, $this->regionCache, $this->logger, $regionCacheRefreshMs);
     }
 
     /**
@@ -370,6 +555,34 @@ final class TxnKvClient
     }
 
     /**
+     * Resolve options['regionCacheRefreshMs'] (see
+     * OPT_REGION_CACHE_REFRESH_MS) for create(): the minimum interval between
+     * two non-forced region-cache refreshes (issue #425). 0 disables it.
+     * Must be >= 0.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRegionCacheRefreshMs(array $options): int
+    {
+        if (!array_key_exists(self::OPT_REGION_CACHE_REFRESH_MS, $options)) {
+            return self::DEFAULT_REGION_CACHE_REFRESH_MS;
+        }
+
+        $refreshMs = $options[self::OPT_REGION_CACHE_REFRESH_MS];
+        if (!is_int($refreshMs)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['regionCacheRefreshMs'] must be an int (milliseconds), %s given",
+                get_debug_type($refreshMs),
+            ));
+        }
+        if ($refreshMs < 0) {
+            throw new InvalidArgumentException("options['regionCacheRefreshMs'] must be >= 0");
+        }
+
+        return $refreshMs;
+    }
+
+    /**
      * Begin a new transaction.
      *
      * The transaction mode defaults to **pessimistic**: `pessimistic` is
@@ -385,12 +598,23 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
      *     optimisticLockTtlMs?: int,
      *     pessimisticLockTtlMs?: int,
+     *     maxTxnEntryCount?: int,
+     *     maxTxnEntrySize?: int,
+     *     maxTxnTotalSize?: int,
+     *     maxReadSetEntries?: int,
+     *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
+     *     requestContext?: RequestContextOptions|null,
      * } $options
      *     `pessimistic` selects the transaction mode: true (the default)
      *     takes the physical lock inside set()/delete(), false defers it to
@@ -407,6 +631,21 @@ final class TxnKvClient
      *     (default 30000) set the lock TTLs in milliseconds, each between 1 and
      *     120000 (issue #429). A pessimistic transaction extends its primary
      *     lock automatically once half of the TTL has elapsed.
+     *     `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` (each 0 =
+     *     unlimited) bound the transaction's write set (issue #430);
+     *     `trackReadSet` (default false) opts in to read-set tracking;
+     *     `maxReadSetEntries` and `maxReadSetTotalSize` (each 0 = unlimited)
+     *     bound the tracked read set (issue #297);
+     *     `maxTxnBatchSize` (default 16384 bytes) and `maxTxnBatchCount`
+     *     (default 512) split each region's prewrite mutations and commit keys
+     *     into multiple requests. Exceeding a size limit throws
+     *     {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
+     *     from set()/delete() before any RPC is issued, and from
+     *     get()/batchGet() before the fetched value is retained.
+     *     `requestContext` replaces the client-level Context control fields
+     *     (see {@see self::OPT_REQUEST_CONTEXT}) for this transaction only
+     *     (issue #426). Omit it to inherit the client-level value; pass null
+     *     to disable the controls for this transaction.
      */
     public function begin(array $options = []): Transaction
     {
@@ -414,6 +653,12 @@ final class TxnKvClient
 
         $pessimistic = (bool) ($options['pessimistic'] ?? true);
         $priority = (int) ($options['priority'] ?? 0);
+        $resourceControl = $this->resourceControl->withOverrides(
+            ResourceControl::fromOptions($options, 'begin() options'),
+        );
+        $requestContext = array_key_exists('requestContext', $options)
+            ? $this->assertRequestContextOption($options['requestContext'])
+            : $this->requestContext;
         $enable1Pc = $this->resolveEnableFlag($options, self::OPT_ENABLE_1PC);
         $enableAsyncCommit = $this->resolveEnableFlag($options, self::OPT_ENABLE_ASYNC_COMMIT);
         $eagerPessimisticLocks = $this->resolveEagerPessimisticLocks($options);
@@ -427,6 +672,24 @@ final class TxnKvClient
             $options,
             self::OPT_PESSIMISTIC_LOCK_TTL_MS,
             TwoPhaseCommitter::DEFAULT_PESSIMISTIC_LOCK_TTL_MS,
+        );
+        $maxTxnEntryCount = $this->resolveIntOption($options, self::OPT_MAX_TXN_ENTRY_COUNT, 0, 0);
+        $maxTxnEntrySize = $this->resolveIntOption($options, self::OPT_MAX_TXN_ENTRY_SIZE, 0, 0);
+        $maxTxnTotalSize = $this->resolveIntOption($options, self::OPT_MAX_TXN_TOTAL_SIZE, 0, 0);
+        $trackReadSet = $this->resolveEnableFlag($options, self::OPT_TRACK_READ_SET);
+        $maxReadSetEntries = $this->resolveIntOption($options, self::OPT_MAX_READ_SET_ENTRIES, 0, 0);
+        $maxReadSetTotalSize = $this->resolveIntOption($options, self::OPT_MAX_READ_SET_TOTAL_SIZE, 0, 0);
+        $maxTxnBatchSize = $this->resolveIntOption(
+            $options,
+            self::OPT_MAX_TXN_BATCH_SIZE,
+            TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
+            1,
+        );
+        $maxTxnBatchCount = $this->resolveIntOption(
+            $options,
+            self::OPT_MAX_TXN_BATCH_COUNT,
+            TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+            1,
         );
 
         // Read the local clock BEFORE the start timestamp and the GC check
@@ -459,9 +722,11 @@ final class TxnKvClient
             timeoutConfig: $this->timeoutConfig,
             logger: $this->logger,
             statusCache: $this->resolvedStatusCache,
+            requestContext: $requestContext,
+            resourceControl: $resourceControl,
         );
 
-        return new Transaction(
+        $transaction = new Transaction(
             txnId: $txnId,
             startTs: $startTs,
             pessimistic: $pessimistic,
@@ -485,7 +750,22 @@ final class TxnKvClient
             pessimisticLockTtlMs: $pessimisticLockTtlMs,
             clock: $this->clock,
             startedAtMs: $startedAtMs,
+            maxTxnEntryCount: $maxTxnEntryCount,
+            maxTxnEntrySize: $maxTxnEntrySize,
+            maxTxnTotalSize: $maxTxnTotalSize,
+            maxTxnBatchSize: $maxTxnBatchSize,
+            maxTxnBatchCount: $maxTxnBatchCount,
+            maxReadSetEntries: $maxReadSetEntries,
+            maxReadSetTotalSize: $maxReadSetTotalSize,
+            trackReadSet: $trackReadSet,
+            requestContext: $requestContext,
+            resourceControl: $resourceControl,
         );
+
+        $this->pruneFinishedTransactions();
+        $this->liveTransactions[] = \WeakReference::create($transaction);
+
+        return $transaction;
     }
 
     /**
@@ -507,12 +787,23 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
      *     optimisticLockTtlMs?: int,
      *     pessimisticLockTtlMs?: int,
+     *     maxTxnEntryCount?: int,
+     *     maxTxnEntrySize?: int,
+     *     maxTxnTotalSize?: int,
+     *     maxReadSetEntries?: int,
+     *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
+     *     requestContext?: RequestContextOptions|null,
      * } $options
      */
     public function beginOptimistic(array $options = []): Transaction
@@ -539,12 +830,23 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
      *     optimisticLockTtlMs?: int,
      *     pessimisticLockTtlMs?: int,
+     *     maxTxnEntryCount?: int,
+     *     maxTxnEntrySize?: int,
+     *     maxTxnTotalSize?: int,
+     *     maxReadSetEntries?: int,
+     *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
+     *     requestContext?: RequestContextOptions|null,
      * } $options
      */
     public function beginPessimistic(array $options = []): Transaction
@@ -562,12 +864,23 @@ final class TxnKvClient
      * @param array{
      *     pessimistic?: bool,
      *     priority?: int,
+     *     resourceGroup?: string,
+     *     resourceGroupTag?: string,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      *     eagerPessimisticLocks?: bool,
      *     lockWaitTimeMs?: int,
      *     optimisticLockTtlMs?: int,
      *     pessimisticLockTtlMs?: int,
+     *     maxTxnEntryCount?: int,
+     *     maxTxnEntrySize?: int,
+     *     maxTxnTotalSize?: int,
+     *     maxReadSetEntries?: int,
+     *     maxReadSetTotalSize?: int,
+     *     trackReadSet?: bool,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
+     *     requestContext?: RequestContextOptions|null,
      * } $options
      */
     private function beginWithMode(array $options, bool $pessimistic, string $method): Transaction
@@ -587,8 +900,9 @@ final class TxnKvClient
     }
 
     /**
-     * Resolve a boolean begin() option (enable1Pc / enableAsyncCommit,
-     * issue #419). Defaults to false; a non-bool value is rejected.
+     * Resolve a boolean begin() option (enable1Pc / enableAsyncCommit, issue
+     * #419, and trackReadSet, issue #297). Defaults to false; a non-bool
+     * value is rejected.
      *
      * @param array<string, mixed> $options
      */
@@ -697,6 +1011,39 @@ final class TxnKvClient
     }
 
     /**
+     * Resolve an integer begin() option, rejecting a non-int or a value
+     * below $minimum. The transaction size and batching options use this
+     * (issue #430); the per-option minimum is 0 for the opt-in limits
+     * (0 = unlimited) and 1 for the batch bounds.
+     *
+     * @param array<string, mixed> $options
+     */
+    private function resolveIntOption(array $options, string $key, int $default, int $minimum): int
+    {
+        if (!array_key_exists($key, $options)) {
+            return $default;
+        }
+
+        $value = $options[$key];
+        if (!is_int($value)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be an int, %s given",
+                $key,
+                get_debug_type($value),
+            ));
+        }
+        if ($value < $minimum) {
+            throw new InvalidArgumentException(sprintf(
+                "options['%s'] must be >= %d",
+                $key,
+                $minimum,
+            ));
+        }
+
+        return $value;
+    }
+
+    /**
      * Resolve options['replicaRead'] (see OPT_REPLICA_READ) for create():
      * the read preference applied to transaction reads (issue #421). Must
      * be a ReplicaReadPolicy instance when set.
@@ -719,6 +1066,50 @@ final class TxnKvClient
         }
 
         return $policy;
+    }
+
+    /**
+     * Resolve options['requestContext'] (see OPT_REQUEST_CONTEXT) for
+     * create(): the optional Context control fields applied to every request
+     * (issue #426). Must be a RequestContextOptions instance when set;
+     * absent or null means "apply none".
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveRequestContext(array $options): ?RequestContextOptions
+    {
+        if (!array_key_exists(self::OPT_REQUEST_CONTEXT, $options) || $options[self::OPT_REQUEST_CONTEXT] === null) {
+            return null;
+        }
+
+        $requestContext = $options[self::OPT_REQUEST_CONTEXT];
+        if (!$requestContext instanceof RequestContextOptions) {
+            throw new InvalidArgumentException(sprintf(
+                "options['requestContext'] must be a %s, %s given",
+                RequestContextOptions::class,
+                get_debug_type($requestContext),
+            ));
+        }
+
+        return $requestContext;
+    }
+
+    /**
+     * Validate a begin() `requestContext` option (issue #426): it must be a
+     * RequestContextOptions instance or null (null disables the client-level
+     * controls for this transaction).
+     */
+    private function assertRequestContextOption(mixed $requestContext): ?RequestContextOptions
+    {
+        if ($requestContext === null || $requestContext instanceof RequestContextOptions) {
+            return $requestContext;
+        }
+
+        throw new InvalidArgumentException(sprintf(
+            "begin() option 'requestContext' must be a %s or null, %s given",
+            RequestContextOptions::class,
+            get_debug_type($requestContext),
+        ));
     }
 
     /**
@@ -798,6 +1189,11 @@ final class TxnKvClient
      *
      * Use as a lightweight health check. Does not touch any user data.
      *
+     * Returns the cluster ID on success, or null if PD responded without a
+     * cluster-ID header. When `options['expectedClusterId']` is set, a
+     * response without a cluster ID fails with HealthCheckException instead
+     * of returning null.
+     *
      * @throws ClientClosedException When the client has been closed
      * @throws HealthCheckException When the PD probe fails
      */
@@ -842,6 +1238,73 @@ final class TxnKvClient
         $this->grpc->reapIdleChannels();
     }
 
+    /**
+     * Refresh the cached regions from PD (issue #425).
+     *
+     * Same contract as {@see RawKvClient::refreshRegionCache()}: PHP has no
+     * background threads, so a long-lived worker calls this from its own tick.
+     * A non-forced call performs at most one refresh per
+     * `options['regionCacheRefreshMs']` (default 0, i.e. disabled) and returns
+     * 0 when the interval has not elapsed; `$force = true` bypasses that
+     * interval only, not the per-tick bound.
+     *
+     * One call re-resolves at most
+     * `RegionCacheWarmer::DEFAULT_MAX_REGIONS_PER_REFRESH` (128) cached
+     * regions, round-robin across calls, so successive ticks walk the whole
+     * cache instead of refreshing it in one unbounded burst. The first PD
+     * failure aborts the tick, is logged and keeps the cached entries, so this
+     * method never throws. No-op after `close()`.
+     *
+     * @return int number of distinct regions the cache still holds after the
+     *         tick (a merge or split arriving later in the tick counts once,
+     *         a leaderless answer counts zero)
+     */
+    public function refreshRegionCache(bool $force = false): int
+    {
+        if ($this->closed) {
+            return 0;
+        }
+
+        return $this->regionCacheWarmer->refresh($force);
+    }
+
+    /**
+     * Resolve and cache the regions of the given ranges without serving a
+     * user read (issue #425).
+     *
+     * Same contract as {@see RawKvClient::preloadRegions()}: each range is a
+     * `[startKey, endKey]` pair of half-open bounds, where an empty `endKey`
+     * means +infinity. A PD failure is logged and never thrown; the existing
+     * cache is left untouched. No-op after `close()`.
+     *
+     * @param array<array-key, mixed> $ranges list of `[startKey, endKey]` pairs
+     * @return int number of regions cached
+     *
+     * @throws InvalidArgumentException when a range is not a pair of strings or
+     *         is reversed (`startKey` sorts after a non-empty `endKey`)
+     */
+    public function preloadRegions(array $ranges): int
+    {
+        if ($this->closed) {
+            return 0;
+        }
+
+        return $this->regionCacheWarmer->preload($ranges);
+    }
+
+    /**
+     * Release the client's resources.
+     *
+     * Transactions this client began that are still active are rolled back
+     * first, while the transport and the PD client they depend on are still
+     * open (issue #226, TXN-21). A rollback failure is logged and does not
+     * abort the shutdown; the transaction keeps its destructor fallback.
+     * The region cache is then cleared, the owned transport is closed and the
+     * PD client is closed.
+     *
+     * Idempotent and never throws. The transaction rollback can perform
+     * network I/O and block while its retry loop runs.
+     */
     public function close(): void
     {
         if ($this->closed) {
@@ -849,6 +1312,8 @@ final class TxnKvClient
         }
 
         $this->closed = true;
+
+        $this->rollbackLiveTransactions();
 
         try {
             $this->regionCache->clear();
@@ -872,6 +1337,64 @@ final class TxnKvClient
         } catch (\Throwable $e) {
             $this->logger->error('Failed to close PD client', ['exception' => $e]);
         }
+    }
+
+    /**
+     * Roll back every transaction this client began that is still active.
+     *
+     * Runs before the region cache, transport and PD client are released, so
+     * an abandoned transaction does not leave its locks behind until the TTL
+     * expires (issue #226, TXN-21). A failure is logged, not propagated:
+     * close() must never throw, and the transaction's own destructor keeps
+     * its rollback fallback.
+     */
+    private function rollbackLiveTransactions(): void
+    {
+        $references = $this->liveTransactions;
+        $this->liveTransactions = [];
+
+        foreach ($references as $reference) {
+            $transaction = $reference->get();
+            // A closed transaction always carries a terminal status, so the
+            // status check also excludes an already committed or rolled back
+            // one (see Transaction::__destruct()).
+            if (
+                !$transaction instanceof Transaction
+                || $transaction->getStatus() !== TransactionStatus::Active
+            ) {
+                continue;
+            }
+
+            try {
+                $transaction->rollback();
+            } catch (\Throwable $e) {
+                $this->logger->error('Transaction rollback failed during client close', [
+                    'txnId' => $transaction->getTxnId(),
+                    'exception' => $e,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Drop weak references whose transaction was destroyed or reached a
+     * terminal status, so the list only tracks transactions that can still
+     * be rolled back.
+     */
+    private function pruneFinishedTransactions(): void
+    {
+        $live = [];
+        foreach ($this->liveTransactions as $reference) {
+            $transaction = $reference->get();
+            if (
+                $transaction instanceof Transaction
+                && $transaction->getStatus() === TransactionStatus::Active
+            ) {
+                $live[] = $reference;
+            }
+        }
+
+        $this->liveTransactions = $live;
     }
 
     public function __destruct()

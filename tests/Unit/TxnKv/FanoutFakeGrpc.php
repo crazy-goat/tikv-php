@@ -34,6 +34,13 @@ final class FanoutFakeGrpc implements GrpcClientInterface
     public int $callCount = 0;
 
     /**
+     * Deadline passed to every call()/callAsync(), in call order.
+     *
+     * @var list<array{method: string, timeoutMs: ?int}>
+     */
+    public array $callTimeouts = [];
+
+    /**
      * Secondary keys carried by the most recent async-commit prewrite
      * request.
      *
@@ -57,6 +64,7 @@ final class FanoutFakeGrpc implements GrpcClientInterface
         ?int $timeoutMs = null,
     ): Message {
         $this->callCount++;
+        $this->callTimeouts[] = ['method' => $method, 'timeoutMs' => $timeoutMs];
         usleep((int) ($this->latencyMs * 1000));
 
         /** @var Message */
@@ -73,6 +81,7 @@ final class FanoutFakeGrpc implements GrpcClientInterface
         ?int $timeoutMs = null,
     ): GrpcFuture {
         $this->callCount++;
+        $this->callTimeouts[] = ['method' => $method, 'timeoutMs' => $timeoutMs];
         $dispatchAt = microtime(true);
         $this->dispatchLog[] = ['method' => $method, 'at' => $dispatchAt];
 
@@ -107,7 +116,7 @@ final class FanoutFakeGrpc implements GrpcClientInterface
         string $address,
         string $service,
         string $method,
-        array $requests,
+        iterable $requests,
         string $responseClass,
         ?int $timeoutMs = null,
     ): Message {

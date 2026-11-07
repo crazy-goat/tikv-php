@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommandPri;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
@@ -20,10 +21,16 @@ use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
+use CrazyGoat\Proto\Kvrpcpb\PrimaryMismatch;
+use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\TxnLockNotFound;
+use CrazyGoat\Proto\Kvrpcpb\TxnNotFound;
+use CrazyGoat\Proto\Kvrpcpb\WriteConflict;
 use CrazyGoat\Proto\Metapb\Peer;
+use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -35,6 +42,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
@@ -100,6 +108,8 @@ class TransactionTest extends TestCase
      *     priority?: int,
      *     maxBackoffMs?: int,
      *     eagerPessimisticLocks?: bool,
+     *     trackReadSet?: bool,
+     *     resourceControl?: ResourceControl,
      * } $options
      */
     private function createTransaction(array $options = []): Transaction
@@ -118,6 +128,8 @@ class TransactionTest extends TestCase
             // Existing tests cover the legacy commit-time pass; eager-lock
             // regressions opt in explicitly below.
             eagerPessimisticLocks: $options['eagerPessimisticLocks'] ?? false,
+            trackReadSet: $options['trackReadSet'] ?? false,
+            resourceControl: $options['resourceControl'] ?? new ResourceControl(),
         );
     }
 
@@ -864,7 +876,16 @@ class TransactionTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
 
         $rollbackResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
-        $this->grpc->method('call')->willReturn($rollbackResponse);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $rollbackResponse): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvBatchRollback' => $rollbackResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('key1', 'value1');
@@ -872,6 +893,7 @@ class TransactionTest extends TestCase
 
         $txn->rollback();
 
+        $this->assertSame(['KvBatchRollback'], $methods);
         $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
         $this->assertSame([], $txn->getWriteSet());
     }
@@ -897,12 +919,22 @@ class TransactionTest extends TestCase
         $heartbeatResponse = new \CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse();
         $heartbeatResponse->setLockTtl(15000);
 
-        $this->grpc->method('call')->willReturn($heartbeatResponse);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $heartbeatResponse): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvTxnHeartBeat' => $heartbeatResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('key1', 'value1');
 
         $lockTtl = $txn->heartbeat(10000);
+        $this->assertSame(['KvTxnHeartBeat'], $methods);
         $this->assertSame(15000, $lockTtl);
     }
 
@@ -922,6 +954,229 @@ class TransactionTest extends TestCase
         $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('Transaction is not active');
         $txn->heartbeat();
+    }
+
+    // ========================================================================
+    // Lifecycle — a terminal transaction cannot be used again
+    // ========================================================================
+
+    /**
+     * Every public operation of a terminal transaction, as a closure so the
+     * same provider drives the post-commit and post-rollback cases.
+     *
+     * @return iterable<string, array{\Closure(Transaction): void}>
+     */
+    public static function postTerminalOperationProvider(): iterable
+    {
+        yield 'commit' => [static function (Transaction $txn): void {
+            $txn->commit();
+        }];
+        yield 'rollback' => [static function (Transaction $txn): void {
+            $txn->rollback();
+        }];
+        yield 'set' => [static function (Transaction $txn): void {
+            $txn->set('k', 'v');
+        }];
+        yield 'delete' => [static function (Transaction $txn): void {
+            $txn->delete('k');
+        }];
+        yield 'get' => [static function (Transaction $txn): void {
+            $txn->get('k');
+        }];
+        yield 'batchGet' => [static function (Transaction $txn): void {
+            $txn->batchGet(['k']);
+        }];
+        yield 'scan' => [static function (Transaction $txn): void {
+            $txn->scan('a', 'z');
+        }];
+        yield 'heartbeat' => [static function (Transaction $txn): void {
+            $txn->heartbeat();
+        }];
+    }
+
+    /**
+     * @param \Closure(Transaction): void $operation
+     */
+    #[DataProvider('postTerminalOperationProvider')]
+    public function testOperationsAfterCommitThrowInvalidState(\Closure $operation): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('Transaction is not active');
+        $operation($txn);
+    }
+
+    /**
+     * @param \Closure(Transaction): void $operation
+     */
+    #[DataProvider('postTerminalOperationProvider')]
+    public function testOperationsAfterRollbackThrowInvalidState(\Closure $operation): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+
+        $this->expectException(InvalidStateException::class);
+        $this->expectExceptionMessage('Transaction is not active');
+        $operation($txn);
+    }
+
+    public function testDoubleCommitThrowsAndIssuesNoSecondCommitRpc(): void
+    {
+        $methods = [];
+        $this->stubCommitRpcResponses($methods);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $commitTs = $txn->getCommitTs();
+        $this->assertNotNull($commitTs);
+        $this->assertSame(['KvPrewrite', 'KvCommit'], $methods);
+
+        try {
+            $txn->commit();
+            $this->fail('A second commit() must throw InvalidStateException');
+        } catch (InvalidStateException $e) {
+            $this->assertSame('Transaction is not active', $e->getMessage());
+        }
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame($commitTs, $txn->getCommitTs());
+        $this->assertSame(1, count(array_keys($methods, 'KvCommit', true)));
+    }
+
+    public function testRollbackAfterCommitThrowsAndIssuesNoRollbackRpc(): void
+    {
+        $methods = [];
+        $this->stubCommitRpcResponses($methods);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        try {
+            $txn->rollback();
+            $this->fail('rollback() after a successful commit() must throw');
+        } catch (InvalidStateException $e) {
+            $this->assertSame('Transaction is not active', $e->getMessage());
+        }
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(['KvPrewrite', 'KvCommit'], $methods);
+    }
+
+    public function testDoubleRollbackThrowsAndIssuesNoSecondRollbackRpc(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods): object {
+                $methods[] = $method;
+
+                return match ($method) {
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->rollback();
+
+        $this->assertSame(['KvBatchRollback'], $methods);
+
+        try {
+            $txn->rollback();
+            $this->fail('A second rollback() must throw InvalidStateException');
+        } catch (InvalidStateException $e) {
+            $this->assertSame('Transaction is not active', $e->getMessage());
+        }
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame(['KvBatchRollback'], $methods);
+    }
+
+    public function testInspectionGettersRemainUsableAfterCommit(): void
+    {
+        $methods = [];
+        $this->stubCommitRpcResponses($methods);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        // Read-only inspection is the one thing a terminal transaction still
+        // supports: callers read the final status before dropping it.
+        $this->assertSame('test-txn-1', $txn->getTxnId());
+        $this->assertSame(1000, $txn->getStartTs());
+        $this->assertNotNull($txn->getCommitTs());
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertFalse($txn->isPessimistic());
+        $this->assertSame(['k1' => 'v1'], $txn->getWriteSet());
+        $this->assertSame(1, $txn->getWriteSetCount());
+        $this->assertSame(4, $txn->getWriteSetSize());
+    }
+
+    public function testInspectionGettersRemainUsableAfterRollback(): void
+    {
+        $this->setUpRollbackRegionMocking();
+        $this->grpc->method('call')->willReturnCallback(
+            static fn (string $addr, string $svc, string $method): object => match ($method) {
+                'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->rollback();
+
+        $this->assertSame('test-txn-1', $txn->getTxnId());
+        $this->assertSame(1000, $txn->getStartTs());
+        $this->assertNull($txn->getCommitTs());
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertFalse($txn->isPessimistic());
+        $this->assertSame([], $txn->getWriteSet());
+        $this->assertSame(0, $txn->getWriteSetCount());
+        $this->assertSame(0, $txn->getWriteSetSize());
+    }
+
+    /**
+     * Stub the two RPCs of a one-region optimistic commit and record the
+     * RPC methods that reached the transport in $methods.
+     *
+     * @param list<string> $methods
+     */
+    private function stubCommitRpcResponses(array &$methods): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods): object {
+                $methods[] = $method;
+
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
     }
 
     // ========================================================================
@@ -1087,6 +1342,123 @@ class TransactionTest extends TestCase
         $this->assertNotSame('', $result[0]['key']);
     }
 
+    /**
+     * A lock can also arrive as the response-level KeyError instead of a
+     * per-pair one; the scan must resolve it, ask the retry executor to
+     * reissue the same KvScan, and return the complete result set.
+     */
+    public function testScanEncounteringLockResolvesItAndRescans(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $lock = new LockInfo();
+        $lock->setKey('k2');
+        $lock->setPrimaryLock('primary');
+        $lock->setLockVersion(900);
+
+        $keyError = new KeyError();
+        $keyError->setLocked($lock);
+        $scanFail = new ScanResponse();
+        $scanFail->setError($keyError);
+
+        $scanOk = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
+        $statusResponse = new CheckTxnStatusResponse();
+        $statusResponse->setCommitVersion(3000);
+
+        $methods = [];
+        $scanCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+        ) use (
+            &$methods,
+            &$scanCalls,
+            $scanFail,
+            $scanOk,
+            $statusResponse,
+        ): object {
+            $methods[] = $method;
+            return match ($method) {
+                'KvScan' => ++$scanCalls === 1 ? $scanFail : $scanOk,
+                'KvCheckTxnStatus' => $statusResponse,
+                'KvResolveLock' => new ResolveLockResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            };
+        });
+
+        $result = $this->createTransaction(['pessimistic' => false])->scan('', '', 0);
+
+        $this->assertSame([
+            ['key' => 'k1', 'value' => 'v1'],
+            ['key' => 'k2', 'value' => 'v2'],
+        ], $result);
+        $this->assertContains('KvResolveLock', $methods);
+        $this->assertSame(2, $scanCalls, 'the scan must be reissued after the lock is resolved');
+        $this->assertSame(['KvScan', 'KvCheckTxnStatus', 'KvResolveLock', 'KvScan'], $methods);
+    }
+
+    /**
+     * A failing lock-resolution RPC is fatal: the original exception must
+     * surface instead of the scan being reissued against the same lock.
+     */
+    public function testScanLockResolutionFailurePropagates(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $lock = new LockInfo();
+        $lock->setKey('k2');
+        $lock->setPrimaryLock('primary');
+        $lock->setLockVersion(900);
+
+        $keyError = new KeyError();
+        $keyError->setLocked($lock);
+        $scanFail = new ScanResponse();
+        $scanFail->setError($keyError);
+
+        $methods = [];
+        $scanCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+        ) use (
+            &$methods,
+            &$scanCalls,
+            $scanFail,
+        ): object {
+            $methods[] = $method;
+            return match ($method) {
+                'KvScan' => ++$scanCalls === 1
+                    ? $scanFail
+                    : throw new \RuntimeException('the scan must not be reissued'),
+                'KvCheckTxnStatus' => throw new TiKvException('status check failed'),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            };
+        });
+
+        try {
+            $this->createTransaction(['pessimistic' => false])->scan('', '', 0);
+            self::fail('Expected the lock-resolution failure to surface');
+        } catch (TiKvException $e) {
+            $this->assertSame('status check failed', $e->getMessage());
+        }
+
+        $this->assertSame(1, $scanCalls);
+        $this->assertSame(['KvScan', 'KvCheckTxnStatus'], $methods);
+    }
+
     public function testScanWithLimitZeroUsesMaxScanLimit(): void
     {
         $region = $this->makeRegion(1, '', '');
@@ -1094,6 +1466,7 @@ class TransactionTest extends TestCase
         $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
+        $response = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
         $this->grpc->expects($this->once())->method('call')->with(
             $this->anything(),
             $this->anything(),
@@ -1101,7 +1474,12 @@ class TransactionTest extends TestCase
             // Limit=0 is normalized to MAX_SCAN_LIMIT (10240)
             $this->callback(fn(ScanRequest $request): bool => $request->getLimit() === 10240),
             $this->anything(),
-        )->willReturn($this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']));
+        )->willReturnCallback(
+            static fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->scan('', '');
@@ -1116,13 +1494,19 @@ class TransactionTest extends TestCase
         $this->stubScanRegionLookup([$region]);
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
+        $response = $this->makeScanResponse(['k1' => 'v1']);
         $this->grpc->expects($this->once())->method('call')->with(
             $this->anything(),
             $this->anything(),
             $this->anything(),
             $this->callback(fn(ScanRequest $request): bool => $request->getLimit() === 5),
             $this->anything(),
-        )->willReturn($this->makeScanResponse(['k1' => 'v1']));
+        )->willReturnCallback(
+            static fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->scan('', '', 5);
@@ -1141,7 +1525,23 @@ class TransactionTest extends TestCase
         $response1 = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
         $response2 = $this->makeScanResponse(['k3' => 'v3', 'k4' => 'v4']);
 
-        $this->grpc->expects($this->exactly(2))->method('call')->willReturn($response1, $response2);
+        $scanCalls = 0;
+        $this->grpc->expects($this->exactly(2))->method('call')->willReturnCallback(
+            static function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$scanCalls,
+                $response1,
+                $response2,
+            ): object {
+                return match ($method) {
+                    'KvScan' => ++$scanCalls === 1 ? $response1 : $response2,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->scan('', '');
@@ -1159,7 +1559,12 @@ class TransactionTest extends TestCase
 
         $response1 = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
 
-        $this->grpc->expects($this->once())->method('call')->willReturn($response1);
+        $this->grpc->expects($this->once())->method('call')->willReturnCallback(
+            static fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvScan' => $response1,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->scan('', '', 2);
@@ -1179,7 +1584,23 @@ class TransactionTest extends TestCase
         $response1 = $this->makeScanResponse(['k1' => 'v1']);
         $response2 = $this->makeScanResponse(['k2' => 'v2', 'k3' => 'v3']);
 
-        $this->grpc->expects($this->exactly(2))->method('call')->willReturn($response1, $response2);
+        $scanCalls = 0;
+        $this->grpc->expects($this->exactly(2))->method('call')->willReturnCallback(
+            static function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$scanCalls,
+                $response1,
+                $response2,
+            ): object {
+                return match ($method) {
+                    'KvScan' => ++$scanCalls === 1 ? $response1 : $response2,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->scan('', '', 3);
@@ -1234,12 +1655,22 @@ class TransactionTest extends TestCase
             '10' => 'a',
             'b' => 'c',
         ]);
-        $this->grpc->method('call')->willReturn($scanResponse);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $scanResponse): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $scanResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('9', 'z');
         $result = $txn->scan('', '', 0);
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertSame(
             ['10', '9', 'b'],
             array_column($result, 'key'),
@@ -1262,12 +1693,22 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $scanResponse = $this->makeScanResponse(['10' => 'a']);
-        $this->grpc->method('call')->willReturn($scanResponse);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $scanResponse): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $scanResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('9', 'z');
         $result = $txn->scan('10', 'b', 0);
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertSame(['10', '9'], array_column($result, 'key'));
     }
 
@@ -1282,12 +1723,22 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $scanResponse = $this->makeScanResponse(['2' => 'a']);
-        $this->grpc->method('call')->willReturn($scanResponse);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $scanResponse): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $scanResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('19', 'z');
         $result = $txn->scan('2', '3', 0);
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertSame(['2'], array_column($result, 'key'));
     }
 
@@ -1309,7 +1760,10 @@ class TransactionTest extends TestCase
             ? $emptyResponse
             : $scanResponse;
         $this->grpc->method('call')->willReturnCallback(
-            static fn (string $addr, string $svc, string $method, ScanRequest $request): object => $respond($request),
+            static fn (string $addr, string $svc, string $method, ScanRequest $request): object => match ($method) {
+                'KvScan' => $respond($request),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
         );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1352,13 +1806,23 @@ class TransactionTest extends TestCase
         $response = new ScanResponse();
         $response->setPairs($pairs);
 
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         // '0' is also in the write set: the normalized string key must find it.
         $txn->set('0', 'local-v0');
         $result = $txn->scan('', '');
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertCount(2, $result);
         $this->assertSame('0', $result[0]['key']);
         $this->assertSame('local-v0', $result[0]['value']);
@@ -1374,7 +1838,13 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         // The empty answer is re-asked once before it is accepted (issue #512).
-        $this->grpc->expects($this->exactly(2))->method('call')->willReturn($this->makeScanResponse([]));
+        $response = $this->makeScanResponse([]);
+        $this->grpc->expects($this->exactly(2))->method('call')->willReturnCallback(
+            static fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->scan('', '');
@@ -1395,6 +1865,34 @@ class TransactionTest extends TestCase
     public function testScanNegativeLimitThrowsInvalidArgument(): void
     {
         $txn = $this->createTransaction(['pessimistic' => false]);
+
+        // A rejected limit must never reach the scan RPC (issue #310).
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->expects($this->never())->method('getStore');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Scan limit must be 0 or greater');
+
+        $txn->scan('a', 'z', -1);
+    }
+
+    /**
+     * A pessimistic transaction refreshes its read timestamp (a PD TSO RPC)
+     * before the reader validates the limit, so "rejected before the scan
+     * RPC" — not "before any RPC" — is the contract. Pin the real ordering:
+     * exactly one getTimestamp, then no scan RPC (issue #310).
+     */
+    public function testPessimisticScanNegativeLimitSendsNoScanRpc(): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => true]);
+
+        $this->pdClient->expects($this->once())->method('getTimestamp')->willReturn(2000);
+        $this->pdClient->expects($this->never())->method('scanRegions');
+        $this->pdClient->expects($this->never())->method('getStore');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
 
         $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
         $this->expectExceptionMessage('Scan limit must be 0 or greater');
@@ -1418,11 +1916,21 @@ class TransactionTest extends TestCase
             'k5' => 'v5',
         ]);
 
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->scan('', '', 3);
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertCount(3, $result);
         $this->assertSame('k1', $result[0]['key']);
         $this->assertSame('k2', $result[1]['key']);
@@ -1442,13 +1950,23 @@ class TransactionTest extends TestCase
             'k3' => 'scanned-v3',
         ]);
 
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'local-v1');
         $txn->set('k2', 'local-v2');
         $result = $txn->scan('', '', 10);
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertCount(3, $result);
         $this->assertSame('local-v1', $result[0]['value']);
         $this->assertSame('local-v2', $result[1]['value']);
@@ -1463,11 +1981,22 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $response = $this->makeScanResponse(['k1' => 'v1']);
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('z-outside', 'should-not-appear');
         $result = $txn->scan('a', 'z');
+
+        $this->assertSame(['KvScan'], $methods);
 
         $this->assertCount(1, $result);
         $this->assertSame('k1', $result[0]['key']);
@@ -1487,12 +2016,22 @@ class TransactionTest extends TestCase
             'k3' => 'v3',
         ]);
 
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->delete('k2');
         $result = $txn->scan('', '', 3);
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertCount(2, $result);
         $this->assertSame('k1', $result[0]['key']);
         $this->assertSame('k3', $result[1]['key']);
@@ -1509,7 +2048,12 @@ class TransactionTest extends TestCase
 
         $this->grpc->expects($this->once())
             ->method('call')
-            ->willThrowException(new TiKvException('KeyExists'));
+            ->willReturnCallback(
+                static fn(string $addr, string $svc, string $method): object => match ($method) {
+                    'KvGet' => throw new TiKvException('KeyExists'),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                },
+            );
 
         $this->expectException(TiKvException::class);
         $this->expectExceptionMessage('KeyExists');
@@ -1525,7 +2069,12 @@ class TransactionTest extends TestCase
 
         $this->grpc->expects($this->once())
             ->method('call')
-            ->willThrowException(new TiKvException('WriteConflict'));
+            ->willReturnCallback(
+                static fn(string $addr, string $svc, string $method): object => match ($method) {
+                    'KvGet' => throw new TiKvException('WriteConflict'),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                },
+            );
 
         $this->expectException(TiKvException::class);
         $this->expectExceptionMessage('WriteConflict');
@@ -1546,14 +2095,18 @@ class TransactionTest extends TestCase
         $response->setNotFound(false);
         $response->setValue('recovered');
 
+        $getCalls = 0;
         $this->grpc->expects($this->exactly(2))
             ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->throwException(new TxnRetryableException(
-                    'Lock encountered',
-                    BackoffType::TxnLock,
-                )),
-                $response,
+            ->willReturnCallback(
+                static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
+                    return match ($method) {
+                        'KvGet' => ++$getCalls === 1
+                            ? throw new TxnRetryableException('Lock encountered', BackoffType::TxnLock)
+                            : $response,
+                        default => throw new \RuntimeException("Unexpected method: $method"),
+                    };
+                },
             );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1574,11 +2127,18 @@ class TransactionTest extends TestCase
         $response->setNotFound(false);
         $response->setValue('recovered');
 
+        $getCalls = 0;
         $this->grpc->expects($this->exactly(2))
             ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->throwException(new TiKvException('StaleCommand')),
-                $response,
+            ->willReturnCallback(
+                static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
+                    return match ($method) {
+                        'KvGet' => ++$getCalls === 1
+                            ? throw new TiKvException('StaleCommand')
+                            : $response,
+                        default => throw new \RuntimeException("Unexpected method: $method"),
+                    };
+                },
             );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1609,14 +2169,17 @@ class TransactionTest extends TestCase
         $response->setValue('recovered');
 
         $calls = 0;
-        $this->grpc->method('call')->willReturnCallback(function () use (&$calls, $response): GetResponse {
-            $calls++;
-            if ($calls % 3 !== 0) {
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$calls, $response): object {
                 // 1st and 2nd call of each get() fail; the 3rd succeeds.
-                throw new TiKvException('StaleCommand');
-            }
-            return $response;
-        });
+                return match ($method) {
+                    'KvGet' => ++$calls % 3 !== 0
+                        ? throw new TiKvException('StaleCommand')
+                        : $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false, 'maxBackoffMs' => 6]);
 
@@ -1641,11 +2204,18 @@ class TransactionTest extends TestCase
         $response->setNotFound(false);
         $response->setValue('recovered');
 
+        $getCalls = 0;
         $this->grpc->expects($this->exactly(2))
             ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->throwException(new TiKvException('DiskFull')),
-                $response,
+            ->willReturnCallback(
+                static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
+                    return match ($method) {
+                        'KvGet' => ++$getCalls === 1
+                            ? throw new TiKvException('DiskFull')
+                            : $response,
+                        default => throw new \RuntimeException("Unexpected method: $method"),
+                    };
+                },
             );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1666,11 +2236,18 @@ class TransactionTest extends TestCase
         $response->setNotFound(false);
         $response->setValue('recovered');
 
+        $getCalls = 0;
         $this->grpc->expects($this->exactly(2))
             ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->throwException(new TiKvException('EpochNotMatch')),
-                $response,
+            ->willReturnCallback(
+                static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
+                    return match ($method) {
+                        'KvGet' => ++$getCalls === 1
+                            ? throw new TiKvException('EpochNotMatch')
+                            : $response,
+                        default => throw new \RuntimeException("Unexpected method: $method"),
+                    };
+                },
             );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1691,11 +2268,18 @@ class TransactionTest extends TestCase
         $response->setNotFound(false);
         $response->setValue('recovered');
 
+        $getCalls = 0;
         $this->grpc->expects($this->exactly(2))
             ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->throwException(new GrpcException('connection reset', 14)),
-                $response,
+            ->willReturnCallback(
+                static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
+                    return match ($method) {
+                        'KvGet' => ++$getCalls === 1
+                            ? throw new GrpcException('connection reset', 14)
+                            : $response,
+                        default => throw new \RuntimeException("Unexpected method: $method"),
+                    };
+                },
             );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1716,11 +2300,18 @@ class TransactionTest extends TestCase
         $response->setNotFound(false);
         $response->setValue('recovered');
 
+        $getCalls = 0;
         $this->grpc->expects($this->exactly(2))
             ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->throwException(new RegionException('test', 'RegionNotFound')),
-                $response,
+            ->willReturnCallback(
+                static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
+                    return match ($method) {
+                        'KvGet' => ++$getCalls === 1
+                            ? throw new RegionException('test', 'RegionNotFound')
+                            : $response,
+                        default => throw new \RuntimeException("Unexpected method: $method"),
+                    };
+                },
             );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1746,11 +2337,18 @@ class TransactionTest extends TestCase
         $response->setNotFound(false);
         $response->setValue('ok');
 
+        $getCalls = 0;
         $this->grpc->expects($this->exactly(2))
             ->method('call')
-            ->willReturnOnConsecutiveCalls(
-                $this->throwException(new TiKvException('ReadIndexNotReady')),
-                $response,
+            ->willReturnCallback(
+                static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
+                    return match ($method) {
+                        'KvGet' => ++$getCalls === 1
+                            ? throw new TiKvException('ReadIndexNotReady')
+                            : $response,
+                        default => throw new \RuntimeException("Unexpected method: $method"),
+                    };
+                },
             );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -1779,16 +2377,28 @@ class TransactionTest extends TestCase
         $response = new PessimisticLockResponse();
         $response->setErrors([$keyError]);
 
-        $this->grpc->method('call')
-            ->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => true]);
         $txn->set('key', 'value');
 
-        $this->expectException(DeadlockException::class);
-        $this->expectExceptionMessage('Deadlock detected during pessimistic lock');
+        try {
+            $txn->commit();
+            $this->fail('Expected DeadlockException was not thrown');
+        } catch (DeadlockException $e) {
+            $this->assertSame('Deadlock detected during pessimistic lock', $e->getMessage());
+        }
 
-        $txn->commit();
+        $this->assertSame(['KvPessimisticLock'], $methods);
     }
 
     public function testCommitPessimisticLockConflictStillThrowsTransactionConflict(): void
@@ -1806,15 +2416,28 @@ class TransactionTest extends TestCase
         $response = new PessimisticLockResponse();
         $response->setErrors([$keyError]);
 
-        $this->grpc->method('call')
-            ->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => true]);
         $txn->set('key', 'value');
 
-        $this->expectException(TransactionConflictException::class);
+        try {
+            $txn->commit();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException) {
+            // expected
+        }
 
-        $txn->commit();
+        $this->assertSame(['KvPessimisticLock'], $methods);
     }
 
     /**
@@ -1949,8 +2572,16 @@ class TransactionTest extends TestCase
         $response = new PessimisticLockResponse();
         $response->setErrors([$keyError]);
 
-        $this->grpc->method('call')
-            ->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvPessimisticLock' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => true]);
         $txn->set('key', 'value');
@@ -1963,6 +2594,8 @@ class TransactionTest extends TestCase
             $this->assertSame(42, $e->getDeadlockKeyHash());
             $this->assertSame(777, $e->getLockTs());
         }
+
+        $this->assertSame(['KvPessimisticLock'], $methods);
     }
 
     /**
@@ -2204,13 +2837,23 @@ class TransactionTest extends TestCase
         $pair->setValue('remote-v2');
         $batchGetResponse->setPairs([$pair]);
 
-        $this->grpc->method('call')->willReturn($batchGetResponse);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $batchGetResponse): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvBatchGet' => $batchGetResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'local-v1');
 
         $result = $txn->batchGet(['k1', 'k2', 'k3']);
 
+        $this->assertSame(['KvBatchGet'], $methods);
         $this->assertSame('local-v1', $result['k1']);
         $this->assertSame('remote-v2', $result['k2']);
         $this->assertNull($result['k3']);
@@ -2283,6 +2926,87 @@ class TransactionTest extends TestCase
             ['KvBatchGet', 'KvCheckTxnStatus', 'KvResolveLock', 'KvBatchGet'],
             $methods,
         );
+    }
+
+    /**
+     * A per-pair Locked error may omit LockInfo::key; the reader must fall
+     * back to the key it asked for so the lock can still be resolved (the
+     * `$locked->setKey($fallbackKey)` branch), then retry the batch read.
+     */
+    public function testBatchGetLockedPairWithoutKeyResolvesUsingTheRequestKey(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $lock = new LockInfo();
+        $lock->setPrimaryLock('primary');
+        $lock->setLockVersion(900);
+        $keyError = new KeyError();
+        $keyError->setLocked($lock);
+        $errorPair = new KvPair();
+        $errorPair->setError($keyError);
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $errorResponse->setPairs([$errorPair]);
+
+        $successPair = new KvPair();
+        $successPair->setKey('k1');
+        $successPair->setValue('after-lock');
+        $successResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $successResponse->setPairs([$successPair]);
+
+        $statusResponse = new CheckTxnStatusResponse();
+        $statusResponse->setCommitVersion(3000);
+
+        $methods = [];
+        $batchCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+            mixed $request,
+        ) use (
+            &$methods,
+            &$batchCalls,
+            $errorResponse,
+            $successResponse,
+            $statusResponse,
+        ): object {
+            $methods[] = $method;
+            return match ($method) {
+                'KvBatchGet' => ++$batchCalls === 1 ? $errorResponse : $successResponse,
+                'KvCheckTxnStatus' => $statusResponse,
+                'KvResolveLock' => $this->resolveLockResponse($request, ['k1']),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            };
+        });
+
+        $result = $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+
+        $this->assertSame(['k1' => 'after-lock'], $result);
+        $this->assertSame(2, $batchCalls);
+        $this->assertSame(
+            ['KvBatchGet', 'KvCheckTxnStatus', 'KvResolveLock', 'KvBatchGet'],
+            $methods,
+        );
+    }
+
+    /**
+     * @param list<string> $expectedKeys
+     */
+    private function resolveLockResponse(mixed $request, array $expectedKeys): ResolveLockResponse
+    {
+        $this->assertInstanceOf(ResolveLockRequest::class, $request);
+        $this->assertSame($expectedKeys, array_map(
+            static fn (string $key): string => $key,
+            iterator_to_array($request->getKeys()),
+        ));
+
+        return new ResolveLockResponse();
     }
 
     public function testBatchGetLockedResponseErrorResolvesLockAndRetries(): void
@@ -2388,16 +3112,75 @@ class TransactionTest extends TestCase
 
         $addresses = [];
         $this->grpc->method('call')->willReturnCallback(
-            function (string $address) use (&$addresses, $errorResponse, $successResponse): object {
+            static function (
+                string $address,
+                string $svc,
+                string $method,
+            ) use (
+                &$addresses,
+                $errorResponse,
+                $successResponse,
+            ): object {
                 $addresses[] = $address;
-                return count($addresses) === 1 ? $errorResponse : $successResponse;
+                return match ($method) {
+                    'KvBatchGet' => count($addresses) === 1 ? $errorResponse : $successResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             },
         );
 
         $result = $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
 
         $this->assertSame(['k1' => 'v1'], $result);
+        // Issue #222: the first KvBatchGet failed with NotLeader and the
+        // second one (against the hinted leader) succeeded — exactly two RPCs.
+        $this->assertCount(2, $addresses, 'the NotLeader must be retried exactly once');
         $this->assertSame(['127.0.0.1:20161', '127.0.0.1:20162'], $addresses);
+    }
+
+    /**
+     * Issue #222: a fatal region error must surface without a retry. A
+     * `KeyNotInRegion` says the cached routing information is wrong, so the
+     * executor drops the region (issue #233) and rethrows instead of spending
+     * its retry budget on the same request.
+     */
+    public function testBatchGetDoesNotRetryFatalRegionError(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $keyNotInRegion = new \CrazyGoat\Proto\Errorpb\KeyNotInRegion();
+        $keyNotInRegion->setRegionId($this->testRegion->regionId);
+        $keyNotInRegion->setKey('k1');
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setKeyNotInRegion($keyNotInRegion);
+        $response = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
+        $response->setRegionError($regionError);
+
+        $calls = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$calls, $response): object {
+                $calls++;
+                return match ($method) {
+                    'KvBatchGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        try {
+            $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+            $this->fail('Expected RegionException was not thrown');
+        } catch (RegionException $e) {
+            $this->assertSame(
+                \CrazyGoat\TiKV\Client\Retry\ErrorKind::KeyNotInRegion,
+                $e->errorKind,
+            );
+        }
+
+        $this->assertSame(1, $calls, 'a fatal region error must not be retried');
     }
 
     public function testBatchGetRejectsUnhandledPairKeyError(): void
@@ -2413,11 +3196,25 @@ class TransactionTest extends TestCase
         $pair->setError($keyError);
         $response = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
         $response->setPairs([$pair]);
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvBatchGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
-        $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('BatchGet failed: TxnNotFound');
-        $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+        try {
+            $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame('BatchGet failed: TxnNotFound', $e->getMessage());
+        }
+
+        $this->assertSame(['KvBatchGet'], $methods);
     }
 
     public function testBatchGetRejectsResponseLevelKeyError(): void
@@ -2431,11 +3228,25 @@ class TransactionTest extends TestCase
         $keyError->setTxnNotFound(new \CrazyGoat\Proto\Kvrpcpb\TxnNotFound());
         $response = new \CrazyGoat\Proto\Kvrpcpb\BatchGetResponse();
         $response->setError($keyError);
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvBatchGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
-        $this->expectException(TiKvException::class);
-        $this->expectExceptionMessage('BatchGet failed: TxnNotFound');
-        $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+        try {
+            $this->createTransaction(['pessimistic' => false])->batchGet(['k1']);
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame('BatchGet failed: TxnNotFound', $e->getMessage());
+        }
+
+        $this->assertSame(['KvBatchGet'], $methods);
     }
 
     public function testBatchGetAcceptsNumericKeysFromArrayKeys(): void
@@ -2507,11 +3318,21 @@ class TransactionTest extends TestCase
         $response = new GetResponse();
         $response->setNotFound(true);
 
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $result = $txn->get('missing-key');
 
+        $this->assertSame(['KvGet'], $methods);
         $this->assertNull($result);
     }
 
@@ -2588,13 +3409,27 @@ class TransactionTest extends TestCase
         $keyError->setRetryable('optimistic lock not found');
         $response->setError($keyError);
 
-        $this->grpc->method('call')->willReturn($response);
-
-        $this->expectException(TransactionConflictException::class);
-        $this->expectExceptionMessage('optimistic lock not found');
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
-        $txn->get('key');
+
+        try {
+            $txn->get('key');
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('optimistic lock not found', $e->getMessage());
+        }
+
+        $this->assertSame(['KvGet'], $methods);
     }
 
     // ========================================================================
@@ -3035,6 +3870,146 @@ class TransactionTest extends TestCase
     }
 
     /**
+     * Issue #246: a split between grouping and prewrite must not send a key
+     * that equals the old region's exclusive end to that region. The
+     * EpochNotMatch payload refreshes the cache to [.., k2) + [k2, ..); the
+     * retry must split the group and prewrite k1 to region 1 and k2 to
+     * region 2, instead of replaying both mutations against region 1.
+     */
+    public function testCommitPrewriteRegroupsGroupAfterSplitAtExclusiveEnd(): void
+    {
+        $stale = $this->makeRegion(1, '', '');
+        $left = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: '',
+            endKey: 'k2',
+        );
+        $right = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'k2',
+            endKey: '',
+        );
+
+        $cache = $this->stubStatefulRegionCache([$stale]);
+        $this->regionCache->method('invalidate')->willReturnCallback($cache->invalidate(...));
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+        $this->pdClient->method('scanRegions')->willReturn([$stale]);
+        // The payload only carries the left half: the boundary key 'k2' is
+        // not covered by it and must be resolved through PD per key.
+        $this->pdClient->expects($this->once())
+            ->method('getRegion')
+            ->with('k2')
+            ->willReturn($right);
+
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(2);
+
+        $leftPeer = new Peer();
+        $leftPeer->setId(1);
+        $leftPeer->setStoreId(1);
+        $protoLeft = new Region();
+        $protoLeft->setId(1);
+        $protoLeft->setStartKey('');
+        $protoLeft->setEndKey('k2');
+        $protoLeft->setRegionEpoch($epoch);
+        $protoLeft->setPeers([$leftPeer]);
+
+        $payload = new EpochNotMatch();
+        $payload->setCurrentRegions([$protoLeft]);
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setMessage('epoch not match');
+        $regionError->setEpochNotMatch($payload);
+
+        $staleResponse = new PrewriteResponse();
+        $staleResponse->setRegionError($regionError);
+        $okResponse = new PrewriteResponse();
+
+        /** @var list<PrewriteRequest> $prewriteRequests */
+        $prewriteRequests = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$prewriteRequests,
+                $left,
+                $right,
+                $staleResponse,
+                $okResponse,
+            ): object {
+                if ($method === 'KvPrewrite') {
+                    self::assertInstanceOf(PrewriteRequest::class, $request);
+                    $prewriteRequests[] = $request;
+                    if (count($prewriteRequests) === 1) {
+                        return $staleResponse;
+                    }
+
+                    $context = $request->getContext();
+                    $requestRegion = match ($context?->getRegionId()) {
+                        1 => $left,
+                        2 => $right,
+                        default => null,
+                    };
+                    self::assertInstanceOf(
+                        RegionInfo::class,
+                        $requestRegion,
+                        'unexpected request region id: ' . var_export($context?->getRegionId(), true),
+                    );
+                    foreach ($request->getMutations() as $mutation) {
+                        self::assertTrue(
+                            KeyOrder::inRange($mutation->getKey(), $requestRegion->startKey, $requestRegion->endKey),
+                            sprintf(
+                                'prewrite key %s must be inside the request region [%s, %s)',
+                                bin2hex($mutation->getKey()),
+                                bin2hex($requestRegion->startKey),
+                                bin2hex($requestRegion->endKey),
+                            ),
+                        );
+                    }
+
+                    return $okResponse;
+                }
+
+                return match ($method) {
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k1', 'v1');
+        $txn->set('k2', 'v2');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        // One failed pre-split attempt, then one request per post-split region.
+        $this->assertCount(3, $prewriteRequests);
+
+        $retriedLeft = $prewriteRequests[1];
+        $this->assertSame(1, $retriedLeft->getContext()?->getRegionId());
+        $this->assertCount(1, $retriedLeft->getMutations());
+        $this->assertSame('k1', $retriedLeft->getMutations()[0]->getKey());
+
+        $retriedRight = $prewriteRequests[2];
+        $this->assertSame(2, $retriedRight->getContext()?->getRegionId());
+        $this->assertCount(1, $retriedRight->getMutations());
+        $this->assertSame('k2', $retriedRight->getMutations()[0]->getKey());
+    }
+
+    /**
      * Issue #213 (TXN-08): a `KeyError.locked` on prewrite is resolved and
      * the prewrite is retried inside the RetryExecutor instead of the
      * `TxnRetryableException` escaping to the caller.
@@ -3342,7 +4317,7 @@ class TransactionTest extends TestCase
 
         $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('refusing to commit an arbitrary region as primary');
-        $method->invoke($committer, ['k1'], $state, $retryExecutor, static fn (): ?BackoffType => null);
+        $method->invoke($committer, ['k1'], 'other', $state, $retryExecutor, static fn (): ?BackoffType => null);
     }
 
     public function testRollbackAfterCommitThrows(): void
@@ -3936,6 +4911,88 @@ class TransactionTest extends TestCase
         $this->assertSame(1, $context->getPriority());
     }
 
+    public function testResourceControlIsCarriedOnEveryRequestContext(): void
+    {
+        // The transaction's resource group and tag must reach the Context of
+        // every request the transaction sends (issue #427, GAP-13).
+        $this->stubRegionAndStore();
+
+        $capturedRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequests,
+            ): object {
+                if (in_array($method, ['KvGet', 'KvPrewrite', 'KvCommit'], true)) {
+                    if (
+                        !$request instanceof GetRequest
+                        && !$request instanceof PrewriteRequest
+                        && !$request instanceof CommitRequest
+                    ) {
+                        throw new \RuntimeException("Unexpected request for {$method}");
+                    }
+                    $capturedRequests[$method] = $request;
+                }
+                return match ($method) {
+                    'KvGet' => new GetResponse(),
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction([
+            'pessimistic' => false,
+            'resourceControl' => new ResourceControl('tenant-a', 'nightly-job'),
+        ]);
+        $txn->get('k1');
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $this->assertSame(['KvGet', 'KvPrewrite', 'KvCommit'], array_keys($capturedRequests));
+        foreach ($capturedRequests as $method => $request) {
+            $context = $request->getContext();
+            $this->assertNotNull($context, "no Context on {$method}");
+            $controlContext = $context->getResourceControlContext();
+            $this->assertNotNull($controlContext, "no resource control context on {$method}");
+            $this->assertSame('tenant-a', $controlContext->getResourceGroupName(), "wrong group on {$method}");
+            $this->assertSame('nightly-job', $context->getResourceGroupTag(), "wrong tag on {$method}");
+        }
+    }
+
+    public function testDefaultResourceControlLeavesTheContextUnchanged(): void
+    {
+        $this->stubRegionAndStore();
+
+        $capturedRequest = null;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$capturedRequest,
+            ): object {
+                if ($method === 'KvGet') {
+                    $capturedRequest = $request;
+                }
+                return new GetResponse();
+            });
+
+        $this->createTransaction(['pessimistic' => false])->get('k1');
+
+        $this->assertInstanceOf(GetRequest::class, $capturedRequest);
+        $context = $capturedRequest->getContext();
+        $this->assertNotNull($context);
+        $this->assertFalse($context->hasResourceControlContext());
+        $this->assertSame('', $context->getResourceGroupTag());
+    }
+
     // ========================================================================
     // rollback()
     // ========================================================================
@@ -4095,12 +5152,22 @@ class TransactionTest extends TestCase
             'k3' => 'v3',
         ]);
 
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->delete('k2');
         $result = $txn->scan('', '');
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertCount(2, $result);
         $this->assertSame('k1', $result[0]['key']);
         $this->assertSame('k3', $result[1]['key']);
@@ -4114,12 +5181,22 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->makeStore());
 
         $response = $this->makeScanResponse(['k1' => 'v1']);
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvScan' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->delete('missing-key');
         $result = $txn->scan('', '');
 
+        $this->assertSame(['KvScan'], $methods);
         $this->assertCount(1, $result);
         $this->assertSame('k1', $result[0]['key']);
     }
@@ -4169,26 +5246,28 @@ class TransactionTest extends TestCase
         $error->setNotLeader($notLeader);
 
         $cleanResponse = $this->makeScanResponse(['k1' => 'v1']);
+        $staleResponse = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+        $staleResponse->setRegionError($error);
         $addresses = [];
         $callCount = 0;
         $this->grpc->method('call')->willReturnCallback(
-            function (string $address) use (
+            static function (
+                string $address,
+                string $svc,
+                string $method,
+            ) use (
                 &$callCount,
                 &$addresses,
-                $error,
+                $staleResponse,
                 $cleanResponse,
             ): object {
                 $callCount++;
                 $addresses[] = $address;
 
-                if ($callCount === 1) {
-                    $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
-                    $response->setRegionError($error);
-
-                    return $response;
-                }
-
-                return $cleanResponse;
+                return match ($method) {
+                    'KvScan' => $callCount === 1 ? $staleResponse : $cleanResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             },
         );
 
@@ -4243,11 +5322,14 @@ class TransactionTest extends TestCase
 
         $cleanResponse = $this->makeScanResponse(['k1' => 'v1']);
 
+        $staleResponse = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+        $staleResponse->setRegionError($error);
+
         /** @var list<ScanRequest> $capturedRequests */
         $capturedRequests = [];
         $callCount = 0;
         $this->grpc->method('call')->willReturnCallback(
-            function (
+            static function (
                 string $address,
                 string $service,
                 string $method,
@@ -4255,7 +5337,7 @@ class TransactionTest extends TestCase
             ) use (
                 &$callCount,
                 &$capturedRequests,
-                $error,
+                $staleResponse,
                 $cleanResponse,
             ): object {
                 $callCount++;
@@ -4263,19 +5345,15 @@ class TransactionTest extends TestCase
                     $capturedRequests[] = $request;
                 }
 
-                if ($callCount === 1) {
-                    $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
-                    $response->setRegionError($error);
-
-                    return $response;
-                }
-
-                // The continuation over [k,z) returns no keys.
-                if ($request instanceof ScanRequest && $request->getStartKey() === 'k') {
-                    return new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
-                }
-
-                return $cleanResponse;
+                return match ($method) {
+                    'KvScan' => match (true) {
+                        $callCount === 1 => $staleResponse,
+                        // The continuation over [k,z) returns no keys.
+                        $request instanceof ScanRequest && $request->getStartKey() === 'k' => new ScanResponse(),
+                        default => $cleanResponse,
+                    },
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             },
         );
 
@@ -4343,11 +5421,35 @@ class TransactionTest extends TestCase
         $error = new \CrazyGoat\Proto\Errorpb\Error();
         $error->setMessage('epoch not match');
 
+        $staleResponse = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+        $staleResponse->setRegionError($error);
+
+        $buildResponse = static function (mixed $request): \CrazyGoat\Proto\Kvrpcpb\ScanResponse {
+            $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
+            if ($request instanceof ScanRequest && $request->getStartKey() === 'k') {
+                // Continuation over the post-split [k,z).
+                $pair = new KvPair();
+                $pair->setKey('k3');
+                $pair->setValue('v3');
+                $response->setPairs([$pair]);
+            } else {
+                // Retried scan of [a,k) after the split.
+                foreach (['k1' => 'v1', 'k2' => 'v2'] as $k => $v) {
+                    $pair = new KvPair();
+                    $pair->setKey($k);
+                    $pair->setValue($v);
+                    $response->setPairs([...$response->getPairs(), $pair]);
+                }
+            }
+
+            return $response;
+        };
+
         /** @var list<ScanRequest> $capturedRequests */
         $capturedRequests = [];
         $callCount = 0;
         $this->grpc->method('call')->willReturnCallback(
-            function (
+            static function (
                 string $address,
                 string $service,
                 string $method,
@@ -4355,38 +5457,18 @@ class TransactionTest extends TestCase
             ) use (
                 &$callCount,
                 &$capturedRequests,
-                $error,
+                $staleResponse,
+                $buildResponse,
             ): object {
                 $callCount++;
                 if ($request instanceof ScanRequest) {
                     $capturedRequests[] = $request;
                 }
 
-                if ($callCount === 1) {
-                    $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
-                    $response->setRegionError($error);
-
-                    return $response;
-                }
-
-                $response = new \CrazyGoat\Proto\Kvrpcpb\ScanResponse();
-                if ($request instanceof ScanRequest && $request->getStartKey() === 'k') {
-                    // Continuation over the post-split [k,z).
-                    $pair = new KvPair();
-                    $pair->setKey('k3');
-                    $pair->setValue('v3');
-                    $response->setPairs([$pair]);
-                } else {
-                    // Retried scan of [a,k) after the split.
-                    foreach (['k1' => 'v1', 'k2' => 'v2'] as $k => $v) {
-                        $pair = new KvPair();
-                        $pair->setKey($k);
-                        $pair->setValue($v);
-                        $response->setPairs([...$response->getPairs(), $pair]);
-                    }
-                }
-
-                return $response;
+                return match ($method) {
+                    'KvScan' => $callCount === 1 ? $staleResponse : $buildResponse($request),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             },
         );
 
@@ -4421,7 +5503,12 @@ class TransactionTest extends TestCase
         $originalException = new TiKvException('StaleCommand');
 
         $this->grpc->method('call')
-            ->willThrowException($originalException);
+            ->willReturnCallback(
+                static fn(string $addr, string $svc, string $method): object => match ($method) {
+                    'KvGet' => throw $originalException,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                },
+            );
 
         $this->expectException(TiKvException::class);
         $this->expectExceptionMessage('StaleCommand');
@@ -4431,8 +5518,32 @@ class TransactionTest extends TestCase
     }
 
     // ========================================================================
-    // get() — fills readSet
+    // get() — read-set tracking is opt-in
     // ========================================================================
+
+    public function testReadSetIsEmptyByDefaultAfterReads(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $response->setNotFound(false);
+        $response->setValue('some-value');
+        $this->grpc->method('call')->willReturn($response);
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+
+        self::assertSame('some-value', $txn->get('my-key'));
+        self::assertSame([], $txn->getReadSet());
+        self::assertSame(0, $txn->getReadSetCount());
+        self::assertSame(0, $txn->getReadSetSize());
+    }
+
 
     public function testGetPopulatesReadSet(): void
     {
@@ -4448,13 +5559,29 @@ class TransactionTest extends TestCase
         $response->setNotFound(false);
         $response->setValue('some-value');
 
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
-        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn = $this->createTransaction(['pessimistic' => false, 'trackReadSet' => true]);
         $txn->get('my-key');
 
+        $this->assertSame(['KvGet'], $methods);
         $this->assertArrayHasKey('my-key', $txn->getReadSet());
         $this->assertSame('some-value', $txn->getReadSet()['my-key']);
+
+        $txn->clearReadSet();
+
+        $this->assertSame([], $txn->getReadSet());
+        $this->assertSame(0, $txn->getReadSetCount());
+        $this->assertSame(0, $txn->getReadSetSize());
     }
 
     public function testGetPopulatesReadSetWithNullOnNotFound(): void
@@ -4470,11 +5597,21 @@ class TransactionTest extends TestCase
         $response = new GetResponse();
         $response->setNotFound(true);
 
-        $this->grpc->method('call')->willReturn($response);
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
 
-        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn = $this->createTransaction(['pessimistic' => false, 'trackReadSet' => true]);
         $result = $txn->get('missing');
 
+        $this->assertSame(['KvGet'], $methods);
         $this->assertNull($result);
         $this->assertArrayHasKey('missing', $txn->getReadSet());
         $this->assertNull($txn->getReadSet()['missing']);
@@ -5620,13 +6757,13 @@ class TransactionTest extends TestCase
                 string $method,
             ) use (
                 &$lockAttempts,
-                $staleResponse
-): object {
-                if ($method === 'KvPessimisticLock') {
-                    $lockAttempts++;
-                    return $staleResponse;
-                }
-                throw new \RuntimeException("Unexpected method: $method");
+                $staleResponse,
+            ): object {
+                $lockAttempts++;
+                return match ($method) {
+                    'KvPessimisticLock' => $staleResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => true]);
@@ -5705,11 +6842,11 @@ class TransactionTest extends TestCase
                 $staleResponse,
                 $okResponse,
             ): object {
-                if ($method === 'KvBatchRollback') {
-                    $rollbackRequests[] = $request;
-                    return count($rollbackRequests) === 1 ? $staleResponse : $okResponse;
-                }
-                throw new \RuntimeException("Unexpected method: $method");
+                $rollbackRequests[] = $request;
+                return match ($method) {
+                    'KvBatchRollback' => count($rollbackRequests) === 1 ? $staleResponse : $okResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -5888,11 +7025,11 @@ class TransactionTest extends TestCase
             ) use (
                 &$rollbackRequests,
             ): object {
-                if ($method === 'KvBatchRollback') {
-                    $rollbackRequests[] = $request;
-                    return new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
-                }
-                throw new \RuntimeException("Unexpected method: $method");
+                $rollbackRequests[] = $request;
+                return match ($method) {
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -5952,7 +7089,12 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getTimestamp')->willReturn(3000);
 
         $this->grpc->method('call')
-            ->willReturnCallback(static fn(): object => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse());
+            ->willReturnCallback(
+                static fn(string $addr, string $svc, string $method): object => match ($method) {
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                },
+            );
 
         $txn = $this->createTransaction(['pessimistic' => false]);
         $txn->set('k1', 'v1');
@@ -6148,13 +7290,12 @@ class TransactionTest extends TestCase
                 &$rollbackCalls,
                 $errorResponse,
             ): object {
-                if ($method !== 'KvBatchRollback') {
-                    throw new \RuntimeException("Unexpected method: $method");
-                }
-
-                return $rollbackCalls++ === 0
-                    ? $errorResponse
-                    : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+                return match ($method) {
+                    'KvBatchRollback' => $rollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             },
         );
 
@@ -6267,14 +7408,14 @@ class TransactionTest extends TestCase
                 string $method,
             ) use (
                 &$batchRollbackCalls,
-                $errorResponse
-): object {
-                if ($method === 'KvBatchRollback') {
-                    return $batchRollbackCalls++ === 0
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
                         ? $errorResponse
-                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
-                }
-                throw new \RuntimeException("Unexpected method: $method");
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => false]);
@@ -6313,6 +7454,49 @@ class TransactionTest extends TestCase
         }
     }
 
+    public function testRollbackAbortWinsOverCompatibilityRetryable(): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $keyError = new KeyError();
+        $keyError->setAbort('simulated abort');
+        $keyError->setRetryable('simulated retryable');
+        $errorResponse->setError($keyError);
+
+        $batchRollbackCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchRollbackCalls,
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key1', 'value1');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertStringContainsString('Abort during rollback', $e->getMessage());
+        }
+
+        // A fatal abort is checked before the compatibility string, so the
+        // co-set `retryable` must not cause a retry.
+        $this->assertSame(1, $batchRollbackCalls);
+    }
+
     public function testPessimisticRollbackErrorsAreHandled(): void
     {
         $this->setUpRollbackRegionMocking();
@@ -6330,17 +7514,15 @@ class TransactionTest extends TestCase
                 string $method,
             ) use (
                 &$pessimisticRollbackCalls,
-                $errorResponse
-): object {
-                if ($method === 'KVPessimisticRollback') {
-                    return $pessimisticRollbackCalls++ === 0
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KVPessimisticRollback' => $pessimisticRollbackCalls++ === 0
                         ? $errorResponse
-                        : new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse();
-                }
-                if ($method === 'KvBatchRollback') {
-                    return new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
-                }
-                throw new \RuntimeException("Unexpected method: $method");
+                        : new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => true]);
@@ -6353,5 +7535,258 @@ class TransactionTest extends TestCase
 
         $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
         $this->assertSame(2, $pessimisticRollbackCalls);
+    }
+
+    /**
+     * @return array<string, array{0: callable(KeyError): void}>
+     */
+    public static function alreadyGoneRollbackKeyErrorProvider(): array
+    {
+        return [
+            'txn_not_found' => [
+                static function (KeyError $error): void {
+                    $error->setTxnNotFound(new TxnNotFound());
+                },
+            ],
+            'txn_lock_not_found' => [
+                static function (KeyError $error): void {
+                    $error->setTxnLockNotFound(new TxnLockNotFound());
+                },
+            ],
+            // Newer TiKV co-sets the compatibility string with the structured
+            // variant; the structured variant must win (review point 1).
+            'txn_lock_not_found + retryable' => [
+                static function (KeyError $error): void {
+                    $error->setTxnLockNotFound(new TxnLockNotFound());
+                    $error->setRetryable('txn lock not found');
+                },
+            ],
+        ];
+    }
+
+    /**
+     * The two "already gone" variants are the only rollback KeyErrors that
+     * mean there is nothing left to clean up (issue #559).
+     *
+     * @param callable(KeyError): void $setVariant
+     */
+    #[DataProvider('alreadyGoneRollbackKeyErrorProvider')]
+    public function testRollbackTreatsAlreadyGoneKeyErrorAsConfirmedRollback(
+        callable $setVariant,
+    ): void {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $keyError = new KeyError();
+        $setVariant($keyError);
+        $errorResponse->setError($keyError);
+
+        $batchRollbackCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchRollbackCalls,
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key1', 'value1');
+
+        // The lock is already gone, so the error confirms the rollback
+        // instead of triggering a retry.
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame(1, $batchRollbackCalls);
+        $this->assertSame([], $txn->getWriteSet());
+    }
+
+    /**
+     * @return array<string, array{0: KeyError, 1: string}>
+     */
+    public static function unrecognisedRollbackKeyErrorProvider(): array
+    {
+        $primaryMismatch = new KeyError();
+        $primaryMismatch->setPrimaryMismatch(new PrimaryMismatch());
+
+        return [
+            'empty payload' => [new KeyError(), 'unknown error'],
+            'primary_mismatch' => [$primaryMismatch, 'PrimaryMismatch'],
+        ];
+    }
+
+    /**
+     * A rollback response carrying a variant the client does not handle must
+     * not be reported as a successful rollback (issue #559).
+     */
+    #[DataProvider('unrecognisedRollbackKeyErrorProvider')]
+    public function testRollbackUnrecognisedKeyErrorFailsClosed(KeyError $keyError, string $description): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $errorResponse->setError($keyError);
+
+        $batchRollbackCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchRollbackCalls,
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key1', 'value1');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame(TiKvException::class, $e::class);
+            $this->assertSame('Rollback failed: ' . $description, $e->getMessage());
+        }
+
+        // A fatal variant is not retried and the transaction stays active
+        // (rollback-started) so the caller can retry the cleanup.
+        $this->assertSame(1, $batchRollbackCalls);
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
+
+        // The transaction is still rollback-able: the next attempt with a
+        // success response clears the write set and closes it.
+        $txn->rollback();
+        $this->assertSame(2, $batchRollbackCalls);
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame([], $txn->getWriteSet());
+    }
+
+    /**
+     * @return array<string, array{0: KeyError}>
+     */
+    public static function rollbackConflictKeyErrorProvider(): array
+    {
+        $conflict = new KeyError();
+        $conflict->setConflict(new WriteConflict());
+
+        $conflictWithRetryable = new KeyError();
+        $conflictWithRetryable->setConflict(new WriteConflict());
+        $conflictWithRetryable->setRetryable('write conflict');
+
+        return [
+            'conflict' => [$conflict],
+            'conflict + retryable' => [$conflictWithRetryable],
+        ];
+    }
+
+    /**
+     * TiKV co-sets the compatibility `retryable` string with `conflict`; the
+     * structured variant must win and fail as a write conflict instead of
+     * entering the retry loop (review point 1).
+     */
+    #[DataProvider('rollbackConflictKeyErrorProvider')]
+    public function testRollbackConflictFailsAsTransactionConflict(KeyError $keyError): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $errorResponse->setError($keyError);
+
+        $batchRollbackCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$batchRollbackCalls,
+                $errorResponse,
+            ): object {
+                return match ($method) {
+                    'KvBatchRollback' => $batchRollbackCalls++ === 0
+                        ? $errorResponse
+                        : new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('key1', 'value1');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TransactionConflictException was not thrown');
+        } catch (TransactionConflictException $e) {
+            $this->assertSame('Write conflict during rollback', $e->getMessage());
+        }
+
+        // The structured conflict is fatal: the co-set `retryable` string
+        // must not turn it into a retry loop.
+        $this->assertSame(1, $batchRollbackCalls);
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
+    }
+
+    public function testPessimisticRollbackUnrecognisedKeyErrorFailsClosedBeforeBatchRollback(): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse();
+        $keyError = new KeyError();
+        $keyError->setPrimaryMismatch(new PrimaryMismatch());
+        $errorResponse->setErrors([$keyError]);
+
+        $methods = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$methods,
+                $errorResponse,
+            ): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KVPessimisticRollback' => $errorResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('key1', 'value1');
+
+        try {
+            $txn->rollback();
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame(TiKvException::class, $e::class);
+            $this->assertSame('Rollback failed: PrimaryMismatch', $e->getMessage());
+        }
+
+        // The pessimistic rollback failed before the batch rollback was
+        // attempted, and the variant was not retried.
+        $this->assertSame(['KVPessimisticRollback'], $methods);
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
     }
 }

@@ -58,6 +58,14 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
     /** The region PD hands out on cache misses (overridable per test). */
     private RegionInfo $pdRegion;
 
+    /**
+     * Kept until the test ends so the transaction's destructor rollback does
+     * not add a KvBatchRollback to the RPC assertions. The rollback is a real
+     * safety-net RPC (see docs/operations.md); these tests assert the
+     * heartbeat calls only.
+     */
+    private ?Transaction $transaction = null;
+
     protected function setUp(): void
     {
         $this->metrics = new InMemoryMetrics();
@@ -187,10 +195,10 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
 
     private function heartbeat(int $priority = 0): int
     {
-        $txn = $this->createTransaction($priority);
-        $txn->set('key1', 'value1');
+        $this->transaction = $this->createTransaction($priority);
+        $this->transaction->set('key1', 'value1');
 
-        return $txn->heartbeat(10000);
+        return $this->transaction->heartbeat(10000);
     }
 
     /**
@@ -266,10 +274,10 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
 
     /**
      * AC-2, non-NotLeader variant. RegionErrorHandler::check() owns this
-     * drop and invalidates with reason 'region_error'; the RegionException
-     * then flows to the RetryExecutor, whose classifier maps RegionNotFound
-     * to RegionMiss backoff (2 ms base, 500 ms cap — fast), and the
-     * executor's pre-retry invalidation is GATED on a cached entry: check()
+     * drop and invalidates with reason 'region_error:region_not_found'; the
+     * RegionException then flows to the RetryExecutor, whose classifier maps
+     * RegionNotFound to RegionMiss backoff (2 ms base, 500 ms cap — fast), and
+     * the executor's pre-retry invalidation is GATED on a cached entry: check()
      * already removed region 1, so getByKey() misses and no
      * 'retry_region_error' emission occurs. The second attempt re-resolves
      * from PD and succeeds.
@@ -288,7 +296,7 @@ final class HeartbeatRegionErrorAndTtlTest extends TestCase
         self::assertSame('KvTxnHeartBeat', $this->rpcCalls[0]['method']);
         self::assertSame('KvTxnHeartBeat', $this->rpcCalls[1]['method']);
 
-        self::assertSame(1, $this->metrics->getInvalidations('region_error'));
+        self::assertSame(1, $this->metrics->getInvalidations('region_error:region_not_found'));
         self::assertSame(0, $this->metrics->getInvalidations('retry_region_error'));
         self::assertSame(0, $this->metrics->getInvalidations('not_leader'));
     }

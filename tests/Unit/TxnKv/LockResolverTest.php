@@ -6,9 +6,11 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\Errorpb\RegionNotFound;
 use CrazyGoat\Proto\Kvrpcpb\Action;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
@@ -18,9 +20,11 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -57,6 +61,9 @@ class LockResolverTest extends TestCase
     /** @var list<string> Method names of every gRPC call, in order */
     private array $callSequence = [];
 
+    /** @var list<array{method: string, timeoutMs: ?int}> Captured per-call deadlines */
+    private array $callTimeouts = [];
+
     protected function setUp(): void
     {
         $this->grpc = $this->createMock(GrpcClientInterface::class);
@@ -66,6 +73,7 @@ class LockResolverTest extends TestCase
         $this->checkTxnStatusRequests = [];
         $this->resolveLockRequests = [];
         $this->callSequence = [];
+        $this->callTimeouts = [];
 
         $this->region = new RegionInfo(
             regionId: self::REGION_ID,
@@ -76,12 +84,22 @@ class LockResolverTest extends TestCase
         );
     }
 
-    private function createResolver(int $callerStartTs = self::CALLER_START_TS): LockResolver
-    {
+    /**
+     * @param (callable(int): int)|null $tso Optional TSO fetch callback; the
+     *        default returns a fresh timestamp immediately.
+     */
+    private function createResolver(
+        int $callerStartTs = self::CALLER_START_TS,
+        ?callable $tso = null,
+    ): LockResolver {
         $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
         // Fresh TSO for every checkTxnStatus; individual tests override with expects().
-        $this->pdClient->method('getLowResolutionTimestamp')->willReturn(self::TSO_TIMESTAMP);
+        if ($tso !== null) {
+            $this->pdClient->method('getLowResolutionTimestamp')->willReturnCallback($tso);
+        } else {
+            $this->pdClient->method('getLowResolutionTimestamp')->willReturn(self::TSO_TIMESTAMP);
+        }
 
         return new LockResolver(
             $this->grpc,
@@ -105,10 +123,14 @@ class LockResolverTest extends TestCase
         int $lockTtl = 0,
         int $action = Action::NoAction,
         ?Error $regionError = null,
+        ?KeyError $keyError = null,
     ): CheckTxnStatusResponse {
         $response = new CheckTxnStatusResponse();
         if ($regionError instanceof \CrazyGoat\Proto\Errorpb\Error) {
             $response->setRegionError($regionError);
+        }
+        if ($keyError instanceof KeyError) {
+            $response->setError($keyError);
         }
         $response->setCommitVersion($commitVersion);
         $response->setLockTtl($lockTtl);
@@ -144,11 +166,13 @@ class LockResolverTest extends TestCase
                 string $method,
                 mixed $request,
                 string $responseClass,
+                ?int $timeoutMs = null,
             ) use (
                 &$checkIndex,
                 $checkResponses,
             ): object {
                 $this->callSequence[] = $method;
+                $this->callTimeouts[] = ['method' => $method, 'timeoutMs' => $timeoutMs];
                 if ($method === 'KvCheckTxnStatus') {
                     if ($request instanceof CheckTxnStatusRequest) {
                         $this->checkTxnStatusRequests[] = $request;
@@ -182,11 +206,13 @@ class LockResolverTest extends TestCase
                 string $method,
                 mixed $request,
                 string $responseClass,
+                ?int $timeoutMs = null,
             ) use (
                 &$checkIndex,
                 $checkResponses,
             ): object {
                 $this->callSequence[] = $method;
+                $this->callTimeouts[] = ['method' => $method, 'timeoutMs' => $timeoutMs];
                 if ($method === 'KvCheckTxnStatus') {
                     if ($request instanceof CheckTxnStatusRequest) {
                         $this->checkTxnStatusRequests[] = $request;
@@ -394,6 +420,96 @@ class LockResolverTest extends TestCase
 
         $resolver = $this->createResolver();
         $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+    }
+
+    // ========================================================================
+    // checkTxnStatus() — an errored response is not a status (issue #224)
+    // ========================================================================
+
+    public function testErroredCheckTxnStatusIsRetryableAndNeverRollsBack(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $keyError = new KeyError();
+        $keyError->setRetryable('status check failed');
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(keyError: $keyError),
+        );
+
+        $resolver = $this->createResolver();
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected an errored CheckTxnStatus to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+            $this->assertStringContainsString(
+                'CheckTxnStatus failed: retryable: status check failed',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(['KvCheckTxnStatus'], $this->callSequence);
+        $this->assertSame([], $this->resolveLockRequests, 'an errored status check must never drive a rollback');
+    }
+
+    public function testRegionErrorDuringCheckTxnStatusIsRetriedAndSuccessfulResponseDecides(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $regionNotFound = new RegionNotFound();
+        $regionNotFound->setRegionId(self::REGION_ID);
+        $regionError = new Error();
+        $regionError->setMessage('region not found');
+        $regionError->setRegionNotFound($regionNotFound);
+
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(regionError: $regionError),
+            $this->makeCheckTxnStatusResponse(commitVersion: 42),
+        );
+
+        $resolver = $this->createResolver();
+        $executor = new RetryExecutor(
+            maxBackoffMs: 1000,
+            serverBusyBudgetMs: 1000,
+            regionCache: $this->regionCache,
+            grpc: $this->grpc,
+            regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
+            logger: $this->logger,
+            maxAttempts: 5,
+            deadlineMs: 0,
+        );
+
+        $executor->execute(self::TEST_KEY, function () use ($resolver): void {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+        });
+
+        $this->assertSame(
+            ['KvCheckTxnStatus', 'KvCheckTxnStatus', 'KvResolveLock'],
+            $this->callSequence,
+            'the region error must be retried, then the successful response decides',
+        );
+        $this->assertCount(1, $this->resolveLockRequests);
+        $this->assertSame(42, (int) $this->resolveLockRequests[0]->getCommitVersion());
+    }
+
+    public function testGenuineNotCommittedResponseStillRollsBack(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(action: Action::LockNotExistRollback),
+        );
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvResolveLock'], $this->callSequence);
+        $this->assertCount(1, $this->resolveLockRequests);
+        $this->assertSame(0, (int) $this->resolveLockRequests[0]->getCommitVersion());
     }
 
     // ========================================================================
@@ -612,7 +728,7 @@ class LockResolverTest extends TestCase
         $startMs = microtime(true) * 1000;
 
         try {
-            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 100);
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 30000);
             $this->fail('Expected live lock to throw retryable exception');
         } catch (TxnRetryableException) {
             $elapsedMs = (microtime(true) * 1000) - $startMs;
@@ -621,5 +737,187 @@ class LockResolverTest extends TestCase
 
         $this->assertSame(['KvCheckTxnStatus'], $this->callSequence);
         $this->assertSame([], $this->resolveLockRequests);
+    }
+
+    /**
+     * Issue #569: a live lock whose TTL is longer than the remaining retry
+     * deadline is still reported as retryable (the #206 contract), but the
+     * resolver must not sleep for the TTL and must cap its own RPC by the
+     * remaining budget. The caller's executor stops at the deadline.
+     */
+    public function testResolveLockDoesNotSleepPastTheRemainingDeadlineForLongLockTtl(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 60000),
+        );
+
+        $resolver = $this->createResolver();
+        $startMs = microtime(true) * 1000;
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 250);
+            $this->fail('Expected live lock to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+            $elapsedMs = (microtime(true) * 1000) - $startMs;
+            $this->assertLessThan(1000, $elapsedMs, 'the resolver must not sleep for the lock TTL');
+        }
+
+        $this->assertSame(['KvCheckTxnStatus'], $this->callSequence);
+        $this->assertSame([], $this->resolveLockRequests);
+        $this->assertLessThanOrEqual(250, $this->callTimeouts[0]['timeoutMs'] ?? \PHP_INT_MAX);
+    }
+
+    /**
+     * Issue #569: a TTL that fits in the remaining deadline keeps the
+     * resolve-then-retry contract — the resolver reports a retryable lock
+     * and the caller's executor owns the bounded backoff.
+     */
+    public function testResolveLockStillRequestsRetryWhenLockTtlFitsRemainingDeadline(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 1000),
+        );
+
+        $resolver = $this->createResolver();
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 30000);
+            $this->fail('Expected live lock to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+        }
+
+        $this->assertSame(['KvCheckTxnStatus'], $this->callSequence);
+        $this->assertSame([], $this->resolveLockRequests);
+    }
+
+    /**
+     * Issue #569: the remaining retry deadline also caps the lock-resolution
+     * RPCs themselves, not only the TTL comparison. Otherwise one
+     * `lockResolveTimeoutMs` (5 s by default) could outlive a nearly spent
+     * retry budget.
+     */
+    public function testResolveLockCapsLockResolutionRpcTimeoutByRemainingDeadline(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 1),
+        );
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 250);
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvResolveLock'], $this->callSequence);
+        $this->assertCount(2, $this->callTimeouts);
+        foreach ($this->callTimeouts as $call) {
+            $this->assertNotNull($call['timeoutMs']);
+            $this->assertGreaterThan(0, $call['timeoutMs']);
+            $this->assertLessThanOrEqual(250, $call['timeoutMs']);
+        }
+    }
+
+    /**
+     * Issue #569 (N3): the remaining deadline is converted into one absolute
+     * deadline at the public entry. A slow TSO fetch must shrink the
+     * KvCheckTxnStatus timeout instead of letting each nested RPC start with
+     * the full remaining budget again.
+     */
+    public function testResolveLockSharesOneLiveDeadlineAcrossNestedRpcs(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 1),
+        );
+
+        $tsoTimeoutMs = null;
+        $resolver = $this->createResolver(
+            tso: function (int $timeoutMs) use (&$tsoTimeoutMs): int {
+                $tsoTimeoutMs = $timeoutMs;
+                usleep(50_000);
+
+                return self::TSO_TIMESTAMP;
+            },
+        );
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), 250);
+
+        $checkTxnStatusTimeoutMs = null;
+        foreach ($this->callTimeouts as $call) {
+            if ($call['method'] === 'KvCheckTxnStatus') {
+                $checkTxnStatusTimeoutMs = $call['timeoutMs'];
+            }
+        }
+
+        $this->assertNotNull($tsoTimeoutMs);
+        $this->assertGreaterThan(0, $tsoTimeoutMs);
+        $this->assertLessThanOrEqual(250, $tsoTimeoutMs);
+        $this->assertNotNull($checkTxnStatusTimeoutMs);
+        $this->assertGreaterThan(0, $checkTxnStatusTimeoutMs);
+        $this->assertLessThan(
+            $tsoTimeoutMs,
+            $checkTxnStatusTimeoutMs,
+            'the RPC after the TSO fetch must see the time it spent',
+        );
+    }
+
+    /**
+     * Issue #569 (N7): a user-facing `retryDeadlineMs` of PHP_INT_MAX must
+     * saturate the absolute deadline instead of overflowing the int return
+     * type. The configured lock-resolution timeout still applies.
+     */
+    public function testResolveLockWithMaximumRemainingDeadlineKeepsConfiguredTimeout(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 1),
+        );
+
+        $resolver = $this->createResolver();
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo(), \PHP_INT_MAX);
+
+        $this->assertSame(['KvCheckTxnStatus', 'KvResolveLock'], $this->callSequence);
+        foreach ($this->callTimeouts as $call) {
+            $this->assertSame(
+                TimeoutConfig::DEFAULT_LOCK_RESOLVE_TIMEOUT_MS,
+                $call['timeoutMs'],
+            );
+        }
+    }
+
+    /**
+     * Issue #569: without a deadline (standalone resolver, no enclosing
+     * `RetryExecutor`), the configured `lockResolveTimeoutMs` applies and a
+     * live lock keeps raising the retryable exception — the historical
+     * behaviour is unchanged.
+     */
+    public function testResolveLockWithoutDeadlineKeepsConfiguredRpcTimeout(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 60000),
+        );
+
+        $resolver = $this->createResolver();
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected live lock to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+        }
+
+        $this->assertSame(['KvCheckTxnStatus'], $this->callSequence);
+        $this->assertSame(
+            TimeoutConfig::DEFAULT_LOCK_RESOLVE_TIMEOUT_MS,
+            $this->callTimeouts[0]['timeoutMs'] ?? null,
+        );
     }
 }

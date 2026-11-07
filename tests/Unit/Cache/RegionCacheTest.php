@@ -958,6 +958,39 @@ class RegionCacheTest extends TestCase
         $this->assertNotNull($cache->getByKey('zz'));
     }
 
+    public function testCachedRegionsReturnsASnapshotKeyedByRegionId(): void
+    {
+        $cache = new RegionCache();
+        $one = $this->makeRegion(1, 'a', 'm');
+        $two = $this->makeRegion(2, 'm', '');
+        $cache->put($one);
+        $cache->put($two);
+
+        $snapshot = $cache->getCachedRegions();
+
+        $this->assertSame([1 => $one, 2 => $two], $snapshot);
+
+        // A later mutation does not change an already-taken snapshot.
+        $cache->invalidate(1);
+        $this->assertArrayHasKey(1, $snapshot);
+        $this->assertArrayNotHasKey(1, $cache->getCachedRegions());
+    }
+
+    public function testCachedRegionsIncludesAnExpiredEntryUntilALookupDropsIt(): void
+    {
+        // Issue #425: a refresh tick is what revives a cache that sat idle
+        // past its TTL, so the enumeration must not hide the expired entry.
+        $cache = new TestableRegionCache(1000, ttlSeconds: 10);
+        $region = $this->makeRegion(1, 'a', 'm');
+        $cache->put($region);
+
+        $cache->setTime(2000);
+
+        $this->assertSame([1 => $region], $cache->getCachedRegions());
+        $this->assertNull($cache->getById(1));
+        $this->assertSame([], $cache->getCachedRegions());
+    }
+
     private function makeLeaderlessRegion(int $id, string $startKey, string $endKey = ''): RegionInfo
     {
         return new RegionInfo(

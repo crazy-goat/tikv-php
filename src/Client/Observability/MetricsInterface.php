@@ -71,9 +71,18 @@ interface MetricsInterface
      * single emission point for every drop path; invalidating an ID that is
      * not cached emits nothing. $reason names the caller:
      *
-     * - 'region_error':       a top-level region error other than NotLeader
-     *                           (EpochNotMatch etc.) was handled via
-     *                           RegionErrorHandler::check()
+     * - 'region_error:<kind>': a top-level ROUTING region error other than
+     *                           NotLeader (EpochNotMatch, RegionNotFound,
+     *                           KeyNotInRegion, StoreNotMatch,
+     *                           RegionNotInitialized) was handled via
+     *                           RegionErrorHandler::check(); <kind> is the
+     *                           triggering ErrorKind value, e.g.
+     *                           'region_error:epoch_not_match'. Non-routing
+     *                           region errors (ServerIsBusy, DiskFull,
+     *                           IsWitness, RecoveryInProgress, …) keep the
+     *                           cached entry and emit nothing (issue #245)
+     * - 'region_error':       the same handler drop when the region error
+     *                           carries no typed ErrorKind (unknown error)
      * - 'not_leader':         a NotLeader response forced an invalidation in
      *                           RetryExecutor::handleNotLeader() (hint peer
      *                           unknown or no hint) at executor-owned call
@@ -85,8 +94,19 @@ interface MetricsInterface
      *                           self-invalidates with the same reason
      *                           (pessimistic lock, primary-region commit, and
      *                           lock-resolution paths).
-     * - 'retry_region_error': RetryExecutor invalidated before scheduling the
-     *                           next attempt on a retryable error
+     * - 'retry_region_error:<kind>': RetryExecutor invalidated before
+     *                           scheduling the next attempt on a retryable
+     *                           ROUTING error; <kind> is the triggering
+     *                           ErrorKind value, e.g.
+     *                           'retry_region_error:epoch_not_match'. A
+     *                           non-routing retryable error (ServerIsBusy,
+     *                           DiskFull, IsWitness, RecoveryInProgress, …)
+     *                           is retried with the cached region intact
+     *                           (issue #245)
+     * - 'retry_region_error': the same pre-retry invalidation when the error
+     *                           carries no typed ErrorKind (a transport
+     *                           failure or a message-classified exception), so
+     *                           the kind is unknown
      * - 'fatal_region_error': RetryExecutor invalidated a routing error that
      *                           is fatal (KeyNotInRegion) or a
      *                           StoreNotFoundException for one of the
@@ -95,6 +115,11 @@ interface MetricsInterface
      *                           #233, #627)
      * - 'lock_resolve':       LockResolver dropped the region after resolving
      *                           a lock
+     * - 'refresh':            RegionCacheWarmer dropped the region because a
+     *                           refresh tick's PD answer no longer covers its
+     *                           start key (issue #425); a refresh that merely
+     *                           supersedes the entry with a newer one is a
+     *                           put() and emits nothing
      *
      * Note: NotLeader responses whose hint peer is still valid only switch
      * the cached leader (switchLeader()) and do NOT invalidate, so they emit
