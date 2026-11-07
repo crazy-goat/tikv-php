@@ -7,9 +7,12 @@ namespace CrazyGoat\TiKV\Client\Retry;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 
 /**
- * Thrown when RetryExecutor's attempt-cap or wall-clock deadline is reached
- * before the operation succeeds. The original TiKV exception is not lost —
- * callers that want to inspect or rethrow it should catch this and check
+ * Thrown when RetryExecutor gives up before the operation succeeds: the
+ * attempt cap, the wall-clock deadline, the cumulative backoff budget or the
+ * ServerBusy sleep budget was exhausted. Every path reports the same type so
+ * callers can tell "the client stopped retrying" apart from "the server
+ * rejected the request". The original TiKV exception is not lost — callers
+ * that want to inspect or rethrow it should catch this and check
  * {@see RetryBudgetExhaustedException::getPrevious()}.
  */
 final class RetryBudgetExhaustedException extends TiKvException

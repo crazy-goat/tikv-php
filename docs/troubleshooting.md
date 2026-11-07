@@ -331,8 +331,9 @@ overloaded (raft too busy, scheduler congested).
 the scheduled backoff before the sleep is clamped, and with the budget at
 least ~10 s above the deadline the deadline binds first. `getPrevious()`
 holds the `ServerIsBusy` error. If the budget is tuned to within ~10 s of
-the deadline or below it, either can bind and the budget path rethrows the
-raw `ServerIsBusy` instead. If you see this repeatedly, shed load or scale the
+the deadline or below it, either bound can bind; both paths throw
+`RetryBudgetExhaustedException`, with the `ServerIsBusy` error in
+`getPrevious()`. If you see this repeatedly, shed load or scale the
 cluster. See
 [Retry Budgets Behind Every Operation](error-handling.md#retry-budgets-behind-every-operation)
 and
@@ -847,14 +848,15 @@ process salt and differ between processes — and the key is never shown
 verbatim. Use `RetryBudgetExhaustedException::getRawKey()` if your code needs
 the raw key.)
 
-**What it means:** The internal retry loop gave up: either the attempt cap
-(30 by default) or the wall-clock deadline (30000 ms by default,
-`options['retryDeadlineMs']`) was reached before the operation succeeded.
-The original error is preserved — check `getPrevious()`. Note the other two
-budgets (`maxBackoffMs`, `serverBusyBudgetMs`) do **not** throw this class:
-they rethrow the original `TiKvException`. With the defaults, a
-`ServerIsBusy` storm reaches the deadline first, so this class is what you
-see even though the ServerBusy budget is nominally 60 s (see
+**What it means:** The internal retry loop gave up: one of its four bounds
+was reached before the operation succeeded — the attempt cap (30 by default),
+the wall-clock deadline (30000 ms by default, `options['retryDeadlineMs']`),
+the cumulative backoff budget (`maxBackoffMs`) or the ServerBusy budget
+(`serverBusyBudgetMs`). All four paths throw this class, so it always means
+"the client stopped retrying"; the original region or transport error is
+preserved in `getPrevious()`. With the defaults, a `ServerIsBusy` storm
+reaches the deadline first, even though the ServerBusy budget is nominally
+60 s (see
 [ServerBusy Budget vs Retry Deadline](configuration.md#serverbusy-budget-vs-retry-deadline)).
 
 **Solution:** Retry only if your operation is idempotent — the client

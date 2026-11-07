@@ -2027,10 +2027,13 @@ since issue #241):
 | `deadlineMs` | `30000` (`RetryExecutor::DEFAULT_RETRY_DEADLINE_MS`; `0` disables) | Wall-clock deadline from the start of the operation. Checked before each attempt and before each backoff sleep (the sleep is clamped to the remaining budget); the executor terminates when it is reached, regardless of `sleepMs`. The TxnKV data-path RPCs and the PD lookups of lock resolution are capped by the same remaining budget (issue #257). |
 
 When either bound is reached the executor throws
-`RetryBudgetExhaustedException` (extends `TiKvException`). This exception
-exposes `attempts()` and `elapsedOrBackoffMs()` for diagnostics, and
-`getRawKey()` for the un-redacted key (the key is redacted in the message —
-see issue #269).
+`RetryBudgetExhaustedException` (extends `TiKvException`). The two sleep
+budgets (`maxBackoffMs` and `serverBusyBudgetMs`) throw the same class, so
+every exhaustion path reports "the client stopped retrying" rather than the
+underlying region or transport error. This exception exposes `attempts()` and
+`elapsedOrBackoffMs()` for diagnostics, `getPrevious()` for the original
+error, and `getRawKey()` for the un-redacted key (the key is redacted in the
+message — see issue #269).
 
 The time budgets (`maxBackoffMs`, `serverBusyBudgetMs` and `deadlineMs`) are
 scoped to **one logical operation** (issue #223, TXN-18):
@@ -2066,20 +2069,20 @@ the two are within ~10 s of each other, either can bind; when the budget is
 below the deadline, the budget usually binds first. The budget check runs
 before `usleep()`, so an over-budget charge throws without sleeping.
 
-The exhaustion paths also differ, which matters when reading logs or
-`catch` blocks:
+Both paths throw the same exception type, so a `catch` block handles them
+identically; only the message names the binding bound, which matters when
+reading logs:
 
 | Bound reached first | Exception | `getPrevious()` |
 |---|---|---|
 | Retry deadline (the default) | `RetryBudgetExhaustedException` (`Retry deadline (...) exhausted`) | the original `ServerIsBusy` error |
-| ServerBusy budget | the original `TiKvException` (not wrapped) | — |
+| ServerBusy budget | `RetryBudgetExhaustedException` (`ServerBusy budget (...) exhausted`) | the original `ServerIsBusy` error |
 
-A sustained `ServerIsBusy` episode under the default configuration therefore
-surfaces as `RetryBudgetExhaustedException`, not as the raw region error;
-the `ServerIsBusy` error is available through `getPrevious()`. A
-configuration where the budget binds first yields the original
-`ServerIsBusy` exception instead. Both budgets are scoped to one logical
-operation (issue #223), like the other time budgets.
+A sustained `ServerIsBusy` episode therefore surfaces as
+`RetryBudgetExhaustedException`, not as the raw region error, whichever of the
+two bounds binds first; the `ServerIsBusy` error is always available through
+`getPrevious()`. Both budgets are scoped to one logical operation
+(issue #223), like the other time budgets.
 
 ### Custom Retry (Advanced)
 

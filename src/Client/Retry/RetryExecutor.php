@@ -291,7 +291,17 @@ final readonly class RetryExecutor
                             'serverBusyBackoffMs' => $serverBusyBackoffMs,
                             'serverBusyBudgetMs' => $this->serverBusyBudgetMs,
                         ]);
-                        throw $e;
+                        throw new RetryBudgetExhaustedException(
+                            sprintf(
+                                'ServerBusy budget (%d ms) exhausted for key %s',
+                                $this->serverBusyBudgetMs,
+                                KeyRedactor::redact($key),
+                            ),
+                            $attemptBeforeInspection,
+                            $serverBusyBackoffMs,
+                            $e,
+                            rawKey: $key,
+                        );
                     }
                 } else {
                     $totalBackoffMs = $budget->addBackoff($sleepMs);
@@ -302,7 +312,17 @@ final readonly class RetryExecutor
                             'totalBackoffMs' => $totalBackoffMs,
                             'maxBackoffMs' => $this->maxBackoffMs,
                         ]);
-                        throw $e;
+                        throw new RetryBudgetExhaustedException(
+                            sprintf(
+                                'Retry backoff budget (%d ms) exhausted for key %s',
+                                $this->maxBackoffMs,
+                                KeyRedactor::redact($key),
+                            ),
+                            $attemptBeforeInspection,
+                            $totalBackoffMs,
+                            $e,
+                            rawKey: $key,
+                        );
                     }
                 }
 

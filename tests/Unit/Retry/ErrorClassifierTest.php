@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -290,6 +291,23 @@ class ErrorClassifierTest extends TestCase
     public function testServerIsBusyReturnsServerBusyViaMessage(): void
     {
         $this->assertVerdict(BackoffType::ServerBusy, ErrorClassifier::classify(new TiKvException('ServerIsBusy')));
+    }
+
+    /**
+     * The library's ServerBusy-budget message says "ServerBusy", but a
+     * give-up message that names the underlying "ServerIsBusy" error would
+     * match the fallback and classify as retryable. The typed exception must
+     * win: an outer executor must never retry a give-up (issue #256).
+     */
+    public function testRetryBudgetExhaustedIsFatalDespiteServerBusyMessage(): void
+    {
+        $this->assertVerdict(null, ErrorClassifier::classify(
+            new RetryBudgetExhaustedException(
+                'ServerIsBusy budget (60000 ms) exhausted for key #abc123 (3 bytes)',
+                0,
+                60000,
+            ),
+        ));
     }
 
     public function testStaleCommandReturnsStaleCmdViaMessage(): void

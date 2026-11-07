@@ -590,8 +590,8 @@ exposes the live remaining wall-clock budget through
 into an absolute deadline and caps every nested lock-resolution RPC (and the
 TSO fetch) by the live time left until it, so the RPCs share one budget and
 none is given a deadline beyond the operation's `retryDeadlineMs` (issue
-#569). A live lock is still retryable; the executor's own deadline check
-raises `RetryBudgetExhaustedException` when the budget is spent. A deadline of
+#569). A live lock is still retryable; the executor raises
+`RetryBudgetExhaustedException` when any of its retry budgets is spent. A deadline of
 `0` keeps the configured `lockResolveTimeoutMs`/`tsoTimeoutMs` and the
 historical behaviour.
 

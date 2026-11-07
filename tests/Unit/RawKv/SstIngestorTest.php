@@ -539,11 +539,13 @@ class SstIngestorTest extends TestCase
         $this->grpc->method('callStreaming')
             ->willThrowException(new GrpcException('write failed', 13));
 
-        $this->expectException(GrpcException::class);
-        $this->expectExceptionMessage('write failed');
-
         try {
             $this->ingestor->ingest(['key1' => 'value1']);
+            self::fail('The exhausted retry budget must throw');
+        } catch (RetryBudgetExhaustedException $e) {
+            $previous = $e->getPrevious();
+            self::assertInstanceOf(GrpcException::class, $previous);
+            self::assertStringContainsString('write failed', $previous->getMessage());
         } finally {
             // Verify SwitchMode(Normal) was called after the error.
             // At least 2 calls: import mode + normal mode.

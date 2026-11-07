@@ -123,6 +123,16 @@ final class ErrorClassifier
             return self::classifyGrpcStatus($e->grpcStatusCode);
         }
 
+        // A retry-budget exhaustion is terminal: an outer executor must not
+        // retry a give-up. The library's ServerBusy-budget message says
+        // "ServerBusy" and does not match the fallback's "ServerIsBusy"
+        // keyword, but a message that does name the region error would
+        // otherwise classify as retryable. The typed arm keeps the verdict
+        // fatal either way (issue #256).
+        if ($e instanceof RetryBudgetExhaustedException) {
+            return null;
+        }
+
         // === Fallback: message-text matching for non-region exceptions ===
         //
         // RegionException returned above, so this path only sees errors that
