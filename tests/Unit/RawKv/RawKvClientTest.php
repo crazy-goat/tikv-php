@@ -232,20 +232,43 @@ class RawKvClientTest extends TestCase
         $this->assertSame($metrics, $client->getMetrics());
     }
 
-    public function testGetMetricsDoesNotThrowWhenNeverQueried(): void
+    /**
+     * The default-construction path must yield a fully working NoOp backend:
+     * it accepts every call — empty, negative, binary and oversized arguments
+     * included — and records nothing. The InMemoryMetrics half proves the
+     * calls are real, so the empty state is the no-op's behaviour rather than
+     * the calls being inert.
+     */
+    public function testNoOpMetricsRecordsNothingForAnyInput(): void
     {
-        // The default-construction path must yield a fully working NoOp
-        // metrics backend without any additional setup.
+        $exercise = static function (MetricsInterface $metrics): void {
+            $metrics->rpcStarted('');
+            $metrics->rpcCompleted('', -1.0, false);
+            $metrics->retryAttempted("\x00\xff");
+            $metrics->regionCacheHit(str_repeat('x', 10_000));
+            $metrics->regionCacheMiss("\x00");
+            $metrics->regionInvalidated('');
+            $metrics->storeHealthChanged(-1, false);
+        };
+
         $metrics = $this->client->getMetrics();
+        self::assertInstanceOf(NoOpMetrics::class, $metrics);
 
-        $metrics->rpcStarted('dummy');
-        $metrics->rpcCompleted('dummy', 1.0, true);
-        $metrics->retryAttempted('NotLeader');
-        $metrics->regionCacheHit('dummy');
-        $metrics->regionCacheMiss('dummy');
-        $metrics->regionInvalidated('not_leader');
+        $exercise($metrics);
 
-        $this->assertInstanceOf(MetricsInterface::class, $metrics);
+        self::assertSame([], (array) $metrics, 'NoOpMetrics must not record anything');
+
+        $real = new InMemoryMetrics();
+        $exercise($real);
+
+        self::assertSame(1, $real->getRpcStarted(''));
+        self::assertSame(1, $real->getRpcFailed(''));
+        self::assertSame(-1.0, $real->getMeanLatencyMs(''));
+        self::assertSame(1, $real->getRetries("\x00\xff"));
+        self::assertSame(1, $real->getCacheHits(str_repeat('x', 10_000)));
+        self::assertSame(1, $real->getCacheMisses("\x00"));
+        self::assertSame(1, $real->getInvalidations(''));
+        self::assertFalse($real->isStoreHealthy(-1));
     }
 
     public function testCreateAcceptsMetricsOption(): void

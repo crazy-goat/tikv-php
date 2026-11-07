@@ -25,6 +25,7 @@ policy now classifies as internal.
 
 ### Tests
 
+- `RawKvClientTest::testNoOpMetricsRecordsNothingForAnyInput()` now pins the default `NoOpMetrics` contract instead of re-asserting the object type (issue #351, LQ-03). It exercises all seven `MetricsInterface` methods with hostile input — empty tags, a negative duration, a binary operation name and a 10 KB tag — and asserts that the no-op backend is still indistinguishable from a fresh instance, while an `InMemoryMetrics` given the same calls records every one of them, so the calls are real and the empty state is the no-op's behaviour. `docs/advanced.md` now states the accept-anything/record-nothing guarantee and lists the missing `storeHealthChanged()` method. No production behaviour changes. (#351)
 - The close-idempotency lifecycle tests now assert what their names promise instead of relying on mock `expects()` alone (issue #357, LQ-09). `RawKvClientTest` and `TxnKvClientTest` record each sub-close invocation through a callback and assert the count is exactly one after repeated `close()` calls, including when a sub-close throws; `GrpcClientTest::testCloseIsIdempotent` now injects a channel mock and asserts the channel cache is emptied once instead of calling `expectNotToPerformAssertions()`, and `testCloseIsIdempotentAfterPartialFailure` asserts the cache is empty too. No production behaviour changes. (#357)
 
 ### Docs
