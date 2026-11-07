@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- **[TXN-15]**: the issue's own numeric-string vectors now pin byte ordering in both places it names (issue #220). `TxnReaderKeyOrderTest` scans an answer of `"10"`, `"100"` and `"9"` merged with a write-set `"9"` and asserts the byte order `"10"`, `"100"`, `"9"` — a `SORT_REGULAR` merge would return `"9"`, `"10"`, `"100"` and break pagination on the last returned key. `RegionResolverBinaryKeyTest` resolves `"9"`, `"10"` and `"100"` against the regions `["", "10")`, `["10", "100")` and `["100", "")` and asserts `"9"` lands in the last region (bytewise `"10" < "100" < "9"`), while a numeric comparison would route it to the first and TiKV would answer `KeyNotInRegion`. Production code already compared and sorted through `KeyOrder` / `SORT_STRING` after #186 and #331, so there are no behaviour changes here.
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added
