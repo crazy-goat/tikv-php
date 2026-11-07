@@ -272,8 +272,10 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // Reverse scan (descending order)
 // Note the order: startKey = UPPER bound (exclusive), endKey = LOWER bound
 // (inclusive) — the first argument must sort after the second. Bump the last
-// byte of a prefix to cover all of its keys ('log:' -> 'log;'); append "\x00"
-// to a key to make the upper bound inclusive of that key.
+// byte of a prefix to cover all of its keys ('log:' -> 'log;');
+// RawKvSplitter::calculatePrefixEndKey('log:') computes that end key safely
+// (including a trailing 0xFF). Append "\x00" to a key to make the upper bound
+// inclusive of that key.
 $results = $client->reverseScan('log;', 'log:', limit: 100);
 
 // Scan multiple non-contiguous ranges. This is a client-side loop of
@@ -439,7 +441,7 @@ $txnClient = TxnKvClient::create(['127.0.0.1:2379']);   // same options as RawKv
 $txn = $txnClient->begin([          // pessimistic by default
     'pessimistic' => true,          // false = optimistic (locks at commit)
     'priority'    => 0,             // 0 Normal (default), 1 Low, 2 High
-    'lockWaitTimeMs' => 1000,       // how long TiKV may wait for a contended lock
+    'lockWaitTimeMs' => 1000,       // per-txn override of the client-wide wait
 ]);
 
 // ... or state the mode explicitly (recommended):
@@ -459,10 +461,12 @@ second `commit()` throws `InvalidStateException`. Start a new one instead.
 options as `RawKvClient`, plus `retryDeadlineMs` (the wall-clock bound on one
 transaction's internal retry loop, default
 `Transaction::DEFAULT_RETRY_DEADLINE_MS`), `gcSafePointValidation`,
-`replicaRead` and `tsoPoolSize`. The per-transaction options
-(`pessimistic`, `priority`, `enable1Pc`, `enableAsyncCommit`,
-`eagerPessimisticLocks`, `lockWaitTimeMs` and `requestContext`) belong to
-`TxnKvClient::begin()`, not to `create()`.
+`replicaRead`, `tsoPoolSize` and `lockWaitTimeMs` (the client-wide default
+for the pessimistic-lock wait). The per-transaction options (`pessimistic`,
+`priority`, `enable1Pc`, `enableAsyncCommit`, `eagerPessimisticLocks`,
+`lockWaitTimeMs` and `requestContext`) belong to `TxnKvClient::begin()`;
+`lockWaitTimeMs` is the one option accepted by both, where the `begin()`
+value overrides the client-wide default.
 
 #### Reads and writes
 
@@ -524,13 +528,16 @@ prewrite keeps `DO_CONSTRAINT_CHECK` as a safety net. The legacy deferred pass
 is available as `begin(['eagerPessimisticLocks' => false])`, which moves the
 lock pass to `commit()`.
 
-`begin(['lockWaitTimeMs' => N])` bounds how long TiKV waits for a contended
-key before it answers with a "locked" error (default 1000 ms, the timeout
-TiKV applies by default). The value sent to TiKV is
-`min(lockWaitTimeMs, remaining lock-wait budget)`: it never exceeds the budget
-and shrinks as the budget is consumed. When the budget runs out the
-transaction fails with `LockWaitTimeoutException` instead of committing
-without the lock. See [Configuration](docs/configuration.md#pessimistic-lock-wait-timeout-txnkv).
+`lockWaitTimeMs` bounds how long TiKV waits for a contended key before it
+answers with a "locked" error (default 1000 ms, the timeout TiKV applies by
+default). It can be set client-wide on `TxnKvClient::create()` and
+overridden per transaction on `begin()`. The value sent to TiKV is
+`min(lockWaitTimeMs, remaining lock-wait budget, RPC deadline - 100 ms)`: it
+never exceeds the budget, shrinks as the budget is consumed, and always
+leaves the server room to answer before the client cancels the call. When the
+budget runs out the transaction fails with `LockWaitTimeoutException` instead
+of committing without the lock. See
+[Configuration](docs/configuration.md#pessimistic-lock-wait-timeout-txnkv).
 
 A pessimistic transaction can also take a lock explicitly, without writing a
 value:
@@ -1046,6 +1053,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `expectedClusterId` | The PD cluster ID every PD/TSO response must report when set — a mismatch or a missing cluster-ID header throws instead of adopting the server's value ([Cluster Identity Verification](docs/configuration.md#cluster-identity-verification-issue-308-sec-05)) |
 | `allowedStoreHosts` / `storeHostPolicy` / `allowedStorePorts` | Which store addresses the client is allowed to talk to |
 | `gcSafePointValidation` / `gcSafePointRefreshMs` | TxnKV GC safe-point validation and its refresh interval |
+| `lockWaitTimeMs` | TxnKV client-wide pessimistic-lock wait timeout; `begin()` overrides it per transaction ([Pessimistic Lock Wait Timeout](docs/configuration.md#pessimistic-lock-wait-timeout-txnkv)) |
 | `regionCacheRefreshMs` | Minimum interval between non-forced `refreshRegionCache()` ticks; `0` (default) disables the non-forced refresh, which is opt-in ([Region Cache Refresh and Preload](docs/configuration.md#region-cache-refresh-and-preload)) |
 
 The transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
@@ -1056,7 +1064,8 @@ client does not build, so they are rejected instead of being ignored.
 (the default is `true`), `priority` (0 Normal, 1 Low, 2 High), `enable1Pc`
 (one-phase commit), `enableAsyncCommit`, `eagerPessimisticLocks` (pessimistic
 locking at write time — the default — or at commit time), `lockWaitTimeMs`
-(how long TiKV may wait for a contended lock), `optimisticLockTtlMs`
+(how long TiKV may wait for a contended lock; overrides the client-wide
+`create()` value), `optimisticLockTtlMs`
 (optimistic lock TTL baseline, default 3000 ms), `pessimisticLockTtlMs`
 (pessimistic lock TTL, default 30000 ms), `maxTxnEntryCount` /
 `maxTxnEntrySize` / `maxTxnTotalSize` (write-set bounds, each 0 = unlimited),
