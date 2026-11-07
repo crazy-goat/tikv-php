@@ -130,7 +130,11 @@ make up
 make logs
 ```
 
-This starts a 3-node TiKV cluster with PD (Placement Driver).
+This starts a 3-node TiKV cluster with PD (Placement Driver). The published PD and TiKV
+ports are bound to `127.0.0.1` only: the development cluster has no authentication or
+transport security, so it is deliberately unreachable from other hosts. Use
+`127.0.0.1:2379` (or `localhost:2379`) as the PD endpoint; connecting from another
+machine requires an SSH tunnel (issue #318, SEC-15).
 
 ### Option 2: Using Existing TiKV Cluster
 

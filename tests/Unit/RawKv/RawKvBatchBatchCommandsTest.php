@@ -4,10 +4,16 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
+use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\Proto\Tikvpb\BatchCommandsRequest;
+use CrazyGoat\Proto\Tikvpb\BatchCommandsResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsMultiplexer;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
@@ -114,6 +120,52 @@ final class RawKvBatchBatchCommandsTest extends TestCase
         self::assertCount(2, $fake->exchanges[0]['ids']);
         self::assertSame('v:a', $results['a'], 'out-of-order responses must be correlated back to the right entry');
         self::assertSame('v:z', $results['z']);
+    }
+
+    /**
+     * Issue #303 (PERF-16): the multiplexed path defers the per-pair KeyError
+     * check to the value-collection loop, so a pair error must still be
+     * raised. The exception escapes directly (not wrapped in
+     * BatchPartialFailureException), exactly as before.
+     */
+    public function testBatchGetMultiplexedPerPairErrorIsRaised(): void
+    {
+        $this->stubCluster();
+        $this->grpc->expects($this->never())->method('getChannel');
+
+        $responder = static function (
+            string $address,
+            BatchCommandsRequest $request,
+            array $requestIds,
+        ): array {
+            $keyError = new KeyError();
+            $keyError->setRetryable('too old');
+            $pair = new KvPair();
+            $pair->setKey('a');
+            $pair->setError($keyError);
+
+            $rawBatchGet = new RawBatchGetResponse();
+            $rawBatchGet->setPairs([$pair]);
+
+            $oneof = new BatchCommandsResponse\Response();
+            $oneof->setRawBatchGet($rawBatchGet);
+
+            $ids = array_reverse($requestIds);
+            $wire = new BatchCommandsResponse();
+            $wire->setRequestIds($ids);
+            $wire->setResponses(array_fill(0, count($ids), $oneof));
+
+            return [$wire];
+        };
+
+        $batch = $this->createRawKvBatch(new BatchCommandsMultiplexer(
+            new FakeBatchCommandsTransport($responder),
+        ));
+
+        $this->expectException(KeyErrorException::class);
+        $this->expectExceptionMessage('retryable: too old');
+
+        $batch->batchGet(['a'], $this->createRetryExecutor());
     }
 
     public function testBatchPutMultiplexesWritesToOneRoundTrip(): void

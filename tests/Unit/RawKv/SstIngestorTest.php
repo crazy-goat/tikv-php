@@ -556,19 +556,24 @@ class SstIngestorTest extends TestCase
     // Ingest response error
     // ========================================================================
 
-    public function testIngestThrowsRegionExceptionOnIngestError(): void
+    public function testIngestRetriesUnknownRegionErrorUntilTheRetryBudgetIsExhausted(): void
     {
         $store = $this->defaultStore();
         $region = $this->defaultRegion();
 
         $this->setupStandardPdMocks($region, $store);
+        // The retry re-resolves the region after the ingest error; PHPUnit
+        // cannot generate a final RegionInfo.
+        $this->pdClient->method('getRegion')->willReturn($region);
 
         // Write succeeds.
         $writeResponse = new RawWriteResponse();
         $writeResponse->setMetas([new SSTMeta()]);
         $this->grpc->method('callStreaming')->willReturn($writeResponse);
 
-        // Ingest returns error.
+        // An errorpb.Error with no typed variant is a region error this
+        // client does not know yet: it is retried on the bounded RegionMiss
+        // curve (issue #444) instead of failing immediately.
         $error = new Error();
         $error->setMessage('region not found');
         $ingestResponse = new IngestResponse();
@@ -576,9 +581,19 @@ class SstIngestorTest extends TestCase
 
         $this->setupGrpcCallMock($ingestResponse);
 
-        $this->expectException(RegionException::class);
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            retryDeadlineMs: 200,
+        );
 
-        $this->ingestor->ingest(['key1' => 'value1']);
+        $this->expectException(RetryBudgetExhaustedException::class);
+
+        $ingestor->ingest(['key1' => 'value1']);
     }
 
     // ========================================================================
@@ -757,7 +772,9 @@ class SstIngestorTest extends TestCase
                 }
 
                 if ($regionId === 4) {
-                    // No typed ErrorKind and no classifier keyword: fatal.
+                    // No typed ErrorKind: a region error this client does not
+                    // know yet is retryable (issue #444), so it exhausts the
+                    // group's retry budget instead of failing immediately.
                     $error = new Error();
                     $error->setMessage('permanent ingest failure');
                     $response = new IngestResponse();
@@ -769,15 +786,28 @@ class SstIngestorTest extends TestCase
                 return new IngestResponse();
             });
 
+        // Keep the test fast while still letting the region-2 EpochNotMatch
+        // retry through: 200 ms covers that small retry and expires quickly
+        // on region 4, whose kind-less error is now retryable (issue #444).
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            retryDeadlineMs: 200,
+        );
+
         try {
-            $this->ingestor->ingest(['a' => 'value1', 'n' => 'value2', 'z' => 'value3']);
+            $ingestor->ingest(['a' => 'value1', 'n' => 'value2', 'z' => 'value3']);
             self::fail('The ingest did not fail');
         } catch (IngestPartialFailureException $e) {
             // Region 1 was applied, region 3 (not the grouping-time region 2)
-            // was applied after the retry, and region 4 failed.
+            // was applied after the retry, and region 4 exhausted its budget.
             self::assertSame([1, 3], $e->getAppliedRegionIds());
             self::assertSame(4, $e->getFailedRegionId());
-            self::assertInstanceOf(RegionException::class, $e->getPrevious());
+            self::assertInstanceOf(RetryBudgetExhaustedException::class, $e->getPrevious());
         }
 
         self::assertSame(1, $attemptsByRegion[2] ?? 0);
@@ -928,6 +958,9 @@ class SstIngestorTest extends TestCase
         $this->pdClient->method('getAllStores')->willReturn([$store1, $store2]);
         $this->pdClient->method('scanRegions')->willReturn([$region]);
         $this->pdClient->method('getStore')->willReturn($store1);
+        // The retry re-resolves the region after the ingest error; PHPUnit
+        // cannot generate a final RegionInfo.
+        $this->pdClient->method('getRegion')->willReturn($region);
 
         $writeResponse = new RawWriteResponse();
         $writeResponse->setMetas([new SSTMeta()]);
@@ -955,10 +988,22 @@ class SstIngestorTest extends TestCase
                 return GrpcFuture::completed(new SwitchModeResponse());
             });
 
+        // A kind-less errorpb.Error is retried (issue #444); the short
+        // deadline ends the loop before anything is applied.
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            retryDeadlineMs: 200,
+        );
+
         try {
-            $this->ingestor->ingest(['key1' => 'value1']);
+            $ingestor->ingest(['key1' => 'value1']);
             self::fail('The ingest did not fail');
-        } catch (RegionException) {
+        } catch (RetryBudgetExhaustedException) {
             // Expected: the single region failed before anything was applied.
         }
 

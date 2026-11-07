@@ -175,6 +175,8 @@ of the contract.
 - `Observability\DebugLogging` — the internal probe that decides whether a logger can emit a `debug` record
   when no `options['metrics']` is configured; write against
   `Observability\MetricsInterface`, which is covered;
+- `Observability\SafeLogging` — the guard that keeps a logger failure on a close or destructor path from
+  escaping the destructor;
 - `RawKv\Dto\` (the `RegionInfoMapper` helper) and `RawKv\RawKvSplitter`;
 - the collaborators behind the entry points: `RawKv\RawKvCrud`,
   `RawKv\RawKvAtomic`, `RawKv\RawKvBatch`, `RawKv\RawKvScanner`,
@@ -1136,6 +1138,11 @@ make clean            # Clean everything (containers + volumes)
 make example          # Run basic example
 make shell            # Open development shell
 ```
+
+The Compose containers run as an unprivileged user, so the image is built with
+the host owner's UID/GID (`HOST_UID`/`HOST_GID`) to keep the bind-mounted
+checkout writable. `make` and the E2E scripts detect both automatically; set
+them explicitly only for a direct `docker compose` call, then rebuild.
 
 ## Examples
 
