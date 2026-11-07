@@ -802,6 +802,21 @@ $client = RawKvClient::create(['127.0.0.1:2379'], logger: $logger);
 // - Error conditions
 ```
 
+Keys are redacted before they reach a log line or an exception message. The
+default [`KeyRedactor`](src/Client/Util/KeyRedactor.php) replaces each key with
+a truncated keyed hash and the total byte length, for example
+`#3c469e9d6c5875d3 (5 bytes)`. The digest is the first 16 hex characters of
+`hash_hmac('sha256', $key, $salt)`, so it is **one-way for keys of every
+length** — a key of 8 bytes or fewer is no longer hex-encoded in full — while
+the same key keeps the same token within a process, so log lines can still be
+correlated. The salt is 32 random bytes generated on first use; pin a
+high-entropy salt with `KeyRedactor::setSalt()` before the first redaction when
+tokens must be comparable across processes or restarts.
+`KeyRedactor::setRedactor()` replaces the default entirely: it is an explicit
+opt-out, and a reversible scheme installed there re-exposes the key material.
+See [Log Redaction](docs/configuration.md#log-redaction) for the format, the
+override trade-off and the exception messages that carry a token.
+
 ### Complete Example
 
 ```php
