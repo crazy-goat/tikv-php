@@ -56,9 +56,11 @@ use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+use CrazyGoat\TiKV\Client\Util\ShutdownState;
 use CrazyGoat\TiKV\Tests\Unit\Support\ContextRecordingLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\RecordingLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\StubRegionCache;
+use CrazyGoat\TiKV\Tests\Unit\Support\ThrowingLogger;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -102,6 +104,11 @@ class TransactionTest extends TestCase
             $this->pdClient,
             1000, // matches createTransaction default startTs
         );
+    }
+
+    protected function tearDown(): void
+    {
+        ShutdownState::resetForTests();
     }
 
     /**
@@ -7630,6 +7637,69 @@ class TransactionTest extends TestCase
 
         $txn->rollback();
         $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+    }
+
+    /**
+     * Issue #287 (GRPC-28): the destructor's rollback failure is logged
+     * through a guard, so a logger that throws cannot replace it with a
+     * fatal error from the destructor.
+     */
+    public function testDestructorSwallowsAThrowingLoggerWhenRollbackFails(): void
+    {
+        $this->setUpRollbackRegionMocking();
+
+        $errorResponse = new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse();
+        $keyError = new KeyError();
+        $keyError->setAbort('simulated rollback failure');
+        $errorResponse->setError($keyError);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'KvBatchRollback' => $errorResponse,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => false,
+            'logger' => new ThrowingLogger(),
+        ]);
+        $txn->set('key', 'value');
+
+        $txn->__destruct();
+
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+    }
+
+    /**
+     * Issue #287 (GRPC-28): a rollback is a network round trip, so the
+     * destructor skips it once PHP is shutting down. The transaction keeps
+     * its locks until the lock TTL expires instead of calling into ext-grpc
+     * during module shutdown.
+     */
+    public function testDestructorSkipsRollbackDuringShutdown(): void
+    {
+        $this->grpc->expects($this->never())->method('call');
+        $logger = new RecordingLogger();
+
+        ShutdownState::markShutdown();
+        try {
+            $txn = $this->createTransaction([
+                'pessimistic' => false,
+                'logger' => $logger,
+            ]);
+            $txn->set('key', 'value');
+
+            $txn->__destruct();
+
+            $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+            $this->assertContains('Transaction rollback skipped during shutdown', $logger->messages);
+
+            // Destroy the object while the flag is still set, so the second
+            // destructor run also stays off the network.
+            unset($txn);
+        } finally {
+            ShutdownState::resetForTests();
+        }
     }
 
     public function testRollbackEncounteringLockResolvesItAndRetries(): void

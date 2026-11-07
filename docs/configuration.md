@@ -1009,6 +1009,24 @@ own `log()` and `debug()` implementations: psr/log does not declare that
 class `final`, so a subclass that overrides either method may record what
 it receives.
 
+### Shutdown and destructors
+
+Logging from a destructor is best-effort. PHP releases objects in an order
+that is not guaranteed, so a handler's stream, buffer or network transport
+may already be gone when a client's destructor closes its channels or rolls
+back an abandoned transaction. The client therefore emits every record on a
+close or destructor path through a guard that swallows a logger failure: a
+broken logger cannot replace the original diagnostic with `Fatal error:
+Uncaught ... thrown in destructor`. Those records are lost in that case.
+
+Once PHP has entered its shutdown sequence, `Transaction::__destruct()` and
+`TxnKvClient::close()` also skip the rollback RPC: ext-grpc may already be in
+or past module shutdown, where a call's behaviour is undefined. An abandoned
+transaction keeps its locks until the lock TTL expires, so callers that need
+an immediate release must `commit()` or `rollback()` explicitly, or call
+`close()` before shutdown. An explicit `close()` outside shutdown still rolls
+back the live transactions before it releases the transport.
+
 The answer is taken **once**, when the client is built, and it is not
 re-examined afterwards. A logger that is reconfigured at runtime — a Monolog
 handler whose level is lowered to `DEBUG`, say — keeps the answer the client
