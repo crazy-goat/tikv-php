@@ -76,6 +76,21 @@ no fresh budget after an earlier one spent it), while two calls to
 per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
 on ordinary one-retry-per-region traffic.
 
+## With the default settings the retry deadline fires before the ServerBusy budget
+
+`RetryExecutor` charges `serverBusyBudgetMs` (60 s) only for `ServerBusy`
+backoff sleeps, while `retryDeadlineMs` (30 s) is checked before every
+attempt and before every sleep, with the sleep clamped to the remaining
+deadline. Because of the clamp, an operation cannot accumulate 60 s of
+ServerBusy sleep inside a 30 s wall clock, so with the defaults the deadline
+always binds first and the ServerBusy budget is unreachable — raising it
+alone changes nothing. It becomes the binding bound only when
+`retryDeadlineMs` is `0` (disabled) or larger than the budget. Diagnostics
+differ too: the deadline throws `RetryBudgetExhaustedException` with the
+`ServerIsBusy` error in `getPrevious()`, while an exhausted ServerBusy
+budget rethrows the original `TiKvException`. See
+[ServerBusy Budget vs Retry Deadline](../configuration.md#serverbusy-budget-vs-retry-deadline).
+
 ## Store-health invalidation runs after the retry invalidation, so only sibling regions remain
 
 Issue #424 records a transport failure at the end of `RetryExecutor`'s catch,

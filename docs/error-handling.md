@@ -702,6 +702,14 @@ Notes:
   ServerBusy budgets — it exhausts on the first charge. Only
   `retryDeadlineMs=0` disables its budget (restoring the pre-#294 unbounded
   behaviour).
+- The ServerBusy budget and the deadline are independent, and the deadline
+  is checked (with each backoff sleep clamped to the remaining budget)
+  before the sleep. With the defaults the 30 s deadline always binds before
+  the 60 s ServerBusy budget, so a sustained `ServerIsBusy` episode surfaces
+  as `RetryBudgetExhaustedException` with the `ServerIsBusy` error in
+  `getPrevious()`, not as a rethrown region error; the ServerBusy budget
+  only binds when `retryDeadlineMs` is `0` or larger than it. See
+  [ServerBusy Budget vs Retry Deadline](configuration.md#serverbusy-budget-vs-retry-deadline).
 - Deadline checks run *before* each attempt; worst-case worker occupancy is
   therefore approximately the deadline plus one more in-flight attempt
   (bounded by the gRPC timeout).

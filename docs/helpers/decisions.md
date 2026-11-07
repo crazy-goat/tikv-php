@@ -837,7 +837,11 @@ wall-clock deadline) that no single behavioural test covers.
 the wall-clock deadline, the #233 fatal-path interaction, and the attempt cap.
 Do not collapse the three bounds into one value: the 30 s wall clock is the
 binding one for a `ServerBusy` storm (1–2 s sleeps), the sleep budgets are what
-bound a millisecond-scale retry storm that no wall clock would catch.
+bound a millisecond-scale retry storm that no wall clock would catch. Note
+that the ServerBusy budget is not live under the defaults at all: the 30 s
+deadline is reached before the 60 s budget, so the budget only binds when
+`retryDeadlineMs` is disabled or configured longer (issue #535; see
+[ServerBusy Budget vs Retry Deadline](../configuration.md#serverbusy-budget-vs-retry-deadline)).
 
 ## A non-positive timeout is a configuration error, not a "disabled" spelling (issue #276)
 

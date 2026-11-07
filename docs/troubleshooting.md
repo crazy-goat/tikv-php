@@ -325,11 +325,15 @@ RegionException: ServerIsBusy
 **What it means:** The TiKV node asked to throttle this request — it is
 overloaded (raft too busy, scheduler congested).
 
-**Solution:** The client retries internally with backoff, charging a
-separate ServerBusy budget (60000 ms default). If you see
-`RetryBudgetExhaustedException` wrapping this repeatedly, shed load or
-scale the cluster. See
-[Retry Budgets Behind Every Operation](error-handling.md#retry-budgets-behind-every-operation).
+**Solution:** The client retries internally with backoff. Under the default
+30 s retry deadline a sustained `ServerIsBusy` episode surfaces as
+`RetryBudgetExhaustedException` — the deadline binds before the separate
+60 s ServerBusy budget, which only applies when the deadline is disabled or
+configured longer. `getPrevious()` holds the `ServerIsBusy` error. If you
+see this repeatedly, shed load or scale the cluster. See
+[Retry Budgets Behind Every Operation](error-handling.md#retry-budgets-behind-every-operation)
+and
+[ServerBusy Budget vs Retry Deadline](configuration.md#serverbusy-budget-vs-retry-deadline).
 
 #### Other RegionException Messages
 
@@ -840,7 +844,10 @@ the raw key.)
 `options['retryDeadlineMs']`) was reached before the operation succeeded.
 The original error is preserved — check `getPrevious()`. Note the other two
 budgets (`maxBackoffMs`, `serverBusyBudgetMs`) do **not** throw this class:
-they rethrow the original `TiKvException`.
+they rethrow the original `TiKvException`. With the defaults, a
+`ServerIsBusy` storm reaches the deadline first, so this class is what you
+see even though the ServerBusy budget is nominally 60 s (see
+[ServerBusy Budget vs Retry Deadline](configuration.md#serverbusy-budget-vs-retry-deadline)).
 
 **Solution:** Retry only if your operation is idempotent — the client
 already retried internally until its budget ran out. For non-idempotent
