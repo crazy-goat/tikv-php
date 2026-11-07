@@ -256,15 +256,22 @@ All three batch operations share the same execution model
    if most regions succeeded.
 
 **The exception's diagnostics:** `getRegionErrors()` returns
-`array<int, TiKvException>` (failed sub-batch index → exception) and
-`getTotalRegions()` returns the number of sub-batch units in the batch. The
-message summarises both: `Batch operation partially failed: <n> of <total>
-regions failed. First error: ...`.
+`array<int, TiKvException>` (failed fan-out call index → exception),
+`getFailedRegionIds()` returns the real TiKV region IDs of the failed calls
+(unique, ascending) and `getFailedCallIds()` maps each failed call index to
+a `BatchCallId` carrying `regionId` and `subBatchIndex`. `getTotalRegions()`
+returns the number of sub-batch units in the batch. The message summarises
+the count: `Batch operation partially failed: <n> of <total> regions failed.
+First error: ...`.
 
-> **Note:** the array keys in `getRegionErrors()` are internal sub-batch
-> indices, *not* TiKV region IDs and not your keys — the client does not
-> expose which user keys belonged to a failed sub-batch. In practice, treat
-> the batch as "partially applied with unknown affected keys".
+> **Note:** the array keys in `getRegionErrors()` remain internal call
+> indices, *not* TiKV region IDs and not your keys. Use
+> `getFailedRegionIds()` to correlate the failure with `pd-ctl` and
+> cluster-side metrics; a region split into several sub-batches is reported
+> by `getFailedCallIds()` as one entry per sub-batch (`subBatchIndex`), so
+> identifiers never collide. The client still does not expose which user
+> keys belonged to a failed sub-batch, so treat the batch as "partially
+> applied with unknown affected keys".
 
 **Recovery patterns:**
 
@@ -275,9 +282,10 @@ try {
     $client->batchPut($pairs);
 } catch (BatchPartialFailureException $e) {
     printf(
-        "%d of %d sub-batches failed\n",
+        "%d of %d sub-batches failed (regions: %s)\n",
         count($e->getRegionErrors()),
         $e->getTotalRegions(),
+        implode(', ', $e->getFailedRegionIds()),
     );
 
     // Idempotent work (fixed key/value set): a full retry is safe and
@@ -308,6 +316,9 @@ which ones must not be repeated after an ambiguous failure — see
 `BatchAsyncExecutor` when the wall-clock batch deadline expires (the
 `batchDeadlineMs` timeout option, 60000 ms by default; `0` disables it);
 in-flight futures are cancelled, so the applied subset is likewise unknown.
+When the call site supplied fan-out descriptors, `getContext()` also carries
+`dispatchedRegionIds` and `pendingRegionIds` (the real TiKV region IDs) next
+to the historical `dispatchedRegions`/`pendingRegions` slot indices.
 
 ## Scanning Operations
 

@@ -12,6 +12,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsEntry;
 use CrazyGoat\TiKV\Client\Batch\BatchCommands\BatchCommandsMultiplexer;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
@@ -100,21 +101,26 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
         /** @var array<int, BatchCommandsEntry> $entries */
         $entries = [];
         foreach ($keysByRegion as $regionData) {
+            $regionId = $regionData['region']->regionId;
             $subBatches = RawKvSplitter::splitIntoBatches(
                 $regionData['keys'],
                 self::MAX_BATCH_LIMIT,
                 self::MAX_BATCH_GET_SIZE,
                 strlen(...),
             );
-            foreach ($subBatches as $subBatch) {
+            foreach ($subBatches as $subBatchIndex => $subBatch) {
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetWithRetry(
                     $subBatch,
                     $retryExecutor,
                     $columnFamily,
                 );
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
                 if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
                     $entries[] = $this->batchGetEntry($regionData['region'], $subBatch, $columnFamily);
                 }
@@ -137,6 +143,7 @@ final readonly class RawKvBatch
                 $fallbackCalls,
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
+                array_intersect_key($labels, $fallbackCalls),
             );
 
             foreach ($regionResults as $response) {
@@ -219,9 +226,12 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
         /** @var array<int, BatchCommandsEntry> $entries */
         $entries = [];
         foreach ($pairsByRegion as $regionData) {
+            $regionId = $regionData['region']->regionId;
             $regionPairs = $regionData['pairs'];
             $regionTtls = $regionData['ttls'] ?? [];
 
@@ -232,9 +242,10 @@ final readonly class RawKvBatch
                 $regionTtls,
             );
 
-            foreach ($subBatches as $subBatch) {
+            foreach ($subBatches as $subBatchIndex => $subBatch) {
                 $batchTtls = $subBatch['ttls'];
                 $batchTtl = $batchTtls !== [] ? $batchTtls : (is_int($ttl) ? $ttl : 0);
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchPutWithRetry(
                     $subBatch['pairs'],
                     $batchTtl,
@@ -242,6 +253,7 @@ final readonly class RawKvBatch
                     $forCas,
                     $columnFamily,
                 );
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
                 if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
                     $entries[] = $this->batchPutEntry(
                         $regionData['region'],
@@ -262,6 +274,7 @@ final readonly class RawKvBatch
                 $fallbackCalls,
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
+                array_intersect_key($labels, $fallbackCalls),
             );
         }
     }
@@ -288,22 +301,27 @@ final readonly class RawKvBatch
         $batchExecutor = new BatchAsyncExecutor($this->logger);
 
         $regionCalls = [];
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
         /** @var array<int, BatchCommandsEntry> $entries */
         $entries = [];
         foreach ($keysByRegion as $regionData) {
+            $regionId = $regionData['region']->regionId;
             $subBatches = RawKvSplitter::splitIntoBatches(
                 $regionData['keys'],
                 self::MAX_BATCH_LIMIT,
                 self::MAX_BATCH_DELETE_SIZE,
                 strlen(...),
             );
-            foreach ($subBatches as $subBatch) {
+            foreach ($subBatches as $subBatchIndex => $subBatch) {
+                $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchDeleteWithRetry(
                     $subBatch,
                     $retryExecutor,
                     $forCas,
                     $columnFamily,
                 );
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
                 if ($this->batchCommands instanceof BatchCommandsMultiplexer) {
                     $entries[] = $this->batchDeleteEntry($regionData['region'], $subBatch, $forCas, $columnFamily);
                 }
@@ -318,6 +336,7 @@ final readonly class RawKvBatch
                 $fallbackCalls,
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
+                array_intersect_key($labels, $fallbackCalls),
             );
         }
     }

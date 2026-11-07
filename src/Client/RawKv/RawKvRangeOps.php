@@ -11,6 +11,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawChecksumResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -99,19 +100,24 @@ final readonly class RawKvRangeOps
         $clipper = new RegionRangeClipper();
 
         $calls = [];
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $rangeStart, $rangeEnd]) {
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $rangeStart, $rangeEnd]) {
+            $slot = count($calls);
             $calls[] = fn(): CheckedGrpcFuture => $this->deleteRangeWithRetry(
                 $executor,
                 $rangeStart,
                 $rangeEnd,
                 $columnFamily,
             );
+            $labels[$slot] = new BatchCallId($region->regionId);
         }
 
         $this->createBatchExecutor()->executeParallelCapped(
             $calls,
             $this->maxConcurrency,
             $this->timeoutConfig->batchDeadlineMs,
+            $labels,
         );
     }
 
@@ -149,18 +155,23 @@ final readonly class RawKvRangeOps
         $clipper = new RegionRangeClipper();
 
         $calls = [];
-        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $rangeStart, $rangeEnd]) {
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
+        foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $rangeStart, $rangeEnd]) {
+            $slot = count($calls);
             $calls[] = fn(): CheckedGrpcFuture => $this->checksumWithRetry(
                 $executor,
                 $rangeStart,
                 $rangeEnd,
             );
+            $labels[$slot] = new BatchCallId($region->regionId);
         }
 
         $responses = $this->createBatchExecutor()->executeParallelCapped(
             $calls,
             $this->maxConcurrency,
             $this->timeoutConfig->batchDeadlineMs,
+            $labels,
         );
 
         $mergedChecksum = 0;

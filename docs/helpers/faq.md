@@ -1575,20 +1575,22 @@ Facts fixed by the implementation, worth not re-deriving:
   reassigned after construction. Cache-carrying services can't be
   `readonly` classes.
 
-## BatchPartialFailureException's array keys are sub-batch indices, not region IDs or user keys
+## BatchPartialFailureException's array keys are call indices; use getFailedRegionIds() for region IDs
 
-`BatchPartialFailureException::getRegionErrors()` is documented in several
-places as "regionId → exception", but the keys are actually indices into the
-internal list of sub-batch callables (`RawKvBatch` groups keys per region and
-splits each region into ≤512-key/16 KB sub-batches before dispatch, so the
-count of units is larger than the region count whenever any region's keys
-exceed one sub-batch). There is no public
-mapping from a failed index back to the user keys it contained. Practical
-consequence for recovery advice: you cannot "re-drive only the affected keys"
-through the exception alone — for idempotent work retry the whole batch; for
-non-idempotent work re-read and recompute, or use a transaction. (Documented
-in docs/operations.md, issue #393; `docs/troubleshooting.md`'s "regionId →
-exception" wording is a candidate for the same correction.)
+`BatchPartialFailureException::getRegionErrors()` is keyed by an internal
+fan-out call index, not a region ID or a user key (`RawKvBatch` groups keys
+per region and splits each region into ≤512-key/16 KB sub-batches before
+dispatch, so the number of calls is larger than the region count). Since
+issue #285 the exception also carries a `BatchCallId` per call:
+`getFailedRegionIds()` returns the real TiKV region IDs (unique, ascending,
+ready for `pd-ctl` and cluster metrics) and `getFailedCallIds()` maps each
+failed call index to `{regionId, subBatchIndex}`, so several sub-batches of
+one region are distinguishable and identifiers never collide. There is still
+no public mapping from a failed call back to the user keys it contained: for
+idempotent work retry the whole batch; for non-idempotent work re-read and
+recompute, or use a transaction. (Documented in docs/operations.md, issue
+#393; `BatchDeadlineExceededException` carries the same real region IDs under
+`getContext()['dispatchedRegionIds']` / `['pendingRegionIds']`.)
 
 ## Capturing gRPC requests in a helper-scoped PHPUnit mock callback — closure must take `$requests` by reference
 

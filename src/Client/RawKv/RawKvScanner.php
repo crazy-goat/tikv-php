@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\RawKv;
 use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -777,7 +778,9 @@ final readonly class RawKvScanner
             /** @var array<int, string> $freshEnds */
             $freshEnds = [];
             $calls = [];
-            foreach ($window as $index => [, $scanStart, $scanEnd]) {
+            /** @var array<int, BatchCallId> $labels */
+            $labels = [];
+            foreach ($window as $index => [$region, $scanStart, $scanEnd]) {
                 $freshEnds[$index] = '';
                 $calls[$index] = function () use (
                     $executor,
@@ -801,6 +804,7 @@ final readonly class RawKvScanner
                         $freshEnds[$index],
                     );
                 };
+                $labels[$index] = new BatchCallId($region->regionId);
             }
 
             try {
@@ -808,6 +812,7 @@ final readonly class RawKvScanner
                     $calls,
                     $this->maxConcurrency,
                     $windowDeadlineMs,
+                    $labels,
                 );
             } catch (BatchDeadlineExceededException) {
                 // An exhausted deadline is not a reason to fall back: the
