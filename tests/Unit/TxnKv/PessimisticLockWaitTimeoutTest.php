@@ -15,6 +15,7 @@ use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
@@ -96,6 +97,7 @@ class PessimisticLockWaitTimeoutTest extends TestCase
      *     lockWaitTimeMs?: int,
      *     maxBackoffMs?: int,
      *     eagerPessimisticLocks?: bool,
+     *     writeTimeoutMs?: int,
      * } $options
      */
     private function createTransaction(array $options = []): Transaction
@@ -111,6 +113,9 @@ class PessimisticLockWaitTimeoutTest extends TestCase
             lockResolver: $this->lockResolver,
             regionResolver: $this->regionResolver,
             maxBackoffMs: $options['maxBackoffMs'] ?? 20000,
+            timeoutConfig: isset($options['writeTimeoutMs'])
+                ? new TimeoutConfig(writeTimeoutMs: $options['writeTimeoutMs'])
+                : new TimeoutConfig(),
             eagerPessimisticLocks: $options['eagerPessimisticLocks'] ?? true,
             lockWaitTimeMs: $options['lockWaitTimeMs'] ?? Transaction::DEFAULT_LOCK_WAIT_TIME_MS,
         );
@@ -213,6 +218,46 @@ class PessimisticLockWaitTimeoutTest extends TestCase
         $this->assertSame(1000, Transaction::DEFAULT_LOCK_WAIT_TIME_MS);
     }
 
+    public function testWaitTimeoutIsCappedByTheRpcWriteTimeout(): void
+    {
+        $this->alwaysLockingSuccessfully();
+
+        // A per-request wait longer than the write timeout would let TiKV
+        // answer only after the client has already cancelled the RPC, which
+        // surfaces as a GrpcException (DEADLINE_EXCEEDED) instead of a lock
+        // error. The request must leave the server room to answer first
+        // (issue #229, TXN-24).
+        $txn = $this->createTransaction([
+            'lockWaitTimeMs' => 5000,
+            'writeTimeoutMs' => 1000,
+        ]);
+        $txn->set('key', 'value');
+
+        $this->assertSame([900], $this->capturedWaitTimeouts());
+
+        $lockCall = array_values(array_filter(
+            $this->callTimeouts,
+            static fn (array $call): bool => $call['method'] === 'KvPessimisticLock',
+        ));
+        $this->assertSame(1000, $lockCall[0]['timeoutMs']);
+    }
+
+    public function testWaitTimeoutAsksTiKVNotToWaitWhenTheRpcDeadlineIsBelowTheHeadroom(): void
+    {
+        $this->alwaysLockingSuccessfully();
+
+        // Any positive wait would end in DEADLINE_EXCEEDED before the server
+        // can answer, so the request falls back to the protobuf's "do not
+        // wait" value instead of risking a GrpcException (issue #229).
+        $txn = $this->createTransaction([
+            'lockWaitTimeMs' => 5000,
+            'writeTimeoutMs' => 50,
+        ]);
+        $txn->set('key', 'value');
+
+        $this->assertSame([-1], $this->capturedWaitTimeouts());
+    }
+
     public function testWaitTimeoutShrinksAsTheLockWaitBudgetIsConsumed(): void
     {
         $this->alwaysConflicting();
@@ -280,6 +325,8 @@ class PessimisticLockWaitTimeoutTest extends TestCase
         } catch (LockWaitTimeoutException $e) {
             $this->assertSame('key', $e->getKey());
             $this->assertSame(100, $e->getTimeoutMs());
+            $this->assertSame(100, $e->getBudgetMs());
+            $this->assertSame(1000, $e->getWaitTimeoutMs());
         }
 
         $this->assertNotContains('KvPrewrite', $this->methods);

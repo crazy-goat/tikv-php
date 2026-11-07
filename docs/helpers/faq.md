@@ -579,6 +579,20 @@ already satisfied by #219/#500 before #443 was worked on — an audit issue's
 premise can expire while it waits in the milestone (the same trap as #394).
 The remaining gap was the missing `wait_timeout` and the missing knob.
 
+The #229 review found three residuals, fixed together: a positive
+`lockWaitTimeMs` is capped by the request's gRPC deadline (`writeTimeoutMs`
+minus a 100 ms headroom), because a server-side wait at or above the client
+deadline can only end in `GrpcException` (`DEADLINE_EXCEEDED`) rather than
+`KeyIsLocked`; when the deadline is shorter than the headroom the request
+carries `-1` ("do not wait"). `lockWaitTimeMs` is accepted by `create()` as
+a client-wide default, with `begin()` overriding it per transaction.
+`LockWaitTimeoutException` now carries both timeouts: `getTimeoutMs()` /
+`getBudgetMs()` are the exhausted `maxBackoffMs` budget, and
+`getWaitTimeoutMs()` is the configured per-request wait. The budget is the
+timeout that actually expired — the exception is raised by the client-side
+loop, not by TiKV's server-side wait timer — so the historical accessor
+keeps its value.
+
 ## Retry closures must re-resolve the region inside the loop — scans resolve on the sub-range start, reverse scans on the sub-range end
 
 `RetryExecutor` invalidates the region cache on routing errors

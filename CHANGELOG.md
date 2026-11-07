@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- The pessimistic-lock wait timeout is now capped by the request's gRPC deadline and configurable client-wide (issue #229, TXN-24). A positive `lockWaitTimeMs` was sent as `PessimisticLockRequest.wait_timeout` even when it exceeded the write timeout, so TiKV could answer only after the client had already cancelled the RPC and the caller saw a `GrpcException` (`DEADLINE_EXCEEDED`) instead of a lock error; the effective value is now `min(lockWaitTimeMs, remaining budget, RPC deadline - 100 ms)`, and it falls back to the protobuf's "do not wait" value when the deadline is shorter than the headroom. `lockWaitTimeMs` is also accepted by `TxnKvClient::create()` as the client-wide default, with `begin()` overriding it per transaction. `LockWaitTimeoutException` now reports both timeouts: `getTimeoutMs()` still reports the exhausted `maxBackoffMs` budget (now also available as `getBudgetMs()`), and the new `getWaitTimeoutMs()` returns the configured per-request wait. Documented in `docs/configuration.md`, `docs/troubleshooting.md`, `docs/error-handling.md`, `docs/getting-started.md`, `docs/architecture.md`, `README.md` and `docs/helpers/faq.md`. (#229)
+
 ## [v0.13.0] - 2026-11-07
 
 ### Changed

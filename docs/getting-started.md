@@ -350,7 +350,8 @@ try {
 > mode with `beginPessimistic()` / `beginOptimistic()` in new code. Both are
 > thin wrappers over `begin()` and accept the same options (`priority`,
 > `enable1Pc`, `enableAsyncCommit`, `eagerPessimisticLocks`,
-> `lockWaitTimeMs`).
+> `lockWaitTimeMs`). The lock-wait timeout can also be set client-wide on
+> `TxnKvClient::create()`, with `begin()` overriding it.
 
 ### Basic Transaction Operations
 

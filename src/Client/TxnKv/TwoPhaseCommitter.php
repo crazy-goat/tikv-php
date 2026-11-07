@@ -168,6 +168,19 @@ final readonly class TwoPhaseCommitter
     private const MIN_LOCK_RESOLUTION_BUDGET_MS = 11;
 
     /**
+     * Headroom kept between the server-side `wait_timeout` and the gRPC
+     * deadline of the same pessimistic-lock request (issue #229, TXN-24).
+     *
+     * TiKV must be able to answer with `KeyIsLocked` before the client
+     * cancels the call. Without the headroom a `lockWaitTimeMs` at or above
+     * the write timeout would let the server wait until after the deadline,
+     * so the caller would see a `GrpcException` (`DEADLINE_EXCEEDED`)
+     * instead of the lock error it asked for. 100 ms covers the
+     * request/response transit on a normal network.
+     */
+    private const LOCK_WAIT_DEADLINE_HEADROOM_MS = 100;
+
+    /**
      * Default pessimistic-lock wait timeout handed to TiKV
      * (issue #443, DIV-07). It matches TiKV's own
      * `pessimistic-txn.wait-for-lock-timeout` default (1 s), so the default
@@ -2184,19 +2197,28 @@ final readonly class TwoPhaseCommitter
     /**
      * Effective `PessimisticLockRequest.wait_timeout` for one attempt
      * (issue #443, DIV-07). Mirrors client-go's `calculateEffectiveWaitTime`:
-     * the value handed to TiKV is `min(lockWaitTimeMs, remaining budget)`, so
-     * it never exceeds the budget and shrinks as the budget is consumed. The
+     * the value handed to TiKV is
+     * `min(lockWaitTimeMs, remaining budget, RPC deadline - headroom)`, so it
+     * never exceeds the budget and shrinks as the budget is consumed. The
      * budget counts the backoff sleeps, not the RPC time, so the total
      * occupancy of a contended key is the budget plus the server-side waits
      * of the attempts.
      *
+     * The RPC-deadline cap (issue #229, TXN-24) keeps the server's wait
+     * shorter than the gRPC deadline of the same request: TiKV must answer
+     * with `KeyIsLocked` before the client cancels the call, otherwise the
+     * configured wait escapes as a `GrpcException` (`DEADLINE_EXCEEDED`)
+     * instead of a lock error.
+     *
      * @param int $elapsedMs backoff already spent on this key group
+     * @param RetryBudget|null $budget live retry budget capping the RPC
+     *        deadline of the attempt
      */
-    private function effectiveLockWaitTimeoutMs(int $elapsedMs): int
+    private function effectiveLockWaitTimeoutMs(int $elapsedMs, ?RetryBudget $budget = null): int
     {
         if ($this->lockWaitTimeMs === 0) {
             // 0 is the protobuf's "use TiKV's own default timeout" — there
-            // is no client-side value to shrink.
+            // is no client-side value to shrink or cap.
             return 0;
         }
 
@@ -2207,7 +2229,17 @@ final readonly class TwoPhaseCommitter
             return self::LOCK_WAIT_NO_WAIT_MS;
         }
 
-        return min($this->lockWaitTimeMs, $remainingMs);
+        $rpcDeadlineMs = $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget)
+            ?? $this->timeoutConfig->writeTimeoutMs;
+        $waitCapMs = $rpcDeadlineMs - self::LOCK_WAIT_DEADLINE_HEADROOM_MS;
+        if ($waitCapMs <= 0) {
+            // The RPC deadline is shorter than the headroom: any positive
+            // wait could only end in DEADLINE_EXCEEDED, so ask TiKV to answer
+            // immediately and let the loop decide on the lock error.
+            return self::LOCK_WAIT_NO_WAIT_MS;
+        }
+
+        return min($this->lockWaitTimeMs, $remainingMs, $waitCapMs);
     }
 
     /**
@@ -2443,7 +2475,7 @@ final readonly class TwoPhaseCommitter
                 $primary,
                 $forUpdateTs,
                 $isFirstLock,
-                $this->effectiveLockWaitTimeoutMs(0),
+                $this->effectiveLockWaitTimeoutMs(0, $budget),
                 $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                 $returnValues,
                 $budget,
@@ -2512,7 +2544,7 @@ final readonly class TwoPhaseCommitter
                                     $primary,
                                     $forUpdateTs,
                                     $isFirstLock && in_array($primary, $regionKeys, true),
-                                    $this->effectiveLockWaitTimeoutMs($elapsedMs),
+                                    $this->effectiveLockWaitTimeoutMs($elapsedMs, $budget),
                                     $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                                     $returnValues,
                                 );
@@ -2718,6 +2750,7 @@ final readonly class TwoPhaseCommitter
                         throw new LockWaitTimeoutException(
                             $regionKeys[0] ?? '',
                             $this->maxBackoffMs,
+                            $this->lockWaitTimeMs,
                         );
                     }
 
