@@ -41,6 +41,7 @@ use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
@@ -137,6 +138,7 @@ final readonly class TxnReader
                     priority: $this->priority,
                     requestContext: $this->requestContext,
                     resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -506,7 +508,7 @@ final readonly class TxnReader
      * so would serialise the regions and undo issue #291.
      *
      * @param string[] $regionKeys
-     * @param callable(TiKvException): ?BackoffType $classifier
+     * @param callable(TiKvException): RetryVerdict $classifier
      */
     private function batchGetForRegionWithRetry(
         array $regionKeys,
@@ -557,6 +559,7 @@ final readonly class TxnReader
             priority: $this->priority,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            storeAvailable: $this->regionResolver->isStoreAvailable(...),
         );
         $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
@@ -744,6 +747,7 @@ final readonly class TxnReader
                     priority: $this->priority,
                     requestContext: $this->requestContext,
                     resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;

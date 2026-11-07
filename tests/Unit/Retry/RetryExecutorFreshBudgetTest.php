@@ -19,6 +19,7 @@ use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -252,7 +253,7 @@ class RetryExecutorFreshBudgetTest extends TestCase
 
         // BackoffType::None is the only zero-sleep class (issue #241), so the
         // loop runs to the cap without sleeping a millisecond.
-        $classifier = static fn (TiKvException $e): BackoffType => BackoffType::None;
+        $classifier = static fn (TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
 
         foreach (['a', 'b'] as $key) {
             $attempts = 0;
