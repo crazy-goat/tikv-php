@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `docs/contributing.md` now describes the repository as it is (issue #414, DOC-48). The `src/`, `tests/` and `docs/` trees list every current namespace and directory — including `Codec/`, `Observability/`, `Region/`, `TxnKv/`, `Util/`, the nested `Batch/BatchCommands/`, `RawKv/Dto/`, `Region/Dto/` and `TxnKv/Exception/` packages, the `Integration` suite, all `Unit/` subdirectories and all twenty generated `src/Proto/` namespaces — instead of hiding the transaction subsystem and the generated protocols. The guide no longer quotes a fixed test count, because it changes with every commit; it explains that `OK, but some tests were skipped!` and `OK, but there were issues!` mean skips or warnings rather than failures, that the `Unit` suite excludes the gRPC-dependent files, that `Integration` skips them without `ext-grpc`, and that the `Grpc` suite is the one that treats a skip as a failure. The lint section documents `composer run lint:fix`, `composer run rector` and `composer run rector:fix` next to `composer run lint`, and the common-issues section shows how to auto-fix a Rector failure.
+
 ## [v0.12.0] - 2026-11-07
 
 ### Added
