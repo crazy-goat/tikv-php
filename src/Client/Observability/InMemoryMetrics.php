@@ -15,10 +15,15 @@ namespace CrazyGoat\TiKV\Client\Observability;
  *
  * This class is NOT intended for production use — values are not
  * thread-safe across PHP-FPM workers and memory grows unbounded.
- * For production, implement MetricsInterface on top of Prometheus,
- * StatsD, OpenTelemetry or your backend of choice.
+ * For production, use {@see PrometheusMetrics} or implement
+ * MetricsInterface on top of StatsD, OpenTelemetry or your backend of
+ * choice.
+ *
+ * It implements {@see DetailedMetricsInterface} too, so the richer signals
+ * (backoff, per-store outcomes, lock resolution, 2PC phase timings) are
+ * recorded and inspectable in tests.
  */
-final class InMemoryMetrics implements MetricsInterface
+final class InMemoryMetrics implements DetailedMetricsInterface
 {
     /** @var array<string, int> */
     private array $rpcStarted = [];
@@ -55,6 +60,36 @@ final class InMemoryMetrics implements MetricsInterface
 
     /** @var array<string, int> */
     private array $latencyCount = [];
+
+    /** @var array<string, int> */
+    private array $backoffCount = [];
+
+    /** @var array<string, float> */
+    private array $backoffSumMs = [];
+
+    /** @var array<int, int> */
+    private array $storeSuccessCount = [];
+
+    /** @var array<int, int> */
+    private array $storeFailureCount = [];
+
+    /** @var array<int, array<string, int>> */
+    private array $storeErrorKinds = [];
+
+    /** @var array<string, int> */
+    private array $lockResolutionCount = [];
+
+    /** @var array<string, float> */
+    private array $lockResolutionSumMs = [];
+
+    /** @var array<string, int> */
+    private array $twoPhaseCount = [];
+
+    /** @var array<string, int> */
+    private array $twoPhaseFailureCount = [];
+
+    /** @var array<string, float> */
+    private array $twoPhaseSumMs = [];
 
     public function rpcStarted(string $operation): void
     {
@@ -104,6 +139,39 @@ final class InMemoryMetrics implements MetricsInterface
         }
     }
 
+    public function backoffCompleted(string $backoffType, int $attempt, float $durationMs): void
+    {
+        $this->backoffCount[$backoffType] = ($this->backoffCount[$backoffType] ?? 0) + 1;
+        $this->backoffSumMs[$backoffType] = ($this->backoffSumMs[$backoffType] ?? 0.0) + $durationMs;
+    }
+
+    public function storeAttemptCompleted(int $storeId, bool $success, ?string $errorKind = null): void
+    {
+        if ($success) {
+            $this->storeSuccessCount[$storeId] = ($this->storeSuccessCount[$storeId] ?? 0) + 1;
+            return;
+        }
+
+        $this->storeFailureCount[$storeId] = ($this->storeFailureCount[$storeId] ?? 0) + 1;
+        $kind = $errorKind ?? 'unknown';
+        $this->storeErrorKinds[$storeId][$kind] = ($this->storeErrorKinds[$storeId][$kind] ?? 0) + 1;
+    }
+
+    public function lockResolved(string $result, float $durationMs): void
+    {
+        $this->lockResolutionCount[$result] = ($this->lockResolutionCount[$result] ?? 0) + 1;
+        $this->lockResolutionSumMs[$result] = ($this->lockResolutionSumMs[$result] ?? 0.0) + $durationMs;
+    }
+
+    public function twoPhasePhaseCompleted(string $phase, float $durationMs, bool $success): void
+    {
+        $this->twoPhaseCount[$phase] = ($this->twoPhaseCount[$phase] ?? 0) + 1;
+        $this->twoPhaseSumMs[$phase] = ($this->twoPhaseSumMs[$phase] ?? 0.0) + $durationMs;
+        if (!$success) {
+            $this->twoPhaseFailureCount[$phase] = ($this->twoPhaseFailureCount[$phase] ?? 0) + 1;
+        }
+    }
+
     /**
      * Reset all counters. Intended for tests.
      */
@@ -121,6 +189,16 @@ final class InMemoryMetrics implements MetricsInterface
         $this->storeRecoveredCount = [];
         $this->latencySumMs = [];
         $this->latencyCount = [];
+        $this->backoffCount = [];
+        $this->backoffSumMs = [];
+        $this->storeSuccessCount = [];
+        $this->storeFailureCount = [];
+        $this->storeErrorKinds = [];
+        $this->lockResolutionCount = [];
+        $this->lockResolutionSumMs = [];
+        $this->twoPhaseCount = [];
+        $this->twoPhaseFailureCount = [];
+        $this->twoPhaseSumMs = [];
     }
 
     public function getRpcStarted(string $operation): int
@@ -185,5 +263,80 @@ final class InMemoryMetrics implements MetricsInterface
         }
 
         return ($this->latencySumMs[$operation] ?? 0.0) / $count;
+    }
+
+    public function getBackoffCount(string $backoffType): int
+    {
+        return $this->backoffCount[$backoffType] ?? 0;
+    }
+
+    public function getTotalBackoffMs(string $backoffType): float
+    {
+        return $this->backoffSumMs[$backoffType] ?? 0.0;
+    }
+
+    public function getMeanBackoffMs(string $backoffType): float
+    {
+        $count = $this->getBackoffCount($backoffType);
+        if ($count === 0) {
+            return 0.0;
+        }
+
+        return $this->getTotalBackoffMs($backoffType) / $count;
+    }
+
+    public function getStoreSuccesses(int $storeId): int
+    {
+        return $this->storeSuccessCount[$storeId] ?? 0;
+    }
+
+    public function getStoreFailures(int $storeId): int
+    {
+        return $this->storeFailureCount[$storeId] ?? 0;
+    }
+
+    /**
+     * Failures of a store grouped by the error kind recorded with them.
+     *
+     * @return array<string, int>
+     */
+    public function getStoreErrorKinds(int $storeId): array
+    {
+        return $this->storeErrorKinds[$storeId] ?? [];
+    }
+
+    public function getLockResolutions(string $result): int
+    {
+        return $this->lockResolutionCount[$result] ?? 0;
+    }
+
+    public function getMeanLockResolutionMs(string $result): float
+    {
+        $count = $this->getLockResolutions($result);
+        if ($count === 0) {
+            return 0.0;
+        }
+
+        return ($this->lockResolutionSumMs[$result] ?? 0.0) / $count;
+    }
+
+    public function getTwoPhaseCount(string $phase): int
+    {
+        return $this->twoPhaseCount[$phase] ?? 0;
+    }
+
+    public function getTwoPhaseFailures(string $phase): int
+    {
+        return $this->twoPhaseFailureCount[$phase] ?? 0;
+    }
+
+    public function getMeanTwoPhaseMs(string $phase): float
+    {
+        $count = $this->getTwoPhaseCount($phase);
+        if ($count === 0) {
+            return 0.0;
+        }
+
+        return ($this->twoPhaseSumMs[$phase] ?? 0.0) / $count;
     }
 }

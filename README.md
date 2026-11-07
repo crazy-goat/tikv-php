@@ -171,9 +171,14 @@ that keeps existing, correct code working.
 | `Retry\RetryBudgetExhaustedException` | thrown when the internal retry budget is exhausted |
 | `Retry\ErrorKind` | the enum behind `RegionException::$errorKind` — the typed variant of a region error |
 | `Observability\MetricsInterface` | the metrics backend you implement and pass as `options['metrics']` |
+| `Observability\DetailedMetricsInterface` | the optional extension of `MetricsInterface` for backoff durations, per-store outcomes, lock-resolution results and 2PC phase timings |
 | `Observability\InMemoryMetrics` | the ready-made in-process backend, for tests and benchmarks |
+| `Observability\PrometheusMetrics` | the dependency-free Prometheus text-format exporter |
+| `Observability\TraceEventInterface` | the structured tracing callback you pass as `options['tracer']` |
+| `Observability\TraceCategory` | the category constants carried by trace events |
+| `Observability\InMemoryTracer` | the in-process trace-event recorder, for tests and diagnostics |
 | `Region\ReplicaReadMode`, `Region\ReplicaReadPolicy` | the values you pass as `options['replicaRead']` |
-| the documented `options[]` keys | every key documented in the [configuration guide](docs/configuration.md) — `tls`, `timeout`, `metrics`, `apiVersion`, `keyspace`, `replicaRead`, `batchCommands`, `maxScanRows`, `maxConcurrency`, `tsoPoolSize`, … |
+| the documented `options[]` keys | every key documented in the [configuration guide](docs/configuration.md) — `tls`, `timeout`, `metrics`, `tracer`, `apiVersion`, `keyspace`, `replicaRead`, `batchCommands`, `maxScanRows`, `maxConcurrency`, `tsoPoolSize`, … |
 
 The namespaces above are relative to `CrazyGoat\TiKV\Client\`. One class
 outside that namespace is part of the promise as well:
@@ -191,6 +196,9 @@ of the contract.
 - `Region\` — except `Region\ReplicaReadMode` and `Region\ReplicaReadPolicy`,
   which the table above covers;
 - `Observability\NoOpMetrics` — the default backend `getMetrics()` returns
+- `Observability\NoOpTracer` — the default tracing callback when no
+  `options['tracer']` is configured; write against
+  `Observability\TraceEventInterface`, which is covered;
 - `Observability\DebugLogging` — the internal probe that decides whether a logger can emit a `debug` record
   when no `options['metrics']` is configured; write against
   `Observability\MetricsInterface`, which is covered;
@@ -1017,6 +1025,9 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 
 ### Observability
 - ✅ **Metrics** — `options['metrics']` injects a `MetricsInterface` backend (`InMemoryMetrics` ships with the library for tests and benchmarks); `getMetrics()` returns the backend in use
+- ✅ **Prometheus exporter** — `PrometheusMetrics` is a dependency-free backend that renders the Prometheus text exposition format; no extra Composer package is required
+- ✅ **Extended metrics** — `DetailedMetricsInterface` (optional, so existing backends keep working) records retry backoff durations, per-store attempt outcomes, lock-resolution counts and two-phase-commit phase timings
+- ✅ **Tracing hooks** — `options['tracer']` accepts a `TraceEventInterface` callback; the client emits structured events for gRPC calls, 2PC phases and lock resolution, ready to bridge to OpenTelemetry (see [Tracing](docs/advanced.md#tracing))
 - ✅ **Health check** — `healthCheck()` probes PD with a lightweight `GetMembers` RPC and returns the cluster ID (with `options['expectedClusterId']` set, a response without a cluster-ID header is an error)
 - ✅ **Cluster ID** — `getClusterId()` returns the cluster ID learned from PD
 - ✅ **Slow log** — `options['slowLog']` logs the RawKV operations that are slower than their per-operation threshold
@@ -1042,6 +1053,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `timeout` | A gRPC deadline per operation class — read, write, batch, scan, delete-range, checksum, ingest, PD, TSO, lock resolution |
 | `slowLog` | Thresholds above which an operation is logged as slow |
 | `metrics` | A `MetricsInterface` backend for the RPC, retry and region-cache counters |
+| `tracer` | A `TraceEventInterface` callback for structured trace events (gRPC calls, 2PC phases, lock resolution) |
 | `retryDeadlineMs` | Wall-clock bound on one retry loop |
 | `maxConcurrency` | Maximum number of in-flight requests in the batch and range fan-outs |
 | `maxScanRows` | Row cap for an unbounded (`limit: 0`) scan; exceeding it throws `ScanLimitExceededException` |
@@ -1123,7 +1135,7 @@ src/
 │   ├── Connection/                    # PD client, keyspace resolver, TSO oracle
 │   ├── Exception/                     # Exception hierarchy (TiKvException, GrpcException, RegionException)
 │   ├── Grpc/                          # Low-level gRPC transport, deadlines, timeouts
-│   ├── Observability/                 # Metrics collection (MetricsInterface, NoOpMetrics)
+│   ├── Observability/                 # Metrics and tracing (MetricsInterface, PrometheusMetrics, TraceEventInterface)
 │   ├── RawKv/                         # RawKV API (RawKvClient, RawKvCrud, RawKvBatch, RawKvScanner)
 │   │   └── Dto/                       # RawKV DTOs (RegionInfoMapper)
 │   ├── Region/                        # Region resolution, grouping, range clipping
@@ -1302,6 +1314,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **PD connection reuse** — `TxnKvClient::pdClient()` exposes the client's own `PdClientInterface` for cluster inspection and tests ([#515](https://github.com/crazy-goat/tikv-php/issues/515))
 - ✅ **Explicit pessimistic key locking** — `Transaction::lockKeys()` and `getForUpdate()` acquire locks without writing, with the same conflict, deadlock and wait-timeout handling ([#436](https://github.com/crazy-goat/tikv-php/issues/436))
 - ✅ **Peer-role awareness** — `PeerInfo` carries the TiKV role and a learner or witness can never be adopted as the leader ([#258](https://github.com/crazy-goat/tikv-php/issues/258))
+- ✅ **Prometheus exporter and tracing hooks** — a dependency-free `PrometheusMetrics` backend, the optional `DetailedMetricsInterface` metric set (backoff, per-store outcomes, lock resolution, 2PC timings) and a `TraceEventInterface` callback for bridging to OpenTelemetry ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ✅ **`RawBatchScan` for multi-range scans** — `batchScan()` groups the ranges by region and sends one `RawBatchScan` per region, with the per-range result shape unchanged ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
 
 ### Planned
@@ -1314,7 +1327,6 @@ are tracked in their own issues and are not part of the roadmap. A
 feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
-- ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 
