@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Security
+
+- The TLS base-directory containment check now compares directory boundaries instead of string prefixes (SEC-10, issue #313). `TlsConfigBuilder` canonicalizes a certificate path with `realpath()` and then requires it to start with the canonicalized `caCertBaseDir` / `clientCertBaseDir`; a sibling directory sharing the base name prefix (`/etc/tikv-attacker/ca.pem` against a base of `/etc/tikv`) therefore passed. The check now accepts the base directory itself or a path beneath it, rejecting everything else, and a trailing separator on the base directory is tolerated. Paths that legitimately live inside the base directory keep working; only the sibling-prefix case changes. `TlsConfigBuilderTest` covers the sibling-prefix rejection, a nested path and a trailing-separator base, and the `*BaseDir` documentation in `README.md`, `docs/configuration.md` and `docs/advanced.md` states the boundary semantics. (#313)
+
 ## [v0.13.0] - 2026-11-07
 
 ### Changed

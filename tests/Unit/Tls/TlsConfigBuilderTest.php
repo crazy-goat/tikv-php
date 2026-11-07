@@ -217,6 +217,54 @@ class TlsConfigBuilderTest extends TestCase
             ->withCaCertFile($outsidePath, $this->tempDir);
     }
 
+    public function testBaseDirectoryRestrictionRejectsSiblingPrefixPath(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('outside the allowed base directory');
+
+        // The sibling directory shares the base directory's name prefix but is
+        // not inside it, so a plain str_starts_with() test would let it pass.
+        $baseDir = $this->tempDir . '/certs';
+        $siblingDir = $this->tempDir . '/certs-attacker';
+        mkdir($baseDir, 0777, true);
+        mkdir($siblingDir, 0777, true);
+        $siblingPath = $siblingDir . '/ca.pem';
+        file_put_contents($siblingPath, '-----BEGIN CERTIFICATE-----\nevil\n-----END CERTIFICATE-----');
+
+        (new TlsConfigBuilder())
+            ->withCaCertFile($siblingPath, $baseDir);
+    }
+
+    public function testBaseDirectoryRestrictionAllowsNestedPath(): void
+    {
+        $content = '-----BEGIN CERTIFICATE-----\nnested-content\n-----END CERTIFICATE-----';
+        $baseDir = $this->tempDir . '/certs';
+        mkdir($baseDir . '/sub', 0777, true);
+        $path = $baseDir . '/sub/ca.pem';
+        file_put_contents($path, $content);
+
+        $config = (new TlsConfigBuilder())
+            ->withCaCertFile($path, $baseDir)
+            ->build();
+
+        $this->assertSame($content, $config->caCert);
+    }
+
+    public function testBaseDirectoryRestrictionAcceptsTrailingSeparator(): void
+    {
+        $content = '-----BEGIN CERTIFICATE-----\ntrailing-content\n-----END CERTIFICATE-----';
+        $baseDir = $this->tempDir . '/certs';
+        mkdir($baseDir, 0777, true);
+        $path = $baseDir . '/ca.pem';
+        file_put_contents($path, $content);
+
+        $config = (new TlsConfigBuilder())
+            ->withCaCertFile($path, $baseDir . DIRECTORY_SEPARATOR)
+            ->build();
+
+        $this->assertSame($content, $config->caCert);
+    }
+
     public function testBaseDirectoryRestrictionAllowsInsidePath(): void
     {
         $content = '-----BEGIN CERTIFICATE-----\ninside-content\n-----END CERTIFICATE-----';
