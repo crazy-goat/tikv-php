@@ -100,6 +100,38 @@ final class StubRegionCache implements RegionCacheInterface
     }
 
     /**
+     * The cached region holding the greatest key strictly less than $endKey,
+     * or null when the cache holds none or the region below $endKey is not
+     * cached — the descending counterpart of {@see self::getByKey()}
+     * (issue #198). A region that ends below $endKey is a gap, not an
+     * answer.
+     */
+    public function getRegionBelow(string $endKey): ?RegionInfo
+    {
+        $best = null;
+        foreach ($this->regions as $region) {
+            if (KeyOrder::gte($region->startKey, $endKey)) {
+                continue;
+            }
+            if ($region->endKey !== '' && KeyOrder::lte($region->endKey, $region->startKey)) {
+                continue;
+            }
+            if ($best === null || KeyOrder::gte($region->startKey, $best->startKey)) {
+                $best = $region;
+            }
+        }
+
+        if ($best === null) {
+            return null;
+        }
+        if ($best->endKey !== '' && KeyOrder::lt($best->endKey, $endKey)) {
+            return null;
+        }
+
+        return $best;
+    }
+
+    /**
      * The cached region with this ID, or null when the cache does not hold it
      * — the same all-or-nothing answer {@see self::getByKey()} gives, so a
      * caller can state "the cache already holds this region" without also

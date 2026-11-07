@@ -62,6 +62,30 @@ final class RegionResolverBinaryKeyTest extends TestCase
         }
     }
 
+    public function testBatchResolveAssignsTheIssueVectorBytewise(): void
+    {
+        // The issue's own vector. Bytewise "10" < "100" < "9", so "9" belongs
+        // to the last region; a numeric comparison (9 < 10 < 100) would route
+        // it to the first one and TiKV would reject the request with
+        // KeyNotInRegion (issue #220, TXN-15).
+        $regions = [
+            $this->region(1, '', '10'),
+            $this->region(2, '10', '100'),
+            $this->region(3, '100', ''),
+        ];
+
+        $this->pdClient->method('scanRegions')->with('10', "9\x00")->willReturn($regions);
+        $this->regionCache->method('put');
+
+        $result = $this->resolver->batchResolveRegions(['9', '10', '100']);
+
+        foreach (['9' => 3, '10' => 2, '100' => 3] as $key => $expectedRegionId) {
+            $region = $result[$key] ?? null;
+            self::assertNotNull($region);
+            self::assertSame($expectedRegionId, $region->regionId);
+        }
+    }
+
     public function testBatchResolveHandlesBinaryBoundaries(): void
     {
         $regions = [

@@ -89,6 +89,11 @@ $pdClient = static function (array $regions): PdClientInterface {
             throw new LogicException('not used by the benchmark');
         }
 
+        public function getPrevRegion(string $key): ?RegionInfo
+        {
+            throw new LogicException('not used by the benchmark');
+        }
+
         public function getKeyspaceId(string $name): int
         {
             throw new LogicException('not used by the benchmark');
