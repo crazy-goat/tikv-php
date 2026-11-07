@@ -147,6 +147,7 @@ class UnresolvedRegionFailsClosedTest extends TestCase
             new RegionResolver($this->pdClient, $this->regionCache),
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
         );
     }
 
