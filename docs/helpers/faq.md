@@ -224,6 +224,25 @@ on a machine that has it (an extension that is too old is still reported) and
 the Unit-only workflow keeps working on one that has not. Re-check both
 whenever the job's PHP setup changes.
 
+A missing extension must not hide the transport tests, though (issue #284):
+
+- `phpunit.xml` enables `displayDetailsOnSkippedTests` and
+  `displayDetailsOnTestsThatTriggerWarnings`; `GrpcExtensionGate` emits one
+  `E_USER_WARNING` per skipped class (once, not once per test), so every run
+  names each skipped transport class and its reason instead of reducing it to
+  one `S`. The warning is what makes the class visible in the TestDox output
+  the CI jobs and composer scripts use, because the TestDox printer ignores
+  `displayDetailsOnSkippedTests`.
+- The gate's message names the test class, the `ext-grpc >= 1.57` requirement
+  and `pecl install grpc`, and points at `composer test:grpc`.
+- The `grpc-unit-tests` job sets `REQUIRE_GRPC_EXTENSION=1`; if `ext-grpc`
+  disappears from its PHP setup, the gate calls `self::fail()` with that
+  message instead of skipping. The job also passes `--fail-on-skipped`, so a
+  skip fails the build either way.
+- The `unit-tests` job needs no such flag: it passes `--fail-on-skipped`, so a
+  transport test that leaks into the Unit suite fails there instead of
+  skipping.
+
 ## PHP coerces numeric-string array keys to int — string-cast at every typed consumption point
 
 When a string that parses as an integer is used as an array key (`$map['12345']`,

@@ -592,7 +592,9 @@ Run the gRPC-dependent unit tests with the PHP gRPC extension loaded:
 composer test:grpc
 ```
 
-CI runs the same suite on PHP 8.4 with `extensions: grpc` and `coverage: pcov`, using `--fail-on-skipped` so a missing extension fails the job instead of producing skipped tests.
+CI runs the same suite on PHP 8.4 with `extensions: grpc` and `coverage: pcov`, using `--fail-on-skipped` so a missing extension fails the job instead of producing skipped tests. The job also sets `REQUIRE_GRPC_EXTENSION=1`, so `GrpcExtensionGate` reports "The gRPC extension is required in this environment but is not loaded" rather than a bare skip if the setup step ever loses the extension.
+
+Locally, a bare `vendor/bin/phpunit` still skips the transport tests when the extension is absent, but `phpunit.xml` enables `displayDetailsOnSkippedTests` and `displayDetailsOnTestsThatTriggerWarnings`, and the gate emits one warning per skipped class. The run therefore ends with a list that names every skipped transport class and its reason — the warning covers the TestDox output, which ignores the skipped-details setting — and the message names the class, the `ext-grpc >= 1.57` requirement and `pecl install grpc` (issue #284, GRPC-25).
 
 ### Mutation Testing
 
