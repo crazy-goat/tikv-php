@@ -98,4 +98,44 @@ class RegionEntryTest extends TestCase
         $this->assertSame(1, $entry->getLeaderStoreId());
         $this->assertSame(10, $entry->getLeaderPeerId());
     }
+
+    public function testSwitchLeaderToLearnerReturnsFalse(): void
+    {
+        $entry = new RegionEntry($this->makeRegionWithNonVotingPeers(), 1600);
+
+        $result = $entry->switchLeader(2);
+
+        $this->assertFalse($result);
+        $this->assertSame(1, $entry->getLeaderStoreId());
+        $this->assertSame(10, $entry->getLeaderPeerId());
+    }
+
+    public function testSwitchLeaderToWitnessReturnsFalse(): void
+    {
+        $entry = new RegionEntry($this->makeRegionWithNonVotingPeers(), 1600);
+
+        $result = $entry->switchLeader(3);
+
+        $this->assertFalse($result);
+        $this->assertSame(1, $entry->getLeaderStoreId());
+        $this->assertSame(10, $entry->getLeaderPeerId());
+    }
+
+    private function makeRegionWithNonVotingPeers(): RegionInfo
+    {
+        return new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 10,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'a',
+            endKey: 'z',
+            peers: [
+                new PeerInfo(peerId: 10, storeId: 1),
+                new PeerInfo(peerId: 20, storeId: 2, role: PeerInfo::ROLE_LEARNER),
+                new PeerInfo(peerId: 30, storeId: 3, isWitness: true),
+            ],
+        );
+    }
 }

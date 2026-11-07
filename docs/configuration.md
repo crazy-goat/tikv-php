@@ -2153,7 +2153,10 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 
 **Cache behavior**:
 - Cache entries are invalidated on routing errors
-- `NotLeader` errors update the cache with new leader info
+- `NotLeader` errors update the cache with new leader info when the hinted
+  peer is a voter and not a witness; a hint naming a learner or a witness
+  invalidates the region instead, so the retry re-resolves it through PD
+  (issue #258)
 - `EpochNotMatch` errors refresh the affected regions from TiKV's
   `current_regions` payload when it is usable, so the retry needs no PD
   `GetRegion`; an empty, undecodable, leaderless, older-epoch or
@@ -2521,7 +2524,9 @@ Reasons are mutually exclusive per drop; the current source emits
 `'not_leader'`, `'retry_region_error:<kind>'`, `'retry_region_error'`
 (unclassified retryable error), `'fatal_region_error'`, and `'lock_resolve'`
 when those paths actually remove a region. A NotLeader response whose hinted
-peer is still valid only switches the cached leader and emits nothing, and a
+peer is still valid — a voter that is not a witness — only switches the
+cached leader and emits nothing; a hint naming an unknown peer, a learner or
+a witness is unusable and drops the region with `'not_leader'`, and a
 non-routing error keeps the cached region on both the handler and the retry
 executor paths.
 At executor-owned call sites, NotLeader drops are owned exclusively by the

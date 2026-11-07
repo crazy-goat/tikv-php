@@ -499,7 +499,9 @@ heap records.
   when it is usable (the returned regions cover the key, decode cleanly, and
   the old leader is still a peer); otherwise invalidate the specific region
   and let the next attempt resolve it through PD (issue #246)
-- **NotLeader**: Update leader info or invalidate
+- **NotLeader**: Update leader info when the hinted peer may lead — a voter
+  that is not a witness; a hint naming a learner or a witness invalidates the
+  region and re-resolves it through PD (issue #258, REG-27)
 - **RegionNotFound**: Invalidate and retry
 - **ServerIsBusy / DiskFull / IsWitness / RecoveryInProgress**: Keep the
   cached region — the request reached the right region, so only the retry
@@ -884,7 +886,9 @@ the sequential retrying path.
 - Cache on first access
 - Refresh on EpochNotMatch from its `current_regions` payload; invalidate
   when the payload is absent or unusable
-- Update on NotLeader hint
+- Update on a NotLeader hint only when the hinted peer is a voter and not a
+  witness; a learner or witness hint invalidates the entry so the next attempt
+  re-resolves it through PD (issue #258)
 - Offer an opt-in tick (`refreshRegionCache()`) and an explicit boot-time
   preload (`preloadRegions()`) for long-lived workers (issue #425)
 - Drop the cached store address on a `StoreNotMatch` region error or a
