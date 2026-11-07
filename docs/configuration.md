@@ -755,8 +755,11 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 `caCertBaseDir` and `clientCertBaseDir` are optional and restrict **where the
 certificate files may live**. The path is canonicalized with `realpath()`
 before the comparison, so `..` segments and symlinks are resolved first, and
-the canonicalized path has to start with the canonicalized base directory — a
-path that does not is rejected with `InvalidArgumentException` ("TLS file path
+the canonicalized path must be the canonicalized base directory itself or lie
+beneath it — the check compares whole path components, not a string prefix, so
+a sibling directory whose name merely starts with the base name (for example
+`/etc/tikv-attacker` against a base of `/etc/tikv`) is rejected. A path outside
+the base directory is rejected with `InvalidArgumentException` ("TLS file path
 is outside the allowed base directory"). That is what stops a certificate path
 — or a symlink planted in the certificate directory — from loading a file you
 did not intend.
