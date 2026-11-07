@@ -466,15 +466,20 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\UndeterminedCommitException;
 
 const TXN_ATTEMPTS = 3;
 
+$value = 'v';
+
 for ($attempt = 1; $attempt <= TXN_ATTEMPTS; $attempt++) {
     $txn = $tikv->begin();      // a NEW transaction every round
     try {
-        $txn->set('k', 'v');
+        // Re-read before writing: a previous round may have committed.
+        if ($txn->get('k') !== $value) {
+            $txn->set('k', $value);
+        }
         $txn->commit();
         break;
     } catch (UndeterminedCommitException $e) {
-        // The commit may already be applied. Re-read the key in a NEW
-        // transaction and only re-apply it if it is not there.
+        // The commit may already be applied. The next round re-reads the
+        // key in a NEW transaction and re-applies only if it is not there.
         if ($attempt === TXN_ATTEMPTS) {
             throw $e;
         }
