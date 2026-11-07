@@ -135,6 +135,56 @@ class RegionCache implements RegionCacheInterface
     }
 
     /**
+     * The cached region that holds the greatest key strictly less than
+     * $endKey (issue #198).
+     *
+     * The descending counterpart of {@see self::getByKey()}: the boundary
+     * index already finds the greatest start key below $endKey, which is the
+     * region a reverse scan must read next — the region containing $endKey
+     * when the key is interior, or the adjacent region below when $endKey is
+     * a region boundary. Empty ranges are skipped, an expired entry is
+     * dropped rather than reported, and a hit counts as a use for LRU, all
+     * exactly as in `getByKey()`.
+     */
+    public function getRegionBelow(string $endKey): ?RegionInfo
+    {
+        $node = $this->strictPredecessor($endKey);
+        while ($node instanceof RegionBoundaryNode) {
+            $entry = $this->entriesById[$node->regionId] ?? null;
+            if ($entry instanceof RegionEntry && !$this->isEmptyRange($entry->region)) {
+                break;
+            }
+            $node = $this->strictPredecessor($node->startKey);
+        }
+        if (!$node instanceof RegionBoundaryNode) {
+            $this->debugMiss($endKey);
+            return null;
+        }
+
+        $entry = $this->entriesById[$node->regionId] ?? null;
+        if (!$entry instanceof RegionEntry) {
+            $this->debugMiss($endKey);
+            return null;
+        }
+
+        if ($this->isExpired($entry)) {
+            $this->removeById($entry->region->regionId);
+            $this->debugMiss($endKey);
+            return null;
+        }
+
+        $this->touch($entry->region->regionId);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Region cache hit', [
+                'key' => KeyRedactor::redact($endKey),
+                'regionId' => $entry->region->regionId,
+            ]);
+        }
+
+        return $this->resolveRegionInfo($entry);
+    }
+
+    /**
      * The cached region with this ID, or null when the cache does not hold
      * it (issue #288).
      *

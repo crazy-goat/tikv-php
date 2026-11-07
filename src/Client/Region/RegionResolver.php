@@ -13,6 +13,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
@@ -157,6 +158,46 @@ final readonly class RegionResolver
         $this->regionCache->put($region);
 
         return $region;
+    }
+
+    /**
+     * Resolve the region that holds the greatest key strictly less than
+     * $key (issue #198).
+     *
+     * The descending counterpart of {@see self::getRegionInfo()}, used by a
+     * reverse scan to walk a range from its upper bound downwards. The cache
+     * answers the common case. On a miss, `GetRegion` returns the region
+     * containing $key; when $key sits on a region boundary that region starts
+     * at $key and lies *above* the reverse range, so `GetPrevRegion` steps to
+     * the adjacent region below it instead.
+     *
+     * Returns null only when there is no region below $key: the key is in the
+     * first region of the keyspace, or PD reports no adjacent region.
+     *
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD error
+     */
+    public function getRegionBelow(string $key): ?RegionInfo
+    {
+        $cached = $this->regionCache->getRegionBelow($key);
+        if ($cached instanceof RegionInfo) {
+            $this->metrics->regionCacheHit('region_resolution');
+
+            return $cached;
+        }
+
+        $region = $this->getRegionInfo($key);
+        if (KeyOrder::lt($region->startKey, $key)) {
+            // $key is inside the region, so this region holds keys below it.
+            return $region;
+        }
+
+        $previous = $this->pdClient->getPrevRegion($key);
+        if ($previous instanceof RegionInfo) {
+            $this->regionCache->put($previous);
+        }
+
+        return $previous;
     }
 
     /**

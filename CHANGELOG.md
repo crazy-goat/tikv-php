@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Performance
+
+- A reverse scan no longer enumerates every region of the remaining range before reading the top one (issue #198, RAW-13). `reverseScan()` and the unbounded `reverseScan(..., limit: 0)` pages now resolve regions from the upper bound downwards in bounded batches: `RegionCache::getRegionBelow()` answers from the cache (the existing predecessor walk), and a miss asks PD for the region containing the cursor or, when the cursor sits exactly on a region boundary, for the adjacent region below through the new `PdClientInterface::getPrevRegion()` (`pdpb.PD/GetPrevRegion`). A scan satisfied by its first batch never asks PD for the rest of the range, so `reverseScan('z', 'a', 10)` on a large keyspace resolves only the regions it can consume instead of thousands of descriptors. A merge between two descending batches is clamped by the new `RegionScanBatch::trimEndToCursor()`. **Breaking change:** `RegionCacheInterface` gained `getRegionBelow(string $endKey): ?RegionInfo` and `PdClientInterface` gained `getPrevRegion(string $key): ?RegionInfo`; a third-party implementation of either must add the new method. The warm-cache path issues no PD lookup at all.
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added

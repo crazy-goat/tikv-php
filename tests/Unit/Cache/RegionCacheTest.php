@@ -291,6 +291,59 @@ class RegionCacheTest extends TestCase
         $this->assertSame([], (new RegionCache())->getRegionsInRange('a', 'z'));
     }
 
+    public function testGetRegionBelowReturnsTheRegionContainingAnInteriorKey(): void
+    {
+        $cache = new RegionCache();
+        $region1 = $this->makeRegion(1, 'a', 'm');
+        $region2 = $this->makeRegion(2, 'm', '');
+        $cache->put($region1);
+        $cache->put($region2);
+
+        // 'h' is inside [a, m): that region holds the greatest key below it.
+        $this->assertSame($region1, $cache->getRegionBelow('h'));
+    }
+
+    public function testGetRegionBelowReturnsTheRegionBelowABoundary(): void
+    {
+        $cache = new RegionCache();
+        $region1 = $this->makeRegion(1, 'a', 'm');
+        $region2 = $this->makeRegion(2, 'm', '');
+        $cache->put($region1);
+        $cache->put($region2);
+
+        $this->assertSame($region1, $cache->getRegionBelow('m'));
+        $this->assertSame($region2, $cache->getRegionBelow('z'));
+    }
+
+    public function testGetRegionBelowReturnsNullAtTheStartOfTheKeyspace(): void
+    {
+        $cache = new RegionCache();
+        $cache->put($this->makeRegion(1, '', 'm'));
+
+        $this->assertNull($cache->getRegionBelow(''));
+    }
+
+    public function testGetRegionBelowSkipsAnEmptyRange(): void
+    {
+        $cache = new RegionCache();
+        $empty = $this->makeRegion(1, 'a', 'a');
+        $region = $this->makeRegion(2, '', 'a');
+        $cache->put($empty);
+        $cache->put($region);
+
+        $this->assertSame($region, $cache->getRegionBelow('b'));
+    }
+
+    public function testGetRegionBelowDropsAnExpiredEntry(): void
+    {
+        $cache = new TestableRegionCache(1000, 10);
+        $cache->put($this->makeRegion(1, '', 'a'));
+        $cache->setTime(2000);
+
+        $this->assertNull($cache->getRegionBelow('b'));
+        $this->assertNull($cache->getByKey('x'), 'the expired entry is dropped, not reported');
+    }
+
     public function testMultipleRegionsBinarySearch(): void
     {
         $cache = new RegionCache();
@@ -980,7 +1033,7 @@ class RegionCacheTest extends TestCase
     {
         // Issue #425: a refresh tick is what revives a cache that sat idle
         // past its TTL, so the enumeration must not hide the expired entry.
-        $cache = new TestableRegionCache(1000, ttlSeconds: 10);
+        $cache = new TestableRegionCache(1000, 10);
         $region = $this->makeRegion(1, 'a', 'm');
         $cache->put($region);
 
