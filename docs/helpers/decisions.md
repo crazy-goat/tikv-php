@@ -1787,3 +1787,20 @@ runs after the string exists and cannot prevent that allocation. It remains
 only as a post-allocation defence-in-depth assertion (it can skip the second,
 larger allocation performed by protobuf decoding when set tighter than the
 transport limit).
+
+## `TlsConfig` does not try to scrub credentials (SEC-12, issue #315)
+
+`TlsConfig::close()` was removed rather than made terminal. PHP strings are
+immutable and copy-on-write, so rebinding the property to `str_repeat("\0", ...)`
+leaves both the original buffer and the copy already passed to
+`ChannelCredentials::createSsl()` in memory — the advertised guarantee did not
+exist. Worse, the method was a live footgun: the transport rebuilds credentials
+from the same `TlsConfig` after an idle or LRU eviction, so a caller who followed
+the docblock would silently break every reconnection.
+
+Do not reintroduce a "zero the key" method. `TlsConfig` lives in the internal
+`Tls\` namespace (see the README stability policy), so removing it is not a
+public-API break. If credential lifetime ever becomes a real requirement, it has
+to be solved outside PHP string properties (for example by loading material into
+the gRPC core and dropping the PHP copy immediately), not by a scrubbing method
+that cannot deliver.
