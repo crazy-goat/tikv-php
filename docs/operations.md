@@ -1351,8 +1351,8 @@ public function getMetrics(): MetricsInterface;
 user data and cannot fail with a "no region" error.
 
 - **Returns:** the cluster ID, or `null` when PD answered but the response
-  carried no cluster-ID header ("reachable, identity unknown"). Both are a
-  successful probe.
+  carried no cluster-ID header or reported `0` ("reachable, identity
+  unknown"). Both are a successful probe.
 - **Throws:** `ClientClosedException` when the client has been closed, and
   `HealthCheckException` for every other failure (PD unreachable, a gRPC
   transport error, or a PD-level error in the response header). The underlying
@@ -1394,8 +1394,10 @@ write path through your application's own traffic and the counters exposed by
 **`getClusterId()`** returns the cluster ID the client has already learned, or
 `null` when it has not learned one yet. It is a cached accessor: it sends no RPC
 and throws nothing. The ID is learned from the first PD response whose header
-carries it, or explicitly by `healthCheck()`. After `close()` it returns `null`
-because closing the PD client resets the cache.
+carries a non-zero cluster ID, and every later response header must report the
+same ID (a different one throws `TiKvException` before the response is used), or
+explicitly by `healthCheck()`. After `close()` it returns `null` because
+closing the PD client resets the cache.
 
 **`getMetrics()`** returns the metrics backend in use: the instance passed via
 `options['metrics']`, or the no-op default (`NoOpMetrics`) when none was
@@ -1557,9 +1559,13 @@ not a second full `Pair[]` copy of every value.
 >
 > - Run it in a dedicated, supervised process with no execution-time limit
 >   (CLI, `max_execution_time = 0`), never inside a web request.
-> - Run batches in a size you can afford to re-run: `ingest()` is **not**
->   retried automatically — any region error or transport error aborts the
->   remaining regions and throws.
+> - Run batches in a size you can afford to re-run. Retryable region errors
+>   (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, …) and retryable transport
+>   errors are retried per region against a freshly resolved region, but the
+>   import is **not atomic**: a permanent failure aborts the remaining regions
+>   and throws `IngestPartialFailureException`, whose `getAppliedRegionIds()`
+>   lists the region groups that were already written. Re-run the whole call
+>   to converge (see below).
 > - Verify afterwards that all stores are back in normal mode.
 >
 > **Recovering a cluster stuck in import mode:** the switch-back is issued to
@@ -1574,6 +1580,36 @@ not a second full `Pair[]` copy of every value.
 > that store. (Stores skipped for a rejected address never entered import
 > mode — the import path rejects them too, before any RPC — so they need no
 > restore.)
+
+**Retries and partial failure:**
+
+Each region group runs through the client's retry executor and gets its **own**
+retry budget (`retryDeadlineMs`, `maxBackoffMs` and the ServerBusy budget), so
+a long import is not capped by the per-operation retry deadline. A retryable
+region error (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, `RegionNotFound`,
+…) or a retryable transport error is retried against a **freshly resolved
+region**. A leader transfer, a merge, or a split/merge that leaves the group
+inside the re-resolved region is recovered transparently.
+
+A split that **shrinks the region below the group's last key** is not
+re-grouped: the retry keeps rebuilding an SST that spans both regions, so TiKV
+keeps rejecting it until the budget is exhausted. The import then fails closed
+(no part of that group is applied); split the batch at the split key and
+re-run, or re-run the whole call after the region layout settles.
+
+The import remains **non-atomic across regions**. When a region group fails
+permanently (a fatal region error, an exhausted retry budget or a missing
+store), `ingest()` stops, switches every store back to normal mode and throws:
+
+- `IngestPartialFailureException` when at least one earlier region group was
+  already ingested — `getAppliedRegionIds()` lists those regions and
+  `getPrevious()` carries the original failure; or
+- the original exception (`RegionException`, `RetryBudgetExhaustedException`,
+  `StoreNotFoundException`, …) when nothing was applied yet.
+
+Re-running the **whole** call is the recommended recovery: SST ingestion is
+idempotent for identical key-value pairs. With a TTL the TTL restarts on every
+attempt, exactly as for `put()`.
 
 **Operational notes:**
 

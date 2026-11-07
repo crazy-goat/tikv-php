@@ -113,6 +113,50 @@ class PdClientPingTest extends TestCase
         $this->assertNull($client->ping());
     }
 
+    public function testPingReturnsNullWhenHeaderClusterIdIsZero(): void
+    {
+        $header = new ResponseHeader();
+        $header->setClusterId(0);
+
+        $response = new GetMembersResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+
+        $this->assertNull($client->ping());
+        $this->assertNull($client->getClusterId());
+    }
+
+    public function testPingRejectsLaterResponseFromAnotherCluster(): void
+    {
+        $firstHeader = new ResponseHeader();
+        $firstHeader->setClusterId(7777);
+        $first = new GetMembersResponse();
+        $first->setHeader($firstHeader);
+
+        $secondHeader = new ResponseHeader();
+        $secondHeader->setClusterId(999);
+        $second = new GetMembersResponse();
+        $second->setHeader($secondHeader);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls($first, $second);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $this->assertSame(7777, $client->ping());
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('Cluster ID mismatch: established 7777, server reported 999');
+        $client->ping();
+    }
+
     public function testPingPropagatesGrpcError(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
