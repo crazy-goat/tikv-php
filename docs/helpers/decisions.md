@@ -1566,6 +1566,13 @@ too, and sending no `start_key` reproduces the same empty seek. Pass an
 explicit upper bound, usually the prefix end key (`log;` for `log:`).
 `reverseScan('', '')` stays the documented empty range from #343.
 
+`RegionRangeClipper::clipReverse()` enforces the same contract at its own
+seam (REG-23, #254): it calls `assertReverseRangeOrder()`, so a direct caller
+cannot get sub-ranges for `('', $lower)` even if it bypasses `RawKvScanner`.
+An empty `endKey` remains the keyspace start and is not treated as a
+degenerate range; the `$scanEnd !== ''` skip guard is what keeps the first
+region of a whole-keyspace reverse scan.
+
 ## Rollback KeyErrors fail closed; only `txn_not_found` / `txn_lock_not_found` are success (#559)
 
 `TwoPhaseCommitter::handleRollbackError()` is shared by `batchRollback()` and

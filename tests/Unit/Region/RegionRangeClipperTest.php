@@ -339,6 +339,62 @@ final class RegionRangeClipperTest extends TestCase
     }
 
     // ========================================================================
+    // clipReverse – empty bounds (REG-23, issue #254)
+    // ========================================================================
+
+    public function testClipReverseRejectsAnEmptyStartKeyWithANonEmptyEndKey(): void
+    {
+        // An empty reverse upper bound is not +infinity: TiKV reads an empty
+        // start_key as the keyspace minimum and returns nothing. The public
+        // reverseScan() rejects it (RAW-09, #194); the clipper enforces the
+        // same contract so a direct caller cannot silently drop every region.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'Invalid range in clipReverse: an empty start key is not a valid upper bound',
+        );
+
+        iterator_to_array($this->clipper->clipReverse(
+            [
+                $this->region('a', 'm', regionId: 1),
+                $this->region('m', 'z', regionId: 2),
+            ],
+            '',
+            'a',
+        ));
+    }
+
+    public function testClipReverseRejectsAnEmptyStartKeyBeforeExaminingAnyRegion(): void
+    {
+        // Validation is not conditional on the region list: an empty list must
+        // not turn an invalid request into a silent empty result either.
+        $this->expectException(InvalidArgumentException::class);
+
+        iterator_to_array($this->clipper->clipReverse([], '', 'a'));
+    }
+
+    public function testClipReverseEmptyEndKeyIsTheStartOfTheKeyspace(): void
+    {
+        // endKey '' is the keyspace start for reverse scan (not +infinity).
+        // Region 1 starts at '', so its clipped lower bound stays '' and the
+        // `$scanEnd !== ''` guard must not skip the non-empty sub-range.
+        $regions = [
+            $this->region('m', 'z', regionId: 3),
+            $this->region('a', 'm', regionId: 2),
+            $this->region('', 'a', regionId: 1),
+        ];
+
+        $results = iterator_to_array($this->clipper->clipReverse($regions, 'm', ''));
+
+        $this->assertSame(
+            [
+                [2, 'm', 'a'],
+                [1, 'a', ''],
+            ],
+            $this->shape($results),
+        );
+    }
+
+    // ========================================================================
     // Byte-order semantics (region boundaries must compare in byte order,
     // never PHP numeric-string order)
     // ========================================================================
