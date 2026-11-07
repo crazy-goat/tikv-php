@@ -788,9 +788,11 @@ Closing is the mirror image of creating:
 - a transport **you** build and pass in (`options['grpcClient']`) belongs to
   your application — the client never closes it, so the same transport can
   serve a RawKV and a transactional client. Close it yourself;
-- a client you assemble by hand (`new RawKvClient($pdClient, $grpc)`) closes
-  the transport it was **given** — pass `ownsGrpcClient: false` when your
-  application keeps the transport and wants to close it itself.
+- a client you assemble by hand (`new RawKvClient($pdClient, $grpc)`) does not
+  own the transport or the PD client it is **given** — `close()` and the
+  destructor leave both open, so you can share them with other clients and
+  close them yourself. Pass `ownsGrpcClient: true` / `ownsPdClient: true` to
+  transfer ownership; the client still clears its own region cache.
 
 ```php
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;

@@ -362,10 +362,32 @@ final class RawKvClient
             storeCache: $bundle->storeCache,
             requestContext: self::resolveRequestContext($options),
             resourceControl: self::resolveResourceControl($options),
+            // ConnectionFactory always builds the PD client, even when the
+            // transport is injected through options['grpcClient'], so
+            // create() owns it on every path. If the factory ever accepts an
+            // injected PD client, this flag must follow the bundle the way
+            // ownsGrpcClient does (issue #204).
+            ownsPdClient: true,
         );
     }
 
     /**
+     * Build a client from an existing PD client and transport.
+     *
+     * ## Connection ownership
+     *
+     * A client closes only the connections it owns. This constructor accepts
+     * connections the caller already created, so it treats them as externally
+     * owned and neither `close()` nor `__destruct()` closes them (issue #204).
+     * Sharing one `PdClientInterface` and one `GrpcClientInterface` between
+     * several clients is therefore safe: destroying one client cannot close
+     * the channels the others still use.
+     *
+     * Pass `ownsGrpcClient: true` and/or `ownsPdClient: true` to transfer
+     * ownership explicitly; the client then closes the matching dependency in
+     * `close()`. `RawKvClient::create()` builds the whole bundle itself and
+     * sets both flags accordingly.
+     *
      * @throws InvalidArgumentException When retryDeadlineMs, maxConcurrency or
      *         maxScanRows is out of range
      */
@@ -402,16 +424,14 @@ final class RawKvClient
         /**
          * Whether this client owns the gRPC transport and may close it.
          *
-         * true (the default) for a client that built the transport itself —
-         * and for a client assembled by hand, which therefore closes the
-         * transport it was given (issue #204 tracks the change to close only
-         * what a client owns).
-         * false when the transport was supplied by the application
-         * (options['grpcClient']): the application stays its owner, so the
-         * client never closes it and the same transport can be shared with
-         * other clients.
+         * false (the default) for a client assembled by hand: the caller
+         * supplied the transport, so the caller keeps it open and may share
+         * it with other clients. true when the client built the transport
+         * itself (or when the caller explicitly transfers ownership).
+         * A transport supplied through `options['grpcClient']` is never owned
+         * by the client, so the application stays its owner (issue #407).
          */
-        private readonly bool $ownsGrpcClient = true,
+        private readonly bool $ownsGrpcClient = false,
         /**
          * Key codec supplied by the construction path. `epochNotMatchCodec()`
          * derives the EpochNotMatch payload codec from it (issue #246): V1
@@ -458,6 +478,15 @@ final class RawKvClient
          * unchanged.
          */
         private readonly ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Whether this client owns the PD client and may close it.
+         *
+         * false (the default) for a client assembled by hand: the caller
+         * supplied the PD client, so the caller keeps it open and may share
+         * it with other clients. true when the client built the PD client
+         * itself (or when the caller explicitly transfers ownership).
+         */
+        private readonly bool $ownsPdClient = false,
     ) {
         if ($regionCacheRefreshMs < 0) {
             throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
@@ -1894,6 +1923,17 @@ final class RawKvClient
         return $this->regionCacheWarmer->preload($ranges);
     }
 
+    /**
+     * Release the resources this client owns.
+     *
+     * Idempotent and never throws. The region cache is always cleared (it is
+     * a cache, so dropping its entries cannot break another client), while
+     * the gRPC transport and the PD client are closed only when this client
+     * owns them — see the constructor's ownership rule (issue #204).
+     * `__destruct()` delegates here, so destroying a hand-assembled client
+     * leaves externally supplied connections open for the clients that still
+     * use them.
+     */
     public function close(): void
     {
         if ($this->closed) {
@@ -1923,7 +1963,11 @@ final class RawKvClient
         }
 
         try {
-            $this->pdClient->close();
+            // Same rule for the PD client: a hand-assembled client is given
+            // one it did not create and must not close it (issue #204).
+            if ($this->ownsPdClient) {
+                $this->pdClient->close();
+            }
         } catch (\Throwable $e) {
             SafeLogging::log($this->logger, 'error', 'Failed to close PD client', ['exception' => $e]);
         }
