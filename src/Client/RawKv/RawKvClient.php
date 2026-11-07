@@ -135,6 +135,14 @@ final class RawKvClient
     public const OPT_SLOW_LOG = 'slowLog';
     public const OPT_METRICS = 'metrics';
 
+    /**
+     * Structured tracing callback (issue #434, GAP-20): an instance of
+     * {@see \CrazyGoat\TiKV\Client\Observability\TraceEventInterface}. The
+     * transport emits one event pair per gRPC call; RawKV has no client-side
+     * phase events of its own.
+     */
+    public const OPT_TRACER = 'tracer';
+
     /** API protocol version: 0/1 (V1, default) or 2 (keyspace-aware). */
     public const OPT_API_VERSION = 'apiVersion';
 
@@ -1569,15 +1577,22 @@ final class RawKvClient
     }
 
     /**
-     * Scan multiple non-contiguous ranges with a client-side loop of
-     * per-range `RawScan` requests; this is not the `RawBatchScan` RPC.
+     * Scan multiple non-contiguous ranges with one `RawBatchScan` request per
+     * region (issue #433, GAP-19).
      *
-     * The RPC count is linear in the number of ranges and the regions they
-     * cover, because every range resolves and scans its own regions. The
-     * per-range sends are fanned out concurrently, bounded by
-     * `options['maxConcurrency']`, so wall-clock latencies overlap without
-     * changing the total work. See
-     * {@see RawKvScanner::batchScan()} for the full cost model.
+     * The client groups the ranges by region, clips every range to each
+     * region's bounds, and sends one `RawBatchScan` per region, so the RPC
+     * count is the number of regions touched rather than one per range per
+     * region. Requests to distinct regions are dispatched concurrently,
+     * bounded by `options['maxConcurrency']`. A range that spans several
+     * regions is split across their requests and trimmed back to
+     * `$eachLimit` rows. Overlapping ranges, a region error, a transport
+     * failure or a missing store fall back to the per-range `RawScan` path.
+     * The batch deadline covers region enumeration as well as the store
+     * fan-out, and the fallback only gets the remaining budget. A PD failure
+     * during region enumeration is reported as a
+     * `BatchPartialFailureException`, like the pre-#433 per-range path.
+     * See {@see RawKvScanner::batchScan()} for the full cost model.
      *
      * Returns one entry per range, each a list of
      * `['key' => string, 'value' => ?string]` rows (`value` is `null` when
@@ -1595,7 +1610,7 @@ final class RawKvClient
      *     including a `RegionException`, a `GrpcException`, a region's
      *     exhausted retry budget or a missing store — is reported inside
      *     `getRegionErrors()`; it is wrapped, not thrown directly
-     * @throws BatchDeadlineExceededException When the range fan-out exceeds
+     * @throws BatchDeadlineExceededException When the region fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly = false): array

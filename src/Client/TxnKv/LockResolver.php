@@ -17,6 +17,12 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\DetailedMetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\NoOpTracer;
+use CrazyGoat\TiKV\Client\Observability\TraceCategory;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -54,6 +60,15 @@ final readonly class LockResolver
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Metrics backend for lock-resolution counts and durations (issue
+         * #434, GAP-20). The base interface is frozen; the signals are
+         * emitted only when this backend also implements
+         * {@see DetailedMetricsInterface}.
+         */
+        private MetricsInterface $metrics = new NoOpMetrics(),
+        /** Optional structured tracing callback (issue #434, GAP-20). */
+        private TraceEventInterface $tracer = new NoOpTracer(),
     ) {
     }
 
@@ -96,21 +111,38 @@ final readonly class LockResolver
         int $remainingDeadlineMs = 0,
         bool $notLeaderOwnedByRetryExecutor = true,
     ): void {
+        $startNs = hrtime(true);
         $lockTs = (int) $lock->getLockVersion();
-        $deadlineAtMs = $this->absoluteDeadlineMs($remainingDeadlineMs);
-        $this->logger->debug('Resolving lock', [
-            'key' => KeyRedactor::redact((string) $lock->getKey()),
+        $this->trace('lock_resolve_started', [
+            'eventId' => (string) $startNs,
             'lockTs' => $lockTs,
+            'lockCount' => 1,
         ]);
 
-        $status = $this->resolveStatus(
-            $primaryLock,
-            $lockTs,
-            $notLeaderOwnedByRetryExecutor,
-            $deadlineAtMs,
-        );
+        try {
+            $deadlineAtMs = $this->absoluteDeadlineMs($remainingDeadlineMs);
+            $this->logger->debug('Resolving lock', [
+                'key' => KeyRedactor::redact((string) $lock->getKey()),
+                'lockTs' => $lockTs,
+            ]);
 
-        $this->resolveLockWithStatus($lock, $lockTs, $status, $deadlineAtMs, $notLeaderOwnedByRetryExecutor);
+            $status = $this->resolveStatus(
+                $primaryLock,
+                $lockTs,
+                $notLeaderOwnedByRetryExecutor,
+                $deadlineAtMs,
+            );
+
+            $this->resolveLockWithStatus($lock, $lockTs, $status, $deadlineAtMs, $notLeaderOwnedByRetryExecutor);
+        } catch (TxnRetryableException $e) {
+            $this->recordLockResolution('live', $startNs);
+            throw $e;
+        } catch (\Throwable $e) {
+            $this->recordLockResolution('error', $startNs);
+            throw $e;
+        }
+
+        $this->recordLockResolution('resolved', $startNs);
     }
 
     /**
@@ -137,74 +169,90 @@ final readonly class LockResolver
         int $remainingDeadlineMs = 0,
         bool $notLeaderOwnedByRetryExecutor = true,
     ): void {
-        // One absolute deadline for the whole batch: every transaction and
-        // every region charges the same live budget instead of each getting
-        // the full remaining time (issue #569, N3).
-        $deadlineAtMs = $this->absoluteDeadlineMs($remainingDeadlineMs);
+        $startNs = hrtime(true);
+        $this->trace('lock_resolve_started', [
+            'eventId' => (string) $startNs,
+            'lockCount' => count($locks),
+        ]);
 
-        /** @var array<int, list<LockInfo>> $byTxn */
-        $byTxn = [];
-        foreach ($locks as $lock) {
-            $byTxn[(int) $lock->getLockVersion()][] = $lock;
-        }
+        try {
+            // One absolute deadline for the whole batch: every transaction and
+            // every region charges the same live budget instead of each getting
+            // the full remaining time (issue #569, N3).
+            $deadlineAtMs = $this->absoluteDeadlineMs($remainingDeadlineMs);
 
-        /** @var array<int, list<string>> $keysByTxn keys resolvable with a plain ResolveLock */
-        $keysByTxn = [];
-        /** @var array<int, int> $commitTsByTxn */
-        $commitTsByTxn = [];
-        $retryable = null;
-
-        foreach ($byTxn as $lockTs => $txnLocks) {
-            $first = $txnLocks[0];
-            $this->logger->debug('Resolving locks of one transaction', [
-                'lockTs' => $lockTs,
-                'lockCount' => count($txnLocks),
-            ]);
-
-            $status = $this->resolveStatus(
-                $this->primaryOf($first),
-                $lockTs,
-                $notLeaderOwnedByRetryExecutor,
-                $deadlineAtMs,
-            );
-            $commitTs = $status['commitTs'] ?? 0;
-
-            if ($commitTs > 0 || $status['final']) {
-                $commitTsByTxn[$lockTs] = $commitTs;
-                $keysByTxn[$lockTs] = array_map(
-                    static fn (LockInfo $txnLock): string => (string) $txnLock->getKey(),
-                    $txnLocks,
-                );
-                continue;
+            /** @var array<int, list<LockInfo>> $byTxn */
+            $byTxn = [];
+            foreach ($locks as $lock) {
+                $byTxn[(int) $lock->getLockVersion()][] = $lock;
             }
 
-            // Async-commit, live or undetermined: the single-lock path decides.
-            try {
-                $this->resolveLockWithStatus(
-                    $first,
+            /** @var array<int, list<string>> $keysByTxn keys resolvable with a plain ResolveLock */
+            $keysByTxn = [];
+            /** @var array<int, int> $commitTsByTxn */
+            $commitTsByTxn = [];
+            $retryable = null;
+
+            foreach ($byTxn as $lockTs => $txnLocks) {
+                $first = $txnLocks[0];
+                $this->logger->debug('Resolving locks of one transaction', [
+                    'lockTs' => $lockTs,
+                    'lockCount' => count($txnLocks),
+                ]);
+
+                $status = $this->resolveStatus(
+                    $this->primaryOf($first),
                     $lockTs,
-                    $status,
-                    $deadlineAtMs,
                     $notLeaderOwnedByRetryExecutor,
+                    $deadlineAtMs,
                 );
-            } catch (TxnRetryableException $e) {
-                $retryable ??= $e;
+                $commitTs = $status['commitTs'] ?? 0;
+
+                if ($commitTs > 0 || $status['final']) {
+                    $commitTsByTxn[$lockTs] = $commitTs;
+                    $keysByTxn[$lockTs] = array_map(
+                        static fn (LockInfo $txnLock): string => (string) $txnLock->getKey(),
+                        $txnLocks,
+                    );
+                    continue;
+                }
+
+                // Async-commit, live or undetermined: the single-lock path decides.
+                try {
+                    $this->resolveLockWithStatus(
+                        $first,
+                        $lockTs,
+                        $status,
+                        $deadlineAtMs,
+                        $notLeaderOwnedByRetryExecutor,
+                    );
+                } catch (TxnRetryableException $e) {
+                    $retryable ??= $e;
+                }
             }
+
+            foreach ($keysByTxn as $lockTs => $keys) {
+                $this->resolveKeys(
+                    $lockTs,
+                    $commitTsByTxn[$lockTs],
+                    array_values(array_unique($keys)),
+                    $notLeaderOwnedByRetryExecutor,
+                    $deadlineAtMs,
+                );
+            }
+
+            if ($retryable instanceof TxnRetryableException) {
+                throw $retryable;
+            }
+        } catch (TxnRetryableException $e) {
+            $this->recordLockResolution('live', $startNs);
+            throw $e;
+        } catch (\Throwable $e) {
+            $this->recordLockResolution('error', $startNs);
+            throw $e;
         }
 
-        foreach ($keysByTxn as $lockTs => $keys) {
-            $this->resolveKeys(
-                $lockTs,
-                $commitTsByTxn[$lockTs],
-                array_values(array_unique($keys)),
-                $notLeaderOwnedByRetryExecutor,
-                $deadlineAtMs,
-            );
-        }
-
-        if ($retryable instanceof TxnRetryableException) {
-            throw $retryable;
-        }
+        $this->recordLockResolution('resolved', $startNs);
     }
 
     /**
@@ -279,6 +327,42 @@ final readonly class LockResolver
     public function getGrpc(): GrpcClientInterface
     {
         return $this->grpc;
+    }
+
+    /**
+     * Emit a lock-resolution outcome when the metrics backend opted into the
+     * extended interface (issue #434, GAP-20).
+     */
+    private function recordLockResolution(string $result, int $startNs): void
+    {
+        $durationMs = (hrtime(true) - $startNs) / 1_000_000;
+        if ($this->metrics instanceof DetailedMetricsInterface) {
+            $this->metrics->lockResolved($result, $durationMs);
+        }
+
+        $this->trace('lock_resolve_completed', [
+            'eventId' => (string) $startNs,
+            'result' => $result,
+            'durationMs' => $durationMs,
+        ]);
+    }
+
+    /**
+     * Emit a structured trace event. A tracer that throws is logged and
+     * swallowed: tracing is observability, never part of the data path.
+     *
+     * @param array<string, string|int|float|bool|null> $fields
+     */
+    private function trace(string $event, array $fields = []): void
+    {
+        try {
+            $this->tracer->traceEvent(TraceCategory::TXN_LOCK_RESOLVE, $event, $fields);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Trace backend threw', [
+                'event' => $event,
+                'exception' => $e,
+            ]);
+        }
     }
 
     /**

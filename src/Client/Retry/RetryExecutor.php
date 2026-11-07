@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Exception\StoreUnavailableException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
+use CrazyGoat\TiKV\Client\Observability\DetailedMetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
@@ -145,6 +146,7 @@ final readonly class RetryExecutor
             try {
                 $result = $operation();
                 $this->recordStoreSuccess($key, $targetStoreId);
+                $this->recordStoreOutcome($targetStoreId, true, null);
 
                 return $result;
             } catch (TiKvException $e) {
@@ -200,6 +202,7 @@ final readonly class RetryExecutor
                             'error' => $e->getMessage(),
                         ]);
                         $this->recordStoreFailure($e);
+                        $this->recordStoreOutcome($targetStoreId, false, $this->errorKindOf($e));
                         throw $e;
                     }
 
@@ -279,6 +282,7 @@ final readonly class RetryExecutor
                 }
 
                 $this->recordStoreFailure($e);
+                $this->recordStoreOutcome($targetStoreId, false, $this->errorKindOf($e));
 
                 $sleepMs = $backoffType->sleepMs($attemptBeforeInspection);
 
@@ -349,6 +353,8 @@ final readonly class RetryExecutor
                     $sleepMs = min($sleepMs, $remainingMs);
                     usleep($sleepMs * 1000);
                 }
+
+                $this->recordBackoff($backoffType->name, $attemptBeforeInspection, (float) $sleepMs);
 
                 $attempt++;
             }
@@ -821,6 +827,65 @@ final readonly class RetryExecutor
         }
 
         $this->regionResolver->recordStoreFailure($storeId);
+    }
+
+    /**
+     * Emit one per-store attempt outcome to a detailed metrics backend
+     * (issue #434, GAP-20).
+     *
+     * The base {@see MetricsInterface} is frozen, so this signal is sent only
+     * to a backend that opted into {@see DetailedMetricsInterface}. The store
+     * is the one the attempt targeted, as reported by the caller's provider;
+     * an unknown store records nothing rather than guessing (and no extra
+     * cache lookup is made on the retry path).
+     *
+     * @param (callable(): ?int)|null $targetStoreId
+     */
+    private function recordStoreOutcome(
+        ?callable $targetStoreId,
+        bool $success,
+        ?string $errorKind,
+    ): void {
+        if (!$this->metrics instanceof DetailedMetricsInterface) {
+            return;
+        }
+
+        $storeId = $this->targetStoreIdOf($targetStoreId);
+        if ($storeId === null) {
+            return;
+        }
+
+        $this->metrics->storeAttemptCompleted($storeId, $success, $errorKind);
+    }
+
+    /**
+     * Emit the backoff a retry loop actually waited, in milliseconds, to a
+     * detailed metrics backend (issue #434, GAP-20).
+     */
+    private function recordBackoff(string $backoffType, int $attempt, float $durationMs): void
+    {
+        if (!$this->metrics instanceof DetailedMetricsInterface) {
+            return;
+        }
+
+        $this->metrics->backoffCompleted($backoffType, $attempt, $durationMs);
+    }
+
+    /**
+     * Label for a failed attempt: the region error kind when the exception
+     * carries one, "transport" for a gRPC failure, "unknown" otherwise.
+     */
+    private function errorKindOf(TiKvException $e): string
+    {
+        if ($e instanceof RegionException && $e->errorKind instanceof ErrorKind) {
+            return $e->errorKind->value;
+        }
+
+        if ($e instanceof GrpcException) {
+            return 'transport';
+        }
+
+        return 'unknown';
     }
 
     /**

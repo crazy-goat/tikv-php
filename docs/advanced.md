@@ -484,8 +484,9 @@ function parallelScan(
         $ranges[] = [$start, $end];
     }
     
-    // Scan ranges in parallel (using batchScan).
-    // The ranges are fanned out concurrently, capped by
+    // Scan ranges in parallel (using batchScan). The ranges are grouped by
+    // region and sent as one RawBatchScan per region; requests to distinct
+    // regions are dispatched concurrently, capped by
     // options['maxConcurrency'] (default 16, must be >= 1).
     $results = $client->batchScan($ranges, eachLimit: $limitPerRange);
     
@@ -707,8 +708,12 @@ The interface has seven methods (full reference with emitted tag examples:
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
 
-Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from both `rpcStarted()` and `rpcCompleted()`, so the transport exception of a gRPC call is never replaced. The retry and region-cache counters are emitted directly and are not protected yet. The default is a zero-cost no-op
-(`NoOpMetrics`): it accepts every call — empty, binary or oversized tags, negative durations and store IDs included — and records nothing, so no call site can fail on the default backend. A ready-made in-memory recorder for tests and benchmarks
+Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from both `rpcStarted()` and `rpcCompleted()`, so the transport exception of a gRPC call is never replaced. The retry and region-cache counters are emitted directly and are not protected yet. The default is a no-op backend (`NoOpMetrics`): a call pays one empty-method
+dispatch, and the 2PC and lock-resolution paths take one timestamp for the
+optional detailed timings. It accepts every call — empty, binary or
+oversized tags, negative durations and store IDs included — and records
+nothing, so no call site can fail on the default backend. A ready-made
+in-memory recorder for tests and benchmarks
 ships as [`InMemoryMetrics`](../src/Client/Observability/InMemoryMetrics.php)
 with `getRpcStarted(string $operation)`, `getRpcSucceeded(string $operation)`,
 `getRetries(string $operation)`, `getCacheHits(string $operation)`,
@@ -716,78 +721,57 @@ with `getRpcStarted(string $operation)`, `getRpcSucceeded(string $operation)`,
 (this one keys on the invalidation *reason*, not an operation tag) and
 `reset()`.
 
-Production-shaped example — exporting the built-in counters to Prometheus:
+Production-shaped example — the library ships a dependency-free Prometheus
+adapter, so no extra Composer package is needed:
 
 ```php
-use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\PrometheusMetrics;
 
-final class PrometheusMetrics implements MetricsInterface
-{
-    public function __construct(
-        private readonly \Prometheus\CollectorRegistry $registry,
-        private readonly string $namespace = 'tikv_client',
-    ) {
-    }
-
-    public function rpcStarted(string $operation): void
-    {
-        $this->counter('rpc_started_total', 'Outbound gRPC calls', ['operation'])
-            ->inc(['operation' => $operation]);
-    }
-
-    public function rpcCompleted(string $operation, float $durationMs, bool $success): void
-    {
-        // Histograms give latency distribution, not just averages.
-        $this->histogram('rpc_duration_ms', 'gRPC call duration', [1, 5, 10, 50, 100, 500, 1000, 5000])
-            ->observe($durationMs, ['operation' => $operation, 'success' => $success ? '1' : '0']);
-    }
-
-    public function retryAttempted(string $backoffType): void
-    {
-        $this->counter('retries_total', 'Retryable errors retried', ['backoff_type'])
-            ->inc(['backoff_type' => $backoffType]);
-    }
-
-    public function regionCacheHit(string $operation): void
-    {
-        $this->counter('region_cache_hits_total', 'Region cache hits', ['operation'])
-            ->inc(['operation' => $operation]);
-    }
-
-    public function regionCacheMiss(string $operation): void
-    {
-        $this->counter('region_cache_misses_total', 'Region cache misses', ['operation'])
-            ->inc(['operation' => $operation]);
-    }
-
-    public function regionInvalidated(string $reason): void
-    {
-        $this->counter('region_invalidations_total', 'Regions dropped from cache', ['reason'])
-            ->inc(['reason' => $reason]);
-    }
-
-    private function counter(string $name, string $help, array $labels): \Prometheus\Counter
-    {
-        return $this->registry->getOrRegisterCounter($this->namespace, $name, $help, $labels);
-    }
-
-    private function histogram(string $name, string $help, array $buckets): \Prometheus\Histogram
-    {
-        // Label names must be declared at registration time or ->observe() throws.
-        return $this->registry->getOrRegisterHistogram($this->namespace, $name, $help, ['operation', 'success'], $buckets);
-    }
-}
-
-// Wire it up:
-$metrics = new PrometheusMetrics(new \Prometheus\CollectorRegistry(new \Prometheus\Storage\InMemory()));
+$metrics = new PrometheusMetrics();
 $client = RawKvClient::create(
     pdEndpoints: ['127.0.0.1:2379'],
     options: ['metrics' => $metrics],
 );
 
-// Counters are also reachable afterwards:
-$injected = $client->getMetrics();   // returns whatever was passed via 'metrics'
+// In your HTTP metrics endpoint (any PSR-7/PSR-15 framework):
+header('Content-Type: ' . PrometheusMetrics::CONTENT_TYPE);
+echo $metrics->render();
 ```
+
+`render()` emits counters and histograms in the Prometheus text exposition
+format (`tikv_client_rpc_duration_seconds`, `tikv_client_retries_total`,
+`tikv_client_region_cache_hits_total`, …). Durations are in seconds, as
+Prometheus expects. The default histogram buckets span 1 ms to 10 s; pass
+your own ascending list of second bounds to the constructor when your SLOs
+need a different resolution:
+
+```php
+$metrics = new PrometheusMetrics([0.005, 0.01, 0.05, 0.1, 0.5, 1.0]);
+```
+
+The adapter is single-process state, like `InMemoryMetrics`: every PHP-FPM
+worker exposes its own counters and Prometheus sums the `_total` series
+across instances. For cross-process aggregation, implement
+`MetricsInterface` on top of a shared store.
+
+#### Extended metrics
+
+`MetricsInterface` is frozen, so the richer signals live in the optional
+[`DetailedMetricsInterface`](../src/Client/Observability/DetailedMetricsInterface.php).
+Implement it **in addition to** `MetricsInterface` (use
+`PrometheusMetrics` or `InMemoryMetrics`, or copy either as a starting
+point) to receive:
+
+| Method | Reported when |
+|---|---|
+| `backoffCompleted()` | A retry loop waited a backoff interval; carries the backoff type, attempt and the duration actually slept (ms) |
+| `storeAttemptCompleted()` | One RPC attempt finished against a store; carries the store ID, success flag and the error kind (`server_is_busy`, `transport`, …) |
+| `lockResolved()` | One lock-resolution attempt finished; result is `resolved`, `live` or `error`, with its duration |
+| `twoPhasePhaseCompleted()` | One 2PC phase (`prewrite` or `commit`) finished, with its duration and success flag; 1PC and async commit emit only `prewrite` |
+
+A backend that implements only `MetricsInterface` keeps working unchanged:
+the client probes with `instanceof DetailedMetricsInterface` and simply
+skips the extra calls.
 
 For tests and quick diagnostics, skip the adapter entirely:
 
@@ -800,7 +784,80 @@ $client = RawKvClient::create(pdEndpoints: ['127.0.0.1:2379'], options: ['metric
 
 echo $metrics->getMeanLatencyMs('tikvpb.Tikv/RawGet'); // mean latency of completed RawGet RPCs
 echo $metrics->getRetries('NotLeader');                 // retries tagged with the backoff type
+echo $metrics->getStoreFailures(1);                     // failed attempts against store 1
+echo $metrics->getTwoPhaseCount('prewrite');            // 2PC prewrite phases observed
 ```
+
+### Tracing
+
+Tracing is a separate opt-in callback, not part of the metrics interface.
+Pass a [`TraceEventInterface`](../src/Client/Observability/TraceEventInterface.php)
+as `options['tracer']` and the client emits structured events; mapping them
+to spans is up to you, so the library needs no OpenTelemetry dependency.
+
+| Category | Events | Emitted by |
+|---|---|---|
+| `TraceCategory::KV_REQUEST` | `rpc_started`, `rpc_completed` | The gRPC transport, once per call |
+| `TraceCategory::TXN_2PC` | `prewrite_started`, `prewrite_completed`, `commit_started`, `commit_completed`, `one_pc_completed`, `async_commit_completed` | `TxnKv` commit |
+| `TraceCategory::TXN_LOCK_RESOLVE` | `lock_resolve_started`, `lock_resolve_completed` | Lock resolution |
+
+Fields are scalar attributes (`operation`, `eventId`, `durationMs`,
+`success`, `commitTs`, `result`, …). A paired `*_started` / `*_completed`
+event carries the same opaque `eventId`, so a bridge can correlate them
+even while several calls or transactions are in flight. A tracer that throws
+is logged and swallowed, exactly like a metrics backend, so tracing never
+breaks the data path.
+
+An OpenTelemetry bridge is a few lines:
+
+```php
+use CrazyGoat\TiKV\Client\Observability\TraceCategory;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
+use OpenTelemetry\API\Trace\SpanKind;
+use OpenTelemetry\API\Trace\TracerInterface;
+
+final class OpenTelemetryTracer implements TraceEventInterface
+{
+    /** @var array<string, \OpenTelemetry\API\Trace\SpanInterface> */
+    private array $spans = [];
+
+    public function __construct(private readonly TracerInterface $tracer)
+    {
+    }
+
+    public function traceEvent(string $category, string $event, array $fields = []): void
+    {
+        $key = $category . ':' . ($fields['eventId'] ?? 'default');
+
+        if (str_ends_with($event, '_started')) {
+            $this->spans[$key] = $this->tracer
+                ->spanBuilder($event)
+                ->setSpanKind(SpanKind::KIND_CLIENT)
+                ->setAttributes(array_map('strval', $fields))
+                ->startSpan();
+
+            return;
+        }
+
+        $span = $this->spans[$key] ?? null;
+        if ($span === null) {
+            return;
+        }
+
+        $span->setAttributes(array_map('strval', $fields));
+        $span->end();
+        unset($this->spans[$key]);
+    }
+}
+
+$client = RawKvClient::create(
+    pdEndpoints: ['127.0.0.1:2379'],
+    options: ['tracer' => new OpenTelemetryTracer($otelTracer)],
+);
+```
+
+`InMemoryTracer` records events in order for tests; inspect them with
+`getEvents()` or `eventNames(TraceCategory::TXN_2PC)`.
 
 ### Health Checks
 
