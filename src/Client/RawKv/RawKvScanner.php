@@ -1128,6 +1128,7 @@ final readonly class RawKvScanner
                     excludedStoreId: $excludedStore,
                     requestContext: $this->requestContext,
                     resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -1262,6 +1263,7 @@ final readonly class RawKvScanner
                 excludedStoreId: $excludedStore,
                 requestContext: $this->requestContext,
                 resourceControl: $this->resourceControl,
+                storeAvailable: $this->regionResolver->isStoreAvailable(...),
             );
             $excludedStore = null;
             $targetStoreId = $target->storeId;
@@ -1543,6 +1545,7 @@ final readonly class RawKvScanner
                 $this->regionResolver->getStore(...),
                 requestContext: $this->requestContext,
                 resourceControl: $this->resourceControl,
+                storeAvailable: $this->regionResolver->isStoreAvailable(...),
             );
             $targetStoreId = $target->storeId;
             $address = $this->regionResolver->resolveStoreAddress($target->storeId);

@@ -7,9 +7,11 @@ namespace CrazyGoat\TiKV\Client\Retry;
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
+use CrazyGoat\TiKV\Client\Exception\StoreUnavailableException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
@@ -73,7 +75,11 @@ final readonly class RetryExecutor
     /**
      * @template T
      * @param callable(): T $operation
-     * @param (callable(TiKvException): ?BackoffType)|null $classifier Custom error classifier
+     * @param (callable(TiKvException): RetryVerdict)|null $classifier Custom
+     *        error classifier (issue #534): return
+     *        {@see RetryVerdict::retry()} to retry, {@see RetryVerdict::fatal()}
+     *        to stop, or {@see RetryVerdict::pass()} to fall through to the
+     *        built-in classifier.
      * @param (callable(): ?int)|null $targetStoreId Provider of the store ID
      *        the FAILED attempt was actually addressed to. Pass it for reads
      *        that may target a follower (`ReplicaReadPolicy`): a transport
@@ -137,7 +143,10 @@ final readonly class RetryExecutor
             }
 
             try {
-                return $operation();
+                $result = $operation();
+                $this->recordStoreSuccess($key, $targetStoreId);
+
+                return $result;
             } catch (TiKvException $e) {
                 $lastError = $e;
                 $attemptBeforeInspection = $attempt;
@@ -145,15 +154,16 @@ final readonly class RetryExecutor
                 $backoffType = $this->handleNotLeader($e, $key);
 
                 if (!$backoffType instanceof BackoffType) {
-                    if ($classifier !== null) {
-                        $backoffType = $classifier($e);
+                    // Issue #534: a classifier answers with a RetryVerdict, so
+                    // "no opinion" (Pass) is distinct from "fatal". Only a
+                    // Pass falls through to the built-in classifier.
+                    $verdict = $classifier !== null ? $classifier($e) : RetryVerdict::pass();
+
+                    if ($verdict->isPass()) {
+                        $verdict = $this->classifyError($e);
                     }
 
-                    if (!$backoffType instanceof BackoffType) {
-                        $backoffType = $this->classifyError($e);
-                    }
-
-                    if (!$backoffType instanceof BackoffType) {
+                    if ($verdict->isFatal()) {
                         // Issue #233 (REG-02): retryability and cache
                         // invalidation are two independent decisions, so the
                         // invalidation runs ABOVE this throw instead of below
@@ -168,19 +178,32 @@ final readonly class RetryExecutor
                         // itself lives in self::invalidatesRoutingOnFatal(),
                         // deliberately separate from the retry decision above.
                         //
+                        // Issue #534: a transport failure marked fatal by a
+                        // classifier (RawKvAtomic's CAS classifier) still gets
+                        // the broken-channel cleanup the retryable path runs.
+                        // Before the RetryVerdict contract the classifier had
+                        // to throw to force a fatal verdict, which skipped
+                        // this block and left the dead channel open.
+                        if ($e instanceof GrpcException && $this->indicatesBrokenConnection($e)) {
+                            $cached = $this->regionCache->getByKey($key);
+                            $failedStoreId = $this->targetStoreIdOf($targetStoreId)
+                                ?? ($cached instanceof RegionInfo ? $cached->leaderStoreId : null);
+                            $this->closeBrokenChannel($e, $failedStoreId);
+                        }
+
                         // Metric emission stays with RegionCache::invalidate()
-                        // (#474 — see invalidateRegionForFatalError()) and the
-                        // gRPC channel is left alone: closeChannel() sits
-                        // downstream of the retry decision, so no fatal error
-                        // can reach it.
+                        // (#474 — see invalidateRegionForFatalError()).
                         $this->invalidateRegionForFatalError($e, $key);
 
                         $this->logger->error('Fatal error, not retrying', [
                             'key' => KeyRedactor::redact($key),
                             'error' => $e->getMessage(),
                         ]);
+                        $this->recordStoreFailure($e);
                         throw $e;
                     }
+
+                    $backoffType = $verdict->backoffType();
 
                     // Issue #246 (REG-15): an EpochNotMatch usually carries
                     // the regions that now cover the stale range in
@@ -228,35 +251,8 @@ final readonly class RetryExecutor
                             ]);
                         }
 
-                        if (
-                            $e instanceof GrpcException
-                            && $this->indicatesBrokenConnection($e)
-                        ) {
-                            // The exception carries the address the failed
-                            // attempt was sent to (set by GrpcClient /
-                            // GrpcFuture at throw time). That is authoritative
-                            // even when the RPC was nested inside the retried
-                            // operation — lock resolution talks to the
-                            // primary's region, not the read's/write's region
-                            // (issue #248). Fall back to the provider/cached
-                            // leader only for exceptions that predate the
-                            // field or synthetic test failures.
-                            $failedAddress = $e->targetAddress;
-                            if ($failedAddress === null && $failedStoreId !== null) {
-                                // Resolve the channel address BEFORE dropping
-                                // the store entry: resolveStoreAddress() reads
-                                // the store cache, and invalidating first
-                                // would force a PD GetStore just to close a
-                                // channel.
-                                try {
-                                    $failedAddress = $this->regionResolver->resolveStoreAddress($failedStoreId);
-                                } catch (StoreNotFoundException) {
-                                }
-                            }
-
-                            if ($failedAddress !== null) {
-                                $this->grpc->closeChannel($failedAddress);
-                            }
+                        if ($e instanceof GrpcException) {
+                            $this->closeBrokenChannel($e, $failedStoreId);
                         }
 
                         // A StoreNotMatch says the address the request went
@@ -281,6 +277,8 @@ final readonly class RetryExecutor
                         );
                     }
                 }
+
+                $this->recordStoreFailure($e);
 
                 $sleepMs = $backoffType->sleepMs($attemptBeforeInspection);
 
@@ -567,6 +565,14 @@ final readonly class RetryExecutor
      */
     public static function invalidatesRoutingOnRetry(TiKvException $e): bool
     {
+        // A store in its health cooldown is not evidence that the cached
+        // region is wrong: the region is intact, the store is simply not
+        // routable until the cooldown ends (issue #424). Dropping the entry
+        // would force a PD round trip on every probe attempt.
+        if ($e instanceof StoreUnavailableException) {
+            return false;
+        }
+
         if (!$e instanceof RegionException) {
             return true;
         }
@@ -719,6 +725,103 @@ final readonly class RetryExecutor
     }
 
     /**
+     * Record a successful attempt against the store it was routed to
+     * (issue #424, GAP-10).
+     *
+     * The provider is authoritative for reads that may target a follower;
+     * the cached region's leader is the fallback for leader-only operations.
+     * A null answer (no region cached, no provider) records nothing.
+     *
+     * @param (callable(): ?int)|null $targetStoreId
+     */
+    private function recordStoreSuccess(string $key, ?callable $targetStoreId): void
+    {
+        if ($targetStoreId === null && !$this->regionResolver->hasTrackedStoreFailures()) {
+            return;
+        }
+
+        $storeId = $this->failedStoreIdFor($key, $targetStoreId);
+        if ($storeId !== null) {
+            $this->regionResolver->recordStoreSuccess($storeId);
+        }
+    }
+
+    /**
+     * Record a failed attempt against the store the RPC actually targeted
+     * (issue #424, GAP-10).
+     *
+     * The store is taken from the exception's own `targetAddress`, not from
+     * the outer operation's provider: a nested RPC (lock resolution, a
+     * fan-out sub-call) can fail against a different store, and PD is called
+     * inside the same operation. An address that was never resolved to a
+     * store — a PD endpoint, a synthetic test address, a parse error — is not
+     * guessed and records nothing. This also unwraps
+     * {@see CasIndeterminateException}, whose transport failure is otherwise
+     * invisible to the tracker (issue #239 keeps the CAS outcome typed).
+     *
+     * Only `UNAVAILABLE` and `DEADLINE_EXCEEDED` say something about the
+     * store's reachability. A region error means the request reached the
+     * store, a `StoreNotMatch` means the address was wrong, and a fatal status
+     * such as `UNAUTHENTICATED` is a client or request problem, not a dead
+     * store.
+     */
+    private function recordStoreFailure(TiKvException $e): void
+    {
+        if ($e instanceof CasIndeterminateException) {
+            $previous = $e->getPrevious();
+            if (!$previous instanceof GrpcException) {
+                return;
+            }
+            $e = $previous;
+        }
+
+        if (!$e instanceof GrpcException || $e->targetAddress === null) {
+            return;
+        }
+
+        // Only statuses that say something about the store's reachability:
+        // UNAVAILABLE (the connection failed) and DEADLINE_EXCEEDED (the
+        // store did not answer in time). A fatal status such as
+        // UNAUTHENTICATED or a ServerBusy-style RESOURCE_EXHAUSTED is about
+        // the request or the client configuration, not the store's health,
+        // and must not demote it.
+        $status = GrpcStatusCode::tryFrom($e->grpcStatusCode);
+        if ($status !== GrpcStatusCode::Unavailable && $status !== GrpcStatusCode::DeadlineExceeded) {
+            return;
+        }
+
+        // A PD transport failure must never demote a TiKV store (issue #424).
+        if ($this->regionResolver->isPdEndpointAddress($e->targetAddress)) {
+            return;
+        }
+
+        $storeId = $this->regionResolver->storeIdForAddress($e->targetAddress);
+        if ($storeId === null) {
+            return;
+        }
+
+        $this->regionResolver->recordStoreFailure($storeId);
+    }
+
+    /**
+     * The store the last attempt was addressed to, from the caller's provider
+     * or the cached region's leader.
+     *
+     * @param (callable(): ?int)|null $targetStoreId
+     */
+    private function failedStoreIdFor(string $key, ?callable $targetStoreId): ?int
+    {
+        $storeId = $this->targetStoreIdOf($targetStoreId);
+        if ($storeId !== null) {
+            return $storeId;
+        }
+
+        $cached = $this->regionCache->getByKey($key);
+
+        return $cached instanceof RegionInfo ? $cached->leaderStoreId : null;
+    }
+
+    /**
      * Read the caller's failed-attempt target store ID.
      *
      * A non-positive or non-int answer means "not known" — an unset protobuf
@@ -751,6 +854,40 @@ final readonly class RetryExecutor
     private function indicatesBrokenConnection(GrpcException $e): bool
     {
         return $e->grpcStatusCode === GrpcStatusCode::Unavailable->value;
+    }
+
+    /**
+     * Close the channel behind a transport failure that proves the connection
+     * is unusable (issue #248), shared by the retryable and fatal paths
+     * (issue #534).
+     *
+     * The exception carries the address the failed attempt was sent to (set by
+     * GrpcClient / GrpcFuture at throw time). That is authoritative even when
+     * the RPC was nested inside the retried operation — lock resolution talks
+     * to the primary's region, not the read's/write's region. Fall back to the
+     * provider/cached leader only for exceptions that predate the field or
+     * synthetic test failures.
+     */
+    private function closeBrokenChannel(GrpcException $e, ?int $failedStoreId): void
+    {
+        if (!$this->indicatesBrokenConnection($e)) {
+            return;
+        }
+
+        $failedAddress = $e->targetAddress;
+        if ($failedAddress === null && $failedStoreId !== null) {
+            // Resolve the channel address BEFORE dropping the store entry:
+            // resolveStoreAddress() reads the store cache, and invalidating
+            // first would force a PD GetStore just to close a channel.
+            try {
+                $failedAddress = $this->regionResolver->resolveStoreAddress($failedStoreId);
+            } catch (StoreNotFoundException | StoreUnavailableException) {
+            }
+        }
+
+        if ($failedAddress !== null) {
+            $this->grpc->closeChannel($failedAddress);
+        }
     }
 
     /**
@@ -841,7 +978,7 @@ final readonly class RetryExecutor
         return BackoffType::NotLeader;
     }
 
-    private function classifyError(TiKvException $e): ?BackoffType
+    private function classifyError(TiKvException $e): RetryVerdict
     {
         return ErrorClassifier::classify($e);
     }

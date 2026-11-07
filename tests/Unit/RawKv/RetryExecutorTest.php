@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -227,9 +228,10 @@ class RetryExecutorTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
 
-        $classifier = fn(TiKvException $e): ?BackoffType => match (true) {
-            str_contains($e->getMessage(), 'Lock') || str_contains($e->getMessage(), 'locked') => BackoffType::TxnLock,
-            default => null,
+        $classifier = fn(TiKvException $e): RetryVerdict => match (true) {
+            str_contains($e->getMessage(), 'Lock') || str_contains($e->getMessage(), 'locked')
+                => RetryVerdict::retry(BackoffType::TxnLock),
+            default => RetryVerdict::pass(),
         };
 
         $callCount = 0;
@@ -317,7 +319,7 @@ class RetryExecutorTest extends TestCase
                     $callCount++;
                     throw new TiKvException('EpochNotMatch');
                 },
-                static fn(TiKvException $e): BackoffType => BackoffType::None,
+                static fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None),
             );
         } finally {
             // The first attempt must run, and the deadline must terminate the

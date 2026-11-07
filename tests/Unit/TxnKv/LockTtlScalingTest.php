@@ -19,8 +19,8 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
@@ -182,7 +182,7 @@ final class LockTtlScalingTest extends TestCase
         $state->setWrite('a1', 'v'); // primary — region 1, processed first
         $state->setWrite('b1', 'v'); // secondary — region 2
 
-        $committer->commit($state, $this->createRetryExecutor(), static fn (): ?BackoffType => null);
+        $committer->commit($state, $this->createRetryExecutor(), static fn (): RetryVerdict => RetryVerdict::pass());
 
         self::assertCount(1, $this->heartbeatRequests);
         self::assertGreaterThan(3000, (int) $this->heartbeatRequests[0]->getAdviseLockTtl());
@@ -209,7 +209,7 @@ final class LockTtlScalingTest extends TestCase
         $state->setWrite('a1', 'v');
         $state->setWrite('b1', 'v');
 
-        $committer->commit($state, $this->createRetryExecutor(), static fn (): ?BackoffType => null);
+        $committer->commit($state, $this->createRetryExecutor(), static fn (): RetryVerdict => RetryVerdict::pass());
 
         self::assertCount(0, $this->heartbeatRequests);
         self::assertCount(2, $this->prewriteRequests);
@@ -251,7 +251,7 @@ final class LockTtlScalingTest extends TestCase
         $state = new TransactionState();
         $state->setWrite('a1', 'v');
 
-        $committer->commit($state, $this->createRetryExecutor(), static fn (): ?BackoffType => null);
+        $committer->commit($state, $this->createRetryExecutor(), static fn (): RetryVerdict => RetryVerdict::pass());
 
         self::assertCount(0, $this->heartbeatRequests);
         self::assertSame(12345, $state->getCommitTs());
@@ -277,7 +277,7 @@ final class LockTtlScalingTest extends TestCase
         $state->setWrite('a1', 'v');
         $state->addPendingLockKey('a1');
 
-        $committer->commit($state, $this->createRetryExecutor(), static fn (): ?BackoffType => null);
+        $committer->commit($state, $this->createRetryExecutor(), static fn (): RetryVerdict => RetryVerdict::pass());
 
         self::assertCount(1, $this->prewriteRequests);
         self::assertSame(30000, (int) $this->prewriteRequests[0]->getLockTtl());

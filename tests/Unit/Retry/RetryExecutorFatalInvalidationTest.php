@@ -180,7 +180,7 @@ class RetryExecutorFatalInvalidationTest extends TestCase
         $executor = $this->createExecutor();
 
         $error = new StoreNotFoundException(1);
-        $this->assertNull(ErrorClassifier::classify($error), 'fixture must be a fatal classification');
+        $this->assertTrue(ErrorClassifier::classify($error)->isFatal(), 'fixture must be a fatal classification');
 
         $calls = 0;
         $caught = null;
@@ -286,7 +286,7 @@ class RetryExecutorFatalInvalidationTest extends TestCase
         $executor = $this->createExecutor();
 
         $error = $this->regionError($setVariant);
-        $this->assertNull(ErrorClassifier::classify($error), 'fixture must be a fatal kind');
+        $this->assertTrue(ErrorClassifier::classify($error)->isFatal(), 'fixture must be a fatal kind');
 
         $calls = 0;
         $caught = null;
@@ -336,7 +336,7 @@ class RetryExecutorFatalInvalidationTest extends TestCase
             ],
             // A GC verdict, and the only fatal that is NOT a TxnKvException
             // subclass of TiKvException checked explicitly by the classifier
-            // (ErrorClassifier::classify() returns null for it by type, before
+            // (ErrorClassifier::classify() returns a fatal verdict for it by type, before
             // the message fallback, issue #422).
             'TxnAbortedByGcException' => [
                 new TxnAbortedByGcException('GC life time is shorter than transaction duration'),
@@ -353,7 +353,7 @@ class RetryExecutorFatalInvalidationTest extends TestCase
         $this->cache->put($this->cachedRegion());
         $executor = $this->createExecutor();
 
-        $this->assertNull(ErrorClassifier::classify($error), 'fixture must be a fatal classification');
+        $this->assertTrue(ErrorClassifier::classify($error)->isFatal(), 'fixture must be a fatal classification');
 
         $calls = 0;
         $caught = null;
