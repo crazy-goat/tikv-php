@@ -95,6 +95,25 @@ php -r 'echo phpversion("grpc"), PHP_EOL;'
 The reported version must be 1.57 or newer. Restart PHP-FPM (or your web
 server) after enabling the extension.
 
+## Documentation
+
+The full documentation lives in [`docs/`](docs/README.md) — the
+[documentation index](docs/README.md) links every guide.
+
+- **[Getting Started](docs/getting-started.md)** — Installation, setup, and your first TiKV operations
+- **[Configuration](docs/configuration.md)** — Client options, TLS, timeouts, retry budgets, logging
+- **[Operations](docs/operations.md)** — Complete guide to all RawKV operations
+- **[Advanced Features](docs/advanced.md)** — Production-ready patterns and optimization
+- **[Architecture](docs/architecture.md)** — System architecture, design decisions, component details
+- **[Error Handling](docs/error-handling.md)** — Exception hierarchy, per-operation exceptions and retryability
+- **[Troubleshooting](docs/troubleshooting.md)** — Common issues and solutions
+
+For TxnKV, this README's [Transactions](#transactions-txnkv) section is the
+entry point; `docs/error-handling.md` carries the full per-exception
+retryability matrix and
+[Transaction Operations](docs/error-handling.md#transaction-operations)
+covers where each transactional exception originates.
+
 ## Stability and versioning
 
 The library is **pre-1.0**. It follows
@@ -1171,21 +1190,6 @@ php examples/basic.php
 > `examples/txn.php` needs a cluster in default (V1) mode, so use
 > `docker-compose.txnkv.yml` and start from fresh volumes — TiKV refuses to
 > disable TTL on a cluster that was bootstrapped with it.
-
-## Documentation
-
-- **[Getting Started](docs/getting-started.md)** — Installation, setup, and your first TiKV operations
-- **[Configuration](docs/configuration.md)** — Client options, TLS, timeouts, retry budgets, logging
-- **[Operations](docs/operations.md)** — Complete guide to all RawKV operations
-- **[Advanced Features](docs/advanced.md)** — Production-ready patterns and optimization
-- **[Error Handling](docs/error-handling.md)** — Exception hierarchy, per-operation exceptions and retryability
-- **[Troubleshooting](docs/troubleshooting.md)** — Common issues and solutions
-
-For TxnKV, this README's [Transactions](#transactions-txnkv) section is the
-entry point; `docs/error-handling.md` carries the full per-exception
-retryability matrix and
-`[Transaction Operations](docs/error-handling.md#transaction-operations)`
-covers where each transactional exception originates.
 
 ## Configuration
 
