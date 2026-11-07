@@ -1421,12 +1421,16 @@ ordered treap would otherwise retain). Supersession is silent metrics-wise;
 `invalidate()` remains the sole `regionInvalidated()` emission point.
 
 Caveat: the overlap removal itself does not compare epochs; the stale-epoch
-guard is a separate check earlier in `put()`. A same-ID region whose
-`epochVersion` is lower — or equal with a lower `epochConfVer` — is ignored
-before any removal, so an incoming *older-epoch* region cannot evict a newer
-one (issue #249, REG-18, fixed). The guard is same-ID only: a split or merge
-changes the region layout (a new ID, or the surviving ID with a newer epoch),
-and the new range must still supersede the cached entries it replaces.
+guard is a separate check earlier in `put()`. On the leader-known path, a
+same-ID region whose `epochVersion` is lower — or equal with a lower
+`epochConfVer` — is ignored before any removal, so an incoming *older-epoch*
+region cannot evict a newer one (issue #249, REG-18, fixed). The leaderless
+early return (`leaderStoreId === 0`) is not covered by that guard: it removes
+the same-ID and overlapping entries before the epoch check runs, so a stale
+leaderless answer can still evict a fresher entry. The guard is same-ID only:
+a split or merge changes the region layout (a new ID, or the surviving ID
+with a newer epoch), and the new range must still supersede the cached entries
+it replaces.
 
 When a unit test inspects the cache's private maps (`entriesById`, `lruOrder`)
 by reflection, PHPStan level 9 needs `is_array`/`instanceof` asserts on the
