@@ -276,16 +276,24 @@ example from `pd-ctl cluster` or a trusted client. When it is set:
   cluster-id mismatch errors, so the timestamp path cannot be redirected
   either.
 
-Independently of the option, once a cluster ID has been established, an
-error string naming a different ID is rejected instead of silently
-overwriting it. That no-overwrite rule is unconditional: it also applies when
-`expectedClusterId` is unset, because the issue requires it.
+Independently of the option, once a cluster ID has been established, every
+later PD response header must report the same ID; a different ID throws
+`TiKvException` (`Cluster ID mismatch: established X, server reported Y`)
+before the response reaches the caller. An error string naming a different ID
+is rejected the same way instead of silently overwriting the established ID.
+Both rules are unconditional: they also apply when `expectedClusterId` is
+unset. A reported ID of `0` means "not reported" (proto3 omits an unset
+scalar), so it is never adopted and never treated as a mismatch:
+`healthCheck()` and `getClusterId()` keep returning `null` instead of pinning
+the client to cluster 0. The header and error-string rules live in one shared
+`ClusterIdGuard` used by `PdClient` and `TimestampOracle` (issue #250,
+REG-19).
 
 An absent or explicitly `null` option keeps the historical initial
-learn-and-adopt behaviour: the first cluster ID PD reports is adopted.
-Existing deployments that relied on an error string replacing an already
-established ID do change — intentionally. The option must be a positive
-integer; any other type, `0` or a negative value throws
+learn-and-adopt behaviour: the first non-zero cluster ID PD reports is
+adopted. Existing deployments that relied on an error string replacing an
+already established ID do change — intentionally. The option must be a
+positive integer; any other type, `0` or a negative value throws
 `InvalidArgumentException` at client creation. The value must fit in a PHP
 `int`: PD cluster IDs are `uint64`, and the protobuf runtime clamps a decoded
 value above `PHP_INT_MAX` to `PHP_INT_MAX`, so a cluster whose ID exceeds
@@ -329,7 +337,11 @@ Two additional APIs reduce PD traffic where that is safe and explicit:
 
 Additionally, the pessimistic-lock path in `TwoPhaseCommitter` acquires
 one `for_update_ts` per locking pass instead of one per region, cutting
-one PD round trip per additional region.
+one PD round trip per additional region. The same timestamp is reused by
+every retry of that pass: only a new statement allocates a new read
+timestamp, so a retried lock cannot silently advance past a concurrent
+commit and let a stale read-modify-write pass the prewrite constraint
+check.
 
 ### Store Address Validation
 
@@ -455,10 +467,13 @@ deterministically for that data, even though the client's scan limit allows
 ```php
 $options = [
     'grpc' => [
-        'maxReceiveMessageBytes' => 67108864, // default: 64 MB (gRPC core default: 4 MB)
-        'maxSendMessageBytes'    => 67108864, // default: 64 MB
-        'keepaliveTimeMs'        => 10000,    // default: 10 s — ping interval on idle connections
-        'keepaliveTimeoutMs'     => 3000,     // default: 3 s
+        'maxReceiveMessageBytes'      => 67108864, // default: 64 MB (gRPC core default: 4 MB)
+        'maxSendMessageBytes'         => 67108864, // default: 64 MB
+        'keepaliveTimeMs'             => 10000,    // default: 10 s — ping interval on idle connections
+        'keepaliveTimeoutMs'          => 3000,     // default: 3 s
+        'keepalivePermitWithoutCalls' => true,     // default: true — ping while no call is in flight
+        'compression'                 => 'none',   // default: none; 'gzip' or 'deflate' to compress requests
+        'initialWindowSizeBytes'      => 0,        // default: 0 = let the gRPC core auto-tune
     ],
 ];
 
@@ -468,12 +483,39 @@ $client = RawKvClient::create(
 );
 ```
 
-All values must be ints `>= 1`. Keepalive pings (sent every `keepaliveTimeMs`,
-even without in-flight calls) keep idle connections alive behind stateful
-firewalls / NAT gateways — which typically drop idle flows after ~5 minutes —
-so a dead connection is detected rather than blocking until TCP retransmission
-gives up. Lowering `maxReceiveMessageBytes` is a valid hardening choice when
-you know your values are small.
+The byte limits and keepalive timings must be ints `>= 1`;
+`keepalivePermitWithoutCalls` must be a bool, `compression` one of `none`,
+`gzip` or `deflate`, and `initialWindowSizeBytes` an int `>= 0`.
+
+Keepalive pings (sent every `keepaliveTimeMs`, even without in-flight calls
+when `keepalivePermitWithoutCalls` is true) keep idle connections alive behind
+stateful firewalls / NAT gateways — which typically drop idle flows after
+~5 minutes — so a dead connection is detected rather than blocking until TCP
+retransmission gives up. Lowering `maxReceiveMessageBytes` is a valid
+hardening choice when you know your values are small.
+
+Compression is off by default and applies to the **outgoing** side:
+`'gzip'` or `'deflate'` sets `grpc.default_compression_algorithm` on every
+channel, so requests are compressed. Responses are not controlled by this
+option — the server compresses them (or not) based on the client's advertised
+`grpc-accept-encoding`, which the core sends regardless of the default. The
+trade-off is CPU for wire size on large values. The server must support the
+algorithm, and gzip is the one every gRPC implementation ships; deflate is
+optional.
+
+`initialWindowSizeBytes` sets `grpc.http2.lookahead_bytes`, the gRPC core's
+HTTP/2 initial stream window (0 leaves the core's BDP-based auto-tuning in
+place). Raise it for known high-latency links with large responses. A positive
+value also sets `grpc.http2.bdp_probe` to `0`: without that, BDP probing
+re-tunes the window from its bandwidth estimate almost immediately, so the
+configured value would only be a starting point. The trade-off is a fixed
+window that no longer adapts to the link.
+
+All three of `keepalivePermitWithoutCalls`, `compression` and
+`initialWindowSizeBytes` add or change channel arguments, and ext-grpc keys
+its persistent channels on those arguments. A client configured with a
+different value therefore uses a distinct underlying channel (a separate TCP
+connection) from a default-configured client for the same store address.
 
 ### Channel Pool (maxChannels, idleTtlMs)
 
@@ -737,6 +779,12 @@ $options = [
     ],
 ];
 ```
+
+When both forms are given for the same credential, the explicit file path wins:
+`caCertFile` takes priority over `caCertPem`, and a complete
+`clientCertFile` + `clientKeyFile` pair takes priority over
+`clientCertPem` + `clientKeyPem`. Supplying both is redundant rather than an
+error, but the file is the one that is read.
 
 ### Deprecated TLS Option Keys
 
@@ -1038,7 +1086,10 @@ retry warning — and that message can be TiKV's own text:
 `RegionException::fromRegionError()` copies `errorpb.Error::getMessage()`
 verbatim. TiKV can name a key in such a message, and the client cannot
 redact a key it never saw. Every key the client itself holds is redacted; a
-key only the server ever saw is not (tracked in issue #307).
+key only the server ever saw is not. The structured `errorpb` fields that do
+carry keys are never serialized into a message: `SstIngestor` appends only
+the store error's `message` to a `RawWrite` failure, not the protobuf
+(issue #307).
 
 The redactor is applied wherever a key can reach a log line:
 
@@ -1061,7 +1112,9 @@ the region-shrink error (`RawKvRangeOps`), the heartbeat and primary-key
 errors of the committer (`TwoPhaseCommitter` — a retryable
 `TxnRetryableException` and a fatal `InvalidStateException`), the
 retry-budget and lock-wait exceptions (`RetryBudgetExhaustedException`,
-`LockWaitTimeoutException`) and the API V2 keyspace check
+`LockWaitTimeoutException`), the SST-write store error (`SstIngestor` — only
+the store error's message is appended, never the serialized protobuf) and
+the API V2 keyspace check
 (`KeyOutOfBoundsException`) therefore name the redacted key. When your own
 code needs the raw key, read it from the typed accessor instead of parsing
 it out of a message — `RetryBudgetExhaustedException::getRawKey()` and
@@ -1164,7 +1217,7 @@ the client does not know or a value that is not an integer. Omitting the whole
 
 | Option key               | Default | Operations covered                                                                    |
 |--------------------------|---------|---------------------------------------------------------------------------------------|
-| `readThresholdMs`        | 100     | `get()`, `getKeyTTL()`                                                                 |
+| `readThresholdMs`        | 100     | `get()`, `getKeyTTL()`, `getKeyTTLResult()`                                            |
 | `writeThresholdMs`       | 200     | `put()`, `delete()`, `compareAndSwap()`, `putIfAbsent()`                              |
 | `batchReadThresholdMs`   | 500     | `batchGet()`                                                                           |
 | `batchWriteThresholdMs`  | 500     | `batchPut()`, `batchDelete()`                                                          |
@@ -1910,17 +1963,26 @@ subclassing — there is no `classifyError()` hook on the client and no
 `BackoffType::Custom` case. The supported extension point is the optional
 `$classifier` callable accepted by `RetryExecutor::execute()`
 (`src/Client/Retry/RetryExecutor.php`): it receives the caught
-`TiKvException` and returns a `BackoffType` (see
-`src/Client/Retry/BackoffType.php` for the full case list) or `null`
-to fall through to the built-in classification — and if that also returns
-`null`, the error is fatal and the exception is rethrown. Note that a
-`NotLeader` error is classified before your classifier is consulted.
+`TiKvException` and returns a `RetryVerdict`
+(`src/Client/Retry/RetryVerdict.php`):
+
+- `RetryVerdict::retry($backoffType)` retries with that `BackoffType` (see
+  `src/Client/Retry/BackoffType.php` for the full case list);
+- `RetryVerdict::fatal()` stops immediately and runs the executor's fatal
+  path, including region invalidation and the broken-channel cleanup;
+- `RetryVerdict::pass()` falls through to the built-in classification, which
+  itself always answers Retry or Fatal and never Pass.
+
+Note that a `NotLeader` error is classified before your classifier is
+consulted.
 
 To use it you must construct the `RetryExecutor` yourself and invoke your
 operation through it, rather than going through `RawKvClient`'s methods:
 
 ```php
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 
 $executor = new RetryExecutor(
     maxBackoffMs: 20000,
@@ -1937,11 +1999,11 @@ $result = $executor->execute(
         // your RawKV RPC call
         return $value;
     },
-    classifier: function (TiKvException $e): ?BackoffType {
+    classifier: function (TiKvException $e): RetryVerdict {
         if (str_contains($e->getMessage(), 'CustomError')) {
-            return BackoffType::StaleCmd; // pick a real BackoffType case
+            return RetryVerdict::retry(BackoffType::StaleCmd); // pick a real BackoffType case
         }
-        return null; // fall through to the built-in ErrorClassifier
+        return RetryVerdict::pass(); // fall through to the built-in ErrorClassifier
     },
 );
 ```
@@ -2044,19 +2106,26 @@ saves.
 
 ### Scan-path Region Cache Use
 
-Both scan paths read the region cache first:
+RawKV and TxnKV scans read the region cache first:
 
-- **RawKV** (`scan()`, `scanPrefix()`, `reverseScan()`, `batchScan()` and the
+- **RawKV forward** (`scan()`, `scanPrefix()`, `batchScan()` and the
   iterators) and **TxnKV** (`Transaction::scan()`) enumerate regions through
   the cache. A contiguous cached run is served locally; PD is asked only for
   the uncovered gap, starting at the gap's first key, and the answer is cached
   for the next page and the next scan.
+- **RawKV `reverseScan()`** resolves regions from the upper bound downwards
+  through `RegionResolver::getRegionBelow()`: the cache answers the common
+  case, and a miss asks PD for the region containing the cursor or, when the
+  cursor sits exactly on a region boundary, for the adjacent region below it.
+  It does not use `RegionScanSource`, so its cache counters are labelled
+  `region_resolution` (per lookup), not `scan`.
 - A split or merge the client has not seen yet is still handled by the usual
   region-error retry (the stale entry is invalidated from `EpochNotMatch`,
   then the retry re-resolves the gap through PD).
-- The scan path increments the same counters as point lookups, labelled
-  `scan` (RawKV) and `txn_scan` (TxnKV), so `regionCacheHit()` /
-  `regionCacheMiss()` cover it (see [Metrics and Observability](#metrics-and-observability)).
+- The forward scan path increments the same counters as point lookups,
+  labelled `scan` (RawKV) and `txn_scan` (TxnKV), so `regionCacheHit()` /
+  `regionCacheMiss()` cover it; `reverseScan()` reports
+  `region_resolution` (see [Metrics and Observability](#metrics-and-observability)).
 
 ### Store Cache
 
@@ -2322,8 +2391,8 @@ The library emits the following counter tags:
 | `rpcStarted()`                 | `'tikvpb.Tikv/KvGet'`      | One outbound gRPC call was dispatched             |
 | `rpcCompleted()`               | `'tikvpb.Tikv/KvGet'`      | gRPC call returned (success or error); carries duration (ms) |
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
-| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache; the scan labels are emitted once per cache-served run of regions |
-| `regionCacheMiss()`            | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was not in the cache, had to query PD; the scan labels are emitted once per `ScanRegions` call |
+| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache. `region_resolution` is the per-lookup label (point reads and `reverseScan()`'s top-down resolver); the scan labels are emitted once per cache-served run of regions |
+| `regionCacheMiss()`            | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was not in the cache, had to query PD. `region_resolution` is the per-lookup label; the scan labels are emitted once per `ScanRegions` call |
 | `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'`, `'refresh'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), post-resolve cleanup in `LockResolver`, or a `refreshRegionCache()` tick that found PD no longer maps the entry's start key to its cached range (a refresh that supersedes the entry with a newer answer is a `put()` and emits nothing). Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
 
 For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).

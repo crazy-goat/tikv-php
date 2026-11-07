@@ -1121,6 +1121,23 @@ final class TxnKvClient
     }
 
     /**
+     * Return the PD client this client uses for region discovery and
+     * timestamps.
+     *
+     * The returned object is the same instance the client built (or was
+     * given), so a caller that needs PD — service GC safe points, cluster
+     * inspection, a test that splits regions — reuses this connection
+     * instead of opening a second one with a second TSO stream. This client
+     * owns it: do not close it yourself. It is valid only while this client
+     * is open, because {@see self::close()} closes it — treat the reference
+     * as stale afterwards.
+     */
+    public function pdClient(): PdClientInterface
+    {
+        return $this->pdClient;
+    }
+
+    /**
      * Register a service GC safe point so GC holds back past $safePoint for
      * the given TTL (issue #422).
      *
@@ -1190,9 +1207,9 @@ final class TxnKvClient
      * Use as a lightweight health check. Does not touch any user data.
      *
      * Returns the cluster ID on success, or null if PD responded without a
-     * cluster-ID header. When `options['expectedClusterId']` is set, a
-     * response without a cluster ID fails with HealthCheckException instead
-     * of returning null.
+     * cluster-ID header or with cluster ID `0`. When
+     * `options['expectedClusterId']` is set, a response without a cluster ID
+     * fails with HealthCheckException instead of returning null.
      *
      * @throws ClientClosedException When the client has been closed
      * @throws HealthCheckException When the PD probe fails

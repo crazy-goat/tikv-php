@@ -339,6 +339,10 @@ final readonly class RawKvScanner
      * concurrently, in windows of at most {@see self::$maxConcurrency}
      * regions (issue #555); a bounded scan stays sequential.
      *
+     * Regions are resolved from the upper bound downwards in bounded batches
+     * (issue #198): a scan satisfied by the first batch never asks PD for the
+     * rest of the range.
+     *
      * A reversed range (`startKey` sorts before a non-empty `endKey`) is
      * rejected before any RPC. Reverse scan has no +infinity sentinel: an
      * empty `startKey` is not an unbounded upper bound, so
@@ -367,8 +371,10 @@ final readonly class RawKvScanner
         // region enumeration — the clipper cannot skip this case because its
         // empty-end sentinel also marks a region whose end is unbounded.
         // A non-empty end key with an empty start key is a reversed range and
-        // was rejected by assertReverseRangeOrder() above.
-        if ($startKey === '' && $endKey === '') {
+        // was rejected by assertReverseRangeOrder() above. Equal non-empty
+        // bounds are the same empty range: skip the region lookup entirely
+        // instead of resolving a region that cannot yield a row.
+        if ($startKey === $endKey) {
             return [];
         }
 
@@ -438,16 +444,15 @@ final readonly class RawKvScanner
 
     /**
      * Scan one reverse page over the clipped regions. The wire range is
-     * [endKey, startKey); enumerate it through the region cache like the
-     * forward scan, then walk it in reverse.
+     * [endKey, startKey); enumerate it from the upper bound downwards, then
+     * walk the regions in descending order.
      *
-     * PD's `ScanRegions` enumerates a range from its **lower** bound only,
-     * while the reverse scan consumes the regions from the **upper** bound
-     * down, so the chain cannot be consumed as it arrives: it is collected
-     * first and then walked downwards. The batch bound still caps every PD
-     * response (issue #282) — an unlimited request answers with every
-     * region of the keyspace at once, which can exceed the gRPC receive
-     * limit outright.
+     * PD's `ScanRegions` enumerates a range from its **lower** bound only, so
+     * the reverse scan used to collect the whole chain before walking it from
+     * the top. The regions are now loaded lazily from the top in bounded
+     * batches (issue #198): a page satisfied by its first batch never asks
+     * for the next one, and a narrow reverse scan touches only the regions it
+     * can consume instead of every region of the remaining range.
      *
      * A bounded reverse scan walks the clipped segments one after another.
      * An unbounded page (`$parallel`) fans them out like the forward
@@ -477,37 +482,107 @@ final readonly class RawKvScanner
     ): array {
         assert($limit > 0, 'reverseScanPage() requires a positive page budget; use reverseScanUnbounded() for limit 0');
 
-        $regions = array_reverse(
-            $this->resolveScanRegions($endKey, $startKey, RegionScanBatch::MAX_REGIONS),
-        );
-
-        $clipper = new RegionRangeClipper();
-        /** @var list<array{RegionInfo, string, string}> $segments */
-        $segments = iterator_to_array($clipper->clipReverse($regions, $startKey, $endKey), false);
-        if ($segments === []) {
+        if ($startKey === $endKey) {
+            // An empty page: the unbounded loop can land exactly on the lower
+            // bound after a full page, and there is nothing left to resolve.
             return [];
         }
 
-        if ($parallel && count($segments) > 1) {
-            return $this->scanSegmentsInParallel(
-                $executor,
-                $segments,
-                $endKey,
-                $limit,
-                $keyOnly,
-                $columnFamily,
-                true,
-            );
+        $results = [];
+        $remaining = $limit;
+        $clipper = new RegionRangeClipper();
+
+        foreach ($this->reverseRegionBatches($startKey, $endKey, RegionScanBatch::forRowBudget($limit)) as $batch) {
+            /** @var list<array{RegionInfo, string, string}> $segments */
+            $segments = iterator_to_array($clipper->clipReverse($batch, $startKey, $endKey), false);
+            if ($segments === []) {
+                continue;
+            }
+
+            $batchResults = $parallel && count($segments) > 1
+                ? $this->scanSegmentsInParallel(
+                    $executor,
+                    $segments,
+                    $endKey,
+                    $remaining,
+                    $keyOnly,
+                    $columnFamily,
+                    true,
+                )
+                : $this->scanSegmentsSequentially(
+                    $executor,
+                    $segments,
+                    $remaining,
+                    $keyOnly,
+                    $columnFamily,
+                    true,
+                );
+
+            foreach ($batchResults as $row) {
+                $results[] = $row;
+            }
+
+            $remaining -= count($batchResults);
+            if ($remaining <= 0) {
+                break;
+            }
         }
 
-        return $this->scanSegmentsSequentially(
-            $executor,
-            $segments,
-            $limit,
-            $keyOnly,
-            $columnFamily,
-            true,
-        );
+        return $results;
+    }
+
+    /**
+     * Enumerate the regions covering the reverse range [endKey, startKey) in
+     * bounded batches, from the upper bound downwards (issue #198).
+     *
+     * A reverse scan consumes a range from its upper bound, so the regions
+     * are resolved from the top: the cache answers the common case and a miss
+     * asks PD for the region containing the cursor, or — when the cursor sits
+     * on a region boundary — for the adjacent region below through
+     * `GetPrevRegion`. A batch is fetched only when the previous one did not
+     * spend the row budget, so a scan that fits in the first batch never
+     * enumerates the rest of the range.
+     *
+     * @param string $startKey exclusive upper bound
+     * @param string $endKey lower bound ('' = the start of the keyspace)
+     * @param int $batchSize maximum number of regions per batch
+     * @return \Generator<int, list<RegionInfo>>
+     */
+    private function reverseRegionBatches(string $startKey, string $endKey, int $batchSize): \Generator
+    {
+        $cursor = $startKey;
+        $batch = [];
+
+        while ($cursor !== '') {
+            $region = $this->regionResolver->getRegionBelow($cursor);
+            if (!$region instanceof RegionInfo) {
+                break;
+            }
+
+            // A merge after the previous batch can produce a region that
+            // extends above the cursor already read; clamp it to the cursor.
+            $batch[] = RegionScanBatch::trimEndToCursor($region, $cursor);
+
+            $nextCursor = $region->startKey;
+            $done = $nextCursor === ''
+                || !KeyOrder::lt($nextCursor, $cursor)
+                || ($endKey !== '' && KeyOrder::lte($nextCursor, $endKey));
+
+            if (count($batch) >= $batchSize || $done) {
+                yield $batch;
+                $batch = [];
+            }
+
+            if ($done) {
+                return;
+            }
+
+            $cursor = $nextCursor;
+        }
+
+        if ($batch !== []) {
+            yield $batch;
+        }
     }
 
     /**
@@ -553,8 +628,10 @@ final readonly class RawKvScanner
      * warm cache, or a gap — falls back to PD, and then only $batchSize
      * regions at a time (issue #282).
      *
-     * The list itself is complete: the reverse scan walks it from the top
-     * down and the concurrent batch scan dispatches one send per region.
+     * The list itself is complete: the concurrent batch scan dispatches one
+     * send per region. The reverse scan no longer uses this method — it walks
+     * the range from the top down through {@see self::reverseRegionBatches()}
+     * (issue #198).
      *
      * @param int $batchSize number of regions to request per PD call
      * @return list<RegionInfo>
@@ -1081,6 +1158,7 @@ final readonly class RawKvScanner
                     excludedStoreId: $excludedStore,
                     requestContext: $this->requestContext,
                     resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -1215,6 +1293,7 @@ final readonly class RawKvScanner
                 excludedStoreId: $excludedStore,
                 requestContext: $this->requestContext,
                 resourceControl: $this->resourceControl,
+                storeAvailable: $this->regionResolver->isStoreAvailable(...),
             );
             $excludedStore = null;
             $targetStoreId = $target->storeId;
@@ -1496,6 +1575,7 @@ final readonly class RawKvScanner
                 $this->regionResolver->getStore(...),
                 requestContext: $this->requestContext,
                 resourceControl: $this->resourceControl,
+                storeAvailable: $this->regionResolver->isStoreAvailable(...),
             );
             $targetStoreId = $target->storeId;
             $address = $this->regionResolver->resolveStoreAddress($target->storeId);

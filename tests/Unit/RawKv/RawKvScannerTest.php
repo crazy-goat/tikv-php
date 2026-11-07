@@ -21,9 +21,9 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TxnReader;
@@ -132,6 +132,9 @@ class RawKvScannerTest extends TestCase
         $this->regionCache->method('getByKey')->willReturnCallback(
             static fn(string $key): ?RegionInfo => self::findRegion($regions, $key),
         );
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static fn(string $key): ?RegionInfo => self::findRegionBelow($regions, $key),
+        );
     }
 
     /**
@@ -146,6 +149,38 @@ class RawKvScannerTest extends TestCase
         }
 
         return null;
+    }
+
+    /**
+     * The region a reverse scan reads next: the one holding the greatest key
+     * strictly less than $key (the same choice RegionCache::getRegionBelow()
+     * makes, including its gap guard).
+     *
+     * @param RegionInfo[] $regions
+     */
+    private static function findRegionBelow(array $regions, string $key): ?RegionInfo
+    {
+        $best = null;
+        foreach ($regions as $region) {
+            if (KeyOrder::gte($region->startKey, $key)) {
+                continue;
+            }
+            if ($region->endKey !== '' && KeyOrder::lte($region->endKey, $region->startKey)) {
+                continue;
+            }
+            if ($best === null || KeyOrder::gte($region->startKey, $best->startKey)) {
+                $best = $region;
+            }
+        }
+
+        if ($best === null) {
+            return null;
+        }
+        if ($best->endKey !== '' && KeyOrder::lt($best->endKey, $key)) {
+            return null;
+        }
+
+        return $best;
     }
 
     /**
@@ -912,7 +947,7 @@ class RawKvScannerTest extends TestCase
             $this->regionResolver,
             new NullLogger(),
         );
-        $classifier = static fn(): ?BackoffType => null;
+        $classifier = static fn(): RetryVerdict => RetryVerdict::pass();
 
         $txnReaderMessage = $this->captureNegativeLimitMessage(
             fn(): array => $txnReader->scan(
@@ -1415,6 +1450,9 @@ class RawKvScannerTest extends TestCase
         // The cache serves the stale region for the first resolution and the
         // retry executor's invalidation lookup, then misses so the retry
         // falls back to PD for the post-split region.
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static fn(string $key): ?RegionInfo => $key === 'z' ? $preSplit : null,
+        );
         $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
         $this->regionCache->method('put');
         $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
@@ -1518,6 +1556,9 @@ class RawKvScannerTest extends TestCase
             endKey: 'z',
         );
 
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static fn(string $key): ?RegionInfo => $key === 'z' ? $preSplit : null,
+        );
         $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
         $this->regionCache->method('put');
         $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
@@ -1617,6 +1658,9 @@ class RawKvScannerTest extends TestCase
         // The cache serves the stale region for the first resolution and the
         // retry executor's invalidation lookup, then misses so the retry
         // falls back to PD for the post-split region.
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static fn(string $key): ?RegionInfo => $key === 'z' ? $preSplit : null,
+        );
         $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
         $this->regionCache->method('put');
         $this->regionCache->expects($this->atLeastOnce())->method('invalidate');
@@ -1722,6 +1766,9 @@ class RawKvScannerTest extends TestCase
             endKey: 'z',
         );
 
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static fn(string $key): ?RegionInfo => $key === 'z' ? $preSplit : null,
+        );
         $this->regionCache->method('getByKey')->willReturnOnConsecutiveCalls($preSplit, $preSplit, null, null);
         $this->regionCache->method('put');
         $this->regionCache->expects($this->atLeastOnce())->method('invalidate');

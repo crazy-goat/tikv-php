@@ -44,6 +44,7 @@ use Psr\Log\NullLogger;
 final class PdClient implements PdClientInterface
 {
     private ?int $clusterId = null;
+    private readonly ClusterIdGuard $clusterIdGuard;
     private ?TimestampOracle $tso = null;
 
     /** Whether leader discovery has already run for this client. */
@@ -87,13 +88,6 @@ final class PdClient implements PdClientInterface
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
         private readonly ?int $expectedClusterId = null,
     ) {
-        if ($expectedClusterId !== null && $expectedClusterId < 1) {
-            throw new InvalidArgumentException(sprintf(
-                'expectedClusterId must be greater than 0, got %d',
-                $expectedClusterId,
-            ));
-        }
-
         if (is_string($pdAddresses)) {
             $pdAddresses = [$pdAddresses];
         }
@@ -109,6 +103,12 @@ final class PdClient implements PdClientInterface
         }
         $this->pdAddresses = $addresses;
         $this->currentAddress = $addresses[0];
+        $this->clusterIdGuard = new ClusterIdGuard(
+            $this->getClusterId(...),
+            $this->setClusterId(...),
+            $this->expectedClusterId,
+            $this->logger,
+        );
     }
 
     /**
@@ -175,6 +175,29 @@ final class PdClient implements PdClientInterface
             // cached and silently misroute requests. Throw so the failure is
             // visible instead of corrupting the region cache.
             throw new TiKvException('PD GetRegion returned no region for key');
+        }
+
+        return RegionInfoMapper::fromProto($region, $response->getLeader(), $this->codec);
+    }
+
+    public function getPrevRegion(string $key): ?RegionInfo
+    {
+        $request = new GetRegionRequest();
+        $request->setHeader($this->createHeader());
+        $request->setRegionKey($this->codec->encodeRegionKey($key));
+
+        /** @var GetRegionResponse $response */
+        $response = $this->callWithClusterIdRetry(
+            'GetPrevRegion',
+            $request,
+            GetRegionResponse::class,
+        );
+
+        $region = $response->getRegion();
+        if (!$region instanceof \CrazyGoat\Proto\Metapb\Region) {
+            // No adjacent region below the key: the first region of the
+            // keyspace, or a gap. This is a normal answer, not an error.
+            return null;
         }
 
         return RegionInfoMapper::fromProto($region, $response->getLeader(), $this->codec);
@@ -294,10 +317,10 @@ final class PdClient implements PdClientInterface
      * what every subsequent PD and TSO RPC targets, and `GetMembers` is the
      * RPC that reports it, so a health check that discarded it was
      * reporting less than it had learned). Returns the cluster ID on
-     * success; returns null if the response carried no cluster ID header.
-     * When an expected cluster ID is configured (issue #308, SEC-05), a
-     * response without a cluster ID header is a protocol violation and
-     * throws instead of returning null.
+     * success; returns null if the response carried no cluster ID header or
+     * reported `0`. When an expected cluster ID is configured (issue #308,
+     * SEC-05), a response without a cluster ID header is a protocol
+     * violation and throws instead of returning null.
      * Unlike getRegion(), this call does NOT look up any user data and never
      * fails with "no region" — making it suitable as a health check.
      *
@@ -437,13 +460,14 @@ final class PdClient implements PdClientInterface
 
     public function setClusterId(int $clusterId): void
     {
-        if ($this->expectedClusterId !== null && $clusterId !== $this->expectedClusterId) {
-            throw new TiKvException(sprintf(
-                'Cluster ID mismatch: expected %d, server reported %d',
-                $this->expectedClusterId,
+        if ($clusterId < 1) {
+            throw new InvalidArgumentException(sprintf(
+                'clusterId must be greater than 0, got %d',
                 $clusterId,
             ));
         }
+
+        ClusterIdGuard::assertMatches($this->expectedClusterId, $this->clusterId, $clusterId);
 
         $this->clusterId = $clusterId;
     }
@@ -600,7 +624,7 @@ final class PdClient implements PdClientInterface
                 }
                 $this->currentAddress = $next;
             } catch (GrpcException $e) {
-                if ($this->extractClusterIdFromError($e->getMessage()) !== null) {
+                if (ClusterIdGuard::extractFromError($e->getMessage()) !== null) {
                     // The inner layer already retried the mismatch; a mismatch
                     // that survives it is not a transport failure and must not
                     // trigger failover.
@@ -906,18 +930,18 @@ final class PdClient implements PdClientInterface
 
             return $response;
         } catch (GrpcException $e) {
-            $extractedId = $this->extractClusterIdFromError($e->getMessage());
+            $extractedId = ClusterIdGuard::extractFromError($e->getMessage());
             if ($extractedId !== null) {
                 // The error string is server-controlled: validate it before
                 // adopting it, so it cannot override an expected or an
                 // already-established cluster ID (issue #308, SEC-05).
-                $this->assertReportedClusterIdMatches($extractedId);
+                $this->clusterIdGuard->checkReportedInError($extractedId);
 
                 $this->logger->warning(
                     'Cluster ID mismatch, retrying',
                     ['method' => $method, 'clusterId' => $extractedId],
                 );
-                $this->clusterId = $extractedId;
+                $this->setClusterId($extractedId);
                 if (method_exists($request, 'setHeader')) {
                     $request->setHeader($this->createHeader());
                 }
@@ -942,83 +966,29 @@ final class PdClient implements PdClientInterface
     }
 
     /**
-     * Learn cluster ID from a successful PD response header.
+     * Verify the cluster ID from a successful PD response header.
      *
-     * When an expected cluster ID is configured (issue #308, SEC-05), a
-     * response without a cluster-ID header is a protocol violation: leaving
-     * the ID unset would let a server bypass the check simply by omitting
-     * the header. A header naming a different cluster also throws before the
-     * ID is adopted and before the response is returned to the caller. The
-     * mismatch check runs after the ID has been established too, so a later
-     * response from an impostor cannot pass unnoticed.
+     * The learning and verification rules live in {@see ClusterIdGuard} and
+     * are shared with {@see TimestampOracle} (issue #250, REG-19). Every
+     * response is checked, not only the first one: a later header naming a
+     * different cluster throws before the response reaches the caller. When
+     * an expected cluster ID is configured (issue #308, SEC-05), a response
+     * without a cluster-ID header is a protocol violation: leaving the ID
+     * unset would let a server bypass the check simply by omitting the
+     * header.
      */
     private function learnClusterId(Message $response): void
     {
         $header = method_exists($response, 'getHeader') ? $response->getHeader() : null;
 
         if (!is_object($header) || !method_exists($header, 'getClusterId')) {
-            if ($this->expectedClusterId !== null) {
-                throw new TiKvException(sprintf(
-                    'Cluster ID missing: expected %d, response carried none',
-                    $this->expectedClusterId,
-                ));
-            }
+            $this->clusterIdGuard->check(null);
 
             return;
         }
 
         /** @var int $clusterId */
         $clusterId = $header->getClusterId();
-
-        if ($this->expectedClusterId !== null && $clusterId !== $this->expectedClusterId) {
-            throw new TiKvException(sprintf(
-                'Cluster ID mismatch: expected %d, server reported %d',
-                $this->expectedClusterId,
-                $clusterId,
-            ));
-        }
-
-        if ($this->clusterId !== null) {
-            return;
-        }
-
-        $this->clusterId = $clusterId;
-        $this->logger->info('Learned cluster ID', ['clusterId' => $clusterId]);
-    }
-
-    /**
-     * Validate a cluster ID parsed out of a gRPC error string before it is
-     * adopted (issue #308, SEC-05).
-     *
-     * The error text is controlled by whichever server answers the socket,
-     * so it may not override a configured expected ID or a cluster ID that
-     * has already been established from a response header.
-     */
-    private function assertReportedClusterIdMatches(int $reportedClusterId): void
-    {
-        if ($this->expectedClusterId !== null && $reportedClusterId !== $this->expectedClusterId) {
-            throw new TiKvException(sprintf(
-                'Cluster ID mismatch: expected %d, server reported %d',
-                $this->expectedClusterId,
-                $reportedClusterId,
-            ));
-        }
-
-        if ($this->clusterId !== null && $this->clusterId !== $reportedClusterId) {
-            throw new TiKvException(sprintf(
-                'Cluster ID mismatch: established %d, server reported %d',
-                $this->clusterId,
-                $reportedClusterId,
-            ));
-        }
-    }
-
-    private function extractClusterIdFromError(string $message): ?int
-    {
-        if (preg_match('/mismatch cluster id.*?need (\d+) but got/', $message, $matches)) {
-            return (int) $matches[1];
-        }
-
-        return null;
+        $this->clusterIdGuard->check($clusterId);
     }
 }

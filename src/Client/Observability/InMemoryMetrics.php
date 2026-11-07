@@ -41,6 +41,15 @@ final class InMemoryMetrics implements MetricsInterface
     /** @var array<string, int> */
     private array $invalidations = [];
 
+    /** @var array<int, bool> */
+    private array $storeHealth = [];
+
+    /** @var array<int, int> */
+    private array $storeUnhealthyCount = [];
+
+    /** @var array<int, int> */
+    private array $storeRecoveredCount = [];
+
     /** @var array<string, float> */
     private array $latencySumMs = [];
 
@@ -84,6 +93,17 @@ final class InMemoryMetrics implements MetricsInterface
         $this->invalidations[$reason] = ($this->invalidations[$reason] ?? 0) + 1;
     }
 
+    public function storeHealthChanged(int $storeId, bool $healthy): void
+    {
+        $this->storeHealth[$storeId] = $healthy;
+
+        if ($healthy) {
+            $this->storeRecoveredCount[$storeId] = ($this->storeRecoveredCount[$storeId] ?? 0) + 1;
+        } else {
+            $this->storeUnhealthyCount[$storeId] = ($this->storeUnhealthyCount[$storeId] ?? 0) + 1;
+        }
+    }
+
     /**
      * Reset all counters. Intended for tests.
      */
@@ -96,6 +116,9 @@ final class InMemoryMetrics implements MetricsInterface
         $this->cacheHits = [];
         $this->cacheMisses = [];
         $this->invalidations = [];
+        $this->storeHealth = [];
+        $this->storeUnhealthyCount = [];
+        $this->storeRecoveredCount = [];
         $this->latencySumMs = [];
         $this->latencyCount = [];
     }
@@ -133,6 +156,25 @@ final class InMemoryMetrics implements MetricsInterface
     public function getInvalidations(string $reason): int
     {
         return $this->invalidations[$reason] ?? 0;
+    }
+
+    /**
+     * Last recorded health state for a store: null when it never changed,
+     * true after a recovery, false while marked unhealthy.
+     */
+    public function isStoreHealthy(int $storeId): ?bool
+    {
+        return $this->storeHealth[$storeId] ?? null;
+    }
+
+    public function getStoreUnhealthyCount(int $storeId): int
+    {
+        return $this->storeUnhealthyCount[$storeId] ?? 0;
+    }
+
+    public function getStoreRecoveredCount(int $storeId): int
+    {
+        return $this->storeRecoveredCount[$storeId] ?? 0;
     }
 
     public function getMeanLatencyMs(string $operation): float

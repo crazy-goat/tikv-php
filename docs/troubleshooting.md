@@ -517,8 +517,9 @@ expire" instead of an exception.
 These are raised by the transactional (`TxnKv`) API during prewrite, commit
 and pessimistic locking — the errors a transactional workload hits first and
 most often. All of them mean **the operation did not complete** — on write
-paths nothing was applied (reads may simply need re-running); retry with a
-*new* transaction (fresh begin, re-read all values) rather than
+paths nothing was applied (reads may simply need re-running), except for an
+undetermined commit, whose write may have landed. Retry with a *new*
+transaction (fresh begin, re-read all values) rather than
 replaying into the stale snapshot. See
 [Transaction Operations](error-handling.md#transaction-operations) and
 [Retrying transactions safely](error-handling.md#retrying-transactions-safely).
@@ -611,6 +612,31 @@ surrounding executor gives up.
 **Solution:** Treat like other transaction errors: retry in a new
 transaction unless the operation is idempotent. The carried
 `$e->backoffType` says how the internal loop would have backed off.
+
+#### Undetermined Commit (Never Roll Back)
+
+**Error:**
+```
+UndeterminedCommitException: Primary commit failed at the transport level; the transaction outcome is undetermined and was not rolled back
+```
+
+**What it means:** The `KvCommit` RPC for the transaction's **primary** key
+failed at the transport level after it was sent, so the commit may already be
+applied. `getStatus()` returns `TransactionStatus::Undetermined` and the
+client closes the transaction; `__destruct()` only rolls back `Active`
+transactions, so it never undoes a commit that may have landed (issue #216).
+
+**Likely cause:** A dropped connection, a timeout or a killed proxy between
+the client and the region leader during the primary commit. This is not a
+write conflict or a deadlock — those leave the transaction's outcome definite.
+
+**Solution:** Never roll back and never re-commit the same transaction object.
+Resolve the outcome out of band before re-applying anything: re-check the
+primary key's status (TiKV's `CheckTxnStatus`, or a read of the key in a
+**new** transaction) and only re-run the business operation if the write did
+not take effect. A blind retry can double-apply it. See
+[Transaction commit and the new-transaction rule](error-handling.md#transaction-commit-and-the-new-transaction-rule)
+for the full guidance and a retry loop.
 
 ### Client Errors
 
@@ -971,8 +997,9 @@ affects every client, not just the one that set it.
    the exact request shape.
 
 **Prevention:** run `ingest()` only from a dedicated, supervised CLI process
-with no execution-time limit; keep batches small enough to re-run (`ingest()`
-is not retried automatically). See
+with no execution-time limit; keep batches small enough to re-run (region
+errors are retried, but the import is not atomic across regions, so a
+permanent failure can leave a partial import). See
 [Bulk Import (SST Ingest)](operations.md#bulk-import-sst-ingest).
 
 ## Data Issues
@@ -1301,6 +1328,7 @@ If issues persist:
 | TxnKV fails on TTL cluster | Use a V1-mode cluster (no `enable-ttl`) for TxnKV — see [TxnKV Fails on a TTL-Enabled Cluster](#txnkv-fails-on-a-ttl-enabled-cluster) |
 | Data not found | Check key format, TTL, cluster |
 | Write conflict / deadlock | New transaction, jittered backoff ([Transaction Failures](#transaction-failures)) |
+| Undetermined commit | Never roll back; re-check the key in a new transaction ([Undetermined Commit](#undetermined-commit-never-roll-back)) |
 | Batch partial failure | Re-check affected keys — sub-batch indices are not user keys ([Batch Partial Failure](#batch-partial-failure)) |
 
 ## See Also

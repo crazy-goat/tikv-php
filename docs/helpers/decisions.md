@@ -352,9 +352,13 @@ every case, so a case with no matching `errorpb.Error` oneof turns *every*
 `Error: Call to undefined method …`. That is not silent, but the blast radius
 is wrong for the mistake — the same sentinel measured 8 errors + 3 failures
 across 11 tests in `LockResolverTest`, `RawKvScannerTest`, `TxnReaderTest` and
-`TransactionTest`, and not one of those names the enum. A one-line test
-asserting `method_exists(Error::class, 'has' . PascalCase($kind->value))` for
-every case would turn that scatter into a legible failure.
+`TransactionTest`, and not one of those names the enum. `ErrorClassifierTest::
+testEveryErrorKindHasAnErrorpbOneofDetector()` now asserts
+`method_exists(Error::class, 'has' . PascalCase($kind->value))` for every
+`ErrorKind::cases()` entry, so that scatter is one failure naming the enum case
+and the missing `Error::has…()` method instead (issue #608).
+`testErrorKindMappingCoversEveryCase()` applies the same rule to the
+classification table, which PHPStan cannot see because it is an array literal.
 
 The retryable path now uses the same table (issue #245, REG-14):
 `RetryExecutor` gates its pre-retry drop on `invalidatesRoutingOnRetry()`, which
@@ -961,9 +965,10 @@ finding — `BatchCommands` (#418) is the precedent for a genuinely experimental
 surface, and it is opt-in per option rather than a client-wide gate.
 
 
-## A scan's region list is loaded in bounded batches, and `ScanRegions` can only enumerate a range forwards (issue #282)
+## A scan's region list is loaded in bounded batches, forwards and backwards (issues #282, #198)
 
-Two decisions inside the #282 fix (GRPC-23) that should not be "simplified" away:
+Two decisions inside the #282 fix (GRPC-23) and the #198 follow-up that
+should not be "simplified" away:
 
 1. **The number of regions a scan asks PD for is bounded, and the batch is
    `min(row budget, 32)`.** A scan used to pass `limit = 0` to
@@ -976,23 +981,23 @@ Two decisions inside the #282 fix (GRPC-23) that should not be "simplified" away
    within a few PD round trips. The region cache is still consulted first
    (#293), so a warm chain costs no PD round trip at all.
 
-2. **The reverse scan still collects the whole chain of its range, and that is
-   a limitation of `ScanRegions` plus this client, not a dead end in PD's
-   API.** `ScanRegions` enumerates a range from its **lower** bound only —
-   there is no "last N regions of a range" in that RPC — while a reverse scan
-   consumes the regions from the **upper** bound downwards. The regions a
-   reverse scan needs therefore cannot be fetched *with `ScanRegions`*: they
-   are collected bottom-up (in bounded batches, so every PD response stays
-   small) and then walked downwards. PD itself does offer a backwards
-   lookup — `pdpb.PD/GetPrevRegion` (the vendored stub is
-   `src/Proto/Pdpb/PDClient.php:205`) and `QueryRegion` with `prev_keys` —
-   but this client does not implement it, so today the reverse scan pays for
-   the chain. That is a follow-up, not a dead end: adding
-   `getPrevRegion()` to `PdClientInterface`/`PdClient` would let
-   `reverseScanPage()` resolve the top region with one lookup and continue
-   downwards from there. Do not "fix" the current shape by asking PD for the
-   region above the upper bound: that region does not exist when the upper
-   bound sits exactly on a region boundary, which is the common case.
+2. **A reverse scan walks its range from the upper bound down, and it cannot
+   use `ScanRegions` for that.** `ScanRegions` enumerates a range from its
+   **lower** bound only — there is no "last N regions of a range" in that RPC
+   — while a reverse scan consumes the regions from the **upper** bound
+   downwards. Issue #198 fixed the "collect the whole chain first" cost this
+   used to pay: `RegionResolver::getRegionBelow()` asks the cache for the
+   region holding the greatest key below the cursor
+   (`RegionCache::getRegionBelow()`, the existing `strictPredecessor()` walk)
+   and falls back to PD's `GetRegion` when the cursor is inside a region, or
+   to `GetPrevRegion` when it sits exactly on a region boundary. The scanner
+   yields bounded batches from `reverseRegionBatches()` and stops as soon as
+   the row budget is spent, so a narrow reverse scan resolves only the
+   regions it can consume. Do not "simplify" this by asking PD for the region
+   *above* the upper bound: that region does not exist when the upper bound
+   sits exactly on a region boundary, which is the common case. A merge
+   between two descending batches is handled by
+   `RegionScanBatch::trimEndToCursor()`.
 
 Two smaller rules the same fix settled:
 
@@ -1003,7 +1008,9 @@ Two smaller rules the same fix settled:
   region that spans the cursor — the part below it was read already and must
   not be read twice, so the region is trimmed to the cursor
   (`RegionScanBatch::trimToCursor()`). The trimmed region is a copy; the
-  original is what the region cache holds.
+  original is what the region cache holds. The descending walk has the mirror
+  rule: a merged region that extends above the reverse cursor is clamped to
+  it (`RegionScanBatch::trimEndToCursor()`, issue #198).
 - **The unbounded `array_push($results, ...$rows)` spreads are gone.** They
   pushed up to 10 240 elements onto the VM stack per region; a foreach append
   costs nothing and reads the same.
@@ -1627,9 +1634,11 @@ not be told.
 
 Four consequences to keep:
 
-1. **The classifier still rethrows a bare `GrpcException`.** That path is now
-   only reachable for pre-write failures; it preserves the "not retried"
-   behaviour of #239 and keeps the definitive failure typed as it was.
+1. **The classifier returns `RetryVerdict::fatal()` for a bare `GrpcException`.**
+   That path is now only reachable for pre-write failures; it preserves the
+   "not retried" behaviour of #239 and keeps the definitive failure typed as it
+   was. Since #534 the fatal verdict runs the executor's fatal path, so a
+   broken channel is closed; the old throw-from-classifier trick is gone.
 2. **The typed exception carries the original as `previous`.** It extends
    `TiKvException`, not `GrpcException` (`GrpcException` is `final`), so
    `getGrpcStatusCode()` is the accessor for the status code; callers that need
@@ -1648,3 +1657,21 @@ Four consequences to keep:
    request (`DEADLINE_EXCEEDED`, `UNAVAILABLE`, `ABORTED`, `INTERNAL`,
    `UNKNOWN`, `CANCELLED`, `DATA_LOSS`, unrecognised codes) become
    indeterminate.
+
+## SST ingest retry budget is per region group (issue #197)
+
+`SstIngestor::ingest()` imports regions sequentially and gives **each region
+group** a fresh retry budget instead of sharing one `beginOperation()` budget
+across the loop. A bulk ingest legitimately runs for minutes; a shared budget
+would make `retryDeadlineMs` (default 30 s) a wall-clock cap on the whole
+import, so a group that never retried would fail as soon as the call crossed
+the deadline. `RetryExecutor` has no way to exclude successful work from a
+deadline, so the correct seam is one stateless executor whose `execute()` calls
+each start their own budget. The same reasoning does **not** apply to a
+multi-region `batchGet()`/`scan()`/`commit()`: those are one logical operation
+whose retries must share a budget, so they keep `beginOperation()`.
+
+A split that shrinks a group's region below the group's last key is still not
+re-grouped (the retry only re-resolves the first key and fails closed once the
+budget is exhausted). That limitation is deliberate for this issue; fixing it
+means re-grouping the remaining keys inside the retried closure.

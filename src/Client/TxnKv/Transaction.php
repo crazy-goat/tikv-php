@@ -20,8 +20,8 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
@@ -840,12 +840,13 @@ final class Transaction
         return $this->retryExecutor;
     }
 
-    private function classifyError(TiKvException $e): ?BackoffType
+    private function classifyError(TiKvException $e): RetryVerdict
     {
         if ($e instanceof TxnRetryableException) {
-            return $e->backoffType;
+            return RetryVerdict::retry($e->backoffType);
         }
 
-        return null;
+        // No opinion: let the built-in classifier decide (issue #534).
+        return RetryVerdict::pass();
     }
 }

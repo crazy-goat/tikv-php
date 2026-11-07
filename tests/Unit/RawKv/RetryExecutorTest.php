@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -227,9 +228,10 @@ class RetryExecutorTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
 
-        $classifier = fn(TiKvException $e): ?BackoffType => match (true) {
-            str_contains($e->getMessage(), 'Lock') || str_contains($e->getMessage(), 'locked') => BackoffType::TxnLock,
-            default => null,
+        $classifier = fn(TiKvException $e): RetryVerdict => match (true) {
+            str_contains($e->getMessage(), 'Lock') || str_contains($e->getMessage(), 'locked')
+                => RetryVerdict::retry(BackoffType::TxnLock),
+            default => RetryVerdict::pass(),
         };
 
         $callCount = 0;
@@ -289,8 +291,12 @@ class RetryExecutorTest extends TestCase
         $this->regionCache->method('invalidate');
 
         // Cap attempts high so the deadline (not the attempt cap) is what
-        // trips the loop. Deadline is intentionally tiny: usleep is not
-        // called for BackoffType::None, so the deadline check happens on
+        // trips the loop. The deadline must stay comfortably above the
+        // first-attempt latency: a 1 ms deadline can already be spent by the
+        // pre-attempt check on a loaded CI runner, so the closure never runs
+        // (issue #872). 100 ms leaves room for the first attempt while still
+        // keeping the test fast, because the classifier below maps the error
+        // to BackoffType::None (zero sleep), so the deadline check runs on
         // every iteration.
         $executor = new RetryExecutor(
             maxBackoffMs: 20000,
@@ -300,20 +306,26 @@ class RetryExecutorTest extends TestCase
             regionResolver: new RegionResolver($this->pdClient, $this->regionCache),
             logger: new NullLogger(),
             maxAttempts: 100000,
-            deadlineMs: 1, // 1 ms — guaranteed to elapse on first check
+            deadlineMs: 100,
         );
 
         $this->expectException(RetryBudgetExhaustedException::class);
 
         $callCount = 0;
         try {
-            $executor->execute('key', function () use (&$callCount): never {
-                $callCount++;
-                throw new TiKvException('EpochNotMatch');
-            });
+            $executor->execute(
+                'key',
+                function () use (&$callCount): never {
+                    $callCount++;
+                    throw new TiKvException('EpochNotMatch');
+                },
+                static fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None),
+            );
         } finally {
-            // Deadline caps wall-clock time even when sleepMs=0 each iteration.
+            // The first attempt must run, and the deadline must terminate the
+            // loop before the 100000-attempt cap is reached.
             $this->assertGreaterThanOrEqual(1, $callCount);
+            $this->assertLessThan(100000, $callCount, 'Deadline, not the attempt cap, must end the loop');
         }
     }
 

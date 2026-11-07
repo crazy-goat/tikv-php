@@ -496,10 +496,15 @@ follows:
   when the cached region chain is incomplete.
 - **Continuation** — after consuming a page, the next fetch starts after the
   page's last key (`lastKey . "\x00"`), the same continuation rule as manual
-  pagination. The scan is exhausted when a page returns fewer than `batchSize`
-  rows. A page whose last key does not move the cursor forward (or whose first
-  key lies before it) throws `TiKvException`: it is a protocol violation, not
-  a transient error (#312).
+  pagination. The iteration ends only when a page returns no rows, or when the
+  resume key reaches `endKey`; a page that returns fewer than `batchSize` rows
+  is **not** treated as the end, because `scan()` may return a short page while
+  data remains (a skipped region, a server-side per-region cap, a
+  region-boundary effect). A short page therefore costs at most one extra RPC
+  and can no longer silently truncate the result (issue #195). A page whose
+  last key does not move the cursor forward (or whose first key lies before it)
+  throws `TiKvException`: it is a protocol violation, not a transient error
+  (#312).
 - **keyOnly** — with `keyOnly: true` values are not transferred; `current()`
   returns `null` for every entry.
 - **Rewindable** — calling `rewind()` (e.g. running the same `foreach` twice)
@@ -552,6 +557,11 @@ descending key order — the same fan-out as an unbounded forward scan. A
 region or transport error, or a region that split after enumeration, falls
 back to the sequential retrying path. A bounded reverse scan
 (`limit > 0`) stays sequential.
+
+Regions are resolved from the upper bound downwards in bounded batches
+(issue #198): the region cache answers the common case and a miss asks PD for
+the region containing the cursor or the adjacent region below it, so a narrow
+reverse scan does not enumerate the rest of the range.
 
 **Example:**
 
@@ -744,31 +754,49 @@ $client->put('ratelimit:ip:192.168.1.1', '100', ttl: 60);
 
 ### Get Key TTL
 
-Check remaining time-to-live:
+Check remaining time-to-live. The lookup has three possible outcomes, and
+`getKeyTTLResult()` reports all of them separately:
 
 ```php
-$ttl = $client->getKeyTTL('session:123');
-// Returns: int (seconds remaining) or null (not found/no TTL)
+$result = $client->getKeyTTLResult('session:123');
+
+$result->exists;      // bool: whether the key exists
+$result->ttlSeconds;  // ?int: seconds remaining, or null when it has no expiry
 ```
+
+| Key state | `exists` | `ttlSeconds` |
+|---|---|---|
+| Missing (never written, deleted or expired) | `false` | `null` |
+| Present, no expiry | `true` | `null` |
+| Present, expires | `true` | `int > 0` |
+
+The convenience method `getKeyTTL()` returns only `ttlSeconds`, so its
+`null` means either "key missing" or "key present without an expiry". Use
+`getKeyTTLResult()` whenever the two states lead to different actions, such
+as an expiry monitor that must not report a deleted key as permanent.
 
 **Parameters:**
 - `key` (string): Key to check
 
-**Returns:** `?int` - Seconds remaining, or null if key not found or has no TTL
+**Returns:** `getKeyTTLResult()` returns a `KeyTtl` with `exists: bool` and
+`ttlSeconds: ?int`; `getKeyTTL()` returns `?int` and collapses both `null`
+cases.
 
 **Example:**
 
 ```php
-$ttl = $client->getKeyTTL('session:abc123');
+$result = $client->getKeyTTLResult('session:abc123');
 
-if ($ttl === null) {
+if (!$result->exists) {
     echo "Session not found or expired\n";
-} elseif ($ttl < 300) {
-    echo "Session expires soon ($ttl seconds left)\n";
+} elseif ($result->ttlSeconds === null) {
+    echo "Session has no expiry\n";
+} elseif ($result->ttlSeconds < 300) {
+    echo "Session expires soon ({$result->ttlSeconds} seconds left)\n";
     // Refresh session
     $client->put('session:abc123', $data, ttl: 7200);
 } else {
-    echo "Session valid for $ttl seconds\n";
+    echo "Session valid for {$result->ttlSeconds} seconds\n";
 }
 ```
 
@@ -1123,7 +1151,7 @@ The batch deadline is checked at dispatch boundaries and at wait boundaries. It 
 
 `InvalidArgumentException` is `CrazyGoat\TiKV\Client\Exception\InvalidArgumentException`.
 Its message names the size and the method, for example `Value size (5242880) exceeds maximum allowed size (4194304) in put`.
-The key and value checks apply to `get`, `put`, `delete`, `getKeyTTL`, `compareAndSwap`, `putIfAbsent`, `batchGet`, `batchPut`, `batchDelete` and `ingest`.
+The key and value checks apply to `get`, `put`, `delete`, `getKeyTTL`, `getKeyTTLResult`, `compareAndSwap`, `putIfAbsent`, `batchGet`, `batchPut`, `batchDelete` and `ingest`.
 `putIfAbsent` calls `compareAndSwap`, so its error message names `compareAndSwap`.
 A batch method checks every key and value before it sends the first RPC.
 `scan` and `reverseScan` check the size of the start key and of the end key. `scan` accepts an empty start key (the keyspace start); `reverseScan` accepts it only together with an empty end key (`reverseScan('', '')`, the empty range), because it has no +infinity upper-bound sentinel.
@@ -1334,8 +1362,9 @@ These methods report on the cluster the client is connected to and configure the
 client instance. None of them touches user data. `healthCheck()` is the only one
 that sends an RPC and the only one that can throw a library exception; the rest
 are local accessors and setters that throw nothing. `TxnKvClient` has
-the same three cluster-level methods (`healthCheck()`, `getClusterId()` and
-`getMetrics()`); the column-family and atomic-mode settings are RawKV-only.
+the same cluster-level methods (`healthCheck()`, `getClusterId()` and
+`getMetrics()`) plus `pdClient()`, which exposes the PD connection it owns; the
+column-family and atomic-mode settings are RawKV-only.
 
 ### Health and cluster identity
 
@@ -1345,6 +1374,7 @@ the same three cluster-level methods (`healthCheck()`, `getClusterId()` and
 public function healthCheck(): ?int;
 public function getClusterId(): ?int;
 public function getMetrics(): MetricsInterface;
+public function pdClient(): PdClientInterface;
 ```
 
 **`healthCheck()`** issues a PD `GetMembers` RPC through
@@ -1352,8 +1382,8 @@ public function getMetrics(): MetricsInterface;
 user data and cannot fail with a "no region" error.
 
 - **Returns:** the cluster ID, or `null` when PD answered but the response
-  carried no cluster-ID header ("reachable, identity unknown"). Both are a
-  successful probe.
+  carried no cluster-ID header or reported `0` ("reachable, identity
+  unknown"). Both are a successful probe.
 - **Throws:** `ClientClosedException` when the client has been closed, and
   `HealthCheckException` for every other failure (PD unreachable, a gRPC
   transport error, or a PD-level error in the response header). The underlying
@@ -1392,17 +1422,39 @@ the write path is degraded even though the cluster is reachable. Monitor the
 write path through your application's own traffic and the counters exposed by
 `getMetrics()`.
 
+The data path has its own per-store failover (issue #424): after three
+consecutive `UNAVAILABLE` or `DEADLINE_EXCEEDED` transport failures within a
+60-second window the client marks a store unhealthy for a one-second cooldown,
+drops the cached regions it led and refuses to route to it until the cooldown
+elapses, then probes it again. Failures are attributed to the store the failing
+RPC actually targeted, so a PD outage or a nested RPC against another store does
+not demote the outer store; replica reads skip a store in cooldown. That is
+transparent to `healthCheck()`, which remains a PD-only probe and does not report
+individual store health; the state changes are visible through
+`MetricsInterface::storeHealthChanged()` when a metrics backend is configured.
+
 **`getClusterId()`** returns the cluster ID the client has already learned, or
 `null` when it has not learned one yet. It is a cached accessor: it sends no RPC
 and throws nothing. The ID is learned from the first PD response whose header
-carries it, or explicitly by `healthCheck()`. After `close()` it returns `null`
-because closing the PD client resets the cache.
+carries a non-zero cluster ID, and every later response header must report the
+same ID (a different one throws `TiKvException` before the response is used), or
+explicitly by `healthCheck()`. After `close()` it returns `null` because
+closing the PD client resets the cache.
 
 **`getMetrics()`** returns the metrics backend in use: the instance passed via
 `options['metrics']`, or the no-op default (`NoOpMetrics`) when none was
 configured. It is that same object, not a copy, so an `InMemoryMetrics` instance
 can be inspected after operations. It sends no RPC, throws nothing, and remains
 callable after `close()`.
+
+**`pdClient()`** returns the `PdClientInterface` the TxnKV client uses for
+region discovery and timestamps. It is the same object, not a second
+connection: a consumer that also needs PD — for example to register a service
+GC safe point or to inspect the cluster — reuses this one instead of calling
+`ConnectionFactory::create()` again, which would open another PD connection and
+a second TSO stream. The client owns the object and closes it in `close()`, so
+do not close it yourself and treat the reference as stale afterwards.
+`pdClient()` itself sends no RPC and throws nothing.
 
 ### Column family and atomic mode
 
@@ -1558,9 +1610,13 @@ not a second full `Pair[]` copy of every value.
 >
 > - Run it in a dedicated, supervised process with no execution-time limit
 >   (CLI, `max_execution_time = 0`), never inside a web request.
-> - Run batches in a size you can afford to re-run: `ingest()` is **not**
->   retried automatically — any region error or transport error aborts the
->   remaining regions and throws.
+> - Run batches in a size you can afford to re-run. Retryable region errors
+>   (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, …) and retryable transport
+>   errors are retried per region against a freshly resolved region, but the
+>   import is **not atomic**: a permanent failure aborts the remaining regions
+>   and throws `IngestPartialFailureException`, whose `getAppliedRegionIds()`
+>   lists the region groups that were already written. Re-run the whole call
+>   to converge (see below).
 > - Verify afterwards that all stores are back in normal mode.
 >
 > **Recovering a cluster stuck in import mode:** the switch-back is issued to
@@ -1575,6 +1631,36 @@ not a second full `Pair[]` copy of every value.
 > that store. (Stores skipped for a rejected address never entered import
 > mode — the import path rejects them too, before any RPC — so they need no
 > restore.)
+
+**Retries and partial failure:**
+
+Each region group runs through the client's retry executor and gets its **own**
+retry budget (`retryDeadlineMs`, `maxBackoffMs` and the ServerBusy budget), so
+a long import is not capped by the per-operation retry deadline. A retryable
+region error (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, `RegionNotFound`,
+…) or a retryable transport error is retried against a **freshly resolved
+region**. A leader transfer, a merge, or a split/merge that leaves the group
+inside the re-resolved region is recovered transparently.
+
+A split that **shrinks the region below the group's last key** is not
+re-grouped: the retry keeps rebuilding an SST that spans both regions, so TiKV
+keeps rejecting it until the budget is exhausted. The import then fails closed
+(no part of that group is applied); split the batch at the split key and
+re-run, or re-run the whole call after the region layout settles.
+
+The import remains **non-atomic across regions**. When a region group fails
+permanently (a fatal region error, an exhausted retry budget or a missing
+store), `ingest()` stops, switches every store back to normal mode and throws:
+
+- `IngestPartialFailureException` when at least one earlier region group was
+  already ingested — `getAppliedRegionIds()` lists those regions and
+  `getPrevious()` carries the original failure; or
+- the original exception (`RegionException`, `RetryBudgetExhaustedException`,
+  `StoreNotFoundException`, …) when nothing was applied yet.
+
+Re-running the **whole** call is the recommended recovery: SST ingestion is
+idempotent for identical key-value pairs. With a TTL the TTL restarts on every
+attempt, exactly as for `put()`.
 
 **Operational notes:**
 

@@ -89,13 +89,23 @@ use Psr\Log\NullLogger;
  * store addresses before that wrapper and can still throw
  * `StoreNotFoundException` directly.
  *
- * `ingest()` is the exception: {@see SstIngestor} has no RetryExecutor, so a
- * `StoreNotFoundException` escapes directly and
- * `RetryBudgetExhaustedException` is not reachable at all.
+ * `ingest()` runs each region group through {@see RetryExecutor} with a fresh
+ * budget per group, so it can throw {@see RetryBudgetExhaustedException}
+ * directly (when no region group had been applied yet) or wrap a failure in
+ * {@see \CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException} once
+ * at least one group has landed. The store-mode switch fan-out still reports
+ * its failures through {@see BatchPartialFailureException}; a missing store
+ * during region resolution is retried and, when fatal, escapes directly.
  */
 final class RawKvClient
 {
-    public const MAX_SCAN_LIMIT = 10240;
+    /**
+     * Maximum rows per scan RPC, and the upper bound on a `ScanIterator`
+     * `batchSize`. Kept as an alias of the canonical
+     * {@see RawKvScanner::MAX_SCAN_LIMIT} so the public iterator bound and the
+     * wire-enforced scan bound cannot drift apart.
+     */
+    public const MAX_SCAN_LIMIT = RawKvScanner::MAX_SCAN_LIMIT;
 
     public const MAX_BATCH_LIMIT = 512;
 
@@ -286,6 +296,13 @@ final class RawKvClient
 
     /** Opt-in region-cache refresh and preload (#425). */
     private readonly RegionCacheWarmer $regionCacheWarmer;
+
+    /**
+     * The resolver every component of this client shares, so per-store
+     * health state learned by one retry loop is visible to the next
+     * (issue #424).
+     */
+    private readonly RegionResolver $regionResolver;
 
     /**
      * @param string[] $pdEndpoints
@@ -479,6 +496,7 @@ final class RawKvClient
             $this->epochNotMatchCodec(),
             $this->storeCache,
         );
+        $this->regionResolver = $regionResolver;
         $this->regionCacheWarmer = $regionCacheWarmer
             ?? new RegionCacheWarmer($pdClient, $regionCache, $this->logger, $regionCacheRefreshMs);
         $this->crud = $crud ?? new RawKvCrud(
@@ -557,10 +575,15 @@ final class RawKvClient
             $regionResolver,
             $timeoutConfig,
             $this->logger,
+            $regionCache,
             $this->maxConcurrency,
             $this->maxIngestSize,
             $this->requestContext,
             $this->resourceControl,
+            maxBackoffMs: $maxBackoffMs,
+            serverBusyBudgetMs: $serverBusyBudgetMs,
+            retryDeadlineMs: $this->retryDeadlineMs,
+            metrics: $metrics,
         );
     }
 
@@ -910,25 +933,12 @@ final class RawKvClient
 
     private function createRetryExecutor(): RetryExecutor
     {
-        $regionResolver = new RegionResolver(
-            $this->pdClient,
-            $this->regionCache,
-            $this->metrics,
-            $this->allowedStoreHosts,
-            $this->storeHostPolicy,
-            $this->logger,
-            $this->pdEndpoints,
-            $this->allowedStorePorts,
-            $this->epochNotMatchCodec(),
-            $this->storeCache,
-        );
-
         return new RetryExecutor(
             $this->maxBackoffMs,
             $this->serverBusyBudgetMs,
             $this->regionCache,
             $this->grpc,
-            $regionResolver,
+            $this->regionResolver,
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
@@ -1004,6 +1014,12 @@ final class RawKvClient
     }
 
     /**
+     * Get the remaining TTL of a key in seconds.
+     *
+     * Returns `null` in two different situations: the key does not exist, or
+     * the key exists but has no expiry. Callers that must tell them apart use
+     * {@see getKeyTTLResult()}, which reports existence separately.
+     *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
      * @throws RegionException
@@ -1021,7 +1037,41 @@ final class RawKvClient
         $this->validateKeyNotEmpty($key, 'getKeyTTL');
         $this->validateKeySize($key, 'getKeyTTL');
 
-        return $this->crud->getKeyTTL($key, $this->createRetryExecutor(), $this->columnFamily);
+        return $this->lookupKeyTtl($key)->ttlSeconds;
+    }
+
+    /**
+     * Look up a key's TTL, distinguishing a missing key from one without an
+     * expiry.
+     *
+     * The returned {@see KeyTtl} reports `exists` and `ttlSeconds`: a missing
+     * key is `exists: false, ttlSeconds: null`, a key without an expiry is
+     * `exists: true, ttlSeconds: null`, and a key with an expiry is
+     * `exists: true, ttlSeconds: > 0`.
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
+     */
+    public function getKeyTTLResult(string $key): KeyTtl
+    {
+        $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'getKeyTTLResult');
+        $this->validateKeySize($key, 'getKeyTTLResult');
+
+        return $this->lookupKeyTtl($key);
+    }
+
+    private function lookupKeyTtl(string $key): KeyTtl
+    {
+        return $this->crud->getKeyTTLResult($key, $this->createRetryExecutor(), $this->columnFamily);
     }
 
     // ========================================================================
@@ -1605,7 +1655,20 @@ final class RawKvClient
      * The key-value pairs are sorted by key, grouped by region, and written
      * as SST files via the TiKV ImportSST service. All TiKV stores are
      * switched to import mode during the operation and switched back to
-     * normal mode on completion (even on failure).
+     * normal mode on completion, including on any exception. Process death
+     * (OOM kill, deploy restart, `kill -9`) bypasses that `finally` and
+     * leaves every store in import mode; see the operations guide for the
+     * manual recovery.
+     *
+     * Each region group is retried on retryable region errors (`NotLeader`,
+     * `EpochNotMatch`, `ServerIsBusy`, …) against a freshly resolved region,
+     * with a fresh retry budget per group (a long import is not capped by
+     * `retryDeadlineMs`).
+     * The import is still **not atomic across regions**: when a later group
+     * fails permanently, the earlier groups keep their data and the failure
+     * is reported as {@see \CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException},
+     * which lists the applied region IDs. Re-running the same key-value pairs
+     * is the recommended recovery (it is idempotent; a TTL restarts).
      *
      * Keys inherit PHP's array-key semantics: only canonical decimal-integer
      * strings (`'12345'`, `'0'`) are coerced to int array keys, while
@@ -1627,8 +1690,15 @@ final class RawKvClient
      * @throws InvalidStoreAddressException When PD returns a store address
      *         that fails validation (malformed or outside the allowed set)
      * @throws StoreNotFoundException When PD no longer knows a store that must
-     *         receive an SST. `ingest()` has no RetryExecutor, so this escapes
-     *         directly
+     *         receive an SST. Region resolution is retried; this is the fatal
+     *         verdict the retry executor rethrows
+     * @throws RetryBudgetExhaustedException When a region's retry loop
+     *         exhausts its attempt cap or wall-clock deadline before any region
+     *         group was applied (issue #197)
+     * @throws \CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException
+     *         When at least one region group was already ingested and a later
+     *         one failed permanently; the exception lists the applied region
+     *         IDs (issue #197)
      * @throws BatchDeadlineExceededException When the store-mode fan-out
      *         exceeds `options['timeout']['batchDeadlineMs']`
      * @throws TiKvException when a key's region cannot be resolved. Fail-closed:
@@ -1681,8 +1751,8 @@ final class RawKvClient
      * PD is unreachable or rejects the request.
      *
      * Returns the cluster ID on success. Returns null if PD responded
-     * but the response header did not carry a cluster ID (callers may
-     * treat null as "reachable but identity unknown"). When
+     * but the response header did not carry a cluster ID or reported `0`
+     * (callers may treat null as "reachable but identity unknown"). When
      * `options['expectedClusterId']` is set, a response without a
      * cluster ID is a protocol violation and the probe fails with
      * HealthCheckException instead of returning null.

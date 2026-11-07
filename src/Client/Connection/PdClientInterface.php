@@ -26,6 +26,23 @@ interface PdClientInterface
     public function getRegion(string $key): RegionInfo;
 
     /**
+     * Get the region immediately before the region that contains the given
+     * key.
+     *
+     * PD's `GetPrevRegion` is the backwards counterpart of
+     * {@see self::getRegion()}: it resolves the adjacent region whose end key
+     * is the start key of the region containing `$key`. A reverse scan uses
+     * it to walk a range from its upper bound downwards without enumerating
+     * the whole range up front (issue #198). Returns null when there is no
+     * adjacent region below — the key is in the first region of the keyspace,
+     * or PD reports a gap.
+     *
+     * @throws GrpcException On transport error
+     * @throws TiKvException On PD error
+     */
+    public function getPrevRegion(string $key): ?RegionInfo;
+
+    /**
      * Resolve a keyspace name to its numeric ID through PD.
      *
      * @throws GrpcException On transport error
@@ -161,10 +178,10 @@ interface PdClientInterface
      * Probe PD connectivity and learn the cluster ID.
      *
      * Issues a `GetMembers` RPC and returns the learned cluster ID, or null
-     * if the response carried no cluster ID header. When an expected cluster
-     * ID is configured, a response without a cluster ID header throws
-     * instead of returning null. Suitable as a health check: no user data is
-     * looked up and no "no region" failure can occur.
+     * if the response carried no cluster ID header or reported `0`. When an
+     * expected cluster ID is configured, a response without a cluster ID
+     * header throws instead of returning null. Suitable as a health check: no
+     * user data is looked up and no "no region" failure can occur.
      *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD-level error
@@ -176,11 +193,16 @@ interface PdClientInterface
      *
      * Called by TimestampOracle and PdClient itself when the cluster ID
      * is discovered during a cluster-id mismatch retry or from a response
-     * header. Idempotent. When the client was built with an expected cluster
-     * ID (issue #308, SEC-05), a different value throws a {@see TiKvException}
-     * instead of replacing the configured identity.
+     * header. Idempotent for the same value. When the client was built with
+     * an expected cluster ID (issue #308, SEC-05), a different value throws a
+     * {@see TiKvException} instead of replacing the configured identity; a
+     * value that differs from an already-established ID throws too, and a
+     * non-positive value (including the proto3 default `0`) is rejected
+     * (issue #250, REG-19).
      *
-     * @throws TiKvException when $clusterId differs from the expected cluster ID
+     * @throws InvalidArgumentException when $clusterId is not positive
+     * @throws TiKvException when $clusterId differs from the expected or the
+     *         already-established cluster ID
      */
     public function setClusterId(int $clusterId): void;
 

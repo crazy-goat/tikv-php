@@ -126,4 +126,19 @@ interface MetricsInterface
      * nothing.
      */
     public function regionInvalidated(string $reason): void;
+
+    /**
+     * Record a change of a store's health state (issue #424, GAP-10).
+     *
+     * Called exactly once per transition: `$healthy = false` when the store
+     * crosses the consecutive-failure threshold and enters its cooldown,
+     * `$healthy = true` when a half-open probe succeeds and the store
+     * recovers. A failed half-open probe starts a new cooldown but is not a
+     * state transition and emits nothing.
+     *
+     * The store ID is passed as an integer because it is a stable cluster
+     * identifier; implementations that expose it as a tag should render it
+     * as a decimal string.
+     */
+    public function storeHealthChanged(int $storeId, bool $healthy): void;
 }

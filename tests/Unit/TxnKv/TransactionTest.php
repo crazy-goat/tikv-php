@@ -44,6 +44,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
@@ -55,10 +56,13 @@ use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+use CrazyGoat\TiKV\Tests\Unit\Support\ContextRecordingLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\RecordingLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\StubRegionCache;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 
 class TransactionTest extends TestCase
 {
@@ -110,6 +114,7 @@ class TransactionTest extends TestCase
      *     eagerPessimisticLocks?: bool,
      *     trackReadSet?: bool,
      *     resourceControl?: ResourceControl,
+     *     logger?: LoggerInterface,
      * } $options
      */
     private function createTransaction(array $options = []): Transaction
@@ -125,6 +130,7 @@ class TransactionTest extends TestCase
             lockResolver: $this->lockResolver,
             regionResolver: $this->regionResolver,
             maxBackoffMs: $options['maxBackoffMs'] ?? 20000,
+            logger: $options['logger'] ?? new \Psr\Log\NullLogger(),
             // Existing tests cover the legacy commit-time pass; eager-lock
             // regressions opt in explicitly below.
             eagerPessimisticLocks: $options['eagerPessimisticLocks'] ?? false,
@@ -2803,6 +2809,256 @@ class TransactionTest extends TestCase
         $this->assertNotContains('KvCommit', $methodSequence);
     }
 
+    /**
+     * Issue #337 (TEST-17): the pessimistic-lock retry loop must reuse the
+     * `for_update_ts` of the locking pass on every retry.
+     *
+     * The audit issue expected a fresh PD timestamp per attempt, but the
+     * implementation deliberately pins the pass timestamp (see the comment
+     * in `TwoPhaseCommitter::lockKeysInternal()`): advancing it after a wait
+     * would let a stale read-modify-write value pass the later prewrite
+     * constraint check, so the caller has to retry the statement to obtain a
+     * new read timestamp. This test pins the current contract instead: the
+     * retried `KvPessimisticLock` carries the same `for_update_ts` as the
+     * first attempt and the retry mints no extra PD timestamp.
+     */
+    public function testPessimisticLockRetryKeepsForUpdateTsAcrossAttempts(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+
+        $tsCalls = 0;
+        $this->pdClient->method('getTimestamp')
+            ->willReturnCallback(static function () use (&$tsCalls): int {
+                ++$tsCalls;
+                return 3000 * $tsCalls; // lock pass, then commit ts
+            });
+
+        $lockInfo = new LockInfo();
+        $lockInfo->setKey('k1');
+        $lockInfo->setPrimaryLock('k1');
+        $lockInfo->setLockVersion(1000);
+        $keyError = new KeyError();
+        $keyError->setLocked($lockInfo);
+        $lockedResponse = new PessimisticLockResponse();
+        $lockedResponse->setErrors([$keyError]);
+
+        // The lock belongs to a transaction that has committed: resolveLock()
+        // help-commits it and the retried lock request then succeeds.
+        $committedStatus = new CheckTxnStatusResponse();
+        $committedStatus->setCommitVersion(2500);
+
+        $forUpdateTsSeen = [];
+        $lockCalls = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                &$forUpdateTsSeen,
+                &$lockCalls,
+                $lockedResponse,
+                $committedStatus,
+            ): object {
+                if ($method === 'KvPessimisticLock' && $request instanceof PessimisticLockRequest) {
+                    ++$lockCalls;
+                    $forUpdateTsSeen[] = $request->getForUpdateTs();
+
+                    return $lockCalls === 1 ? $lockedResponse : new PessimisticLockResponse();
+                }
+
+                return match ($method) {
+                    'KvCheckTxnStatus' => $committedStatus,
+                    'KvResolveLock' => new ResolveLockResponse(),
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => true]);
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(6000, $txn->getCommitTs());
+        $this->assertSame(2, $lockCalls, 'the locked attempt and exactly one retry');
+        $this->assertSame(
+            [3000, 3000],
+            $forUpdateTsSeen,
+            'the locking pass timestamp must not advance across retries',
+        );
+        $this->assertSame(
+            2,
+            $tsCalls,
+            'only the locking pass and the commit allocate a timestamp; a retry must not',
+        );
+    }
+
+    /**
+     * Issue #337 (TEST-17): the per-region retry loop sleeps
+     * `min(100 * 2^attempt, 10000)` ms, clipped to the remaining budget.
+     * The loop has no injectable clock, so this pins the computed delay from
+     * the debug record instead of wall-clock timing: the delay doubles and
+     * the last sleep is clipped to what is left, so a retry never overshoots
+     * `maxBackoffMs`.
+     *
+     * @param list<int> $expectedDelaysMs
+     */
+    #[DataProvider('pessimisticLockBackoffProvider')]
+    public function testPessimisticLockRetryDelayGrowsAndIsCappedByBudget(
+        int $maxBackoffMs,
+        array $expectedDelaysMs,
+    ): void {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $regionError = new \CrazyGoat\Proto\Errorpb\Error();
+        $regionError->setMessage('EpochNotMatch');
+        $regionError->setEpochNotMatch(new EpochNotMatch());
+        $staleResponse = new PessimisticLockResponse();
+        $staleResponse->setRegionError($regionError);
+
+        $lockCalls = 0;
+        $this->grpc->method('call')
+            ->willReturnCallback(static function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$lockCalls,
+                $staleResponse,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    ++$lockCalls;
+
+                    return $staleResponse;
+                }
+
+                throw new \RuntimeException("Unexpected method: $method");
+            });
+
+        $logger = new ContextRecordingLogger();
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'maxBackoffMs' => $maxBackoffMs,
+            'logger' => $logger,
+        ]);
+        $txn->set('k1', 'v1');
+
+        $startMs = microtime(true) * 1000;
+        try {
+            $txn->commit();
+            $this->fail('Expected RegionException was not thrown');
+        } catch (RegionException $e) {
+            $this->assertStringContainsString('EpochNotMatch', $e->getMessage());
+        }
+        $elapsedMs = (microtime(true) * 1000) - $startMs;
+
+        $delays = [];
+        foreach ($logger->contextsFor('Pessimistic lock conflict, retrying') as $context) {
+            if (!is_int($context['delayMs'] ?? null)) {
+                $this->fail('The retry debug record must carry an integer delayMs');
+            }
+            $delays[] = $context['delayMs'];
+        }
+        $this->assertSame($expectedDelaysMs, $delays);
+        $this->assertSame(count($expectedDelaysMs), $lockCalls, 'one retry per recorded delay');
+        // The clipped sleeps stay within the budget; generous slack absorbs
+        // a loaded runner while still failing on an uncapped 800 ms sleep.
+        $this->assertLessThan($maxBackoffMs + 1000, $elapsedMs);
+    }
+
+    /**
+     * @return array<string, array{int, list<int>}>
+     */
+    public static function pessimisticLockBackoffProvider(): array
+    {
+        return [
+            'the only retry is clipped to the remaining budget' => [300, [200, 100]],
+            'the delay doubles before the last one is clipped' => [700, [200, 400, 100]],
+        ];
+    }
+
+    /**
+     * Issue #337 (TEST-17): `remainingMs <= 0` is the second exit from the
+     * retry loop (the do-while condition normally wins because the delay is
+     * clipped to the remaining budget). With `maxBackoffMs = 0` the first
+     * Locked response reaches it: the loop logs the warning, breaks, and the
+     * post-loop guard turns the still-pending retry into
+     * `LockWaitTimeoutException` instead of prewriting unlocked keys.
+     */
+    public function testPessimisticLockBudgetGuardLogsAndFailsWithoutPrewrite(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $lockInfo = new LockInfo();
+        $lockInfo->setKey('k1');
+        $lockInfo->setPrimaryLock('k1');
+        $lockInfo->setLockVersion(1000);
+        $keyError = new KeyError();
+        $keyError->setLocked($lockInfo);
+        $lockedResponse = new PessimisticLockResponse();
+        $lockedResponse->setErrors([$keyError]);
+
+        $methods = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(static function (
+                string $addr,
+                string $svc,
+                string $method,
+            ) use (
+                &$methods,
+                $lockedResponse,
+            ): object {
+                $methods[] = $method;
+
+                return match ($method) {
+                    'KvPessimisticLock' => $lockedResponse,
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $logger = new RecordingLogger();
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'maxBackoffMs' => 0,
+            'logger' => $logger,
+        ]);
+        $txn->set('k1', 'v1');
+
+        try {
+            $txn->commit();
+            $this->fail('Expected LockWaitTimeoutException was not thrown');
+        } catch (LockWaitTimeoutException $e) {
+            $this->assertSame('k1', $e->getKey());
+            $this->assertSame(0, $e->getTimeoutMs());
+        }
+
+        $this->assertContains('Pessimistic lock retry budget exhausted', $logger->messages);
+        $this->assertNotContains('KvPrewrite', $methods);
+        $this->assertNotContains('KvCommit', $methods);
+    }
+
     // ========================================================================
     // batchGet()
     // ========================================================================
@@ -3430,6 +3686,48 @@ class TransactionTest extends TestCase
         }
 
         $this->assertSame(['KvGet'], $methods);
+    }
+
+    public function testGetRejectsUnhandledResponseKeyError(): void
+    {
+        // TXN-16: a KeyError variant the read path does not handle must fail
+        // the read instead of falling through to the value extraction and
+        // returning '' (which would also be cached as the key's value).
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+
+        $store = new Store();
+        $store->setId(1);
+        $store->setAddress('127.0.0.1:20160');
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getRegion')->willReturn($this->testRegion);
+
+        $response = new GetResponse();
+        $keyError = new KeyError();
+        $keyError->setTxnNotFound(new TxnNotFound());
+        $response->setError($keyError);
+
+        $methods = [];
+        $this->grpc->method('call')->willReturnCallback(
+            static function (string $addr, string $svc, string $method) use (&$methods, $response): object {
+                $methods[] = $method;
+                return match ($method) {
+                    'KvGet' => $response,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false, 'trackReadSet' => true]);
+
+        try {
+            $txn->get('key');
+            $this->fail('Expected TiKvException was not thrown');
+        } catch (TiKvException $e) {
+            $this->assertSame('Get failed: TxnNotFound', $e->getMessage());
+        }
+
+        $this->assertSame(['KvGet'], $methods, 'an unhandled KeyError must not be retried');
+        $this->assertSame([], $txn->getReadSet(), 'a failed read must not be cached');
     }
 
     // ========================================================================
@@ -4317,7 +4615,14 @@ class TransactionTest extends TestCase
 
         $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('refusing to commit an arbitrary region as primary');
-        $method->invoke($committer, ['k1'], 'other', $state, $retryExecutor, static fn (): ?BackoffType => null);
+        $method->invoke(
+            $committer,
+            ['k1'],
+            'other',
+            $state,
+            $retryExecutor,
+            static fn (): RetryVerdict => RetryVerdict::pass(),
+        );
     }
 
     public function testRollbackAfterCommitThrows(): void
@@ -4377,7 +4682,7 @@ class TransactionTest extends TestCase
             regionResolver: $this->regionResolver,
             logger: new \Psr\Log\NullLogger(),
         );
-        $committer->rollback($state, $retryExecutor, static fn (): ?BackoffType => null);
+        $committer->rollback($state, $retryExecutor, static fn (): RetryVerdict => RetryVerdict::pass());
     }
 
     public function testCommitWithNumericStringKeySucceeds(): void

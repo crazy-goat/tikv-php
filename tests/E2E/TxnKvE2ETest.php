@@ -789,14 +789,21 @@ PHP;
     public function testMultiplePostCloseBeginAllThrow(): void
     {
         $client = $this->createFreshTxnClient();
+
+        // A live client begins normally; close() changes only the post-close
+        // behaviour pinned below.
+        $txn = $client->begin(['pessimistic' => false]);
+        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        $txn->rollback();
+
         $client->close();
 
         for ($i = 0; $i < 3; $i++) {
             try {
                 $client->begin();
                 $this->fail('Expected ClientClosedException on iteration ' . $i);
-            } catch (ClientClosedException) {
-                // Expected
+            } catch (ClientClosedException $e) {
+                $this->assertSame('Client is closed', $e->getMessage());
             }
         }
     }

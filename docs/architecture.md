@@ -820,9 +820,12 @@ executes the per-region sub-scans concurrently, in windows of at most
 `options['maxConcurrency']` regions (default 16): every send in a window is
 issued before the first wait, and the responses are merged in key order
 (descending for a reverse scan). A bounded scan (`limit > 0`) walks the
-regions sequentially. The reverse path enumerates the region chain
-bottom-up (PD's `ScanRegions` only enumerates forwards), walks it top-down,
-and concatenates the per-region rows in descending order. A region or
+regions sequentially. The reverse path resolves its regions from the upper
+bound downwards in bounded batches (issue #198):
+`RegionCache::getRegionBelow()` serves the warm case and a miss asks PD for
+the region containing the cursor or, when the cursor sits on a region
+boundary, for the adjacent region below it through `GetPrevRegion`. It no
+longer collects the whole chain before reading the top region. A region or
 transport error, or a region that split after enumeration, falls back to
 the sequential retrying path.
 
@@ -884,6 +887,19 @@ the sequential retrying path.
   retried without a re-handshake. The exception carries the address of the
   failed call, so a nested lock-resolution RPC against another region also
   closes its own channel
+- Track per-store health as a circuit breaker (issue #424): after three
+  consecutive `UNAVAILABLE` or `DEADLINE_EXCEEDED` transport failures within a
+  60-second window a store is unavailable for a one-second cooldown, its
+  cached leader regions are invalidated with the `store_unhealthy` reason, and
+  `resolveStoreAddress()` throws the retryable `StoreUnavailableException`
+  before any RPC. After the cooldown the next request is a half-open probe: a
+  success recovers the store, a failure restarts the cooldown. Failures are
+  attributed by the exception's `targetAddress`, so a PD outage or a nested
+  RPC against another store does not demote the outer store; a
+  `CasIndeterminateException` is unwrapped to its transport cause. Replica
+  reads skip stores in cooldown. Fatal statuses such as `UNAUTHENTICATED` and
+  server-busy responses do not demote a store. The state is reported through
+  `MetricsInterface::storeHealthChanged()`
 
 **Trade-off**: refresh costs one PD `GetRegion` per cached region, which is
 why it is opt-in and throttled by `regionCacheRefreshMs` rather than running

@@ -125,6 +125,12 @@ the error-to-backoff mapping; message-based fallbacks live in
 public static function classifyByKind(ErrorKind $kind): ?BackoffType
 ```
 
+`ErrorClassifier::classify()` returns a `RetryVerdict`
+(`src/Client/Retry/RetryVerdict.php`) instead of `?BackoffType`, so a custom
+classifier can distinguish "no opinion" (`RetryVerdict::pass()`) from an
+explicit fatal verdict (`RetryVerdict::fatal()`); the mapping helpers above
+keep returning `?BackoffType` (issue #534).
+
 ## Adding New Features
 
 ### Step-by-Step Guide
@@ -284,28 +290,12 @@ class MyOperationE2ETest extends TestCase
 - Update `README.md` usage section
 - Add example to `examples/` (if applicable)
 
-#### 9. Update Implementation Plans
+#### 9. Update the Changelog
 
-If this was a planned feature:
-
-```markdown
-# docs/superpowers/plans/XX-my-operation.md
-
-# My Operation Implementation
-
-## Status: ✅ COMPLETED
-
-## Implementation
-- [x] Proto message handling
-- [x] RawKvClient method
-- [x] Unit tests
-- [x] E2E tests
-- [x] Documentation
-- [x] Example
-
-## Notes
-Any special considerations...
-```
+Add an entry under `## [Unreleased]` in [`CHANGELOG.md`](../CHANGELOG.md), with
+the issue number in parentheses. Implementation plans live in
+[GitHub Issues](https://github.com/crazy-goat/tikv-php/issues), not in this
+repository.
 
 ### Pattern: Batch Operations
 
@@ -600,6 +590,11 @@ the script passes that mode itself). It writes the Clover report to `coverage.xm
 `bin/check-coverage.php`, which fails when the line coverage is below
 `DEFAULT_COVERAGE_FLOOR` in that script. CI runs the same two commands in the `grpc-unit-tests`
 job and uploads the Clover report as the `coverage-clover` artifact.
+
+Coverage is opt-in on the command line: `phpunit.xml` configures no coverage report, so an
+ordinary `vendor/bin/phpunit` run — and every composer test script that does not request a
+report — neither asks for a coverage driver nor writes `coverage.xml` / `coverage-html/`. The
+report is requested only by the commands above (issue #556).
 
 The floor is a ratchet: it is set below the measured coverage and only moves up. The generated
 protobuf classes in `src/Proto/` are excluded from the coverage source set (see `phpunit.xml`),
@@ -942,7 +937,7 @@ region count (1, 2, 5, 10, 20), because the whole point is how the two curves
 diverge.
 
 For other operations, create focused benchmark classes under
-`tests/Benchmark/`:
+`benchmarks/`:
 
 ```php
 <?php

@@ -91,4 +91,32 @@ final class RegionScanBatch
 
         return $trimmed;
     }
+
+    /**
+     * Trim a region's end key to the exclusive cursor it was fetched at.
+     *
+     * The descending counterpart of {@see self::trimToCursor()}: a reverse
+     * scan walks a range from its upper bound down, so a region a **merge**
+     * produced after the previous batch may extend above the cursor the scan
+     * already read. Clamping its end to the cursor keeps the walk from
+     * reading those keys a second time. The trimmed region is a copy — the
+     * original one is what the region cache holds.
+     */
+    public static function trimEndToCursor(RegionInfo $region, string $cursor): RegionInfo
+    {
+        if ($region->endKey !== '' && KeyOrder::lte($region->endKey, $cursor)) {
+            return $region;
+        }
+
+        return new RegionInfo(
+            regionId: $region->regionId,
+            leaderPeerId: $region->leaderPeerId,
+            leaderStoreId: $region->leaderStoreId,
+            epochConfVer: $region->epochConfVer,
+            epochVersion: $region->epochVersion,
+            startKey: $region->startKey,
+            endKey: $cursor,
+            peers: $region->peers,
+        );
+    }
 }
