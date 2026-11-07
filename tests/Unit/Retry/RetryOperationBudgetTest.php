@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudget;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 
@@ -65,7 +66,7 @@ class RetryOperationBudgetTest extends TestCase
             maxBackoffMs: self::TWO_RETRY_BUDGET_MS,
             deadlineMs: 0,
         )->beginOperation();
-        $classifier = static fn (TiKvException $e): BackoffType => BackoffType::StaleCmd;
+        $classifier = static fn (TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::StaleCmd);
 
         $firstAttempts = 0;
         try {
@@ -103,7 +104,7 @@ class RetryOperationBudgetTest extends TestCase
             maxBackoffMs: self::TWO_RETRY_BUDGET_MS,
             deadlineMs: 0,
         );
-        $classifier = static fn (TiKvException $e): BackoffType => BackoffType::StaleCmd;
+        $classifier = static fn (TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::StaleCmd);
 
         // Operation A exhausts its budget and throws.
         $first = $executor->beginOperation();
@@ -171,7 +172,7 @@ class RetryOperationBudgetTest extends TestCase
             deadlineMs: 0,
             serverBusyBudgetMs: 2000,
         )->beginOperation();
-        $classifier = static fn (TiKvException $e): BackoffType => BackoffType::ServerBusy;
+        $classifier = static fn (TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::ServerBusy);
 
         // ServerBusy sleeps are 2000 ms base with equal jitter, i.e.
         // [1000, 2000] and [2000, 4000] ms. The first charge always fits the
@@ -253,7 +254,7 @@ class RetryOperationBudgetTest extends TestCase
 
         // BackoffType::None is the only zero-sleep class (issue #241), so the
         // loop reaches the cap without spending any wall clock.
-        $classifier = static fn (TiKvException $e): BackoffType => BackoffType::None;
+        $classifier = static fn (TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
 
         foreach (['first', 'second'] as $key) {
             $attempts = 0;

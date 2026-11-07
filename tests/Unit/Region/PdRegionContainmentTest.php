@@ -62,7 +62,7 @@ final class PdRegionContainmentTest extends TestCase
             $resolver->getRegionInfo($key);
             self::fail('Expected RegionException');
         } catch (RegionException $e) {
-            self::assertSame(BackoffType::RegionMiss, ErrorClassifier::classify($e));
+            self::assertSame(BackoffType::RegionMiss, ErrorClassifier::classify($e)->backoffType());
         }
 
         self::assertNotInstanceOf(RegionInfo::class, $cache->getByKey($key));

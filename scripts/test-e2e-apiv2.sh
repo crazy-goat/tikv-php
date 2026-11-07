@@ -65,7 +65,9 @@ COUNT=0
 while [ "$COUNT" -lt "$RETRIES" ]; do
     # Both conditions matter: PD's healthcheck only covers PD itself, and a
     # test that starts before the stores register would fail region lookups.
-    if compose ps --format '{{.Service}} {{.Health}}' 2>/dev/null | grep -q '^pd healthy$' &&
+    # `compose_running_services` works under both Compose v2 and the v1
+    # fallback, where `ps --format` does not exist.
+    if compose_running_services 2>/dev/null | grep -qx 'pd' &&
         [ "$(up_store_count)" -ge 3 ]; then
         break
     fi

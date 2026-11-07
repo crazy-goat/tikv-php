@@ -359,7 +359,12 @@ class MyFeatureTest extends TestCase
 
 E2E tests use Docker and switch between two cluster modes. The
 `make test-e2e` runner manages that lifecycle (and removes its temporary
-volumes on exit), so a separate `make up` is not required for the full run:
+volumes on exit), so a separate `make up` is not required for the full run.
+It waits until all four service containers are running and PD reports all
+three TiKV stores `Up` — a healthy PD alone is not enough, because the test
+container reaches the stores by their Compose service names. On a failed run
+it prints `compose ps` and the container logs before tearing the cluster
+down, so the `down -v` does not erase the evidence:
 
 ```bash
 # Run RawKV E2E, then switch to V1 and run TxnKV E2E
@@ -371,7 +376,7 @@ composer test:e2e
 # Or manually run the RawKV suite inside the Compose network
 # (start the default V1TTL cluster first)
 make up
-docker-compose run --rm php-client \
+docker compose run --rm --no-deps php-client \
   vendor/bin/phpunit --testsuite E2E-RawKV --no-coverage
 
 # TxnKV uses the V1 cluster override and is run by make test-e2e

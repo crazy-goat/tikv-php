@@ -421,8 +421,8 @@ final class TransactionSizeLimitTest extends TestCase
 
     public function testTransactionTooLargeExceptionIsClassifiedAsFatal(): void
     {
-        self::assertNull(
-            ErrorClassifier::classify(TransactionTooLargeException::entryCount(3, 2)),
+        self::assertTrue(
+            ErrorClassifier::classify(TransactionTooLargeException::entryCount(3, 2))->isFatal(),
             'TransactionTooLargeException must never be retried',
         );
     }

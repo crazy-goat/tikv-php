@@ -36,6 +36,7 @@ use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -123,7 +124,7 @@ class RetryExecutorRoutingInvalidationTest extends TestCase
      */
     private function zeroSleepClassifier(): \Closure
     {
-        return static fn (TiKvException $e): BackoffType => BackoffType::None;
+        return static fn (TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
     }
 
     /**
@@ -181,7 +182,7 @@ class RetryExecutorRoutingInvalidationTest extends TestCase
         $this->assertSame($expectedKind, $error->errorKind, 'fixture must carry the typed kind under test');
         $this->assertSame(
             $expectedBackoff,
-            ErrorClassifier::classify($error),
+            ErrorClassifier::classify($error)->backoffType(),
             'fixture must be retryable through the real classifier, otherwise it never reaches this branch',
         );
 

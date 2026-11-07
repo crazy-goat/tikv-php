@@ -103,6 +103,32 @@ class BackoffTest extends TestCase
         }
     }
 
+    /**
+     * Issue #296 (PERF-09): NotLeader is fleet-correlated — every worker
+     * holding the region sees the same leader transfer — so its backoff must
+     * be jittered, not the deterministic 2, 4, 8, ... ms schedule. The fix
+     * shipped with #242 (equal jitter on every backoff type); this pins the
+     * audit's acceptance criterion explicitly for NotLeader.
+     */
+    public function testNotLeaderSleepIsJitteredWithinEqualJitterRange(): void
+    {
+        $this->assertTrue(BackoffType::NotLeader->equalJitter());
+
+        for ($attempt = 0; $attempt < 12; $attempt++) {
+            $expo = min(BackoffType::NotLeader->capMs(), BackoffType::NotLeader->baseMs() * (1 << $attempt));
+            $values = [];
+
+            for ($i = 0; $i < 50; $i++) {
+                $sleep = BackoffType::NotLeader->sleepMs($attempt);
+                $this->assertGreaterThanOrEqual(intdiv($expo, 2), $sleep, "attempt {$attempt}");
+                $this->assertLessThanOrEqual($expo, $sleep, "attempt {$attempt}");
+                $values[$sleep] = true;
+            }
+
+            $this->assertGreaterThan(1, count($values), "attempt {$attempt} must not be deterministic");
+        }
+    }
+
     // Issue #241 (REG-10): EpochNotMatch must sleep a non-zero, jittered
     // interval — the same values as client-go's BoEpochNotMatch.
 

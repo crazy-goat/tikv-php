@@ -67,6 +67,7 @@ class StabilityPolicyGuardTest extends TestCase
         \CrazyGoat\TiKV\Client\RawKv\RawKvClient::class,
         \CrazyGoat\TiKV\Client\RawKv\CasResult::class,
         \CrazyGoat\TiKV\Client\RawKv\ChecksumResult::class,
+        \CrazyGoat\TiKV\Client\RawKv\KeyTtl::class,
         \CrazyGoat\TiKV\Client\RawKv\ScanIterator::class,
         \CrazyGoat\TiKV\Client\TxnKv\TxnKvClient::class,
         \CrazyGoat\TiKV\Client\TxnKv\Transaction::class,
