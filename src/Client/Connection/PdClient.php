@@ -156,7 +156,7 @@ final class PdClient implements PdClientInterface
         return $this->tso;
     }
 
-    public function getRegion(string $key): RegionInfo
+    public function getRegion(string $key, ?int $timeoutMs = null): RegionInfo
     {
         $request = new GetRegionRequest();
         $request->setHeader($this->createHeader());
@@ -167,6 +167,7 @@ final class PdClient implements PdClientInterface
             'GetRegion',
             $request,
             GetRegionResponse::class,
+            timeoutMs: $timeoutMs,
         );
 
         $region = $response->getRegion();
@@ -180,7 +181,7 @@ final class PdClient implements PdClientInterface
         return RegionInfoMapper::fromProto($region, $response->getLeader(), $this->codec);
     }
 
-    public function getPrevRegion(string $key): ?RegionInfo
+    public function getPrevRegion(string $key, ?int $timeoutMs = null): ?RegionInfo
     {
         $request = new GetRegionRequest();
         $request->setHeader($this->createHeader());
@@ -191,6 +192,7 @@ final class PdClient implements PdClientInterface
             'GetPrevRegion',
             $request,
             GetRegionResponse::class,
+            timeoutMs: $timeoutMs,
         );
 
         $region = $response->getRegion();
@@ -273,7 +275,7 @@ final class PdClient implements PdClientInterface
     /**
      * @return RegionInfo[]
      */
-    public function scanRegions(string $startKey, string $endKey, int $limit = 0): array
+    public function scanRegions(string $startKey, string $endKey, int $limit = 0, ?int $timeoutMs = null): array
     {
         [$encodedStart, $encodedEnd] = $this->codec->encodeRange($startKey, $endKey);
 
@@ -288,6 +290,7 @@ final class PdClient implements PdClientInterface
             'ScanRegions',
             $request,
             ScanRegionsResponse::class,
+            timeoutMs: $timeoutMs,
         );
 
         $regions = [];
@@ -601,6 +604,7 @@ final class PdClient implements PdClientInterface
         Message $request,
         string $responseClass,
         string $service = 'pdpb.PD',
+        ?int $timeoutMs = null,
     ): Message {
         $this->discoverLeaderOnce();
 
@@ -608,7 +612,13 @@ final class PdClient implements PdClientInterface
         while (true) {
             $attempted[] = $this->currentAddress;
             try {
-                return $this->callCurrentAddressWithClusterIdRetry($method, $request, $responseClass, $service);
+                return $this->callCurrentAddressWithClusterIdRetry(
+                    $method,
+                    $request,
+                    $responseClass,
+                    $service,
+                    $timeoutMs,
+                );
             } catch (PdException $e) {
                 if (!$e->isNotLeader()) {
                     throw $e;
@@ -913,7 +923,9 @@ final class PdClient implements PdClientInterface
         Message $request,
         string $responseClass,
         string $service = 'pdpb.PD',
+        ?int $timeoutMs = null,
     ): Message {
+        $deadlineMs = $timeoutMs ?? $this->timeoutConfig->pdTimeoutMs;
         $this->logger->debug('PD gRPC call', ['method' => $method, 'address' => $this->currentAddress]);
         try {
             $response = $this->grpc->call(
@@ -922,7 +934,7 @@ final class PdClient implements PdClientInterface
                 $method,
                 $request,
                 $responseClass,
-                $this->timeoutConfig->pdTimeoutMs,
+                $deadlineMs,
             );
 
             $this->learnClusterId($response);
@@ -952,7 +964,7 @@ final class PdClient implements PdClientInterface
                     $method,
                     $request,
                     $responseClass,
-                    $this->timeoutConfig->pdTimeoutMs,
+                    $deadlineMs,
                 );
 
                 $this->learnClusterId($response);

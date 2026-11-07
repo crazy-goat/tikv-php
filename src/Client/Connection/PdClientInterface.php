@@ -20,10 +20,14 @@ interface PdClientInterface
      * requests. Throws a {@see TiKvException} so the failure is visible
      * rather than corrupting the region cache.
      *
+     * @param int|null $timeoutMs Deadline in milliseconds for the `GetRegion`
+     *                            RPC; null means the configured
+     *                            TimeoutConfig::$pdTimeoutMs (issue #257)
+     *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD error, or when PD returns no region
      */
-    public function getRegion(string $key): RegionInfo;
+    public function getRegion(string $key, ?int $timeoutMs = null): RegionInfo;
 
     /**
      * Get the region immediately before the region that contains the given
@@ -37,10 +41,14 @@ interface PdClientInterface
      * adjacent region below — the key is in the first region of the keyspace,
      * or PD reports a gap.
      *
+     * @param int|null $timeoutMs Deadline in milliseconds for the
+     *                            `GetPrevRegion` RPC; null means the configured
+     *                            TimeoutConfig::$pdTimeoutMs (issue #257)
+     *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD error
      */
-    public function getPrevRegion(string $key): ?RegionInfo;
+    public function getPrevRegion(string $key, ?int $timeoutMs = null): ?RegionInfo;
 
     /**
      * Resolve a keyspace name to its numeric ID through PD.
@@ -61,12 +69,15 @@ interface PdClientInterface
     /**
      * Scan all regions covering the key range [startKey, endKey).
      *
+     * @param int|null $timeoutMs Deadline in milliseconds for the
+     *                            `ScanRegions` RPC; null means the configured
+     *                            TimeoutConfig::$pdTimeoutMs (issue #257)
      * @return RegionInfo[]
      *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD error
      */
-    public function scanRegions(string $startKey, string $endKey, int $limit = 0): array;
+    public function scanRegions(string $startKey, string $endKey, int $limit = 0, ?int $timeoutMs = null): array;
 
     /**
      * Get all stores from PD.

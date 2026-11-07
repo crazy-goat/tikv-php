@@ -602,7 +602,7 @@ class TransactionTest extends TestCase
         $this->assertNotContains('KvCommit', $methods);
     }
 
-    public function testFailedEagerLockCleanupCanBeRetried(): void
+    public function testFailedEagerLockCleanupLeavesTransactionTerminal(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
         $this->regionCache->method('put');
@@ -643,18 +643,25 @@ class TransactionTest extends TestCase
             $txn->set('key', 'value');
             $this->fail('Expected TransactionConflictException was not thrown');
         } catch (TransactionConflictException) {
-            $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+            // The cleanup rollback failed, but it still made the transaction
+            // terminal (issue #231): the remaining lock expires with its TTL.
+            $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
         }
 
         try {
             $txn->set('other', 'value');
             $this->fail('A failed eager statement must not be continuable');
         } catch (InvalidStateException $e) {
-            $this->assertStringContainsString('rollback', $e->getMessage());
+            $this->assertSame('Transaction is not active', $e->getMessage());
         }
 
-        $txn->rollback();
-        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        try {
+            $txn->rollback();
+            $this->fail('A failed cleanup must not be retried');
+        } catch (InvalidStateException $e) {
+            $this->assertSame('Transaction is not active', $e->getMessage());
+        }
+        $this->assertSame(1, $rollbackCalls);
     }
 
     public function testPessimisticLockWaitTimeoutSurfacesFromSet(): void
@@ -7634,7 +7641,12 @@ class TransactionTest extends TestCase
         $this->pdClient->method('getTimestamp')->willReturn(3000);
     }
 
-    public function testFailedRollbackIsRetryableButBlocksWritesAndCommit(): void
+    /**
+     * Issue #231 (TXN-26): a rollback whose RPC fails is still terminal. The
+     * status must read RolledBack, the buffered write set must be dropped, and
+     * the destructor must not repeat the failing rollback.
+     */
+    public function testFailedRollbackLeavesTransactionTerminalAndDestructorDoesNotRetry(): void
     {
         $this->setUpRollbackRegionMocking();
 
@@ -7668,24 +7680,18 @@ class TransactionTest extends TestCase
             $txn->rollback();
             $this->fail('Expected TransactionConflictException was not thrown');
         } catch (TransactionConflictException) {
-            $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+            // The exception still propagates to the caller.
         }
 
-        try {
-            $txn->set('other', 'value');
-            $this->fail('Writes must be blocked after rollback starts');
-        } catch (InvalidStateException $e) {
-            $this->assertStringContainsString('rollback', $e->getMessage());
-        }
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame([], $txn->getWriteSet());
+        $this->assertNull($txn->getCommitTs());
+        $this->assertSame(1, $rollbackCalls);
 
-        try {
-            $txn->commit();
-            $this->fail('Commit must be blocked after rollback starts');
-        } catch (InvalidStateException $e) {
-            $this->assertStringContainsString('rollback', $e->getMessage());
-        }
-
-        $txn->rollback();
+        // The destructor sees a terminal transaction and issues no second
+        // rollback for the same failed cleanup.
+        $txn->__destruct();
+        $this->assertSame(1, $rollbackCalls);
         $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
     }
 
@@ -7717,7 +7723,9 @@ class TransactionTest extends TestCase
 
         $txn->__destruct();
 
-        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        // The throwing logger must not escape the destructor; the failed
+        // rollback still leaves the transaction terminal (issue #231).
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
     }
 
     /**
@@ -8091,18 +8099,20 @@ class TransactionTest extends TestCase
             $this->assertSame('Rollback failed: ' . $description, $e->getMessage());
         }
 
-        // A fatal variant is not retried and the transaction stays active
-        // (rollback-started) so the caller can retry the cleanup.
+        // A fatal variant is not retried, and the attempted rollback still
+        // makes the transaction terminal (issue #231): the buffered write set
+        // is dropped and a second rollback is rejected without an RPC.
         $this->assertSame(1, $batchRollbackCalls);
-        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
-        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
-
-        // The transaction is still rollback-able: the next attempt with a
-        // success response clears the write set and closes it.
-        $txn->rollback();
-        $this->assertSame(2, $batchRollbackCalls);
         $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
         $this->assertSame([], $txn->getWriteSet());
+
+        try {
+            $txn->rollback();
+            $this->fail('A failed rollback must not be retried');
+        } catch (InvalidStateException $e) {
+            $this->assertSame('Transaction is not active', $e->getMessage());
+        }
+        $this->assertSame(1, $batchRollbackCalls);
     }
 
     /**
@@ -8165,10 +8175,11 @@ class TransactionTest extends TestCase
         }
 
         // The structured conflict is fatal: the co-set `retryable` string
-        // must not turn it into a retry loop.
+        // must not turn it into a retry loop. The attempted rollback is still
+        // terminal (issue #231).
         $this->assertSame(1, $batchRollbackCalls);
-        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
-        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame([], $txn->getWriteSet());
     }
 
     public function testPessimisticRollbackUnrecognisedKeyErrorFailsClosedBeforeBatchRollback(): void
@@ -8209,9 +8220,10 @@ class TransactionTest extends TestCase
         }
 
         // The pessimistic rollback failed before the batch rollback was
-        // attempted, and the variant was not retried.
+        // attempted, the variant was not retried, and the transaction is
+        // still terminal (issue #231).
         $this->assertSame(['KVPessimisticRollback'], $methods);
-        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
-        $this->assertSame(['key1' => 'value1'], $txn->getWriteSet());
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertSame([], $txn->getWriteSet());
     }
 }

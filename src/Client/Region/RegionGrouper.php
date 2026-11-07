@@ -73,15 +73,21 @@ final class RegionGrouper
      * Group keys by region using batch resolution (single scanRegions call).
      *
      * @param string[] $keys
+     * @param int|null $timeoutMs Deadline in milliseconds for the PD
+     *        `ScanRegions` lookups; null uses the configured
+     *        TimeoutConfig::$pdTimeoutMs (issue #257)
      * @return array<int, array{region: RegionInfo, keys: string[]}>
      */
-    public static function groupKeysByRegionBatch(array $keys, RegionResolver $regionResolver): array
-    {
+    public static function groupKeysByRegionBatch(
+        array $keys,
+        RegionResolver $regionResolver,
+        ?int $timeoutMs = null,
+    ): array {
         if ($keys === []) {
             return [];
         }
 
-        $resolved = $regionResolver->batchResolveRegions($keys);
+        $resolved = $regionResolver->batchResolveRegions($keys, $timeoutMs);
 
         $grouped = [];
         foreach ($keys as $key) {
@@ -122,13 +128,14 @@ final class RegionGrouper
         array $items,
         callable $keyExtractor,
         RegionResolver $regionResolver,
+        ?int $timeoutMs = null,
     ): array {
         if ($items === []) {
             return [];
         }
 
         $keys = array_map($keyExtractor, $items);
-        $resolved = $regionResolver->batchResolveRegions($keys);
+        $resolved = $regionResolver->batchResolveRegions($keys, $timeoutMs);
 
         $grouped = [];
         foreach ($items as $item) {

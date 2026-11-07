@@ -14,8 +14,10 @@ use CrazyGoat\TiKV\Client\Util\KeyOrder;
  * tuples with consistent half-open [start, end) semantics.
  *
  * For forward clipping an empty end-key is +infinity; for reverse clipping it
- * is the start of the keyspace. Sub-ranges that fall completely outside a
- * region are skipped.
+ * is the start of the keyspace. A reverse request must name an explicit upper
+ * bound: an empty start-key is not +infinity (RAW-09, #194), so clipReverse()
+ * rejects it instead of silently clipping every region to nothing. Sub-ranges
+ * that fall completely outside a region are skipped.
  *
  * This centralises the region-clipping logic that was duplicated across
  * RawKvScanner, RawKvRangeOps and Transaction, ensuring that boundary
@@ -113,11 +115,20 @@ final readonly class RegionRangeClipper
      * ([clippedEnd, clippedStart) with reverse=true on the wire), meaning
      * scanning proceeds from clippedStart downwards towards clippedEnd.
      *
+     * The request must be a valid reverse range (see
+     * {@see self::assertReverseRangeOrder()}): an empty start key with a
+     * non-empty end key throws rather than yielding sub-ranges whose empty
+     * upper bound TiKV reads as the keyspace minimum (REG-23, #254).
+     *
      * @param RegionInfo[] $regions
      * @return \Generator<int, array{RegionInfo, string, string}>
+     *
+     * @throws InvalidArgumentException When the range is not a valid reverse range
      */
     public function clipReverse(array $regions, string $startKey, string $endKey): \Generator
     {
+        self::assertReverseRangeOrder($startKey, $endKey, 'clipReverse');
+
         foreach ($regions as $region) {
             $scanStart = ($region->endKey === '' || KeyOrder::lt($startKey, $region->endKey))
                 ? $startKey

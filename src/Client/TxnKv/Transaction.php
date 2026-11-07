@@ -582,7 +582,13 @@ final class Transaction
             $lockTtlMs = $this->committer->ttlWithUptimeMs($this->state, $this->pessimisticLockTtlMs);
             $this->state->setPessimisticPrimaryKey($key);
             try {
-                $this->committer->lockKeys([$key], $this->state, $forUpdateTs, $key);
+                $this->committer->lockKeys(
+                    [$key],
+                    $this->state,
+                    $forUpdateTs,
+                    $key,
+                    retryExecutor: $this->retryExecutor()->beginOperation(),
+                );
             } catch (\Throwable $failure) {
                 $this->failPessimisticStatement($failure);
             }
@@ -613,9 +619,9 @@ final class Transaction
                 $this->classifyError(...),
             );
         } catch (\Throwable $cleanupFailure) {
-            // Keep the transaction active-but-unwritable so the caller (or
-            // the destructor) can retry rollback; do not claim cleanup
-            // succeeded when the RPC failed.
+            // The rollback attempt made the transaction terminal even though
+            // its RPC failed (issue #231): the remaining locks expire with
+            // their TTL, and neither the caller nor the destructor retries.
             $this->logger->error('Pessimistic lock failure cleanup failed', [
                 'txnId' => $this->txnId,
                 'exception' => $cleanupFailure,
@@ -722,7 +728,13 @@ final class Transaction
         // lock: the tracked expiry must never be later than the real one.
         $lockTtlMs = $this->committer->ttlWithUptimeMs($this->state, $this->pessimisticLockTtlMs);
         try {
-            $this->committer->lockKeys($keys, $this->state, $this->pdClient->getTimestamp(), $primary);
+            $this->committer->lockKeys(
+                $keys,
+                $this->state,
+                $this->pdClient->getTimestamp(),
+                $primary,
+                retryExecutor: $this->retryExecutor()->beginOperation(),
+            );
         } catch (\Throwable $failure) {
             $this->failPessimisticStatement($failure);
         }
@@ -781,6 +793,7 @@ final class Transaction
                 $this->pdClient->getTimestamp(),
                 $primary,
                 true,
+                $this->retryExecutor()->beginOperation(),
             );
         } catch (\Throwable $failure) {
             $this->failPessimisticStatement($failure);

@@ -158,7 +158,7 @@ final readonly class TxnReader
                         'KvGet',
                         $request,
                         GetResponse::class,
-                        $this->timeoutMs('read'),
+                        $this->timeoutMsWithinBudget($this->timeoutMs('read'), $budget),
                     );
 
                     RegionErrorHandler::check(
@@ -581,7 +581,7 @@ final readonly class TxnReader
             'KvBatchGet',
             $request,
             BatchGetResponse::class,
-            $this->timeoutMs('batch_read'),
+            $this->timeoutMsWithinBudget($this->timeoutMs('batch_read'), $budget),
         );
 
         return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $regionKeys, $budget) {
@@ -787,7 +787,7 @@ final readonly class TxnReader
                         'KvScan',
                         $request,
                         ScanResponse::class,
-                        $this->timeoutMs('scan'),
+                        $this->timeoutMsWithinBudget($this->timeoutMs('scan'), $budget),
                     );
                     RegionErrorHandler::check(
                         $response,
@@ -1080,5 +1080,30 @@ final readonly class TxnReader
             'scan' => $this->timeoutConfig->scanTimeoutMs,
             default => null,
         };
+    }
+
+    /**
+     * Per-RPC deadline capped by the operation's live remaining retry budget
+     * (issue #257, REG-26).
+     *
+     * The configured timeout is the upper bound: an in-flight read must not
+     * outlive the retry deadline the executor is enforcing around it. A null
+     * configured timeout keeps the gRPC-layer default; a disabled or absent
+     * budget leaves the configured value unchanged. The result is at least
+     * 1 ms because 0 means "no deadline" to the gRPC layer, which is the
+     * unbounded behaviour this guard exists to prevent.
+     */
+    private function timeoutMsWithinBudget(?int $configuredMs, ?RetryBudget $budget): ?int
+    {
+        if ($configuredMs === null) {
+            return null;
+        }
+
+        $remainingMs = $budget?->remainingDeadlineMs() ?? 0;
+        if ($remainingMs <= 0) {
+            return $configuredMs;
+        }
+
+        return max(1, min($configuredMs, $remainingMs));
     }
 }
