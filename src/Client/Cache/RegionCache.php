@@ -525,6 +525,10 @@ class RegionCache implements RegionCacheInterface
 
     /**
      * Evict the least recently used entry from the cache.
+     *
+     * O(1): `touch()` keeps `$lruOrder` in recency order (it removes the key
+     * before appending it), so the first key is the least recently used one
+     * and eviction never scans the cache (issue #255, REG-24).
      */
     private function evictLru(): void
     {
@@ -658,6 +662,14 @@ class RegionCache implements RegionCacheInterface
         return $this->now() >= $entry->expiresAt;
     }
 
+    /**
+     * Mark a region as the most recently used one.
+     *
+     * The recency order is the insertion order of `$lruOrder`, so the key
+     * must be removed before it is appended; a plain assignment to an
+     * existing key would leave it at its old position and force
+     * {@see self::evictLru()} to scan for the smallest counter value.
+     */
     private function touch(int $regionId): void
     {
         unset($this->lruOrder[$regionId]);
