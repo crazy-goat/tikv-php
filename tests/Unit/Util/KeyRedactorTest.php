@@ -45,6 +45,28 @@ class KeyRedactorTest extends TestCase
 
         self::assertMatchesRegularExpression('/\A#[0-9a-f]{16} \(8 bytes\)\z/', $result);
         self::assertStringNotContainsString(bin2hex($key), $result);
+        // A full 8-byte key used to be hex-encoded in full and placed in the
+        // token slot, so the keyed hash must not reproduce that encoding.
+        self::assertNotSame(bin2hex($key), substr($result, 1, 16));
+    }
+
+    public function testRedactShortKeyDoesNotLeakItsHexEncoding(): void
+    {
+        // Issue #279 (GRPC-20): the previous default hex-encoded the whole
+        // key for keys of 8 bytes or fewer, so this key was recoverable with
+        // hex2bin(). The keyed hash must not contain that encoding.
+        $key = 'user:42';
+        $result = KeyRedactor::redact($key);
+
+        self::assertMatchesRegularExpression('/\A#[0-9a-f]{16} \(7 bytes\)\z/', $result);
+        self::assertStringNotContainsString($key, $result);
+        self::assertStringNotContainsString(bin2hex($key), $result);
+    }
+
+    public function testShortKeyTokensRemainStableAndDistinct(): void
+    {
+        self::assertSame(KeyRedactor::redact('user:42'), KeyRedactor::redact('user:42'));
+        self::assertNotSame(KeyRedactor::redact('user:42'), KeyRedactor::redact('user:43'));
     }
 
     public function testRedactLongKeyDoesNotContainItsPrefix(): void
