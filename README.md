@@ -119,7 +119,7 @@ covers where each transactional exception originates.
 The library is **pre-1.0**. It follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), but before `1.0.0`
 a breaking change bumps the **minor** version — so a `0.x` release may break
-your code, and `0.12.0 → 0.13.0` is not a safe upgrade on its own.
+your code, and `0.13.0 → 0.14.0` is not a safe upgrade on its own.
 
 [`CHANGELOG.md`](CHANGELOG.md) marks every breaking change of the public API
 below with a **BREAKING** prefix and a migration note. A change that breaks a
@@ -128,23 +128,23 @@ migration note and needs no version bump of its own.
 
 ### Which version to require
 
-The current release is **v0.12.0**. Require the exact version, or allow patch
+The current release is **v0.13.0**. Require the exact version, or allow patch
 releases inside the current minor line only:
 
 ```json
 {
     "require": {
-        "crazy-goat/tikv-client": "~0.12.0"
+        "crazy-goat/tikv-client": "~0.13.0"
     }
 }
 ```
 
-`~0.12.0` (equivalently `^0.12.0` or `0.12.*`) resolves to `>=0.12.0 <0.13.0`, so
-it never pulls `0.13.0` — and therefore never pulls a breaking change. Use
-`"0.12.0"` instead when you want a reproducible build.
+`~0.13.0` (equivalently `^0.13.0` or `0.13.*`) resolves to `>=0.13.0 <0.14.0`, so
+it never pulls `0.14.0` — and therefore never pulls a breaking change. Use
+`"0.13.0"` instead when you want a reproducible build.
 
 Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
-`~0.12` all resolve to a range that includes `0.13.0` and every later release.
+`~0.13` all resolve to a range that includes `0.14.0` and every later release.
 
 The versions above follow the releases: every one of them is updated in the
 same pull request as the changelog section of the release, because the guard
@@ -1285,6 +1285,8 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Configurable gRPC channel parameters** — message sizes, keepalive, `keepalivePermitWithoutCalls`, compression and the HTTP/2 initial window size ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
 - ✅ **Store health tracking and failover** — a per-store circuit breaker with cooldown, half-open probing, `StoreUnavailableException` and replica-read exclusion ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
 - ✅ **PD connection reuse** — `TxnKvClient::pdClient()` exposes the client's own `PdClientInterface` for cluster inspection and tests ([#515](https://github.com/crazy-goat/tikv-php/issues/515))
+- ✅ **Explicit pessimistic key locking** — `Transaction::lockKeys()` and `getForUpdate()` acquire locks without writing, with the same conflict, deadlock and wait-timeout handling ([#436](https://github.com/crazy-goat/tikv-php/issues/436))
+- ✅ **Peer-role awareness** — `PeerInfo` carries the TiKV role and a learner or witness can never be adopted as the leader ([#258](https://github.com/crazy-goat/tikv-php/issues/258))
 
 ### Planned
 
@@ -1299,7 +1301,6 @@ the issue is still open.
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ⬜ **`RawBatchScan` RPC for multi-range scans** — `batchScan()` is a client-side loop today ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
-- ⬜ **Explicit key-locking API for pessimistic transactions** ([#436](https://github.com/crazy-goat/tikv-php/issues/436))
 - ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 
 ## Contributing

@@ -23,6 +23,8 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+## [v0.13.0] - 2026-11-07
+
 ### Changed
 
 - `StoreCache` eviction is now O(1) instead of a linear scan over the store map (issue #255, REG-24). Its LRU index is a recency-ordered hash — `touch()` removes the key before appending it, the pattern `RegionCache` has used since #289 — so the least recently used store is the index's first key and `array_key_first()` replaces the `foreach`. `RegionCache::put()` already met the issue's target (its LRU maintenance and eviction have been constant-time since #289), so this change finishes the same pattern in the last cache that still scanned it. No behaviour change: strict LRU is preserved, so the hit rate is identical. `benchmarks/RegionCacheBenchmark.php` now also prints the cost of a `put()` that evicts, swept over capacities 1 000 / 10 000 / 50 000, which must stay logarithmic rather than grow with the number of cached entries.
