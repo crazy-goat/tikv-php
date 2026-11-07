@@ -33,7 +33,7 @@ Since issue #241 (REG-10) `EpochNotMatch` classifies as `BackoffType::EpochNotMa
 ~10 s of real wall clock and burns ~11 s of budget. To keep a retry test fast
 and deterministic: (a) throw `DataIsNotReady` — still the only zero-sleep class,
 so the attempt cap fires in milliseconds; (b) pass an explicit
-`fn () => BackoffType::None` classifier; or (c) when you WANT the new behavior,
+`fn (): RetryVerdict => RetryVerdict::retry(BackoffType::None)` classifier; or (c) when you WANT the new behavior,
 use a small `maxBackoffMs` (e.g. 50) so the sleep budget exhausts after a
 handful of 2/4/8/16 ms retries — a regression test can then assert
 `attempts < DEFAULT_MAX_ATTEMPTS` and a minimum wall-clock elapsed time.
@@ -75,6 +75,36 @@ no fresh budget after an earlier one spent it), while two calls to
 `execute()` on a bare executor each get a full budget. The attempt cap stays
 per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
 on ordinary one-retry-per-region traffic.
+
+## Store-health invalidation runs after the retry invalidation, so only sibling regions remain
+
+Issue #424 records a transport failure at the end of `RetryExecutor`'s catch,
+after the existing routing invalidation has already dropped the region the
+failed attempt was routed through. `RegionResolver::recordStoreFailure()`
+therefore invalidates the *other* cached regions whose leader is the same
+store, with reason `store_unhealthy`; the failing region is already gone under
+`retry_region_error` (or `fatal_region_error`). A test that asserts one
+`store_unhealthy` emission must cache a second region on the same store.
+Success recording is skipped when the caller supplied no target-store provider
+and no failure state is tracked, so the common success path does not pay an
+extra cache lookup; once a failure is recorded, the leader lookup runs so a
+success can reset the counter.
+
+Failure recording uses the exception's own `targetAddress`, resolved through
+`RegionResolver`'s address-to-store index, not the outer operation's provider.
+That is what keeps a PD outage (`pd:2379` is a configured PD endpoint and is
+never in the index) and a nested lock-resolution RPC against store B from
+demoting store A. An address that was never validated through
+`RegionResolver::validateStoreAddress()` is deliberately not guessed: a
+synthetic or direct `GrpcClient` address records nothing. `CasIndeterminateException`
+is unwrapped to its underlying `GrpcException` before this check.
+
+The consecutive-failure counter expires after `DEFAULT_FAILURE_WINDOW_MS`
+(60 s), so isolated failures spread over time never accumulate into a
+demotion. An unhealthy store does **not** become healthy when its cooldown
+expires: it is half-open and routable, but `isHealthy()` and a gauge fed from
+`storeHealthChanged()` stay false until a probe actually succeeds. This is
+intentional — the cooldown is not evidence of recovery.
 
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
@@ -1088,6 +1118,25 @@ single seam — its output is the effective channel key material — and it is
 unit-tested via reflection in the Unit suite (`GrpcClientChannelArgsTest`)
 without ext-grpc, since no real channel is created.
 
+## There is no `grpc.http2.initial_window_size` channel arg (#423)
+
+The gRPC HTTP/2 initial stream window is not a channel argument of its own.
+`grpc.http2.lookahead_bytes` (`GRPC_ARG_HTTP2_STREAM_LOOKAHEAD_BYTES`) is the
+knob: `chttp2_transport.cc::read_channel_args()` feeds it to
+`settings.SetInitialWindowSize()` and `flow_control.set_target_initial_window_size()`.
+`grpc.http2.initial_window_size` — the name used in issue #423's sketch — does
+not exist and is silently ignored by the core, so `GrpcClient` maps
+`initialWindowSizeBytes` to `lookahead_bytes`.
+
+`lookahead_bytes` alone does **not** pin the window: while
+`grpc.http2.bdp_probe` is true (the default) the chttp2 transport's
+`PeriodicUpdate()` overwrites `target_initial_window_size_` from its BDP
+estimate and memory pressure almost immediately, so the configured value is
+only a starting point. `GrpcClient` therefore also emits
+`grpc.http2.bdp_probe => 0` when `initialWindowSizeBytes > 0`; the cost is a
+fixed window that no longer adapts to the link. Do not "fix" that by dropping
+the bdp_probe arg — the configured window would not stick.
+
 ## ext-grpc's persistent channels are shared and reference-counted (#283)
 
 `Grpc\Channel` keys its process-global persistent-channel table on the
@@ -1217,9 +1266,9 @@ status Active so a second `commit()` could reuse the timestamp — that premise
 expired with #215, and the test now asserts the failure is swallowed and
 exactly one timestamp is minted.
 
-## The issue's suggested classifier fix would silently fall back to the default classifier — return a decision or rethrow
+## The classifier contract is a RetryVerdict — return a decision, not a throw (issue #534)
 
-The RetryExecutor's classifier chain is `handleNotLeader → classifier → ErrorClassifier`; a classifier that returns `null` is NOT a "do not retry" verdict — the executor falls through to the default `ErrorClassifier::classify()`, which retries every `GrpcException` as `TiKvRpc`. Issue #239's suggested snippet (`if ($e instanceof GrpcException) { return null; }`) would therefore have retried CAS exactly as before. To make an exception non-retriable from a custom classifier without changing `RetryExecutor`'s signature, **rethrow** it inside the classifier (the throw escapes the executor's catch and propagates with the original type/trace) — that is what `RawKvAtomic::compareAndSwap()` now does for `GrpcException` (#239). Side effect: the executor's fatal path (`'Fatal error, not retrying'` log) and its post-classification region invalidation + `closeChannel()` on `GrpcException` are skipped for the rethrown error; if a CAS transport error needs channel cleanup, that logic would have to move. If this pattern recurs, consider promoting it: a classifier result type with an explicit `Rethrow`/`Fatal` variant instead of the throw-from-classifier trick.
+The RetryExecutor's classifier chain is `handleNotLeader → classifier → ErrorClassifier`. A classifier returns a `RetryVerdict`: `RetryVerdict::retry($backoff)` retries, `RetryVerdict::fatal()` stops immediately, and `RetryVerdict::pass()` falls through to the default `ErrorClassifier::classify()`. Before issue #534 the contract was `?BackoffType`, so `null` meant "no opinion" and a classifier that wanted a fatal verdict had to throw from inside the executor's catch block — which skipped the executor's fatal path (`'Fatal error, not retrying'` log, region invalidation and `closeChannel()` cleanup). Issue #239's snippet (`if ($e instanceof GrpcException) { return null; }`) is still wrong for a different reason: `null` (now `pass()`) is not "do not retry", it defers to the built-in classifier, which retries every retryable `GrpcException` as `TiKvRpc`. `RawKvAtomic::compareAndSwap()` therefore returns `RetryVerdict::fatal()` for a `GrpcException` (#239/#534), and a fatal `UNAVAILABLE` now closes the broken channel. Do not reintroduce the throw-from-classifier trick.
 
 ## A rebase can leave stray conflict markers in docs — grep before finishing
 
@@ -1355,6 +1404,15 @@ so compute the attempt count from the exponential sequence (2+4=6 ≤ 6 allows
 two retries; 6+8=14 > 6 aborts the third), and an operation that "fails twice
 then succeeds" needs a per-call failure counter (a shared `$calls % 3`
 pattern silently gives the second execute() zero retries).
+
+The same premise expiry closed issue #296 (audit PERF-09, jitter for
+`NotLeader` / `RegionMiss` / `StaleCmd`): 54036f8 (issue #242) had already
+made `BackoffType::equalJitter()` return `true` for every type, so the
+deterministic 2, 4, 8, ... ms schedule the audit describes no longer existed,
+and `BackoffTest` already asserted both the `[expo/2, expo]` range and
+non-constant values for all types. The #296 change adds only a
+NotLeader-specific pin and this note; no production code changed. Close such
+an audit import as a duplicate instead of re-implementing the jitter.
 
 ## Equal-jitter randomness can collapse the separating boundary in budget assertions — assert `<=` over more iterations, never strict `<`
 

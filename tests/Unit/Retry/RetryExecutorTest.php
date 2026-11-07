@@ -14,6 +14,7 @@ use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -86,7 +87,7 @@ class RetryExecutorTest extends TestCase
             serverBusyBudgetMs: 10000,
         );
 
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::RegionMiss;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::RegionMiss);
 
         // RegionMiss: baseMs=2, capMs=500, equal jitter (issue #242), so each
         // sleep is drawn from [expo/2, expo]: 1-2, 2-4, 4-8 ms.
@@ -116,7 +117,7 @@ class RetryExecutorTest extends TestCase
             logger: $logger,
         );
 
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::RegionMiss;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::RegionMiss);
 
         $operation = function (): void {
             throw new TiKvException('test error');
@@ -142,7 +143,7 @@ class RetryExecutorTest extends TestCase
             maxBackoffMs: 6, // RegionMiss backoff 2, 4: two retries fit (2+4=6), three do not
             serverBusyBudgetMs: 10000,
         );
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::RegionMiss;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::RegionMiss);
 
         $calls = 0;
         // A fresh operation per execute() call: fails its first two attempts
@@ -207,7 +208,7 @@ class RetryExecutorTest extends TestCase
             serverBusyBudgetMs: 100, // below the minimum ServerBusy sleep (~1000ms)
             logger: $logger,
         );
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::ServerBusy;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::ServerBusy);
 
         $operation = function (): never {
             throw new TiKvException('server busy');
@@ -249,7 +250,7 @@ class RetryExecutorTest extends TestCase
         // ServerBusy: baseMs=2000, equalJitter=true
         // attempt 0: sleepMs = 1000 + random_int(0, 1000), so >= 1000
         // serverBusyBackoffMs = 0 + >=1000 > 100 → throw on first retry
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::ServerBusy;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::ServerBusy);
 
         $operation = function (): void {
             throw new TiKvException('server busy');
@@ -274,7 +275,7 @@ class RetryExecutorTest extends TestCase
             logger: $logger,
         );
 
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::ServerBusy;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::ServerBusy);
 
         $operation = function (): void {
             throw new TiKvException('server busy');
@@ -299,7 +300,7 @@ class RetryExecutorTest extends TestCase
             maxAttempts: 2,
         );
 
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
 
         $operation = function (): void {
             throw new TiKvException('test error');
@@ -319,7 +320,7 @@ class RetryExecutorTest extends TestCase
             maxAttempts: 3,
         );
 
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
 
         $lastError = new TiKvException('last error message');
         $operation = function () use ($lastError): void {
@@ -360,7 +361,7 @@ class RetryExecutorTest extends TestCase
             maxAttempts: 2,
         );
 
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
         $rawKey = 'user_email:alice@example.com';
 
         $operation = function (): void {
@@ -397,7 +398,7 @@ class RetryExecutorTest extends TestCase
         );
 
         // Use None backoff (sleepMs=0) so the loop iterates without delay
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
 
         $operation = function (): void {
             throw new TiKvException('test error');
@@ -424,7 +425,7 @@ class RetryExecutorTest extends TestCase
             deadlineMs: 1,
         );
 
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::None;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
         $rawKey = 'user_email:alice@example.com';
 
         $operation = function (): void {
@@ -472,9 +473,9 @@ class RetryExecutorTest extends TestCase
             throw new TiKvException('CustomError');
         };
 
-        $classifier = function (TiKvException $e): \CrazyGoat\TiKV\Client\Retry\BackoffType {
+        $classifier = function (TiKvException $e): \CrazyGoat\TiKV\Client\Retry\RetryVerdict {
             $this->assertStringContainsString('CustomError', $e->getMessage());
-            return BackoffType::ServerBusy;
+            return RetryVerdict::retry(BackoffType::ServerBusy);
         };
 
         $this->expectException(RetryBudgetExhaustedException::class);
@@ -612,7 +613,7 @@ class RetryExecutorTest extends TestCase
         // calls (worst case 62+2=64 > 63), so this detects carry-over
         // probabilistically while the "second call succeeds" invariant below
         // holds deterministically.
-        $classifier = fn(TiKvException $e): BackoffType => BackoffType::RegionMiss;
+        $classifier = fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::RegionMiss);
 
         $firstCalls = 0;
         $firstResult = $executor->execute('first_key', function () use (&$firstCalls): string {

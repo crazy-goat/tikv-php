@@ -467,10 +467,13 @@ deterministically for that data, even though the client's scan limit allows
 ```php
 $options = [
     'grpc' => [
-        'maxReceiveMessageBytes' => 67108864, // default: 64 MB (gRPC core default: 4 MB)
-        'maxSendMessageBytes'    => 67108864, // default: 64 MB
-        'keepaliveTimeMs'        => 10000,    // default: 10 s — ping interval on idle connections
-        'keepaliveTimeoutMs'     => 3000,     // default: 3 s
+        'maxReceiveMessageBytes'      => 67108864, // default: 64 MB (gRPC core default: 4 MB)
+        'maxSendMessageBytes'         => 67108864, // default: 64 MB
+        'keepaliveTimeMs'             => 10000,    // default: 10 s — ping interval on idle connections
+        'keepaliveTimeoutMs'          => 3000,     // default: 3 s
+        'keepalivePermitWithoutCalls' => true,     // default: true — ping while no call is in flight
+        'compression'                 => 'none',   // default: none; 'gzip' or 'deflate' to compress requests
+        'initialWindowSizeBytes'      => 0,        // default: 0 = let the gRPC core auto-tune
     ],
 ];
 
@@ -480,12 +483,39 @@ $client = RawKvClient::create(
 );
 ```
 
-All values must be ints `>= 1`. Keepalive pings (sent every `keepaliveTimeMs`,
-even without in-flight calls) keep idle connections alive behind stateful
-firewalls / NAT gateways — which typically drop idle flows after ~5 minutes —
-so a dead connection is detected rather than blocking until TCP retransmission
-gives up. Lowering `maxReceiveMessageBytes` is a valid hardening choice when
-you know your values are small.
+The byte limits and keepalive timings must be ints `>= 1`;
+`keepalivePermitWithoutCalls` must be a bool, `compression` one of `none`,
+`gzip` or `deflate`, and `initialWindowSizeBytes` an int `>= 0`.
+
+Keepalive pings (sent every `keepaliveTimeMs`, even without in-flight calls
+when `keepalivePermitWithoutCalls` is true) keep idle connections alive behind
+stateful firewalls / NAT gateways — which typically drop idle flows after
+~5 minutes — so a dead connection is detected rather than blocking until TCP
+retransmission gives up. Lowering `maxReceiveMessageBytes` is a valid
+hardening choice when you know your values are small.
+
+Compression is off by default and applies to the **outgoing** side:
+`'gzip'` or `'deflate'` sets `grpc.default_compression_algorithm` on every
+channel, so requests are compressed. Responses are not controlled by this
+option — the server compresses them (or not) based on the client's advertised
+`grpc-accept-encoding`, which the core sends regardless of the default. The
+trade-off is CPU for wire size on large values. The server must support the
+algorithm, and gzip is the one every gRPC implementation ships; deflate is
+optional.
+
+`initialWindowSizeBytes` sets `grpc.http2.lookahead_bytes`, the gRPC core's
+HTTP/2 initial stream window (0 leaves the core's BDP-based auto-tuning in
+place). Raise it for known high-latency links with large responses. A positive
+value also sets `grpc.http2.bdp_probe` to `0`: without that, BDP probing
+re-tunes the window from its bandwidth estimate almost immediately, so the
+configured value would only be a starting point. The trade-off is a fixed
+window that no longer adapts to the link.
+
+All three of `keepalivePermitWithoutCalls`, `compression` and
+`initialWindowSizeBytes` add or change channel arguments, and ext-grpc keys
+its persistent channels on those arguments. A client configured with a
+different value therefore uses a distinct underlying channel (a separate TCP
+connection) from a default-configured client for the same store address.
 
 ### Channel Pool (maxChannels, idleTtlMs)
 
@@ -1181,7 +1211,7 @@ the client does not know or a value that is not an integer. Omitting the whole
 
 | Option key               | Default | Operations covered                                                                    |
 |--------------------------|---------|---------------------------------------------------------------------------------------|
-| `readThresholdMs`        | 100     | `get()`, `getKeyTTL()`                                                                 |
+| `readThresholdMs`        | 100     | `get()`, `getKeyTTL()`, `getKeyTTLResult()`                                            |
 | `writeThresholdMs`       | 200     | `put()`, `delete()`, `compareAndSwap()`, `putIfAbsent()`                              |
 | `batchReadThresholdMs`   | 500     | `batchGet()`                                                                           |
 | `batchWriteThresholdMs`  | 500     | `batchPut()`, `batchDelete()`                                                          |
@@ -1927,17 +1957,26 @@ subclassing — there is no `classifyError()` hook on the client and no
 `BackoffType::Custom` case. The supported extension point is the optional
 `$classifier` callable accepted by `RetryExecutor::execute()`
 (`src/Client/Retry/RetryExecutor.php`): it receives the caught
-`TiKvException` and returns a `BackoffType` (see
-`src/Client/Retry/BackoffType.php` for the full case list) or `null`
-to fall through to the built-in classification — and if that also returns
-`null`, the error is fatal and the exception is rethrown. Note that a
-`NotLeader` error is classified before your classifier is consulted.
+`TiKvException` and returns a `RetryVerdict`
+(`src/Client/Retry/RetryVerdict.php`):
+
+- `RetryVerdict::retry($backoffType)` retries with that `BackoffType` (see
+  `src/Client/Retry/BackoffType.php` for the full case list);
+- `RetryVerdict::fatal()` stops immediately and runs the executor's fatal
+  path, including region invalidation and the broken-channel cleanup;
+- `RetryVerdict::pass()` falls through to the built-in classification, which
+  itself always answers Retry or Fatal and never Pass.
+
+Note that a `NotLeader` error is classified before your classifier is
+consulted.
 
 To use it you must construct the `RetryExecutor` yourself and invoke your
 operation through it, rather than going through `RawKvClient`'s methods:
 
 ```php
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 
 $executor = new RetryExecutor(
     maxBackoffMs: 20000,
@@ -1954,11 +1993,11 @@ $result = $executor->execute(
         // your RawKV RPC call
         return $value;
     },
-    classifier: function (TiKvException $e): ?BackoffType {
+    classifier: function (TiKvException $e): RetryVerdict {
         if (str_contains($e->getMessage(), 'CustomError')) {
-            return BackoffType::StaleCmd; // pick a real BackoffType case
+            return RetryVerdict::retry(BackoffType::StaleCmd); // pick a real BackoffType case
         }
-        return null; // fall through to the built-in ErrorClassifier
+        return RetryVerdict::pass(); // fall through to the built-in ErrorClassifier
     },
 );
 ```
