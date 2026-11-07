@@ -23,6 +23,8 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+## [v0.12.0] - 2026-11-07
+
 ### Added
 
 - `TxnKvClient::pdClient()` returns the `PdClientInterface` the client uses for region discovery and timestamps (issue #515). A consumer or test that also needs PD — service GC safe points, cluster inspection, region splits — reuses this connection instead of calling `ConnectionFactory::create()` again, which opened a second PD connection and a second TSO stream. The accessor returns the same instance the client owns, sends no RPC and throws nothing; the object is valid only until `TxnKvClient::close()`, which closes it. The GC safe-point E2E test now uses it instead of building a second factory instance (and no longer leaks the connection it used to leave open). Documented in `docs/operations.md` and `docs/error-handling.md`. (#515)
