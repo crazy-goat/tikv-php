@@ -1153,10 +1153,13 @@ consecutive-return stub needs one more value. The truncation probe is
 re-asked too: a transient empty probe would otherwise make `scan(limit: 0)`
 return a truncated range silently.
 
-E2E note: `docker-compose run --rm php-test …` recreates the tikv
+E2E note: `docker compose run --rm php-test …` recreates the tikv
 containers it depends on; if the cluster was just (re)started the run
 container's DNS can fail with "Name does not resolve tikv1:20160" and the
-whole suite errors — wait ~20 s after `make up` before running E2E.
+whole suite errors. `scripts/test-e2e.sh` now waits until all four service
+containers are running and PD reports all three stores `Up` before the first
+test (issue #514), so the flake is gone from the full run; a manual `make up`
+followed by a per-mode script still needs ~20 s.
 
 ## `git log master..HEAD --oneline` is the definitive "what's in this PR" check
 
