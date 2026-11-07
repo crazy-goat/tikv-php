@@ -398,7 +398,8 @@ and you have to decide again. The CAS loop in
 `RawKvClient::ingest()` runs **each region group** through the retry executor
 (issue #197). A retryable region error (`NotLeader`, `EpochNotMatch`,
 `ServerIsBusy`, …) or a retryable transport error is retried against a freshly
-resolved region, and the retry loop shares one budget across the whole call.
+resolved region. Each region group has its own retry budget, so a slow but
+successful group does not consume the next group's retries.
 
 What the client does **not** do is make the import atomic across regions. A
 permanent failure stops at that region group and propagates:
@@ -668,7 +669,7 @@ Every RawKV operation (and every transactional read/commit) runs through
 `RetryExecutor`, whose budgets decide when an error stops being retried
 internally and surfaces to your `catch` block. The lazy iterator factories
 defer their RPCs to `ScanIterator::next()`/`valid()`, and `ingest()` runs one
-retry loop per region group under one shared budget (issue #197).
+retry loop with a fresh budget per region group (issue #197).
 
 | Budget | Default | Exhaustion behaviour |
 |---|---|---|
@@ -762,7 +763,7 @@ Notes:
   `batchDelete()`, `batchScan()`, `deleteRange()`, `deletePrefix()`,
   `checksum()`) reports a region's `RetryBudgetExhaustedException` inside
   `BatchPartialFailureException::getRegionErrors()`; it is not thrown
-  directly. `ingest()` uses one retry budget for all region groups, so an
+  directly. `ingest()` gives every region group a fresh retry budget, so an
   exhausted budget is reported directly when no group was applied yet and
   wrapped in `IngestPartialFailureException` once one has landed (issue #197).
 - A region error carried in a range response is not the end of the operation:

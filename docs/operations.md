@@ -1573,13 +1573,19 @@ not a second full `Pair[]` copy of every value.
 
 **Retries and partial failure:**
 
-Each region group runs through the client's retry executor. A retryable region
-error (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, `RegionNotFound`, …) or a
-retryable transport error is retried against a **freshly resolved region**, so
-a leader transfer or a split/merge during a long import is recovered
-transparently. The retry loop shares one budget for the whole `ingest()` call
-(`retryDeadlineMs`, `maxBackoffMs` and the ServerBusy budget, exactly as for
-other operations).
+Each region group runs through the client's retry executor and gets its **own**
+retry budget (`retryDeadlineMs`, `maxBackoffMs` and the ServerBusy budget), so
+a long import is not capped by the per-operation retry deadline. A retryable
+region error (`NotLeader`, `EpochNotMatch`, `ServerIsBusy`, `RegionNotFound`,
+…) or a retryable transport error is retried against a **freshly resolved
+region**. A leader transfer, a merge, or a split/merge that leaves the group
+inside the re-resolved region is recovered transparently.
+
+A split that **shrinks the region below the group's last key** is not
+re-grouped: the retry keeps rebuilding an SST that spans both regions, so TiKV
+keeps rejecting it until the budget is exhausted. The import then fails closed
+(no part of that group is applied); split the batch at the split key and
+re-run, or re-run the whole call after the region layout settles.
 
 The import remains **non-atomic across regions**. When a region group fails
 permanently (a fatal region error, an exhausted retry budget or a missing

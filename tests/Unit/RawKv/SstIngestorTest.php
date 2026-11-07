@@ -29,6 +29,7 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\SstIngestor;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -173,6 +174,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
             maxIngestSize: 5,
         );
 
@@ -193,6 +195,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
             maxIngestSize: 5,
         );
 
@@ -507,7 +510,118 @@ class SstIngestorTest extends TestCase
         self::assertSame([1, 2, 2], $ingestRegionIds);
     }
 
-    public function testIngestReportsAppliedRegionsWhenALaterRegionFailsPermanently(): void
+    public function testIngestReportsRegionsActuallyIngestedAfterARetryReResolution(): void
+    {
+        $store = $this->defaultStore();
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 2,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: 't',
+        );
+        // The retry re-resolves key "n" after the region-2 cache entry is
+        // invalidated; the group now lives in region 3.
+        $freshRegion3 = new RegionInfo(
+            regionId: 3,
+            leaderPeerId: 3,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: 'm',
+            endKey: 't',
+        );
+        $region4 = new RegionInfo(
+            regionId: 4,
+            leaderPeerId: 4,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 't',
+            endKey: '',
+        );
+
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2, $region4]);
+        $this->pdClient->method('getStore')->willReturn($store);
+        $this->pdClient->method('getAllStores')->willReturn([$store]);
+        $this->pdClient->method('getRegion')->willReturn($freshRegion3);
+
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->method('callStreaming')->willReturn($writeResponse);
+
+        /** @var array<int, int> $attemptsByRegion */
+        $attemptsByRegion = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                \Google\Protobuf\Internal\Message $request,
+            ) use (&$attemptsByRegion): Message {
+                if ($method === 'SwitchMode') {
+                    return new SwitchModeResponse();
+                }
+
+                self::assertInstanceOf(IngestRequest::class, $request);
+                $context = $request->getContext();
+                self::assertNotNull($context);
+                $regionId = (int) $context->getRegionId();
+                $attemptsByRegion[$regionId] = ($attemptsByRegion[$regionId] ?? 0) + 1;
+
+                if ($regionId === 2) {
+                    $error = new Error();
+                    $error->setMessage('epoch not match');
+                    $error->setEpochNotMatch(new EpochNotMatch());
+                    $response = new IngestResponse();
+                    $response->setError($error);
+
+                    return $response;
+                }
+
+                if ($regionId === 4) {
+                    // No typed ErrorKind and no classifier keyword: fatal.
+                    $error = new Error();
+                    $error->setMessage('permanent ingest failure');
+                    $response = new IngestResponse();
+                    $response->setError($error);
+
+                    return $response;
+                }
+
+                return new IngestResponse();
+            });
+
+        try {
+            $this->ingestor->ingest(['a' => 'value1', 'n' => 'value2', 'z' => 'value3']);
+            self::fail('The ingest did not fail');
+        } catch (IngestPartialFailureException $e) {
+            // Region 1 was applied, region 3 (not the grouping-time region 2)
+            // was applied after the retry, and region 4 failed.
+            self::assertSame([1, 3], $e->getAppliedRegionIds());
+            self::assertSame(4, $e->getFailedRegionId());
+            self::assertInstanceOf(RegionException::class, $e->getPrevious());
+        }
+
+        self::assertSame(1, $attemptsByRegion[2] ?? 0);
+        self::assertSame(1, $attemptsByRegion[3] ?? 0);
+    }
+
+    public function testIngestGivesEachRegionGroupAFreshRetryBudget(): void
     {
         $store = $this->defaultStore();
         $region1 = new RegionInfo(
@@ -540,6 +654,62 @@ class SstIngestorTest extends TestCase
         $writeResponse->setMetas([new SSTMeta()]);
         $this->grpc->method('callStreaming')->willReturn($writeResponse);
 
+        /** @var list<int> $ingestRegionIds */
+        $ingestRegionIds = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                \Google\Protobuf\Internal\Message $request,
+            ) use (&$ingestRegionIds): Message {
+                if ($method === 'SwitchMode') {
+                    return new SwitchModeResponse();
+                }
+
+                self::assertInstanceOf(IngestRequest::class, $request);
+                $context = $request->getContext();
+                self::assertNotNull($context);
+                $regionId = (int) $context->getRegionId();
+                $ingestRegionIds[] = $regionId;
+
+                // A slow but successful first group must not consume the
+                // second group's retry budget.
+                if ($regionId === 1) {
+                    usleep(50000);
+                }
+
+                return new IngestResponse();
+            });
+
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            retryDeadlineMs: 20,
+        );
+
+        $ingestor->ingest(['a' => 'value1', 'z' => 'value2']);
+
+        self::assertSame([1, 2], $ingestRegionIds);
+    }
+
+    public function testIngestRethrowsRetryBudgetExhaustionWhenNoGroupWasApplied(): void
+    {
+        $store = $this->defaultStore();
+        $region = $this->defaultRegion();
+
+        $this->setupStandardPdMocks($region, $store);
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->method('callStreaming')->willReturn($writeResponse);
+
         $this->grpc->method('call')
             ->willReturnCallback(function (
                 string $address,
@@ -551,29 +721,32 @@ class SstIngestorTest extends TestCase
                     return new SwitchModeResponse();
                 }
 
-                self::assertInstanceOf(IngestRequest::class, $request);
-                $context = $request->getContext();
-                self::assertNotNull($context);
-                if ((int) $context->getRegionId() === 2) {
-                    // No typed ErrorKind and no classifier keyword: fatal.
-                    $error = new Error();
-                    $error->setMessage('permanent ingest failure');
-                    $response = new IngestResponse();
-                    $response->setError($error);
+                $error = new Error();
+                $error->setMessage('epoch not match');
+                $error->setEpochNotMatch(new EpochNotMatch());
+                $response = new IngestResponse();
+                $response->setError($error);
 
-                    return $response;
-                }
-
-                return new IngestResponse();
+                return $response;
             });
 
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(),
+            new NullLogger(),
+            $this->regionCache,
+            retryDeadlineMs: 1,
+        );
+
         try {
-            $this->ingestor->ingest(['a' => 'value1', 'z' => 'value2']);
+            $ingestor->ingest(['key1' => 'value1']);
             self::fail('The ingest did not fail');
-        } catch (IngestPartialFailureException $e) {
-            self::assertSame([1], $e->getAppliedRegionIds());
-            self::assertSame(2, $e->getFailedRegionId());
-            self::assertInstanceOf(RegionException::class, $e->getPrevious());
+        } catch (RetryBudgetExhaustedException $e) {
+            self::assertStringContainsString('Retry deadline (1 ms) exhausted', $e->getMessage());
+        } catch (IngestPartialFailureException) {
+            self::fail('A first-group failure must not be reported as a partial ingest');
         }
     }
 
@@ -883,6 +1056,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
         );
 
         $this->expectException(InvalidStoreAddressException::class);
@@ -913,6 +1087,7 @@ class SstIngestorTest extends TestCase
             $this->regionResolver,
             new TimeoutConfig(),
             new NullLogger(),
+            $this->regionCache,
         );
 
         $this->expectException(InvalidStoreAddressException::class);

@@ -17,7 +17,6 @@ use CrazyGoat\Proto\ImportSstpb\SwitchModeRequest;
 use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
-use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
@@ -65,6 +64,12 @@ final readonly class SstIngestor
         private RegionResolver $regionResolver,
         private TimeoutConfig $timeoutConfig,
         private LoggerInterface $logger,
+        /**
+         * Region cache the retry executor invalidates when a retryable region
+         * error proves the cached entry stale (issue #197). Required so the
+         * executor cannot invalidate a cache the resolver never reads.
+         */
+        private RegionCacheInterface $regionCache,
         private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
         /**
          * Maximum payload bytes (keys plus values) of one ingest() call;
@@ -77,16 +82,11 @@ final readonly class SstIngestor
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
-        /**
-         * Region cache the retry executor invalidates when a retryable region
-         * error proves the cached entry stale (issue #197).
-         */
-        private RegionCacheInterface $regionCache = new RegionCache(),
-        /** Cumulative backoff budget (ms) for one ingest operation's retry loops. */
+        /** Cumulative backoff budget (ms) for one region group's retry loop. */
         private int $maxBackoffMs = 20000,
-        /** ServerBusy backoff budget (ms) for one ingest operation. */
+        /** ServerBusy backoff budget (ms) for one region group's retry loop. */
         private int $serverBusyBudgetMs = 60000,
-        /** Wall-clock deadline (ms) for one ingest operation's retry loops. */
+        /** Wall-clock deadline (ms) for one region group's retry loop. */
         private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
         private MetricsInterface $metrics = new NoOpMetrics(),
     ) {
@@ -135,9 +135,11 @@ final readonly class SstIngestor
         // 2. Get all TiKV stores from PD.
         $stores = $this->pdClient->getAllStores();
 
-        // One ingest is one logical operation: every region's retry loop
-        // shares one budget (issue #197, mirroring #223).
-        $executor = $this->createRetryExecutor()->beginOperation();
+        // Each region group gets a fresh retry budget (issue #197). A bulk
+        // ingest legitimately runs for minutes, so a budget shared across the
+        // sequential groups would make retryDeadlineMs a wall-clock cap on the
+        // whole import and fail a group that has not retried once.
+        $executor = $this->createRetryExecutor();
         /** @var list<int> $appliedRegionIds */
         $appliedRegionIds = [];
 
@@ -163,17 +165,25 @@ final readonly class SstIngestor
                 /** @var string[] $regionKeys */
                 $regionKeys = $group['keys'];
 
+                // Best available ID until the retried closure resolves the
+                // region; a retry may move the group to a different region
+                // (split/merge), so the last resolved ID is reported.
+                $failedRegionId = $region->regionId;
                 try {
-                    $this->ingestRegionKeysWithRetry($executor, $regionKeys, $keyValuePairs, $ttl);
+                    $appliedRegionIds[] = $this->ingestRegionKeysWithRetry(
+                        $executor,
+                        $regionKeys,
+                        $keyValuePairs,
+                        $ttl,
+                        $failedRegionId,
+                    );
                 } catch (TiKvException $e) {
                     if ($appliedRegionIds === []) {
                         throw $e;
                     }
 
-                    throw new IngestPartialFailureException($appliedRegionIds, $region->regionId, $e);
+                    throw new IngestPartialFailureException($appliedRegionIds, $failedRegionId, $e);
                 }
-
-                $appliedRegionIds[] = $region->regionId;
             }
         } finally {
             // 6. Always switch stores back to normal mode, even on failure.
@@ -380,6 +390,10 @@ final readonly class SstIngestor
      *
      * @param string[] $keys
      * @param array<string, string> $keyValuePairs
+     * @param int $lastResolvedRegionId Set to the region ID of the last
+     *     resolution attempt, so a failure reports the region that actually
+     *     rejected the SST rather than the grouping-time one
+     * @return int The region ID the successful attempt ingested into
      *
      * @throws TiKvException
      */
@@ -388,17 +402,25 @@ final readonly class SstIngestor
         array $keys,
         array $keyValuePairs,
         ?int $ttl,
-    ): void {
+        int &$lastResolvedRegionId,
+    ): int {
         $targetStoreId = null;
 
-        $executor->execute(
+        return $executor->execute(
             $keys[0],
-            function () use ($keys, $keyValuePairs, $ttl, &$targetStoreId): void {
+            function () use ($keys, $keyValuePairs, $ttl, &$targetStoreId, &$lastResolvedRegionId): int {
+                // Reset per attempt: a failure inside getRegionInfo() must
+                // not report the previous attempt's store (issue #197).
+                $targetStoreId = null;
+
                 // Re-resolve on every attempt: a retry must use the region
                 // that owns the key now, not the one that failed.
                 $region = $this->regionResolver->getRegionInfo($keys[0]);
                 $targetStoreId = $region->leaderStoreId;
+                $lastResolvedRegionId = $region->regionId;
                 $this->ingestRegionKeys($region, $keys, $keyValuePairs, $ttl);
+
+                return $region->regionId;
             },
             targetStoreId: static function () use (&$targetStoreId): ?int {
                 return $targetStoreId;

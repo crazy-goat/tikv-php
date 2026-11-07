@@ -19,6 +19,13 @@ namespace CrazyGoat\TiKV\Client\Exception;
 final class IngestPartialFailureException extends TiKvException
 {
     /**
+     * Upper bound on the region IDs rendered into the message. A bulk import
+     * that fails late can have thousands of applied regions; the full list
+     * stays available through getAppliedRegionIds().
+     */
+    private const MAX_REGION_IDS_IN_MESSAGE = 10;
+
+    /**
      * @param list<int> $appliedRegionIds Regions whose SST was ingested successfully
      * @param int $failedRegionId The region whose import failed
      * @param TiKvException $cause The underlying failure
@@ -33,13 +40,29 @@ final class IngestPartialFailureException extends TiKvException
                 'SST ingest partially failed: %d region(s) ingested (%s); region %d failed: %s. '
                 . 'Re-running the same key-value pairs is safe.',
                 count($appliedRegionIds),
-                implode(', ', $appliedRegionIds),
+                $this->formatRegionIds($appliedRegionIds),
                 $failedRegionId,
                 $cause->getMessage(),
             ),
             0,
             $cause,
         );
+    }
+
+    /**
+     * @param list<int> $regionIds
+     */
+    private function formatRegionIds(array $regionIds): string
+    {
+        $shown = array_slice($regionIds, 0, self::MAX_REGION_IDS_IN_MESSAGE);
+        $formatted = implode(', ', $shown);
+
+        $remaining = count($regionIds) - count($shown);
+        if ($remaining > 0) {
+            $formatted .= sprintf(', ... (%d more)', $remaining);
+        }
+
+        return $formatted;
     }
 
     /**

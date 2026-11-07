@@ -1630,3 +1630,21 @@ Four consequences to keep:
    request (`DEADLINE_EXCEEDED`, `UNAVAILABLE`, `ABORTED`, `INTERNAL`,
    `UNKNOWN`, `CANCELLED`, `DATA_LOSS`, unrecognised codes) become
    indeterminate.
+
+## SST ingest retry budget is per region group (issue #197)
+
+`SstIngestor::ingest()` imports regions sequentially and gives **each region
+group** a fresh retry budget instead of sharing one `beginOperation()` budget
+across the loop. A bulk ingest legitimately runs for minutes; a shared budget
+would make `retryDeadlineMs` (default 30 s) a wall-clock cap on the whole
+import, so a group that never retried would fail as soon as the call crossed
+the deadline. `RetryExecutor` has no way to exclude successful work from a
+deadline, so the correct seam is one stateless executor whose `execute()` calls
+each start their own budget. The same reasoning does **not** apply to a
+multi-region `batchGet()`/`scan()`/`commit()`: those are one logical operation
+whose retries must share a budget, so they keep `beginOperation()`.
+
+A split that shrinks a group's region below the group's last key is still not
+re-grouped (the retry only re-resolves the first key and fails closed once the
+budget is exhausted). That limitation is deliberate for this issue; fixing it
+means re-grouping the remaining keys inside the retried closure.

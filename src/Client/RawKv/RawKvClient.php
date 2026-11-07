@@ -89,9 +89,9 @@ use Psr\Log\NullLogger;
  * store addresses before that wrapper and can still throw
  * `StoreNotFoundException` directly.
  *
- * `ingest()` runs each region group through its own {@see RetryExecutor}, so
- * it can throw {@see RetryBudgetExhaustedException} directly (when no region
- * group had been applied yet) or wrap a failure in
+ * `ingest()` runs each region group through {@see RetryExecutor} with a fresh
+ * budget per group, so it can throw {@see RetryBudgetExhaustedException}
+ * directly (when no region group had been applied yet) or wrap a failure in
  * {@see \CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException} once
  * at least one group has landed. The store-mode switch fan-out still reports
  * its failures through {@see BatchPartialFailureException}; a missing store
@@ -561,11 +561,11 @@ final class RawKvClient
             $regionResolver,
             $timeoutConfig,
             $this->logger,
+            $regionCache,
             $this->maxConcurrency,
             $this->maxIngestSize,
             $this->requestContext,
             $this->resourceControl,
-            regionCache: $regionCache,
             maxBackoffMs: $maxBackoffMs,
             serverBusyBudgetMs: $serverBusyBudgetMs,
             retryDeadlineMs: $this->retryDeadlineMs,
@@ -1611,7 +1611,9 @@ final class RawKvClient
      * manual recovery.
      *
      * Each region group is retried on retryable region errors (`NotLeader`,
-     * `EpochNotMatch`, `ServerIsBusy`, …) against a freshly resolved region.
+     * `EpochNotMatch`, `ServerIsBusy`, …) against a freshly resolved region,
+     * with a fresh retry budget per group (a long import is not capped by
+     * `retryDeadlineMs`).
      * The import is still **not atomic across regions**: when a later group
      * fails permanently, the earlier groups keep their data and the failure
      * is reported as {@see \CrazyGoat\TiKV\Client\Exception\IngestPartialFailureException},
