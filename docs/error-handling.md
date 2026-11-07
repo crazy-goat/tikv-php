@@ -305,6 +305,7 @@ only the timing it produces differs.
 |---|---|---|---|
 | `RawKvClient::get()` | Yes | Yes | Read-only. A repeated read returns the *current* value, which may differ from the first answer when a concurrent write landed in between |
 | `RawKvClient::getKeyTTL()` | Yes | Yes | Read-only. The TTL keeps counting down, so the second answer can be smaller |
+| `RawKvClient::getKeyTTLResult()` | Yes | Yes | Read-only. The TTL keeps counting down, so the second answer can be smaller; `exists` can also change if the key expires or is written in between |
 | `RawKvClient::batchGet()` | Yes | Yes | Read-only. A `BatchPartialFailureException` returns **no** results — re-run the whole call |
 | `RawKvClient::scan()`, `RawKvClient::scanPrefix()`, `RawKvClient::reverseScan()`, `RawKvClient::batchScan()` | Yes | Yes | Read-only. The rows are the same set the first call returned unless the data changed in between |
 | `RawKvClient::scanIterator()`, `RawKvClient::scanPrefixIterator()` | Yes | Yes | Read-only, but **lazy**: the failure surfaces from the iteration, not from the factory call. A new iterator starts again at the beginning of the range. Exception: the cursor-progress `TiKvException` (#312) is not transient, so do not loop on it |
@@ -531,7 +532,8 @@ an earlier group already landed (issue #197).
 | `get(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Key validated non-empty + size limit before the RPC. `RetryBudgetExhaustedException` means the internal retry loop exhausted its attempt cap or wall-clock deadline |
 | `put(string, string, int $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Same validation as `get()` plus value size |
 | `delete(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Idempotent at the TiKV level |
-| `getKeyTTL(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Returns `null` when the key has no TTL |
+| `getKeyTTL(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Returns `null` both when the key is missing and when it has no TTL; use `getKeyTTLResult()` to tell them apart |
+| `getKeyTTLResult(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Returns a `KeyTtl` with `exists` and `ttlSeconds`, distinguishing a missing key (`exists: false`) from one without an expiry (`exists: true, ttlSeconds: null`) |
 | `compareAndSwap(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `CasIndeterminateException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | `InvalidStateException` with `CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))` when atomic mode is off. `CasIndeterminateException` means the swap may have been applied; a `GrpcException` here means the request was never sent or was rejected before it was applied, so the swap definitively did not happen |
 | `putIfAbsent(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `CasIndeterminateException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Delegates to `compareAndSwap()`; requires atomic mode (`setAtomicForCAS(true)`), same `InvalidStateException` message. `CasIndeterminateException` means the value may have been stored |
 | `batchGet(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `KeyErrorException`, `StoreNotFoundException`, `TiKvException` | Empty input returns `[]` without RPC. A region's `RetryBudgetExhaustedException` is reported inside `BatchPartialFailureException::getRegionErrors()`. `KeyErrorException` and `StoreNotFoundException` escape directly only with `options['batchCommands']` enabled. `TiKvException` is the fail-closed unresolved-region error before any send |
@@ -742,7 +744,7 @@ Notes:
   (#247)
 - The channel a transport failure closes is the one of the store the failed
   attempt actually targeted, not one re-derived from the region cache. Every
-  retrying RPC path — RawKV `get`/`getKeyTTL`/`put`/`delete`, `batchGet`/
+  retrying RPC path — RawKV `get`/`getKeyTTL`/`getKeyTTLResult`/`put`/`delete`, `batchGet`/
   `batchPut`/`batchDelete`, forward and reverse scans, `deleteRange` and
   `checksum`, and TxnKV `get`/`batchGet`/`scan`, prewrite, secondary commit,
   rollback, pessimistic rollback, heartbeat and lock resolution — reports its
