@@ -30,6 +30,7 @@ policy now classifies as internal.
 ### Tests
 
 - `tests/Unit/Ci/WorkflowSupplyChainGuardTest.php` pins the SEC-13 hardening (issue #316): it fails when a workflow adds a `uses:` reference without a full 40-character commit SHA and a trailing version comment, when the CI workflow loses its top-level `permissions: contents: read` block, or when Dependabot stops watching the `github-actions` ecosystem. Local actions and `docker://` references are exempt, the check discovers every `.github/workflows/*.y*ml` so a new workflow cannot escape it, and a `uses:` line the parser cannot read fails instead of being skipped.
+- `tests/Unit/RawKv/RawKvClientBatchGetArrayKeyTest.php` pins the public `RawKvClient::batchGet()` contract for canonical decimal-string keys (issue #202, RAW-17): PHP stores `'12345'` under int 12345, so `array_keys()` yields an `int` where the method used to declare `string`, `in_array('12345', array_keys($result), true)` is false, and the lookup by the original bytes still resolves the same entry. The coercion was already fixed and documented by #261/#603 (`array<array-key, ?string>`); this adds the client-boundary regression test the audit asked for, including the exact reproduction, and pins that a non-canonical form (`'01000'`) keeps its `string` key and that an `int` input key is string-cast on the wire. No production behaviour change.
 
 ## [v0.13.0] - 2026-11-07
 
