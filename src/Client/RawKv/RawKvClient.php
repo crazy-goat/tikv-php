@@ -1558,8 +1558,9 @@ final class RawKvClient
      * @return array<array<array{key: string, value: ?string}>>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException When `eachLimit` is invalid or a range
-     *         is reversed (`$startKey` sorts after a non-empty `$endKey`)
+     * @throws InvalidArgumentException When `eachLimit` is invalid, a range is
+     *         not a `[startKey, endKey]` pair of strings, or a range is
+     *         reversed (`$startKey` sorts after a non-empty `$endKey`)
      * @throws BatchPartialFailureException A per-range or per-region failure —
      *     including a `RegionException`, a `GrpcException`, a region's
      *     exhausted retry budget or a missing store — is reported inside
