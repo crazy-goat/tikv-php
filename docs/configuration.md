@@ -276,16 +276,24 @@ example from `pd-ctl cluster` or a trusted client. When it is set:
   cluster-id mismatch errors, so the timestamp path cannot be redirected
   either.
 
-Independently of the option, once a cluster ID has been established, an
-error string naming a different ID is rejected instead of silently
-overwriting it. That no-overwrite rule is unconditional: it also applies when
-`expectedClusterId` is unset, because the issue requires it.
+Independently of the option, once a cluster ID has been established, every
+later PD response header must report the same ID; a different ID throws
+`TiKvException` (`Cluster ID mismatch: established X, server reported Y`)
+before the response reaches the caller. An error string naming a different ID
+is rejected the same way instead of silently overwriting the established ID.
+Both rules are unconditional: they also apply when `expectedClusterId` is
+unset. A reported ID of `0` means "not reported" (proto3 omits an unset
+scalar), so it is never adopted and never treated as a mismatch:
+`healthCheck()` and `getClusterId()` keep returning `null` instead of pinning
+the client to cluster 0. The header and error-string rules live in one shared
+`ClusterIdGuard` used by `PdClient` and `TimestampOracle` (issue #250,
+REG-19).
 
 An absent or explicitly `null` option keeps the historical initial
-learn-and-adopt behaviour: the first cluster ID PD reports is adopted.
-Existing deployments that relied on an error string replacing an already
-established ID do change — intentionally. The option must be a positive
-integer; any other type, `0` or a negative value throws
+learn-and-adopt behaviour: the first non-zero cluster ID PD reports is
+adopted. Existing deployments that relied on an error string replacing an
+already established ID do change — intentionally. The option must be a
+positive integer; any other type, `0` or a negative value throws
 `InvalidArgumentException` at client creation. The value must fit in a PHP
 `int`: PD cluster IDs are `uint64`, and the protobuf runtime clamps a decoded
 value above `PHP_INT_MAX` to `PHP_INT_MAX`, so a cluster whose ID exceeds
@@ -2044,19 +2052,26 @@ saves.
 
 ### Scan-path Region Cache Use
 
-Both scan paths read the region cache first:
+RawKV and TxnKV scans read the region cache first:
 
-- **RawKV** (`scan()`, `scanPrefix()`, `reverseScan()`, `batchScan()` and the
+- **RawKV forward** (`scan()`, `scanPrefix()`, `batchScan()` and the
   iterators) and **TxnKV** (`Transaction::scan()`) enumerate regions through
   the cache. A contiguous cached run is served locally; PD is asked only for
   the uncovered gap, starting at the gap's first key, and the answer is cached
   for the next page and the next scan.
+- **RawKV `reverseScan()`** resolves regions from the upper bound downwards
+  through `RegionResolver::getRegionBelow()`: the cache answers the common
+  case, and a miss asks PD for the region containing the cursor or, when the
+  cursor sits exactly on a region boundary, for the adjacent region below it.
+  It does not use `RegionScanSource`, so its cache counters are labelled
+  `region_resolution` (per lookup), not `scan`.
 - A split or merge the client has not seen yet is still handled by the usual
   region-error retry (the stale entry is invalidated from `EpochNotMatch`,
   then the retry re-resolves the gap through PD).
-- The scan path increments the same counters as point lookups, labelled
-  `scan` (RawKV) and `txn_scan` (TxnKV), so `regionCacheHit()` /
-  `regionCacheMiss()` cover it (see [Metrics and Observability](#metrics-and-observability)).
+- The forward scan path increments the same counters as point lookups,
+  labelled `scan` (RawKV) and `txn_scan` (TxnKV), so `regionCacheHit()` /
+  `regionCacheMiss()` cover it; `reverseScan()` reports
+  `region_resolution` (see [Metrics and Observability](#metrics-and-observability)).
 
 ### Store Cache
 
@@ -2322,8 +2337,8 @@ The library emits the following counter tags:
 | `rpcStarted()`                 | `'tikvpb.Tikv/KvGet'`      | One outbound gRPC call was dispatched             |
 | `rpcCompleted()`               | `'tikvpb.Tikv/KvGet'`      | gRPC call returned (success or error); carries duration (ms) |
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
-| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache; the scan labels are emitted once per cache-served run of regions |
-| `regionCacheMiss()`            | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was not in the cache, had to query PD; the scan labels are emitted once per `ScanRegions` call |
+| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache. `region_resolution` is the per-lookup label (point reads and `reverseScan()`'s top-down resolver); the scan labels are emitted once per cache-served run of regions |
+| `regionCacheMiss()`            | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was not in the cache, had to query PD. `region_resolution` is the per-lookup label; the scan labels are emitted once per `ScanRegions` call |
 | `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'`, `'refresh'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), post-resolve cleanup in `LockResolver`, or a `refreshRegionCache()` tick that found PD no longer maps the entry's start key to its cached range (a refresh that supersedes the entry with a newer answer is a `put()` and emits nothing). Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
 
 For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
