@@ -484,6 +484,12 @@ and resolves only inside the compose network; on the host use the published PD p
 PD_ENDPOINTS=localhost:${PD_PORT:-2379} composer test:e2e:raw
 ```
 
+The published PD and TiKV ports are bound to `127.0.0.1`, not to every host interface,
+because the development cluster has no authentication or transport security. The
+`localhost` form above is therefore the only host-side address that works; reaching the
+cluster from another machine needs an SSH tunnel or a compose override that opts in
+deliberately (issue #318, SEC-15).
+
 The API V2 lane needs a second keyspace that already exists in the cluster (the
 suite proves that the same user key stays isolated per keyspace). Create it once
 and name it in `TIKV_ALT_KEYSPACE`:
@@ -802,6 +808,24 @@ make clean && make up
 # Development shell
 make shell
 ```
+
+The `php-client` and `php-test` containers run as an unprivileged `app` user
+that owns the bind-mounted checkout. `make` and the E2E scripts detect the
+host owner with `id -u` / `id -g`; when you call `docker compose` directly,
+pass the same IDs and rebuild after changing them:
+
+```bash
+export HOST_UID=$(id -u) HOST_GID=$(id -g)
+docker compose build
+docker compose run --rm --no-deps php-client vendor/bin/phpunit --testsuite Unit
+```
+
+If you built the image before the non-root change, `vendor/` and
+`.phpunit.cache/` may still be owned by root; the first run as `app` then fails
+with `Permission denied`. Fix it once with
+`sudo chown -R "$(id -u):$(id -g)" vendor .phpunit.cache`, or remove both and
+let Composer and PHPUnit recreate them. `docs/helpers/faq.md` also covers the
+build-time GID/UID collision fallbacks.
 
 ## Recognition
 
