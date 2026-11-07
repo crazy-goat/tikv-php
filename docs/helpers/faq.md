@@ -297,6 +297,12 @@ Two traps when measuring coverage:
    reason. `ext-grpc` is required too: the `Grpc` suite mocks `\Grpc\Call`, which is a hard error
    (not a skip) without the extension.
 
+`phpunit.xml` configures no coverage report on purpose (issue #556): a report block there makes
+every bare `vendor/bin/phpunit` run request a driver, so on the documented local setup
+(`xdebug.mode=debug`) it exits 1 with the warning above although every test passed, and with a
+driver in coverage mode it leaves `coverage.xml` / `coverage-html/` behind. The report is requested
+on the command line by `composer test:coverage` and the CI coverage job.
+
 ## Every TiKV `*_ts` protobuf field must be a PD TSO timestamp, never a monotonic-clock value
 
 TiKV interprets every timestamp protobuf field (`caller_start_ts`,
@@ -1377,10 +1383,12 @@ decide — do not re-derive routability in application code. `TwoPhaseCommitter`
 is not affected: it groups through `RegionGrouper`, so it has failed closed
 since #244.
 
-Separately, `ingest()` is not retried at all: any region/transport error
-aborts the remaining regions (the `finally` still switches all stores back to
-normal mode), and a killed process leaves the cluster in import mode — see the
-[DOC-24] section in `docs/operations.md`.
+Separately, `ingest()` retries each region group through the retry executor
+(issue #197), but the import is not atomic across regions: a permanent failure
+aborts the remaining groups, reports the applied region IDs through
+`IngestPartialFailureException`, and the `finally` still switches all stores
+back to normal mode. A killed process leaves the cluster in import mode — see
+the [DOC-24] section in `docs/operations.md`.
 
 ## Doc enum/const lists drift — regenerate them from code, never hand-write
 

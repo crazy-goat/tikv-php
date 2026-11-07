@@ -366,7 +366,10 @@ $client->ingest(['k1' => 'v1', 'k2' => 'v2'], ttl: 3600);
 > switched into import mode and switched back on completion. The switch-back
 > runs in a `finally` block, so exceptions are safe — but a killed process
 > (OOM killer, deploy restart, `max_execution_time`) leaves the cluster in
-> import mode, degrading it for all clients. Run `ingest()` only from a
+> import mode, degrading it for all clients. Retryable region errors are
+> retried per region, but the import is not atomic across regions: a permanent
+> failure throws `IngestPartialFailureException` with the applied region IDs,
+> and re-running the whole call is the recovery. Run `ingest()` only from a
 > dedicated, supervised CLI process, and see
 > [Bulk Import (SST Ingest)](docs/operations.md#bulk-import-sst-ingest) in the
 > operations guide for the full semantics, the configurable ingest deadline
@@ -802,6 +805,26 @@ $client = RawKvClient::create(['127.0.0.1:2379'], logger: $logger);
 // - Error conditions
 ```
 
+Every key the client itself formats for a log line or an exception message is
+redacted before it leaves the client. The default
+[`KeyRedactor`](src/Client/Util/KeyRedactor.php) replaces each key with a
+truncated keyed hash and the total byte length, for example
+`#3c469e9d6c5875d3 (5 bytes)`. The digest is the first 16 hex characters of
+`hash_hmac('sha256', $key, $salt)`, so it is **one-way for keys of every
+length** — a key of 8 bytes or fewer is no longer hex-encoded in full — while
+the same key keeps the same token within a process, so log lines can still be
+correlated. The salt is 32 random bytes generated on first use, so the example
+shows the shape only and the exact token differs per process; pin a high-entropy
+salt with `KeyRedactor::setSalt()` before the first redaction when tokens must
+be comparable across processes or restarts. `KeyRedactor::setRedactor()`
+replaces the default entirely: it is an explicit opt-out, and a reversible
+scheme installed there re-exposes the key material. This guarantee covers keys
+the client holds; TiKV's own error text can still name a key the client never
+saw, and the client cannot redact what it never received. See
+[Log Redaction](docs/configuration.md#log-redaction) for the format, the
+server-text caveat, the override trade-off and the exception messages that
+carry a token.
+
 ### Complete Example
 
 ```php
@@ -901,7 +924,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 - ✅ **Checksum** — CRC64-XOR checksum over key range with `ChecksumResult`
 
 ### Bulk Import
-- ✅ **Ingest** — SST bulk import: the key/value pairs are sorted and written straight into the regions, bypassing the Raft write path (optional TTL); the payload is streamed in chunks, and `options['maxIngestSize']` optionally bounds it before any RPC
+- ✅ **Ingest** — SST bulk import: the key/value pairs are sorted and written straight into the regions, bypassing the Raft write path (optional TTL); the payload is streamed in chunks, retryable region errors are retried per region, `IngestPartialFailureException` reports a partial import, and `options['maxIngestSize']` optionally bounds the payload before any RPC
 
 ### Transaction Capabilities
 - ✅ **TxnKvClient / Transaction** — ACID transactions with snapshot reads and two-phase commit
@@ -990,7 +1013,7 @@ Two settings are methods on the client rather than options:
 ### Infrastructure
 - ✅ **PD Region Discovery** — With RegionEpoch support
 - ✅ **Region Routing** — Direct to correct TiKV node
-- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. Both scan paths (RawKV and TxnKV `Transaction::scan()`) read the cache first and query PD only for the uncovered ranges, and report `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels
+- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. RawKV forward scans/iterators and TxnKV `Transaction::scan()` read the cache first and query PD only for the uncovered ranges, reporting `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels; RawKV `reverseScan()` resolves regions top-down through the region resolver and reports `region_resolution`
 - ✅ **Region cache refresh and preload** — opt-in, PHP-process-model friendly (no timers): call `refreshRegionCache()` from a worker tick (throttled by `options['regionCacheRefreshMs']`, default `0` = disabled) and `preloadRegions([['start', 'end'], ...])` at boot to warm the keys the worker will touch without serving a read. Both keep the old entry and only log when PD fails, and are no-ops after `close()` ([Region Cache Refresh and Preload](docs/configuration.md#region-cache-refresh-and-preload))
 - ✅ **Store Cache** — In-memory caching of store addresses
 - ✅ **Retry Logic** — Automatic retry with exponential backoff; the wall-clock bound of one retry loop is `options['retryDeadlineMs']` (see [Retry System](docs/architecture.md#8-retry-system))
