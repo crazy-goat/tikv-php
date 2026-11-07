@@ -484,8 +484,9 @@ function parallelScan(
         $ranges[] = [$start, $end];
     }
     
-    // Scan ranges in parallel (using batchScan).
-    // The ranges are fanned out concurrently, capped by
+    // Scan ranges in parallel (using batchScan). The ranges are grouped by
+    // region and sent as one RawBatchScan per region; requests to distinct
+    // regions are dispatched concurrently, capped by
     // options['maxConcurrency'] (default 16, must be >= 1).
     $results = $client->batchScan($ranges, eachLimit: $limitPerRange);
     

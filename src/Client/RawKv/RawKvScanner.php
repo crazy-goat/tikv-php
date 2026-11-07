@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use CrazyGoat\Proto\Kvrpcpb\KeyRange;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
@@ -977,34 +980,31 @@ final readonly class RawKvScanner
     }
 
     /**
-     * Scan multiple non-contiguous ranges with a client-side loop of
-     * per-range `RawScan` requests.
+     * Scan multiple non-contiguous ranges with one `RawBatchScan` request per
+     * region (issue #433, GAP-19).
      *
-     * This is **not** the `RawBatchScan` RPC. The client decomposes the call
-     * into one `RawScan` per range, and each range is itself clipped into one
-     * request per region, then assembles the answers into the returned array.
-     * The RPC count is therefore linear in the number of ranges and in the
-     * regions those ranges cover, and every range independently resolves its
-     * regions: fifty ranges cost roughly fifty scans, not one round trip per
-     * region for the whole call. Size range lists accordingly, or call
-     * {@see self::scan()} directly and parallelise in application code.
+     * The client groups the requested ranges by the regions that own them,
+     * clips every range to each region's bounds, and sends one
+     * `RawBatchScan` per region with all of that region's clipped ranges.
+     * Requests to distinct regions are dispatched concurrently, bounded by
+     * {@see self::$maxConcurrency} (issue #295), and share one batch deadline
+     * ({@see TimeoutConfig::$batchDeadlineMs}). For a range list that spans
+     * N regions the call therefore costs N store round trips instead of one
+     * `RawScan` per range per region, which is the point of the RPC.
      *
-     * The per-range sends are dispatched concurrently in windows of at most
-     * {@see self::$maxConcurrency} ranges (issue #295), so their server-side
-     * latencies overlap instead of accumulating serially; all sends share one
-     * batch deadline ({@see TimeoutConfig::$batchDeadlineMs}) and one retry
-     * budget (issue #223). Concurrency bounds the wall-clock overlap, not the
-     * total work: the number of `RawScan` RPCs still grows with the number of
-     * ranges and regions, so a long range list remains proportionally more
-     * expensive than a short one.
-     *
-     * Each range's first `RawScan` send is issued at the wire layer before any
-     * wait begins; ranges whose region enumeration yields more than one
-     * sub-range fan out all of those sends too. After the waits, a sub-range
-     * whose region returned a region error or shrank after enumeration is
-     * re-run through the sequential retrying path, and a split of the final
-     * sub-range continues from its fresh end key, so no part of the range is
-     * dropped (issue #267 semantics).
+     * `RawBatchScan` carries one `context` (one region), so a range that
+     * spans several regions is split across those regions' requests. The
+     * response is a flat `kvs` list without per-range boundaries; the client
+     * restores the per-range grouping from the clipped bounds. That is only
+     * unambiguous when the requested ranges are pairwise disjoint, so a call
+     * with overlapping ranges keeps the per-range `RawScan` path
+     * ({@see self::batchScanPerRange()}). The same fallback runs when a
+     * region error, a transport failure or a missing store makes the
+     * un-retried region fan-out untrustworthy: reads are idempotent, so the
+     * whole call is re-run through the per-range path, which re-resolves and
+     * retries each range (issue #267 semantics). A
+     * {@see BatchDeadlineExceededException} is never a reason to fall back
+     * (the per-range path has no batch deadline) and is rethrown.
      *
      * `eachLimit` is required and must be in `1..MAX_SCAN_LIMIT`. Unlike
      * {@see self::scan()}, `0` is rejected instead of meaning "the whole
@@ -1013,7 +1013,9 @@ final readonly class RawKvScanner
      * `batchScan([['', '']], eachLimit: 100)` scans the whole keyspace and
      * returns at most 100 rows. Each range returns at most `eachLimit` rows;
      * a returned count equal to the limit may mean the range holds more rows
-     * (issue #440).
+     * (issue #440). TiKV applies `each_limit` per region and per range, so a
+     * range that spans several regions is trimmed to `eachLimit` after the
+     * per-region responses are merged.
      *
      * Every range is validated before the first send: a reversed range
      * rejects the whole call with {@see InvalidArgumentException}.
@@ -1024,9 +1026,7 @@ final readonly class RawKvScanner
      * `[[['key' => ..., 'value' => ...], ...], ...]`. Each inner list holds
      * at most `eachLimit` rows in ascending key order, and `value` is `null`
      * when `$keyOnly` is true. An empty `$ranges` list returns `[]`; a range
-     * that matches no rows contributes an empty inner list. This per-range
-     * grouping is a client-side convenience and is not the flat `kvs` list a
-     * `RawBatchScan` response would carry.
+     * that matches no rows contributes an empty inner list.
      *
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>
@@ -1054,15 +1054,372 @@ final readonly class RawKvScanner
             ));
         }
 
-        // One batchScan() call is one logical operation: every range and
-        // region shares one retry budget (issue #223).
-        $executor = $this->createRetryExecutor()->beginOperation();
-        $clipper = new RegionRangeClipper();
-
-        $calls = [];
+        // Validate every range before the first RPC and keep the caller's
+        // index => [startKey, endKey] mapping for the result shape.
+        /** @var array<array-key, array{0: string, 1: string}> $normalized */
+        $normalized = [];
         foreach ($ranges as $index => $range) {
             [$startKey, $endKey] = $this->assertBatchRange($range, $index);
             RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'batchScan');
+            $normalized[$index] = [$startKey, $endKey];
+        }
+
+        // One batchScan() call is one logical operation: every range and
+        // region shares one retry budget (issue #223).
+        $executor = $this->createRetryExecutor()->beginOperation();
+
+        // A flat RawBatchScan response carries no per-range boundaries, so
+        // the grouping can only be restored when the ranges are disjoint.
+        if (!$this->rangesAreDisjoint($normalized)) {
+            return $this->batchScanPerRange($normalized, $eachLimit, $keyOnly, $columnFamily, $executor);
+        }
+
+        $groups = $this->groupBatchScanRangesByRegion($normalized);
+        if ($groups === []) {
+            return $this->emptyBatchScanResult($normalized);
+        }
+
+        try {
+            return $this->batchScanByRegion($groups, $normalized, $eachLimit, $keyOnly, $columnFamily);
+        } catch (BatchDeadlineExceededException $e) {
+            // The per-range path has no batch deadline: falling back would
+            // silently lift the caller's wall-clock bound.
+            throw $e;
+        } catch (TiKvException) {
+            // Region errors, transport failures and missing stores make the
+            // un-retried region fan-out untrustworthy. Reads are idempotent,
+            // so re-run the whole call through the per-range path, which
+            // re-resolves the regions and retries each range.
+            return $this->batchScanPerRange($normalized, $eachLimit, $keyOnly, $columnFamily, $executor);
+        }
+    }
+
+    /**
+     * Whether every non-empty range is pairwise disjoint.
+     *
+     * The `RawBatchScan` response is a flat `kvs` list, so a key that belongs
+     * to two overlapping ranges cannot be attributed to one of them. Empty
+     * ranges (`startKey === endKey` with a non-empty end) match no key and
+     * are ignored.
+     *
+     * @param array<array-key, array{0: string, 1: string}> $ranges
+     */
+    private function rangesAreDisjoint(array $ranges): bool
+    {
+        /** @var list<array{0: string, 1: string}> $intervals */
+        $intervals = [];
+        foreach ($ranges as [$startKey, $endKey]) {
+            if ($endKey !== '' && KeyOrder::eq($startKey, $endKey)) {
+                continue;
+            }
+            $intervals[] = [$startKey, $endKey];
+        }
+
+        $count = count($intervals);
+        if ($count < 2) {
+            return true;
+        }
+
+        usort(
+            $intervals,
+            static fn(array $a, array $b): int => KeyOrder::cmp($a[0], $b[0]),
+        );
+
+        $maxEnd = $intervals[0][1];
+        for ($i = 1; $i < $count; ++$i) {
+            [$startKey, $endKey] = $intervals[$i];
+            if ($maxEnd === '' || KeyOrder::gt($maxEnd, $startKey)) {
+                return false;
+            }
+            if ($endKey === '' || KeyOrder::gt($endKey, $maxEnd)) {
+                $maxEnd = $endKey;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Group every range's clipped sub-ranges by the region that owns them.
+     *
+     * Within a region the entries are sorted by start key. That keeps each
+     * range's keys contiguous in the flat response and, crucially, puts a
+     * clipped range with an empty end key (+infinity) last: TiKV reads an
+     * empty end key on a non-final range as "up to the next range's start".
+     *
+     * @param array<array-key, array{0: string, 1: string}> $ranges
+     * @return array<int, array{
+     *     region: RegionInfo,
+     *     ranges: list<array{index: int|string, start: string, end: string}>
+     * }>
+     */
+    private function groupBatchScanRangesByRegion(array $ranges): array
+    {
+        $clipper = new RegionRangeClipper();
+        /** @var array<int, array{
+         *     region: RegionInfo,
+         *     ranges: list<array{index: int|string, start: string, end: string}>
+         * }> $groups
+         */
+        $groups = [];
+
+        foreach ($ranges as $index => [$startKey, $endKey]) {
+            $regions = $this->resolveScanRegions($startKey, $endKey, RegionScanBatch::MAX_REGIONS);
+            foreach ($clipper->clipForward($regions, $startKey, $endKey) as [$region, $scanStart, $scanEnd]) {
+                $regionId = $region->regionId;
+                $groups[$regionId] ??= ['region' => $region, 'ranges' => []];
+                $groups[$regionId]['ranges'][] = [
+                    'index' => $index,
+                    'start' => $scanStart,
+                    'end' => $scanEnd,
+                ];
+            }
+        }
+
+        foreach ($groups as $regionId => $group) {
+            usort(
+                $group['ranges'],
+                static fn(array $a, array $b): int => KeyOrder::cmp($a['start'], $b['start']),
+            );
+            $groups[$regionId]['ranges'] = $group['ranges'];
+        }
+
+        return $groups;
+    }
+
+    /**
+     * Dispatch one `RawBatchScan` per region and merge the flat responses
+     * back into the caller's per-range result shape.
+     *
+     * Regions are dispatched in ascending start-key order, so merging their
+     * responses in slot order yields ascending rows per range without a
+     * sort. A range that spans several regions can return up to
+     * `eachLimit` rows from each region (TiKV applies `each_limit` per
+     * region), so each range is trimmed to `eachLimit` after the merge.
+     *
+     * @param array<int, array{
+     *     region: RegionInfo,
+     *     ranges: list<array{index: int|string, start: string, end: string}>
+     * }> $groups
+     * @param array<array-key, array{0: string, 1: string}> $ranges
+     * @return array<array<array{key: string, value: ?string}>>
+     */
+    private function batchScanByRegion(
+        array $groups,
+        array $ranges,
+        int $eachLimit,
+        bool $keyOnly,
+        string $columnFamily,
+    ): array {
+        $regionIds = array_keys($groups);
+        usort(
+            $regionIds,
+            fn(int $a, int $b): int => KeyOrder::cmp(
+                $groups[$a]['region']->startKey,
+                $groups[$b]['region']->startKey,
+            ),
+        );
+
+        $calls = [];
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
+        /** @var array<int, int> $slotToRegionId */
+        $slotToRegionId = [];
+        foreach ($regionIds as $regionId) {
+            $slot = count($calls);
+            $group = $groups[$regionId];
+            $calls[$slot] = fn(): CheckedGrpcFuture => $this->sendBatchScanAsync(
+                $group['region'],
+                $group['ranges'],
+                $eachLimit,
+                $keyOnly,
+                $columnFamily,
+            );
+            $labels[$slot] = new BatchCallId($regionId);
+            $slotToRegionId[$slot] = $regionId;
+        }
+
+        $responses = $this->createBatchExecutor()->executeParallelCapped(
+            $calls,
+            $this->maxConcurrency,
+            $this->timeoutConfig->batchDeadlineMs,
+            $labels,
+        );
+
+        /** @var array<array-key, list<array{key: string, value: ?string}>> $results */
+        $results = [];
+        foreach ($ranges as $index => $_) {
+            $results[$index] = [];
+        }
+
+        foreach ($responses as $slot => $response) {
+            if (!$response instanceof RawBatchScanResponse) {
+                throw new TiKvException('RawBatchScan returned an unexpected response type');
+            }
+            $this->collectBatchScanRows(
+                $response,
+                $groups[$slotToRegionId[$slot]]['ranges'],
+                $eachLimit,
+                $keyOnly,
+                $results,
+            );
+        }
+
+        // TiKV's each_limit is per region and per range; the documented
+        // contract is a per-range cap, so trim the ascending merge.
+        foreach ($results as $index => $rows) {
+            if (count($rows) > $eachLimit) {
+                $results[$index] = array_slice($rows, 0, $eachLimit);
+            }
+        }
+
+        ksort($results);
+
+        return array_values($results);
+    }
+
+    /**
+     * Issue one `RawBatchScan` for a region's clipped ranges.
+     *
+     * @param list<array{index: int|string, start: string, end: string}> $groupRanges
+     */
+    private function sendBatchScanAsync(
+        RegionInfo $region,
+        array $groupRanges,
+        int $eachLimit,
+        bool $keyOnly,
+        string $columnFamily,
+    ): CheckedGrpcFuture {
+        $target = RegionContextFactory::resolveTarget(
+            $region,
+            $this->replicaReadPolicy,
+            $this->regionResolver->getStore(...),
+            requestContext: $this->requestContext,
+            resourceControl: $this->resourceControl,
+            storeAvailable: $this->regionResolver->isStoreAvailable(...),
+        );
+        $address = $this->regionResolver->resolveStoreAddress($target->storeId);
+
+        $request = new RawBatchScanRequest();
+        $request->setContext($target->context);
+
+        $protoRanges = [];
+        foreach ($groupRanges as $entry) {
+            $keyRange = new KeyRange();
+            $keyRange->setStartKey($entry['start']);
+            if ($entry['end'] !== '') {
+                $keyRange->setEndKey($entry['end']);
+            }
+            $protoRanges[] = $keyRange;
+        }
+        $request->setRanges($protoRanges);
+        $request->setEachLimit($eachLimit);
+        $request->setKeyOnly($keyOnly);
+        if ($columnFamily !== '') {
+            $request->setCf($columnFamily);
+        }
+
+        $future = $this->grpc->callAsync(
+            $address,
+            'tikvpb.Tikv',
+            'RawBatchScan',
+            $request,
+            RawBatchScanResponse::class,
+            $this->timeoutConfig->scanTimeoutMs,
+        );
+
+        $regionId = $region->regionId;
+        $firstKey = $groupRanges[0]['start'];
+
+        return CheckedGrpcFuture::fromCallable(
+            fn(): Message => $this->measure(
+                'scan',
+                $firstKey,
+                function () use ($future, $regionId): Message {
+                    $response = $future->wait();
+                    // No RetryExecutor owns this send, so NotLeader must
+                    // invalidate the cached entry itself; the fallback path
+                    // then re-resolves from PD.
+                    RegionErrorHandler::check(
+                        $response,
+                        $this->regionCache,
+                        $regionId,
+                        notLeaderOwnedByRetryExecutor: false,
+                    );
+
+                    return $response;
+                },
+            ),
+            $future,
+        );
+    }
+
+    /**
+     * Split one region's flat `RawBatchScan` response back into the caller's
+     * per-range lists.
+     *
+     * The response concatenates the requested ranges' results in request
+     * order, and the group entries are sorted by start key, so a simple
+     * membership walk restores the grouping. A range yields at most
+     * `$eachLimit` rows from this region (TiKV's per-region cap); the
+     * caller trims the cross-region merge afterwards.
+     *
+     * @param list<array{index: int|string, start: string, end: string}> $groupRanges
+     * @param array<array-key, list<array{key: string, value: ?string}>> $results
+     */
+    private function collectBatchScanRows(
+        RawBatchScanResponse $response,
+        array $groupRanges,
+        int $eachLimit,
+        bool $keyOnly,
+        array &$results,
+    ): void {
+        $kvs = $response->getKvs();
+        $count = count($kvs);
+        $position = 0;
+
+        foreach ($groupRanges as $entry) {
+            $consumed = 0;
+            while ($position < $count && $consumed < $eachLimit) {
+                $pair = $kvs[$position];
+                $key = $pair->getKey();
+                if (!KeyOrder::inRange($key, $entry['start'], $entry['end'])) {
+                    break;
+                }
+
+                $results[$entry['index']][] = [
+                    'key' => $key,
+                    'value' => $keyOnly ? null : $pair->getValue(),
+                ];
+                ++$position;
+                ++$consumed;
+            }
+        }
+    }
+
+    /**
+     * The per-range `RawScan` path: one scan per range, fanned out
+     * concurrently (issue #295).
+     *
+     * Used for overlapping ranges, where a flat `RawBatchScan` response
+     * cannot be split unambiguously, and as the recovery path when the
+     * region-grouped fan-out fails. Every range independently resolves and
+     * retries its own regions (issue #267).
+     *
+     * @param array<array-key, array{0: string, 1: string}> $ranges
+     * @return array<array<array{key: string, value: ?string}>>
+     */
+    private function batchScanPerRange(
+        array $ranges,
+        int $eachLimit,
+        bool $keyOnly,
+        string $columnFamily,
+        RetryExecutor $executor,
+    ): array {
+        $clipper = new RegionRangeClipper();
+
+        $calls = [];
+        foreach ($ranges as $index => [$startKey, $endKey]) {
             $calls[$index] = fn(): CheckedGrpcFuture => $this->scanRangeAsync(
                 $executor,
                 $clipper,
@@ -1090,6 +1447,26 @@ final readonly class RawKvScanner
         }
 
         return $results;
+    }
+
+    /**
+     * One empty list per requested range, preserving the historical result
+     * order (input order for a list, ascending key order for associative
+     * input).
+     *
+     * @param array<array-key, array{0: string, 1: string}> $ranges
+     * @return array<array<array{key: string, value: ?string}>>
+     */
+    private function emptyBatchScanResult(array $ranges): array
+    {
+        $results = [];
+        foreach ($ranges as $index => $_) {
+            $results[$index] = [];
+        }
+
+        ksort($results);
+
+        return array_values($results);
     }
 
     /**

@@ -1540,15 +1540,18 @@ final class RawKvClient
     }
 
     /**
-     * Scan multiple non-contiguous ranges with a client-side loop of
-     * per-range `RawScan` requests; this is not the `RawBatchScan` RPC.
+     * Scan multiple non-contiguous ranges with one `RawBatchScan` request per
+     * region (issue #433, GAP-19).
      *
-     * The RPC count is linear in the number of ranges and the regions they
-     * cover, because every range resolves and scans its own regions. The
-     * per-range sends are fanned out concurrently, bounded by
-     * `options['maxConcurrency']`, so wall-clock latencies overlap without
-     * changing the total work. See
-     * {@see RawKvScanner::batchScan()} for the full cost model.
+     * The client groups the ranges by region, clips every range to each
+     * region's bounds, and sends one `RawBatchScan` per region, so the RPC
+     * count is the number of regions touched rather than one per range per
+     * region. Requests to distinct regions are dispatched concurrently,
+     * bounded by `options['maxConcurrency']`. A range that spans several
+     * regions is split across their requests and trimmed back to
+     * `$eachLimit` rows. Overlapping ranges, a region error, a transport
+     * failure or a missing store fall back to the per-range `RawScan` path.
+     * See {@see RawKvScanner::batchScan()} for the full cost model.
      *
      * Returns one entry per range, each a list of
      * `['key' => string, 'value' => ?string]` rows (`value` is `null` when
@@ -1566,7 +1569,7 @@ final class RawKvClient
      *     including a `RegionException`, a `GrpcException`, a region's
      *     exhausted retry budget or a missing store — is reported inside
      *     `getRegionErrors()`; it is wrapped, not thrown directly
-     * @throws BatchDeadlineExceededException When the range fan-out exceeds
+     * @throws BatchDeadlineExceededException When the region fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly = false): array

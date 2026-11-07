@@ -635,22 +635,32 @@ rows in ascending key order and carries `null` values when `keyOnly` is true.
 An empty `ranges` list returns `[]`, and a range that matches no rows
 contributes an empty inner list.
 
-> **Not the `RawBatchScan` RPC.** `batchScan` is a client-side loop: it
-> sends one `RawScan` per range (and one per region inside each range) and
-> assembles the answers. The RPC count is linear in the number of ranges and
-> in the regions they cover, and every range independently resolves its own
-> regions — fifty ranges cost roughly fifty scans, not one round trip per
-> region for the whole call. `eachLimit` is required and must be greater
-> than zero; unlike `scan()`, `batchScan()` cannot omit the per-range cap or
-> request an unbounded result set. Empty bounds are still allowed:
-> `batchScan([['', '']], eachLimit: 100)` scans the whole keyspace and
-> returns at most 100 rows.
+> **One `RawBatchScan` per region.** `batchScan` groups the requested
+> ranges by the regions that own them, clips every range to each region's
+> bounds, and sends one `RawBatchScan` request per region carrying all of
+> that region's clipped ranges (issue #433). The RPC count is therefore the
+> number of regions touched, not one `RawScan` per range per region: fifty
+> ranges that share a few regions cost a few round trips. `eachLimit` is
+> required and must be greater than zero; unlike `scan()`, `batchScan()`
+> cannot omit the per-range cap or request an unbounded result set. Empty
+> bounds are still allowed: `batchScan([['', '']], eachLimit: 100)` scans the
+> whole keyspace and returns at most 100 rows.
 >
-> **Performance Note:** the per-range sends are fanned out **concurrently**
-> — at most `options['maxConcurrency']` ranges (default **16**; must be
-> `>= 1`) are in flight at once, and each range's per-region scan RPCs are
-> all dispatched before any response is awaited, so server-side latencies
-> overlap. Concurrency bounds the wall-clock overlap, not the total work.
+> **Performance Note:** requests to distinct regions are fanned out
+> **concurrently** — at most `options['maxConcurrency']` regions (default
+> **16**; must be `>= 1`) are in flight at once, all dispatched before any
+> response is awaited, so server-side latencies overlap. TiKV applies
+> `each_limit` per region and per range, so a range that spans several
+> regions is trimmed to `eachLimit` after the responses are merged.
+>
+> **Fallbacks.** A `RawBatchScan` response is a flat `kvs` list without
+> per-range boundaries, so the per-range grouping is restored from the
+> clipped bounds only when the requested ranges are pairwise disjoint. A
+> call with overlapping ranges keeps the per-range `RawScan` path, and a
+> region error, transport failure or missing store falls back to it for the
+> whole call (reads are idempotent, and that path re-resolves and retries
+> each range). A `BatchDeadlineExceededException` is never a reason to fall
+> back: it is rethrown with the configured deadline.
 
 **Example:**
 

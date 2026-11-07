@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- `RawKvClient::batchScan()` / `RawKvScanner::batchScan()` now use the `RawBatchScan` RPC instead of a client-side loop of per-range `RawScan` requests (issue #433, GAP-19). The client groups the requested ranges by region, clips every range to each region's bounds, and sends one `RawBatchScan` per region, so a call that cost one `RawScan` per range per region now costs one store round trip per region touched; requests to distinct regions are dispatched concurrently (`options['maxConcurrency']`) under one batch deadline. The per-range result shape, the required positive `eachLimit`, the per-range row cap and the ascending order are unchanged. Because a `RawBatchScan` response is a flat `kvs` list without range boundaries, the per-range grouping is restored from the clipped bounds only when the requested ranges are pairwise disjoint; overlapping ranges keep the per-range path, and a region error, transport failure or missing store falls back to it for the whole call (re-resolving and retrying each range). `benchmarks/BatchScanLatencyBenchmark.php` compares the two shapes. Documented in `README.md`, `docs/operations.md`, `docs/advanced.md`, `docs/error-handling.md` and `docs/helpers/faq.md`. (#433)
+
 ### Fixed
 
 - `TimestampOracle` now rejects a TSO response whose timestamp is present but has a non-positive physical component (issue #230, TXN-25). A `Timestamp` with `physical = 0` composed to timestamp 0, which TiKV reads as "no version": a transaction started with `startTs = 0` would read nothing and write locks that no correct resolver can reason about, and the failure surfaced far from its cause. `getTimestamp()`, `getTimestampBatch()` and `getLowResolutionTimestamp()` now throw `TiKvException('TSO response contained an invalid physical timestamp')` instead, consistent with the documented fail-closed contract. A zero logical counter with a valid physical part is still accepted. (#230)

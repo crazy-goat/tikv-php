@@ -6,9 +6,12 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\Kvrpcpb\KeyRange;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawCASResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawChecksumRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawChecksumResponse;
@@ -1800,21 +1803,32 @@ class RawKvClientTest extends TestCase
         $pair2->setKey('k2');
         $pair2->setValue('v2');
 
-        $response = new RawScanResponse();
-        $response->setKvs([$pair1]);
+        $response = new RawBatchScanResponse();
+        $response->setKvs([$pair1, $pair2]);
 
-        $response2 = new RawScanResponse();
-        $response2->setKvs([$pair2]);
+        // Both ranges live in the same region: one RawBatchScan carries both
+        // clipped ranges, and the flat response is split back per range
+        // (issue #433).
+        $requests = [];
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (
+                    &$requests,
+                    $response,
+                ): GrpcFuture {
+                    $this->assertSame('RawBatchScan', $method);
+                    $this->assertInstanceOf(RawBatchScanRequest::class, $request);
+                    $requests[] = $request;
 
-        // batchScan fans out per-range sends via callAsync (issue #295);
-        // one future per range, resolved in dispatch order.
-        $responses = [$response, $response2];
-        $this->grpc->method('callAsync')
-            ->willReturnCallback(function () use (&$responses): GrpcFuture {
-                return $this->okFuture(
-                    array_shift($responses) ?? new RawScanResponse(),
-                );
-            });
+                    return $this->okFuture($response);
+                },
+            );
 
         $result = $this->client->batchScan([['a', 'm'], ['m', 'z']], 10);
 
@@ -1823,6 +1837,13 @@ class RawKvClientTest extends TestCase
         $this->assertSame('k1', $result[0][0]['key']);
         $this->assertCount(1, $result[1]);
         $this->assertSame('k2', $result[1][0]['key']);
+        $this->assertSame(
+            [['a', 'm'], ['m', 'z']],
+            array_map(
+                static fn(KeyRange $range): array => [$range->getStartKey(), $range->getEndKey()],
+                iterator_to_array($requests[0]->getRanges()),
+            ),
+        );
     }
 
     public function testBatchScanWithEmptyEndKeyScansToInfinity(): void
@@ -1863,12 +1884,13 @@ class RawKvClientTest extends TestCase
                     string $method,
                     Message $request,
                 ) use (&$requests): GrpcFuture {
-                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame('RawBatchScan', $method);
+                    $this->assertInstanceOf(RawBatchScanRequest::class, $request);
                     $requests[] = $request;
 
-                    $response = new RawScanResponse();
+                    $response = new RawBatchScanResponse();
                     $pair = new KvPair();
-                    $pair->setKey($request->getStartKey() === 'a' ? 'k1' : 'k2');
+                    $pair->setKey($request->getRanges()[0]->getStartKey() === 'a' ? 'k1' : 'k2');
                     $pair->setValue('v');
                     $response->setKvs([$pair]);
 
@@ -1880,8 +1902,8 @@ class RawKvClientTest extends TestCase
 
         $this->assertCount(1, $result);
         $this->assertSame(['k1', 'k2'], array_column($result[0], 'key'));
-        $this->assertSame('m', $requests[1]->getStartKey());
-        $this->assertSame('', $requests[1]->getEndKey());
+        $this->assertSame('m', $requests[1]->getRanges()[0]->getStartKey());
+        $this->assertSame('', $requests[1]->getRanges()[0]->getEndKey());
     }
 
     public function testBatchScanWithBothBoundsEmptyScansToInfinity(): void
@@ -1906,13 +1928,14 @@ class RawKvClientTest extends TestCase
                     string $method,
                     Message $request,
                 ) use (&$requests): GrpcFuture {
-                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame('RawBatchScan', $method);
+                    $this->assertInstanceOf(RawBatchScanRequest::class, $request);
                     $requests[] = $request;
 
                     $pair = new KvPair();
-                    $pair->setKey($request->getStartKey() === '' ? 'k1' : 'k2');
+                    $pair->setKey($request->getRanges()[0]->getStartKey() === '' ? 'k1' : 'k2');
                     $pair->setValue('v');
-                    $response = new RawScanResponse();
+                    $response = new RawBatchScanResponse();
                     $response->setKvs([$pair]);
 
                     return GrpcFuture::completed($response);
@@ -1922,10 +1945,10 @@ class RawKvClientTest extends TestCase
         $result = $this->client->batchScan([['', '']], 10);
 
         $this->assertSame(['k1', 'k2'], array_column($result[0], 'key'));
-        $this->assertSame('', $requests[0]->getStartKey());
-        $this->assertSame('m', $requests[0]->getEndKey());
-        $this->assertSame('m', $requests[1]->getStartKey());
-        $this->assertSame('', $requests[1]->getEndKey());
+        $this->assertSame('', $requests[0]->getRanges()[0]->getStartKey());
+        $this->assertSame('m', $requests[0]->getRanges()[0]->getEndKey());
+        $this->assertSame('m', $requests[1]->getRanges()[0]->getStartKey());
+        $this->assertSame('', $requests[1]->getRanges()[0]->getEndKey());
     }
 
     // ========================================================================

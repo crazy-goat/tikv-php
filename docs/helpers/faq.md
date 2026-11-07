@@ -2053,6 +2053,27 @@ through `executeScanForRegion()` (the concurrent send is awaited outside the
 per-range retry loop, so a region error there is neither retried nor
 invalidated otherwise).
 
+## `RawBatchScan` returns a flat kv list — per-range grouping needs disjoint ranges (#433)
+
+`kvrpcpb.RawBatchScanResponse` carries only `region_error` and a flat `kvs`
+list; unlike the client's `batchScan()` return shape it has no per-range
+boundaries. TiKV concatenates each requested range's results in request
+order and applies `each_limit` **per region and per range**, so the client
+restores the per-range grouping by walking the clipped bounds of each entry
+in the per-region request. That walk is unambiguous only when the requested
+ranges are pairwise disjoint (the common case); an overlapping pair can
+return the same key for both ranges, so `batchScan()` keeps the per-range
+`RawScan` path for such a call. The same fallback covers a region error,
+transport failure, missing store or an older TiKV that does not implement
+`RawBatchScan` (gRPC `UNIMPLEMENTED`): reads are idempotent, so the whole
+call is re-run through the retrying per-range path. Because TiKV's
+`each_limit` is per region, a range spanning several regions can return up
+to `eachLimit` rows from each; the client trims the merged ascending rows to
+`eachLimit` before returning. A clipped range with an empty end key
+(+infinity) must stay last in a per-region request: TiKV reads an empty end
+key on a non-final range as "up to the next range's start". The client
+therefore sorts each region's entries by start key.
+
 ## TxnKV region lookups must be MCE-encoded (GAP-01)
 
 Validated empirically against TiKV v8.5.5 / PD v8.5.5 (V1 txn cluster) while
