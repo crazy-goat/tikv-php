@@ -581,7 +581,16 @@ final class TimestampOracle
      * $n = min(granted, requested). The handout never exceeds the
      * granted count so we never fabricate timestamps outside the grant.
      *
+     * A present but zero-valued timestamp is rejected too (issue #230,
+     * TXN-25): TiKV reads timestamp 0 as "no version", so serving it would
+     * make a transaction read nothing and write locks no resolver can
+     * reason about. Failing closed keeps the documented contract that no
+     * unusable timestamp is ever handed out.
+     *
      * @return list<int>
+     *
+     * @throws TiKvException when the response carries no timestamp or a
+     *                       non-positive physical component
      */
     private function extractTimestampRange(TsoResponse $response, int $requested): array
     {
@@ -591,6 +600,10 @@ final class TimestampOracle
         }
 
         $physical = (int) $ts->getPhysical();
+        if ($physical <= 0) {
+            throw new TiKvException('TSO response contained an invalid physical timestamp');
+        }
+
         $logical = (int) $ts->getLogical();
         $base = ($physical << self::LOGICAL_SHIFT) + $logical;
 
