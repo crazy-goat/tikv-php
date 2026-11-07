@@ -435,6 +435,25 @@ class ErrorClassifierTest extends TestCase
         );
     }
 
+    /**
+     * The bounded retry is only reachable through the real factory, so pin
+     * the flag there (issue #444). An Error with a message but no oneof is
+     * the "variant this client does not know yet" case; if fromRegionError()
+     * ever stops setting fromErrorpb, this test fails instead of every
+     * synthetic-input test staying green.
+     */
+    public function testFromRegionErrorSetsFlagAndGetsBoundedRetry(): void
+    {
+        $error = new Error();
+        $error->setMessage('a region error variant this client does not know');
+
+        $exception = RegionException::fromRegionError($error);
+
+        $this->assertTrue($exception->fromErrorpb);
+        $this->assertNull($exception->errorKind);
+        $this->assertVerdict(BackoffType::RegionMiss, ErrorClassifier::classify($exception));
+    }
+
     public function testSyntheticRegionExceptionWithoutKindStaysFatal(): void
     {
         // A response-level error string or a top-level KeyError is wrapped in

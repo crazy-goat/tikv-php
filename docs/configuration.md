@@ -1977,9 +1977,9 @@ subclassing — there is no `classifyError()` hook on the client and no
   itself always answers Retry or Fatal and never Pass.
 
 The backoff taxonomy mirrors client-go's set: besides the region-error curves,
-`BackoffType` exposes `PDRpc` (500–3000 ms), and `TxnLockFast`, `TxnNotFound`
-and `CommitTSLag` (2–500 ms each), the equivalents of client-go's `BoPDRPC`,
-`BoTxnLockFast`, `BoTxnNotFound` and `BoCommitTSLag`.
+`BackoffType` exposes `PDRpc` (500–3000 ms), `TxnLockFast` (10–3000 ms), and
+`TxnNotFound` and `CommitTSLag` (2–500 ms each), the equivalents of client-go's
+`BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound` and `BoCommitTSLag`.
 
 Note that a `NotLeader` error is classified before your classifier is
 consulted.

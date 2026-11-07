@@ -169,7 +169,14 @@ class BackoffTest extends TestCase
 
     // Issue #444 (DIV-08): the missing client-go backoffer types are now
     // part of the public taxonomy, with the same base/cap values as
-    // config/retry/config.go.
+    // client-go's runtime curves. BoTxnLockFast's base comes from
+    // vars.BackoffLockFast (DefBackoffLockFast = 10 ms), not from the
+    // NewBackoffFnCfg argument, and its cap is 3000 ms.
+    //
+    // Jitter is intentionally not asserted here: client-go uses NoJitter for
+    // BoTxnNotFound and BoCommitTSLag, while PHP currently applies equal
+    // jitter to every BackoffType. That broader per-type jitter gap is
+    // recorded in findings.md rather than silently advertised as parity.
 
     /**
      * @return array<string, array{BackoffType, int, int}>
@@ -177,7 +184,7 @@ class BackoffTest extends TestCase
     public static function provideClientGoParityBackoffTypes(): array
     {
         return [
-            'BoTxnLockFast' => [BackoffType::TxnLockFast, 2, 500],
+            'BoTxnLockFast' => [BackoffType::TxnLockFast, 10, 3000],
             'BoTxnNotFound' => [BackoffType::TxnNotFound, 2, 500],
             'BoCommitTSLag' => [BackoffType::CommitTSLag, 2, 500],
             'BoPDRPC' => [BackoffType::PDRpc, 500, 3000],
@@ -189,6 +196,5 @@ class BackoffTest extends TestCase
     {
         $this->assertSame($baseMs, $type->baseMs());
         $this->assertSame($capMs, $type->capMs());
-        $this->assertTrue($type->equalJitter());
     }
 }

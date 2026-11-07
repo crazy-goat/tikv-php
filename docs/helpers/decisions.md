@@ -398,8 +398,11 @@ The message fallback itself is kept for non-region exceptions such as
 `PdException` (see the PD header decision above) — the issue asks to remove it
 from the region-error path, not from every error. The four client-go backoff
 types that had no PHP equivalent (`BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound`,
-`BoCommitTSLag`) are now `BackoffType::PDRpc`, `TxnLockFast`, `TxnNotFound` and
-`CommitTSLag`, so a custom classifier can use the same curves.
+`BoCommitTSLag`) are now `BackoffType::PDRpc` (500–3000 ms), `TxnLockFast`
+(10–3000 ms), and `TxnNotFound` / `CommitTSLag` (2–500 ms each), so a custom
+classifier can use the same curves. client-go applies `NoJitter` to
+`BoTxnNotFound` and `BoCommitTSLag`, while PHP currently applies equal jitter to
+every `BackoffType`; that per-type jitter gap is recorded in `findings.md`.
 
 ## `notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)
 
