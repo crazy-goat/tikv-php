@@ -1953,17 +1953,26 @@ subclassing — there is no `classifyError()` hook on the client and no
 `BackoffType::Custom` case. The supported extension point is the optional
 `$classifier` callable accepted by `RetryExecutor::execute()`
 (`src/Client/Retry/RetryExecutor.php`): it receives the caught
-`TiKvException` and returns a `BackoffType` (see
-`src/Client/Retry/BackoffType.php` for the full case list) or `null`
-to fall through to the built-in classification — and if that also returns
-`null`, the error is fatal and the exception is rethrown. Note that a
-`NotLeader` error is classified before your classifier is consulted.
+`TiKvException` and returns a `RetryVerdict`
+(`src/Client/Retry/RetryVerdict.php`):
+
+- `RetryVerdict::retry($backoffType)` retries with that `BackoffType` (see
+  `src/Client/Retry/BackoffType.php` for the full case list);
+- `RetryVerdict::fatal()` stops immediately and runs the executor's fatal
+  path, including region invalidation and the broken-channel cleanup;
+- `RetryVerdict::pass()` falls through to the built-in classification, which
+  itself always answers Retry or Fatal and never Pass.
+
+Note that a `NotLeader` error is classified before your classifier is
+consulted.
 
 To use it you must construct the `RetryExecutor` yourself and invoke your
 operation through it, rather than going through `RawKvClient`'s methods:
 
 ```php
+use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 
 $executor = new RetryExecutor(
     maxBackoffMs: 20000,
@@ -1980,11 +1989,11 @@ $result = $executor->execute(
         // your RawKV RPC call
         return $value;
     },
-    classifier: function (TiKvException $e): ?BackoffType {
+    classifier: function (TiKvException $e): RetryVerdict {
         if (str_contains($e->getMessage(), 'CustomError')) {
-            return BackoffType::StaleCmd; // pick a real BackoffType case
+            return RetryVerdict::retry(BackoffType::StaleCmd); // pick a real BackoffType case
         }
-        return null; // fall through to the built-in ErrorClassifier
+        return RetryVerdict::pass(); // fall through to the built-in ErrorClassifier
     },
 );
 ```

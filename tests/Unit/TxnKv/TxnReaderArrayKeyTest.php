@@ -14,8 +14,8 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TxnReader;
@@ -133,11 +133,11 @@ final class TxnReaderArrayKeyTest extends TestCase
     }
 
     /**
-     * @return callable(\CrazyGoat\TiKV\Client\Exception\TiKvException): ?BackoffType
+     * @return callable(\CrazyGoat\TiKV\Client\Exception\TiKvException): RetryVerdict
      */
     private function classifier(): callable
     {
-        return static fn (): ?BackoffType => null;
+        return RetryVerdict::pass(...);
     }
 
     /**

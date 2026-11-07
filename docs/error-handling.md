@@ -179,7 +179,7 @@ Verdict legend:
 | `InvalidArgumentException` | **Never retry** — programming or input error |
 | `InvalidStateException` | **Never retry** — fix the calling code / lifecycle first |
 | `ClientClosedException` | **Never retry** on that client instance — reopen a new client if appropriate |
-| `InvalidStoreAddressException` | **Never retry** — classified fatal before any retry backoff (`ErrorClassifier::classify()` returns null), so the client did not retry and will not succeed next time without configuration change |
+| `InvalidStoreAddressException` | **Never retry** — classified fatal before any retry backoff (`ErrorClassifier::classify()` returns a fatal `RetryVerdict`), so the client did not retry and will not succeed next time without configuration change |
 | `StoreUnavailableException` | **Retried automatically** — the store is in its one-second health cooldown and the client's own retry loop waits it out; seeing it means the retry budget ran out before the store recovered, so re-driving the operation later is safe for idempotent calls |
 | `KeyErrorException` | **Never retry** — a per-pair key error is a deterministic rejection of that key; fix the request, not the retry count |
 | `KeyOutOfBoundsException` | **Never retry** — API V2 only: the key is outside the configured keyspace (or its prefix is malformed). Fix the key or the keyspace configuration |

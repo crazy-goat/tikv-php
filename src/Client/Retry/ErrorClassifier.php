@@ -18,16 +18,33 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 final class ErrorClassifier
 {
     /**
-     * Classify a TiKvException into a BackoffType.
+     * Classify a TiKvException into a retry verdict.
+     *
+     * The built-in classifier always has an opinion: a retryable error gets
+     * the mapped {@see BackoffType}, anything else is {@see RetryVerdict::fatal()}.
+     * It never returns {@see RetryVerdict::pass()}, which exists for custom
+     * classifiers that want to defer to this one (issue #534).
      *
      * The primary classification path uses the typed ErrorKind carried by
      * RegionException, eliminating dependence on message-string matching.
      * For exceptions that do not carry a typed kind (legacy or non-region
      * errors), a message-based fallback is used.
+     */
+    public static function classify(TiKvException $e): RetryVerdict
+    {
+        $backoffType = self::classifyToBackoffType($e);
+
+        return $backoffType instanceof BackoffType
+            ? RetryVerdict::retry($backoffType)
+            : RetryVerdict::fatal();
+    }
+
+    /**
+     * Map a TiKvException to a BackoffType, or null when it is fatal.
      *
      * @return BackoffType|null BackoffType for retryable errors, null for fatal/non-retryable
      */
-    public static function classify(TiKvException $e): ?BackoffType
+    private static function classifyToBackoffType(TiKvException $e): ?BackoffType
     {
         // A rejected store address is always fatal. Checked before any message
         // matching: the raw address inside the exception may contain retry

@@ -183,13 +183,14 @@ of the contract.
   `TxnKv\RollbackRegroupSignal`, `TxnKv\ResolvedTxnStatusCache`;
 - `Retry\` — except `Retry\RetryBudgetExhaustedException` and
   `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
-  `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget` and
-  `Retry\RetryExecutor`;
+  `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget`,
+  `Retry\RetryExecutor` and `Retry\RetryVerdict`;
 - the generated protobuf and gRPC classes under `src/Proto/` — except
   `Errorpb\NotLeader`, which the promise covers.
 
-The advanced extension points — `Retry\RetryExecutor` and `Retry\BackoffType`
-in [Custom Retry (Advanced)](docs/configuration.md#custom-retry-advanced), and
+The advanced extension points — `Retry\RetryExecutor`,
+`Retry\RetryVerdict` and `Retry\BackoffType` in
+[Custom Retry (Advanced)](docs/configuration.md#custom-retry-advanced), and
 `Tls\TlsConfigBuilder` — are documented, but they are internal like the
 rest: they change whenever the internals they wrap change.
 ## Usage
