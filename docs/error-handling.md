@@ -551,7 +551,7 @@ an earlier group already landed (issue #197).
 | `scan(string, string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchDeadlineExceededException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Limit validated (`'Scan limit must be 0 or greater'`; max 10240 per RPC) and a reversed range rejected, both before any RPC. `limit: 0` returns the whole range by paging internally; collecting more than `options['maxScanRows']` rows throws `ScanLimitExceededException` instead of truncating (issue #191). A bounded scan returns at most `limit` rows, so a result whose count equals the limit may be truncated (issue #440). `BatchDeadlineExceededException` comes from a page fanned out across several regions |
 | `scanPrefix(string, int $limit = 0, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchDeadlineExceededException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Delegates to `scan()`; same `limit: 0` pagination + guard semantics |
 | `reverseScan(...)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `KeyErrorException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `ScanLimitExceededException` | Limit validated and a reversed range (`startKey` sorts before `endKey`) rejected, both before any RPC; `limit: 0` pages internally (descending bound moves down each page) and is guarded by `options['maxScanRows']` |
-| `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Every range is validated before the first send; one reversed range rejects the whole call. Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved. A per-range or per-region `RegionException`, `GrpcException`, retry-budget failure or missing store is wrapped in `BatchPartialFailureException::getRegionErrors()` |
+| `batchScan(array $ranges, int $eachLimit, bool $keyOnly = false)` | `ClientClosedException`, `InvalidArgumentException`, `BatchPartialFailureException`, `BatchDeadlineExceededException` | Every range is validated before the first send; one malformed range (not a `[startKey, endKey]` pair of strings) or reversed range rejects the whole call. Ranges fan out **concurrently**, capped by `options['maxConcurrency']` (default 16); order preserved. A per-range or per-region `RegionException`, `GrpcException`, retry-budget failure or missing store is wrapped in `BatchPartialFailureException::getRegionErrors()` |
 | `deleteRange(string, string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | A reversed range is rejected before any RPC. Concurrent per-region deletes; idempotent, so a `BatchPartialFailureException` may be retried whole. A retry-budget or store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
 | `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics. The pre-fan-out PD region enumeration can throw the base `TiKvException` |
 | `checksum(string, string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | A reversed range is rejected before any RPC. Concurrent per-region checksums; idempotent. A retry-budget or store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
@@ -702,6 +702,19 @@ Notes:
   ServerBusy budgets — it exhausts on the first charge. Only
   `retryDeadlineMs=0` disables its budget (restoring the pre-#294 unbounded
   behaviour).
+- The ServerBusy budget and the deadline are independent, and the deadline
+  is checked (with each backoff sleep clamped to the remaining budget)
+  before the sleep. The budget is charged from the scheduled backoff before
+  that clamp, so with the defaults (30 s deadline, 60 s budget) the
+  accumulated charge is bounded by roughly `deadline + 10 s` ≈ 40 s and the
+  30 s deadline always binds before the 60 s ServerBusy budget: a sustained
+  `ServerIsBusy` episode surfaces as `RetryBudgetExhaustedException` with
+  the `ServerIsBusy` error in `getPrevious()`, not as a rethrown region
+  error. The deadline is guaranteed to bind first only while the budget is
+  at least one maximum ServerBusy backoff (~10 s) above it; when the budget
+  is within ~10 s of the deadline or below it, either can bind, and a
+  budget that binds first rethrows the original `ServerIsBusy` error. See
+  [ServerBusy Budget vs Retry Deadline](configuration.md#serverbusy-budget-vs-retry-deadline).
 - Deadline checks run *before* each attempt; worst-case worker occupancy is
   therefore approximately the deadline plus one more in-flight attempt
   (bounded by the gRPC timeout).
