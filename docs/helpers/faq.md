@@ -1414,6 +1414,21 @@ non-constant values for all types. The #296 change adds only a
 NotLeader-specific pin and this note; no production code changed. Close such
 an audit import as a duplicate instead of re-implementing the jitter.
 
+## A stray Markdown fence can become a legitimate closer — render the file before deleting it
+
+Issue #381 (DOC-15) reported an orphan closing fence after the TLS "manual
+construction" note in `docs/configuration.md`, which made everything from
+`## Logging` to the end render as code. By the time the issue was picked the
+premise had expired: c3af3eb (#304/#524) replaced that note with a paragraph
+and a PHP example whose closing fence *was* the orphan, so the file has been
+balanced since 2026-09-09 and renders correctly.
+`tests/Unit/Docs/AtomicModeDocumentationGuardTest.php` already fails on an
+unterminated fence in every `docs/**/*.md` file and in `README.md`, so the
+acceptance criteria need no new guard. Lesson: `git log -S '<quoted phrase>'
+-- <file>` and render the file (or compare the `^#` lines with the parsed
+heading count) before deleting a fence an audit issue quotes — a later feature
+can turn a stray fence into a legitimate closer.
+
 ## Equal-jitter randomness can collapse the separating boundary in budget assertions — assert `<=` over more iterations, never strict `<`
 
 `Backoff::exponential()` with equal jitter returns `half + random_int(0, half)`
