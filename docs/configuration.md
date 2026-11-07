@@ -463,10 +463,13 @@ deterministically for that data, even though the client's scan limit allows
 ```php
 $options = [
     'grpc' => [
-        'maxReceiveMessageBytes' => 67108864, // default: 64 MB (gRPC core default: 4 MB)
-        'maxSendMessageBytes'    => 67108864, // default: 64 MB
-        'keepaliveTimeMs'        => 10000,    // default: 10 s — ping interval on idle connections
-        'keepaliveTimeoutMs'     => 3000,     // default: 3 s
+        'maxReceiveMessageBytes'      => 67108864, // default: 64 MB (gRPC core default: 4 MB)
+        'maxSendMessageBytes'         => 67108864, // default: 64 MB
+        'keepaliveTimeMs'             => 10000,    // default: 10 s — ping interval on idle connections
+        'keepaliveTimeoutMs'          => 3000,     // default: 3 s
+        'keepalivePermitWithoutCalls' => true,     // default: true — ping while no call is in flight
+        'compression'                 => 'none',   // default: none; 'gzip' or 'deflate' to compress requests
+        'initialWindowSizeBytes'      => 0,        // default: 0 = let the gRPC core auto-tune
     ],
 ];
 
@@ -476,12 +479,39 @@ $client = RawKvClient::create(
 );
 ```
 
-All values must be ints `>= 1`. Keepalive pings (sent every `keepaliveTimeMs`,
-even without in-flight calls) keep idle connections alive behind stateful
-firewalls / NAT gateways — which typically drop idle flows after ~5 minutes —
-so a dead connection is detected rather than blocking until TCP retransmission
-gives up. Lowering `maxReceiveMessageBytes` is a valid hardening choice when
-you know your values are small.
+The byte limits and keepalive timings must be ints `>= 1`;
+`keepalivePermitWithoutCalls` must be a bool, `compression` one of `none`,
+`gzip` or `deflate`, and `initialWindowSizeBytes` an int `>= 0`.
+
+Keepalive pings (sent every `keepaliveTimeMs`, even without in-flight calls
+when `keepalivePermitWithoutCalls` is true) keep idle connections alive behind
+stateful firewalls / NAT gateways — which typically drop idle flows after
+~5 minutes — so a dead connection is detected rather than blocking until TCP
+retransmission gives up. Lowering `maxReceiveMessageBytes` is a valid
+hardening choice when you know your values are small.
+
+Compression is off by default and applies to the **outgoing** side:
+`'gzip'` or `'deflate'` sets `grpc.default_compression_algorithm` on every
+channel, so requests are compressed. Responses are not controlled by this
+option — the server compresses them (or not) based on the client's advertised
+`grpc-accept-encoding`, which the core sends regardless of the default. The
+trade-off is CPU for wire size on large values. The server must support the
+algorithm, and gzip is the one every gRPC implementation ships; deflate is
+optional.
+
+`initialWindowSizeBytes` sets `grpc.http2.lookahead_bytes`, the gRPC core's
+HTTP/2 initial stream window (0 leaves the core's BDP-based auto-tuning in
+place). Raise it for known high-latency links with large responses. A positive
+value also sets `grpc.http2.bdp_probe` to `0`: without that, BDP probing
+re-tunes the window from its bandwidth estimate almost immediately, so the
+configured value would only be a starting point. The trade-off is a fixed
+window that no longer adapts to the link.
+
+All three of `keepalivePermitWithoutCalls`, `compression` and
+`initialWindowSizeBytes` add or change channel arguments, and ext-grpc keys
+its persistent channels on those arguments. A client configured with a
+different value therefore uses a distinct underlying channel (a separate TCP
+connection) from a default-configured client for the same store address.
 
 ### Channel Pool (maxChannels, idleTtlMs)
 
@@ -1046,7 +1076,10 @@ retry warning — and that message can be TiKV's own text:
 `RegionException::fromRegionError()` copies `errorpb.Error::getMessage()`
 verbatim. TiKV can name a key in such a message, and the client cannot
 redact a key it never saw. Every key the client itself holds is redacted; a
-key only the server ever saw is not (tracked in issue #307).
+key only the server ever saw is not. The structured `errorpb` fields that do
+carry keys are never serialized into a message: `SstIngestor` appends only
+the store error's `message` to a `RawWrite` failure, not the protobuf
+(issue #307).
 
 The redactor is applied wherever a key can reach a log line:
 
@@ -1069,7 +1102,9 @@ the region-shrink error (`RawKvRangeOps`), the heartbeat and primary-key
 errors of the committer (`TwoPhaseCommitter` — a retryable
 `TxnRetryableException` and a fatal `InvalidStateException`), the
 retry-budget and lock-wait exceptions (`RetryBudgetExhaustedException`,
-`LockWaitTimeoutException`) and the API V2 keyspace check
+`LockWaitTimeoutException`), the SST-write store error (`SstIngestor` — only
+the store error's message is appended, never the serialized protobuf) and
+the API V2 keyspace check
 (`KeyOutOfBoundsException`) therefore name the redacted key. When your own
 code needs the raw key, read it from the typed accessor instead of parsing
 it out of a message — `RetryBudgetExhaustedException::getRawKey()` and

@@ -496,7 +496,11 @@ final readonly class SstIngestor
             $msg = $writeError->getMessage();
             $storeError = $writeError->getStoreError();
             if ($storeError !== null) {
-                $msg .= ': ' . json_encode($storeError, JSON_THROW_ON_ERROR);
+                // Only the human-readable message: an errorpb.Error carries
+                // raw key fields (KeyNotInRegion::key, ...), and a protobuf
+                // object must never be dumped into a message that reaches the
+                // log sink (issue #307, SEC-04).
+                $msg .= ': ' . $storeError->getMessage();
             }
             throw new RegionException('SST Write', $msg);
         }

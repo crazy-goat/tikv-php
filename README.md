@@ -805,6 +805,26 @@ $client = RawKvClient::create(['127.0.0.1:2379'], logger: $logger);
 // - Error conditions
 ```
 
+Every key the client itself formats for a log line or an exception message is
+redacted before it leaves the client. The default
+[`KeyRedactor`](src/Client/Util/KeyRedactor.php) replaces each key with a
+truncated keyed hash and the total byte length, for example
+`#3c469e9d6c5875d3 (5 bytes)`. The digest is the first 16 hex characters of
+`hash_hmac('sha256', $key, $salt)`, so it is **one-way for keys of every
+length** — a key of 8 bytes or fewer is no longer hex-encoded in full — while
+the same key keeps the same token within a process, so log lines can still be
+correlated. The salt is 32 random bytes generated on first use, so the example
+shows the shape only and the exact token differs per process; pin a high-entropy
+salt with `KeyRedactor::setSalt()` before the first redaction when tokens must
+be comparable across processes or restarts. `KeyRedactor::setRedactor()`
+replaces the default entirely: it is an explicit opt-out, and a reversible
+scheme installed there re-exposes the key material. This guarantee covers keys
+the client holds; TiKV's own error text can still name a key the client never
+saw, and the client cannot redact what it never received. See
+[Log Redaction](docs/configuration.md#log-redaction) for the format, the
+server-text caveat, the override trade-off and the exception messages that
+carry a token.
+
 ### Complete Example
 
 ```php
@@ -954,7 +974,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `batchCommands` | RawKV experimental RPC multiplexing over the `BatchCommands` stream |
 | `resourceGroup` / `resourceGroupTag` | Resource-control attribution — the resource group and opaque tag sent on every request's `Context` ([Resource Control](docs/configuration.md#resource-control-resource-groups)) |
 | `apiVersion` / `keyspace` | API V2 with a named keyspace |
-| `grpc` | gRPC channel arguments (keepalive, message sizes) |
+| `grpc` | gRPC channel arguments — message sizes, keepalive, compression and the HTTP/2 window size |
 | `maxChannels` / `idleTtlMs` | The channel pool — how many gRPC channels the transport keeps open and after how long an unused one is evicted ([Channel Pool](docs/configuration.md#channel-pool-maxchannels-idlettlms)) |
 | `grpcClient` | A transport the application built — the client uses it as it is and never closes it ([Sharing One Transport](docs/configuration.md#sharing-one-transport-between-clients)) |
 | `tsoPoolSize` / `lowResTimestampMaxStalenessMs` | TSO batching and the low-resolution timestamp cache of the TxnKV timestamp oracle |
@@ -1209,6 +1229,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Typed CAS outcome** — `CasIndeterminateException` for a compare-and-swap whose outcome cannot be determined, never retried
 - ✅ **Cluster identity verification** — `options['expectedClusterId']` pins the PD cluster ID on the PD and TSO paths
 - ✅ **Store-cache invalidation and operation-scoped retry budget** — the cached store is dropped on `StoreNotMatch` and transport failures, and one retry budget covers a whole logical operation
+- ✅ **Configurable gRPC channel parameters** — message sizes, keepalive, `keepalivePermitWithoutCalls`, compression and the HTTP/2 initial window size ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
 
 ### Planned
 
@@ -1220,7 +1241,6 @@ are tracked in their own issues and are not part of the roadmap. A
 feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
-- ⬜ **The remaining gRPC channel parameters** — compression, the HTTP/2 initial window size and `keepalive_permit_without_calls` are still hard-coded (the message sizes and the keepalive times are configurable already) ([#423](https://github.com/crazy-goat/tikv-php/issues/423))
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ⬜ **Store health checking and failover to healthy replicas** ([#424](https://github.com/crazy-goat/tikv-php/issues/424))
 - ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
