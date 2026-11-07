@@ -2,7 +2,7 @@ services:
   pd:
     image: pingcap/pd:v8.5.5
     ports:
-      - "${PD_PORT:-2379}:2379"
+      - "127.0.0.1:${PD_PORT:-2379}:2379"
     command: >
       --name=pd
       --client-urls=http://0.0.0.0:2379
@@ -22,7 +22,7 @@ services:
   tikv1:
     image: pingcap/tikv:v8.5.5
     ports:
-      - "${TIKV1_PORT:-20160}:20160"
+      - "127.0.0.1:${TIKV1_PORT:-20160}:20160"
     command: >
       --addr=0.0.0.0:20160
       --advertise-addr=tikv1:20160
@@ -39,7 +39,7 @@ services:
   tikv2:
     image: pingcap/tikv:v8.5.5
     ports:
-      - "${TIKV2_PORT:-20161}:20161"
+      - "127.0.0.1:${TIKV2_PORT:-20161}:20161"
     command: >
       --addr=0.0.0.0:20161
       --advertise-addr=tikv2:20161
@@ -56,7 +56,7 @@ services:
   tikv3:
     image: pingcap/tikv:v8.5.5
     ports:
-      - "${TIKV3_PORT:-20162}:20162"
+      - "127.0.0.1:${TIKV3_PORT:-20162}:20162"
     command: >
       --addr=0.0.0.0:20162
       --advertise-addr=tikv3:20162
@@ -71,7 +71,15 @@ services:
         condition: service_healthy
 
   php-client:
-    build: .
+    # The image runs as an unprivileged user that must own the bind-mounted
+    # checkout, so build it with the host owner's IDs. The Makefile and the
+    # E2E scripts set these automatically; override them only when the
+    # checkout belongs to another user.
+    build:
+      context: .
+      args:
+        APP_UID: "${HOST_UID:-1000}"
+        APP_GID: "${HOST_GID:-1000}"
     volumes:
       - .:/app
     depends_on:
@@ -85,7 +93,11 @@ services:
     command: php examples/basic.php
 
   php-test:
-    build: .
+    build:
+      context: .
+      args:
+        APP_UID: "${HOST_UID:-1000}"
+        APP_GID: "${HOST_GID:-1000}"
     volumes:
       - .:/app
     depends_on:

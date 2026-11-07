@@ -122,6 +122,12 @@ jobs:
     needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    env:
+      # Turn a missing extension into a clear failure instead of a skipped
+      # transport test (issue #284, GRPC-25). The suite already runs with
+      # --fail-on-skipped; this makes the gate name the cause when ext-grpc
+      # disappears from the setup step.
+      REQUIRE_GRPC_EXTENSION: '1'
     steps:
       - uses: actions/checkout@v7
 
@@ -200,6 +206,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # The image runs as an unprivileged user that owns the bind-mounted
+      # checkout, so build it with the runner's IDs (docker-compose.yml reads
+      # HOST_UID/HOST_GID).
+      - name: Match the container user to the workspace owner
+        run: |
+          echo "HOST_UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "HOST_GID=$(id -g)" >> "$GITHUB_ENV"
 
       - name: Build Docker images
         run: docker compose build
@@ -342,6 +356,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # Same as the V1 E2E job: the unprivileged container user must own the
+      # bind-mounted checkout.
+      - name: Match the container user to the workspace owner
+        run: |
+          echo "HOST_UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "HOST_GID=$(id -g)" >> "$GITHUB_ENV"
 
       - name: Build Docker images
         run: docker compose -f docker-compose.yml -f docker-compose.apiv2.yml build
