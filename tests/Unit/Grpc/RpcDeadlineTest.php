@@ -113,7 +113,7 @@ class RpcDeadlineTest extends TestCase
                 throw new GrpcException('mismatch cluster id, need 999 but got 0', 2);
             }
 
-            return $this->getRegionResponse();
+            return $this->getRegionResponse(999);
         });
 
         (new PdClient($grpc, 'pd:2379', timeoutConfig: $this->timeoutConfig()))->getRegion('some-key');
@@ -605,7 +605,7 @@ class RpcDeadlineTest extends TestCase
         return $response;
     }
 
-    private function getRegionResponse(): GetRegionResponse
+    private function getRegionResponse(int $clusterId = 100): GetRegionResponse
     {
         $epoch = new RegionEpoch();
         $epoch->setConfVer(1);
@@ -620,7 +620,7 @@ class RpcDeadlineTest extends TestCase
         $leader->setStoreId(1);
 
         $header = new ResponseHeader();
-        $header->setClusterId(100);
+        $header->setClusterId($clusterId);
 
         $response = new GetRegionResponse();
         $response->setHeader($header);
