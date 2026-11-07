@@ -233,20 +233,43 @@ class RawKvClientTest extends TestCase
         $this->assertSame($metrics, $client->getMetrics());
     }
 
-    public function testGetMetricsDoesNotThrowWhenNeverQueried(): void
+    /**
+     * The default-construction path must yield a fully working NoOp backend:
+     * it accepts every call — empty, negative, binary and oversized arguments
+     * included — and records nothing. The InMemoryMetrics half proves the
+     * calls are real, so the empty state is the no-op's behaviour rather than
+     * the calls being inert.
+     */
+    public function testNoOpMetricsRecordsNothingForAnyInput(): void
     {
-        // The default-construction path must yield a fully working NoOp
-        // metrics backend without any additional setup.
+        $exercise = static function (MetricsInterface $metrics): void {
+            $metrics->rpcStarted('');
+            $metrics->rpcCompleted('', -1.0, false);
+            $metrics->retryAttempted("\x00\xff");
+            $metrics->regionCacheHit(str_repeat('x', 10_000));
+            $metrics->regionCacheMiss("\x00");
+            $metrics->regionInvalidated('');
+            $metrics->storeHealthChanged(-1, false);
+        };
+
         $metrics = $this->client->getMetrics();
+        self::assertInstanceOf(NoOpMetrics::class, $metrics);
 
-        $metrics->rpcStarted('dummy');
-        $metrics->rpcCompleted('dummy', 1.0, true);
-        $metrics->retryAttempted('NotLeader');
-        $metrics->regionCacheHit('dummy');
-        $metrics->regionCacheMiss('dummy');
-        $metrics->regionInvalidated('not_leader');
+        $exercise($metrics);
 
-        $this->assertInstanceOf(MetricsInterface::class, $metrics);
+        self::assertSame([], (array) $metrics, 'NoOpMetrics must not record anything');
+
+        $real = new InMemoryMetrics();
+        $exercise($real);
+
+        self::assertSame(1, $real->getRpcStarted(''));
+        self::assertSame(1, $real->getRpcFailed(''));
+        self::assertSame(-1.0, $real->getMeanLatencyMs(''));
+        self::assertSame(1, $real->getRetries("\x00\xff"));
+        self::assertSame(1, $real->getCacheHits(str_repeat('x', 10_000)));
+        self::assertSame(1, $real->getCacheMisses("\x00"));
+        self::assertSame(1, $real->getInvalidations(''));
+        self::assertFalse($real->isStoreHealthy(-1));
     }
 
     public function testCreateAcceptsMetricsOption(): void
@@ -340,57 +363,116 @@ class RawKvClientTest extends TestCase
         // A second close() must not close the gRPC transport or PD client
         // again: closing a gRPC channel twice is undefined behaviour in the C
         // extension (issue #344).
-        $this->grpc->expects($this->once())->method('close');
-        $this->pdClient->expects($this->once())->method('close');
+        $grpcCloses = 0;
+        $this->grpc->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+            });
+        $pdCloses = 0;
+        $this->pdClient->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+            });
 
         $this->client->close();
         $this->client->close();
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses, 'the gRPC transport must be closed exactly once');
+        $this->assertSame(1, $pdCloses, 'the PD client must be closed exactly once');
     }
 
     public function testCloseContinuesWhenGrpcCloseThrows(): void
     {
+        $grpcCloses = 0;
         $this->grpc->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('grpc boom'));
-        $this->pdClient->expects($this->once())->method('close');
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+                throw new \RuntimeException('grpc boom');
+            });
+        $pdCloses = 0;
+        $this->pdClient->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+            });
 
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses);
+        $this->assertSame(1, $pdCloses, 'a throwing gRPC close must not skip the PD close');
     }
 
     public function testCloseContinuesWhenPdCloseThrows(): void
     {
-        $this->grpc->expects($this->once())->method('close');
+        $grpcCloses = 0;
+        $this->grpc->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+            });
+        $pdCloses = 0;
         $this->pdClient->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('pd boom'));
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+                throw new \RuntimeException('pd boom');
+            });
 
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses, 'a throwing PD close must not undo the gRPC close');
+        $this->assertSame(1, $pdCloses);
     }
 
     public function testCloseSwallowsBothSubCloseExceptions(): void
     {
+        $grpcCloses = 0;
         $this->grpc->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('grpc boom'));
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+                throw new \RuntimeException('grpc boom');
+            });
+        $pdCloses = 0;
         $this->pdClient->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('pd boom'));
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+                throw new \RuntimeException('pd boom');
+            });
 
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses);
+        $this->assertSame(1, $pdCloses);
     }
 
     public function testCloseIsIdempotentAfterSubCloseThrows(): void
     {
+        $grpcCloses = 0;
         $this->grpc->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('grpc boom'));
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+                throw new \RuntimeException('grpc boom');
+            });
+        $pdCloses = 0;
         $this->pdClient->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('pd boom'));
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+                throw new \RuntimeException('pd boom');
+            });
 
         $this->client->close();
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses, 'a failed first close must still mark the client closed');
+        $this->assertSame(1, $pdCloses, 'a failed first close must still mark the client closed');
     }
 
     // ========================================================================
