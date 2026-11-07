@@ -340,8 +340,13 @@ final readonly class RawKvScanner
      * regions (issue #555); a bounded scan stays sequential.
      *
      * A reversed range (`startKey` sorts before a non-empty `endKey`) is
-     * rejected before any RPC. An empty `endKey` is the start of the keyspace
-     * (not +infinity), so `reverseScan('', '')` is an empty range.
+     * rejected before any RPC. Reverse scan has no +infinity sentinel: an
+     * empty `startKey` is not an unbounded upper bound, so
+     * `reverseScan('', $lower)` with a non-empty lower bound throws
+     * `InvalidArgumentException` instead of issuing a `RawScan` whose empty
+     * `start_key` would return nothing (RAW-09, #194). An empty `endKey` is
+     * the start of the keyspace (not +infinity), so `reverseScan('', '')` is
+     * the empty range.
      *
      * @return array<array{key: string, value: ?string}>
      *
@@ -361,6 +366,8 @@ final readonly class RawKvScanner
         // keyspace minimum, not an unbounded upper bound. Return before the
         // region enumeration — the clipper cannot skip this case because its
         // empty-end sentinel also marks a region whose end is unbounded.
+        // A non-empty end key with an empty start key is a reversed range and
+        // was rejected by assertReverseRangeOrder() above.
         if ($startKey === '' && $endKey === '') {
             return [];
         }

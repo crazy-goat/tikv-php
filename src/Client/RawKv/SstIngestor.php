@@ -631,6 +631,18 @@ final readonly class SstIngestor
     /**
      * Compute CRC32 checksum over the region's keys and values in order.
      *
+     * `hash_final()` returns the digest as a hexadecimal string, so it must be
+     * decoded with `hexdec()` before the cast: casting the hex string directly
+     * truncates it at the first non-digit (or yields `0` when it starts with a
+     * letter), which is not the CRC32 of anything (issue #196).
+     *
+     * The target TiKV version does not validate this field on the `RawWrite`
+     * path: it builds the SST server-side, echoes the client-supplied
+     * `SSTMeta` back (only `cf_name` is overridden) and `Ingest` checks only
+     * the API version, not `crc32`, `total_kvs` or `total_bytes`. The true
+     * checksum is still sent so that a TiKV version that starts validating it
+     * receives a correct value instead of a truncated prefix.
+     *
      * @param string[] $keys
      * @param array<string, string> $keyValuePairs
      */
@@ -642,6 +654,6 @@ final readonly class SstIngestor
             hash_update($ctx, $keyValuePairs[$key]);
         }
 
-        return (int) hash_final($ctx);
+        return (int) hexdec(hash_final($ctx));
     }
 }
