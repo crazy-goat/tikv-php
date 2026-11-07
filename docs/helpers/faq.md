@@ -1414,6 +1414,18 @@ non-constant values for all types. The #296 change adds only a
 NotLeader-specific pin and this note; no production code changed. Close such
 an audit import as a duplicate instead of re-implementing the jitter.
 
+The same happened to issue #320 (audit SEC-17, "pass the configured metrics
+instance through `RawKvClient::create()`"): 6911928 (#368) had already added
+`metrics: $bundle->metrics` to both `create()` methods and the region cache,
+retry executors and transactions. The acceptance criterion still open was the
+behavioural regression test — `getMetrics()` returning the injected instance
+does not prove the counters fire, because a factory that drops the argument
+still returns a (NoOp) backend. `MetricsWiringTest` drives one operation
+through each factory with `allowInsecure: false`, which fails closed in
+`getChannel()` right after `rpcStarted()`, and asserts the transport's
+`rpcStarted()` / `rpcCompleted()` for both factories plus the client-side
+`regionCacheMiss` on the RawKV path.
+
 ## A stray Markdown fence can become a legitimate closer — render the file before deleting it
 
 Issue #381 (DOC-15) reported an orphan closing fence after the TLS "manual
