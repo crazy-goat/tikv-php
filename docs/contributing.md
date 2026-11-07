@@ -552,7 +552,9 @@ Document all public methods:
  * Get the remaining TTL for a key.
  *
  * @param string $key The key to check
- * @return int|null Remaining TTL in seconds, or null if not found/no TTL
+ * @return int|null Remaining TTL in seconds, or null both when the key does
+ *         not exist and when it exists without an expiry; use
+ *         getKeyTTLResult() to tell the two apart
  */
 public function getKeyTTL(string $key): ?int;
 ```
