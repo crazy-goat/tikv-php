@@ -1,5 +1,10 @@
 .PHONY: help install test test-e2e test-e2e-apiv2 test-unit proto-generate proto-clean build up down logs clean
 
+# Docker Compose v2 ships as a `docker` plugin; the v1 binary is the fallback
+# for installations that still have it (the same rule as
+# scripts/lib/compose.sh, which the runner scripts source).
+COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+
 # Default target
 help:
 	@echo "TiKV PHP Client - Available commands:"
@@ -22,7 +27,7 @@ help:
 # Install dependencies
 install:
 	@echo "Installing PHP dependencies..."
-	docker-compose run --rm php-client composer install
+	$(COMPOSE) run --rm php-client composer install
 
 # Run all tests
 test: test-unit test-e2e
@@ -31,7 +36,7 @@ test: test-unit test-e2e
 # Run unit tests only (no TiKV required)
 test-unit:
 	@echo "Running unit tests..."
-	docker-compose run --rm php-client vendor/bin/phpunit --testsuite Unit --testdox --fail-on-empty-test-suite
+	$(COMPOSE) run --rm php-client vendor/bin/phpunit --testsuite Unit --testdox --fail-on-empty-test-suite
 
 # Run E2E tests with TiKV cluster
 test-e2e:
@@ -46,7 +51,7 @@ test-e2e-apiv2:
 # Generate PHP classes + gRPC stubs from proto files
 proto-generate:
 	@echo "Generating PHP classes from TiKV proto files..."
-	@docker-compose run --rm php-client sh /app/scripts/generate-proto.sh
+	@$(COMPOSE) run --rm php-client sh /app/scripts/generate-proto.sh
 	@echo ""
 	@echo "Proto generation complete!"
 
@@ -60,39 +65,39 @@ proto-clean:
 # Build Docker images
 build:
 	@echo "Building Docker images..."
-	docker-compose build
+	$(COMPOSE) build
 
 # Start TiKV cluster
 up:
 	@echo "Starting TiKV cluster..."
-	docker-compose up -d pd tikv1 tikv2 tikv3
+	$(COMPOSE) up -d pd tikv1 tikv2 tikv3
 	@echo "Waiting for cluster to be healthy..."
 	@sleep 10
-	@docker-compose ps
+	@$(COMPOSE) ps
 
 # Stop TiKV cluster
 down:
 	@echo "Stopping TiKV cluster..."
-	docker-compose down
+	$(COMPOSE) down
 
 # Show logs
 logs:
 	@echo "Showing TiKV cluster logs..."
-	docker-compose logs -f
+	$(COMPOSE) logs -f
 
 # Clean everything
 clean:
 	@echo "Cleaning everything..."
-	docker-compose down -v --remove-orphans
+	$(COMPOSE) down -v --remove-orphans
 	@rm -rf vendor/
 	@echo "Clean complete!"
 
 # Run basic example
 example:
 	@echo "Running basic example..."
-	docker-compose run --rm php-client php examples/basic.php
+	$(COMPOSE) run --rm php-client php examples/basic.php
 
 # Development shell
 shell:
 	@echo "Opening development shell..."
-	docker-compose run --rm php-client sh
+	$(COMPOSE) run --rm php-client sh

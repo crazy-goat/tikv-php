@@ -55,6 +55,11 @@ cleanup() {
 # Set trap to cleanup on exit
 trap cleanup EXIT
 
+# An interrupted run must still dump the diagnostics: without these the EXIT
+# trap sees status 0 and goes straight to `down -v`, erasing the artifacts.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 echo -e "${YELLOW}Step 1: Starting TiKV cluster...${NC}"
 compose up -d pd tikv1 tikv2 tikv3
 

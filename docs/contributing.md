@@ -373,7 +373,7 @@ composer test:e2e
 # Or manually run the RawKV suite inside the Compose network
 # (start the default V1TTL cluster first)
 make up
-docker-compose run --rm php-client \
+docker compose run --rm --no-deps php-client \
   vendor/bin/phpunit --testsuite E2E-RawKV --no-coverage
 
 # TxnKV uses the V1 cluster override and is run by make test-e2e

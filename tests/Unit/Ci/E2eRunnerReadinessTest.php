@@ -13,8 +13,13 @@ use PHPUnit\Framework\TestCase;
  * reported healthy — in practice PD, while the TiKV stores were still
  * booting — and the test container then failed with "Name does not resolve
  * tikv1:20160". The gate lives in `scripts/lib/wait-for-cluster.sh`; these
- * tests drive it through a fake `compose` function, so they need neither
+ * tests drive it through a fake `docker` command, so they need neither
  * Docker nor a cluster.
+ *
+ * The fake answers the v1-compatible `ps --services --filter
+ * status=running` shape and rejects `ps --format`, which Compose v1 does not
+ * understand: a gate that regressed to the v2-only option would time out
+ * here.
  */
 final class E2eRunnerReadinessTest extends TestCase
 {
@@ -52,6 +57,13 @@ final class E2eRunnerReadinessTest extends TestCase
         self::assertSame(0, $exitCode, 'All four containers running and three stores Up is a ready cluster');
     }
 
+    public function testAClusterIsNotReadyWhenComposePsFails(): void
+    {
+        [$exitCode] = $this->runClusterReady($this->allRunning(), 3, true);
+
+        self::assertSame(1, $exitCode, 'A failing `compose ps` means "cannot tell", which is not ready');
+    }
+
     public function testWaitForClusterReportsATimeout(): void
     {
         [$exitCode, $output] = $this->runWaitForCluster(
@@ -85,12 +97,43 @@ final class E2eRunnerReadinessTest extends TestCase
         self::assertStringContainsString('lib/wait-for-cluster.sh', $script);
         self::assertStringContainsString('wait_for_cluster "cluster"', $script);
         self::assertStringContainsString('wait_for_cluster "V1 cluster"', $script);
+        self::assertStringContainsString("trap 'exit 130' INT", $script);
+        self::assertStringContainsString("trap 'exit 143' TERM", $script);
         self::assertStringNotContainsString('grep -q "healthy"', $script);
         self::assertSame(
             1,
             substr_count($script, 'docker-compose.txnkv.yml'),
             'The TxnKV override belongs in the one COMPOSE_FILES definition, '
             . 'so no invocation can miss it',
+        );
+    }
+
+    /**
+     * `ps --format` is a Compose v2 option; v1's `ps` knows only
+     * `-q`, `--services` and `--filter`, so the gate has to stay on those.
+     */
+    public function testTheReadinessGateUsesOnlyComposeV1CompatibleOptions(): void
+    {
+        $library = $this->readScript('scripts/lib/wait-for-cluster.sh');
+
+        self::assertStringContainsString('compose_running_services', $library);
+        self::assertStringNotContainsString('--format', $library);
+    }
+
+    /**
+     * The Makefile targets have to follow the same detection as the scripts;
+     * calling the v1 binary directly fails on a v2-only host.
+     */
+    public function testTheMakefileUsesTheSharedComposeDetection(): void
+    {
+        $makefile = $this->readScript('Makefile');
+
+        self::assertStringContainsString('COMPOSE := $(shell docker compose version', $makefile);
+        self::assertStringContainsString('$(COMPOSE)', $makefile);
+        self::assertSame(
+            0,
+            preg_match('/^\tdocker-compose\b/m', $makefile),
+            'No Makefile recipe may call the v1 binary directly',
         );
     }
 
@@ -109,9 +152,9 @@ final class E2eRunnerReadinessTest extends TestCase
      *
      * @return array{int, string} the exit code and the combined output
      */
-    private function runClusterReady(array $services, int $stores): array
+    private function runClusterReady(array $services, int $stores, bool $psFails = false): array
     {
-        return $this->runHarness($this->harness($services, $stores) . "\ncluster_ready");
+        return $this->runHarness($this->harness($services, $stores, $psFails) . "\ncluster_ready");
     }
 
     /**
@@ -129,18 +172,28 @@ final class E2eRunnerReadinessTest extends TestCase
     }
 
     /**
-     * The bash harness: a fake `compose`, no real sleeping, and the library
-     * under test. `compose ps` prints the service states, `compose exec`
-     * answers PD's store list.
+     * The bash harness: a fake `docker`, no real sleeping, and the libraries
+     * under test. `compose ps` answers the v1-compatible service list (and
+     * rejects `--format`), `compose exec` answers PD's store list.
      *
      * @param array<string, string> $services service name => container state
      */
-    private function harness(array $services, int $stores): string
+    private function harness(array $services, int $stores, bool $psFails = false): string
     {
-        $ps = '';
+        $running = [];
         foreach ($services as $service => $state) {
-            $ps .= $service . ' ' . $state . "\n";
+            if ($state === 'running') {
+                $running[] = escapeshellarg($service);
+            }
         }
+
+        $psBody = $psFails
+            ? 'return 1'
+            : 'case " $* " in' . "\n"
+                . '    *" --format "*) return 1 ;;' . "\n"
+                . '    *" --services "*) printf \'%s\\n\' ' . implode(' ', $running) . ' ;;' . "\n"
+                . '    *) return 1 ;;' . "\n"
+                . 'esac';
 
         $storeEntries = [];
         for ($index = 0; $index < $stores; $index++) {
@@ -148,18 +201,23 @@ final class E2eRunnerReadinessTest extends TestCase
         }
         $storesJson = '{"stores":[' . implode(',', $storeEntries) . ']}';
 
-        $library = escapeshellarg(dirname(__DIR__, 3) . '/scripts/lib/wait-for-cluster.sh');
+        $root = dirname(__DIR__, 3);
+        $composeLibrary = escapeshellarg($root . '/scripts/lib/compose.sh');
+        $readinessLibrary = escapeshellarg($root . '/scripts/lib/wait-for-cluster.sh');
 
         return <<<BASH
 set -e
 GREEN=''
 RED=''
 sleep() { :; }
-compose() {
+docker() {
+    if [ "\$1" = "compose" ]; then
+        shift
+    fi
     case "\$1" in
+        version) return 0 ;;
         ps)
-            cat <<'PS'
-{$ps}PS
+            {$psBody}
             ;;
         exec)
             printf '%s' '{$storesJson}'
@@ -169,7 +227,8 @@ compose() {
             ;;
     esac
 }
-. {$library}
+. {$composeLibrary}
+. {$readinessLibrary}
 BASH;
     }
 

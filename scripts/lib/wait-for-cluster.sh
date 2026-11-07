@@ -12,7 +12,7 @@
 # scripts/lib/compose.sh) and may override TIKV_SERVICE_COUNT or
 # TIKV_STORE_COUNT for a different topology:
 #
-#   compose() { "${COMPOSE[@]}" "$@"; }
+#   . "$(dirname "$0")/lib/compose.sh"
 #   . "$(dirname "$0")/lib/wait-for-cluster.sh"
 #   wait_for_cluster "cluster"
 
@@ -33,11 +33,11 @@ up_store_count() {
 # True when every service container is running and PD sees every store Up.
 # A `compose ps` failure (no cluster yet) means "not ready", not an error.
 cluster_ready() {
-    local states service
-    states=$(compose ps --format '{{.Service}} {{.State}}' 2>/dev/null) || return 1
+    local services service
+    services=$(compose_running_services 2>/dev/null) || return 1
 
     for service in "${CLUSTER_SERVICES[@]}"; do
-        if ! grep -qx "$service running" <<<"$states"; then
+        if ! grep -qx "$service" <<<"$services"; then
             return 1
         fi
     done
