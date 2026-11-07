@@ -1591,7 +1591,7 @@ client-wide on `create()` and overridable per transaction on `begin()`
 
 ```php
 // Client-wide default for every transaction this client begins
-$client = TxnKvClient::create(['127.0.0.1:2379'], [
+$client = TxnKvClient::create(['127.0.0.1:2379'], options: [
     'lockWaitTimeMs' => 1000, // default; 0 = "let TiKV use its own default"
 ]);
 

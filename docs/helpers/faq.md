@@ -566,12 +566,14 @@ also the case the audit finding quoted: the field was never set at all).
 
 The client derives the value from the remaining lock-wait budget, like
 client-go's `calculateEffectiveWaitTime`: the value sent to TiKV is
-`min(lockWaitTimeMs, remaining budget)`, so it never exceeds the budget and
-shrinks as the budget is consumed. The budget that shrinks is the **backoff**
-budget of the key group (`maxBackoffMs` minus the sleep already spent), not
-the wall clock — the group's RPC time is not part of it, so the total
-occupancy of a contended key is the budget plus the server-side waits of the
-attempts, not `maxBackoffMs` alone.
+`min(lockWaitTimeMs, remaining budget, RPC deadline - 100 ms)`, so it never
+exceeds the budget and shrinks as the budget is consumed. The budget that
+shrinks is the **backoff** budget of the key group (`maxBackoffMs` minus the
+sleep already spent), not the wall clock — the group's RPC time is not part
+of it, so the total occupancy of a contended key is the budget plus the
+server-side waits of the attempts, not `maxBackoffMs` alone. The
+`RPC deadline - 100 ms` term is the #229 cap described below; `0` is exempt
+from both the shrink and the cap because it delegates the timeout to TiKV.
 
 Note that the issue's *first* acceptance criterion ("exhausting the budget
 raises `LockWaitTimeoutException` instead of continuing to prewrite") was
@@ -588,10 +590,11 @@ carries `-1` ("do not wait"). `lockWaitTimeMs` is accepted by `create()` as
 a client-wide default, with `begin()` overriding it per transaction.
 `LockWaitTimeoutException` now carries both timeouts: `getTimeoutMs()` /
 `getBudgetMs()` are the exhausted `maxBackoffMs` budget, and
-`getWaitTimeoutMs()` is the configured per-request wait. The budget is the
-timeout that actually expired — the exception is raised by the client-side
-loop, not by TiKV's server-side wait timer — so the historical accessor
-keeps its value.
+`getConfiguredWaitTimeoutMs()` is the configured per-request wait before the
+budget and deadline caps (the message renders `0` as "TiKV default"). The
+budget is the timeout that actually expired — the exception is raised by the
+client-side loop, not by TiKV's server-side wait timer — so the historical
+accessor keeps its value.
 
 ## Retry closures must re-resolve the region inside the loop — scans resolve on the sub-range start, reverse scans on the sub-range end
 

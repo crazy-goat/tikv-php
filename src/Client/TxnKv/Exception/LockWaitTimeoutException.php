@@ -13,8 +13,9 @@ use CrazyGoat\TiKV\Client\Util\KeyRedactor;
  * Two different timeouts are involved (issue #229, TXN-24):
  * - the budget (`maxBackoffMs`) that the client spent retrying, which is
  *   the timeout that actually expired, and
- * - the per-request `lockWaitTimeMs` handed to TiKV as
- *   `PessimisticLockRequest.wait_timeout`.
+ * - the configured per-request `lockWaitTimeMs`, which the committer caps to
+ *   `min(configured wait, remaining budget, RPC deadline - 100 ms)` before
+ *   sending it as `PessimisticLockRequest.wait_timeout`.
  *
  * Both are exposed so a caller can tell a short per-request wait from a
  * short retry budget.
@@ -23,14 +24,14 @@ final class LockWaitTimeoutException extends TiKvException
 {
     public function __construct(
         private readonly string $key,
-        private readonly int $budgetMs,
-        private readonly int $waitTimeoutMs = 0,
+        private readonly int $timeoutMs,
+        private readonly int $configuredWaitTimeoutMs = 0,
     ) {
         parent::__construct(sprintf(
-            'Lock wait timeout for key: %s (budget %dms, per-request wait %dms)',
+            'Lock wait timeout for key: %s (budget %dms, %s)',
             KeyRedactor::redact($key),
-            $budgetMs,
-            $waitTimeoutMs,
+            $timeoutMs,
+            $this->describeConfiguredWaitTimeout($configuredWaitTimeoutMs),
         ));
     }
 
@@ -47,22 +48,31 @@ final class LockWaitTimeoutException extends TiKvException
      */
     public function getTimeoutMs(): int
     {
-        return $this->budgetMs;
+        return $this->timeoutMs;
     }
 
     /** The client-side lock-wait budget that expired (`maxBackoffMs`). */
     public function getBudgetMs(): int
     {
-        return $this->budgetMs;
+        return $this->timeoutMs;
     }
 
     /**
-     * The configured per-request server-side wait (`lockWaitTimeMs`), the
-     * value sent as `PessimisticLockRequest.wait_timeout`. `0` means TiKV's
-     * own default timeout.
+     * The **configured** per-request server-side wait (`lockWaitTimeMs`),
+     * before the remaining-budget and gRPC-deadline caps. It is not
+     * necessarily the value the last request carried: the effective value is
+     * `min(configured wait, remaining budget, RPC deadline - 100 ms)`. `0`
+     * means "let TiKV use its own default timeout".
      */
-    public function getWaitTimeoutMs(): int
+    public function getConfiguredWaitTimeoutMs(): int
     {
-        return $this->waitTimeoutMs;
+        return $this->configuredWaitTimeoutMs;
+    }
+
+    private function describeConfiguredWaitTimeout(int $configuredWaitTimeoutMs): string
+    {
+        return $configuredWaitTimeoutMs === 0
+            ? 'per-request wait: TiKV default'
+            : sprintf('per-request wait %dms', $configuredWaitTimeoutMs);
     }
 }

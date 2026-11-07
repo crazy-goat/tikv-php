@@ -593,8 +593,11 @@ LockWaitTimeoutException: Lock wait timeout for key: <redacted> (budget <maxBack
 
 **What it means:** A pessimistic lock wait exhausted its wait budget
 (`maxBackoffMs`, default 20000 ms) without acquiring the lock (issue #219).
-`getTimeoutMs()` / `getBudgetMs()` report that budget; `getWaitTimeoutMs()`
-reports the per-request `lockWaitTimeMs` that was sent to TiKV (issue #229).
+`getTimeoutMs()` / `getBudgetMs()` report that budget; `getConfiguredWaitTimeoutMs()`
+reports the configured per-request `lockWaitTimeMs`. The value actually sent
+is capped by the remaining budget and by the gRPC deadline (write timeout
+minus 100 ms), so it can be smaller than the configured value (issue #229). A
+configured `0` is rendered as "TiKV default".
 
 **Likely cause:** A competing transaction holds the lock longer than your
 budget — long-running transaction, or a genuinely stuck lock.

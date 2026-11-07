@@ -2229,8 +2229,7 @@ final readonly class TwoPhaseCommitter
             return self::LOCK_WAIT_NO_WAIT_MS;
         }
 
-        $rpcDeadlineMs = $this->timeoutMsWithinBudget($this->timeoutMs('write'), $budget)
-            ?? $this->timeoutConfig->writeTimeoutMs;
+        $rpcDeadlineMs = $this->timeoutMsWithinBudget($this->timeoutConfig->writeTimeoutMs, $budget);
         $waitCapMs = $rpcDeadlineMs - self::LOCK_WAIT_DEADLINE_HEADROOM_MS;
         if ($waitCapMs <= 0) {
             // The RPC deadline is shorter than the headroom: any positive

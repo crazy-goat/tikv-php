@@ -326,11 +326,45 @@ class PessimisticLockWaitTimeoutTest extends TestCase
             $this->assertSame('key', $e->getKey());
             $this->assertSame(100, $e->getTimeoutMs());
             $this->assertSame(100, $e->getBudgetMs());
-            $this->assertSame(1000, $e->getWaitTimeoutMs());
+            $this->assertSame(1000, $e->getConfiguredWaitTimeoutMs());
         }
 
         $this->assertNotContains('KvPrewrite', $this->methods);
         $this->assertNotContains('KvCommit', $this->methods);
+    }
+
+    public function testExceptionReportsTheConfiguredWaitNotTheCappedValue(): void
+    {
+        $this->alwaysConflicting();
+
+        // The 100 ms budget capped the wait actually sent to TiKV, while the
+        // accessor reports the configured value by name (issue #229 review).
+        $txn = $this->createTransaction(['maxBackoffMs' => 100]);
+
+        try {
+            $txn->set('key', 'value');
+            $this->fail('Expected LockWaitTimeoutException was not thrown');
+        } catch (LockWaitTimeoutException $e) {
+            $this->assertSame(1000, $e->getConfiguredWaitTimeoutMs());
+            $this->assertStringContainsString('per-request wait 1000ms', $e->getMessage());
+        }
+    }
+
+    public function testExceptionMessageRendersAZeroWaitAsTikvDefault(): void
+    {
+        $this->alwaysConflicting();
+
+        // 0 delegates the timeout to TiKV; rendering it as "0ms" would read
+        // like "do not wait" (issue #229 review).
+        $txn = $this->createTransaction(['lockWaitTimeMs' => 0, 'maxBackoffMs' => 100]);
+
+        try {
+            $txn->set('key', 'value');
+            $this->fail('Expected LockWaitTimeoutException was not thrown');
+        } catch (LockWaitTimeoutException $e) {
+            $this->assertSame(0, $e->getConfiguredWaitTimeoutMs());
+            $this->assertStringContainsString('per-request wait: TiKV default', $e->getMessage());
+        }
     }
 
     public function testZeroWaitTimeoutLeavesTheDecisionToTiKV(): void
