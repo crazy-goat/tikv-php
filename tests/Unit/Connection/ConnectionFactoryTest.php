@@ -24,6 +24,29 @@ use PHPUnit\Framework\TestCase;
 
 class ConnectionFactoryTest extends TestCase
 {
+    private string $tempDir;
+
+    protected function setUp(): void
+    {
+        $this->tempDir = sys_get_temp_dir() . '/tikv-connection-factory-' . uniqid();
+        mkdir($this->tempDir, 0777, true);
+    }
+
+    protected function tearDown(): void
+    {
+        if (!is_dir($this->tempDir)) {
+            return;
+        }
+
+        foreach (scandir($this->tempDir) ?: [] as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            unlink($this->tempDir . '/' . $entry);
+        }
+        rmdir($this->tempDir);
+    }
+
     public function testAllowedStorePortsDefaultsToNull(): void
     {
         $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
@@ -438,6 +461,39 @@ class ConnectionFactoryTest extends TestCase
     }
 
     /**
+     * @return array<string, array{string}>
+     */
+    public static function timeoutFieldProvider(): array
+    {
+        $fields = [];
+        foreach ((new \ReflectionMethod(TimeoutConfig::class, '__construct'))->getParameters() as $parameter) {
+            $fields[$parameter->getName()] = [$parameter->getName()];
+        }
+
+        return $fields;
+    }
+
+    /**
+     * A numeric string — the shape an environment variable produces — is a
+     * type error, not a value to coerce or silently ignore (issue #339,
+     * TEST-19). Every timeout field fails the same way.
+     */
+    #[DataProvider('timeoutFieldProvider')]
+    public function testNumericStringTimeoutIsRejectedNotSilentlyIgnored(string $field): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf(
+            "options['timeout'][%s] must be an int (milliseconds), string given",
+            $field,
+        ));
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['timeout' => [$field => '5000']],
+        );
+    }
+
+    /**
      * A key the factory does not know is a misconfiguration, not a no-op:
      * a silently dropped option has no effect and the default applies, with
      * no warning anywhere (issue #272, GRPC-13). The TLS options already
@@ -535,6 +591,25 @@ class ConnectionFactoryTest extends TestCase
             ['127.0.0.1:2379'],
             options: ['slowLog' => ['readThresholdMs' => -1]],
         );
+    }
+
+    /**
+     * A threshold of `0` is the documented "disable slow logging for this
+     * operation" value, unlike a zero timeout, which is a configuration
+     * error.
+     */
+    public function testZeroSlowLogThresholdDisablesLoggingForThatOperation(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['slowLog' => ['readThresholdMs' => 0]],
+        );
+
+        $this->assertNotNull($bundle->slowLogConfig);
+        $this->assertSame(0, $bundle->slowLogConfig->readThresholdMs);
+        $this->assertSame(0, $bundle->slowLogConfig->getThreshold('read'));
+        // The other operations keep their own defaults.
+        $this->assertSame(200, $bundle->slowLogConfig->writeThresholdMs);
     }
 
     public function testAnUnknownSlowLogOptionIsRejected(): void
@@ -1034,5 +1109,166 @@ class ConnectionFactoryTest extends TestCase
             ['127.0.0.1:2379'],
             options: ['tls' => ['clientCertFile' => '/etc/tikv/client.crt']],
         );
+    }
+
+    // ========================================================================
+    // options['tls'] — parsing and the documented precedence rules
+    // (issue #339, TEST-19)
+    // ========================================================================
+
+    private const CA_PEM = "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----";
+
+    private const CLIENT_CERT_PEM = "-----BEGIN CERTIFICATE-----\nclient-cert\n-----END CERTIFICATE-----";
+
+    private const CLIENT_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nclient-key\n-----END PRIVATE KEY-----";
+
+    /**
+     * An explicit file path wins over inline PEM content when both are
+     * given (documented precedence in buildTlsConfig()).
+     */
+    public function testTlsFilePathTakesPriorityOverPem(): void
+    {
+        $filePem = "-----BEGIN CERTIFICATE-----\nfrom-file\n-----END CERTIFICATE-----";
+        $caPath = $this->writeTlsFile('ca.crt', $filePem);
+
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCertFile' => $caPath,
+                'caCertPem' => self::CA_PEM,
+            ]],
+        );
+
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertSame($filePem, $bundle->tlsConfig->caCert);
+    }
+
+    /**
+     * The same precedence applies to the client certificate pair: a
+     * complete file pair wins over a complete PEM pair.
+     */
+    public function testClientCertFilePathTakesPriorityOverPem(): void
+    {
+        $caPath = $this->writeTlsFile('ca.crt', self::CA_PEM);
+        $certPath = $this->writeTlsFile('client.crt', self::CLIENT_CERT_PEM);
+        $keyPath = $this->writeTlsFile('client.key', self::CLIENT_KEY_PEM);
+
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCertFile' => $caPath,
+                'clientCertFile' => $certPath,
+                'clientKeyFile' => $keyPath,
+                'clientCertPem' => "-----BEGIN CERTIFICATE-----\ninline-cert\n-----END CERTIFICATE-----",
+                'clientKeyPem' => "-----BEGIN PRIVATE KEY-----\ninline-key\n-----END PRIVATE KEY-----",
+            ]],
+        );
+
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertSame(self::CLIENT_CERT_PEM, $bundle->tlsConfig->clientCert);
+        $this->assertSame(self::CLIENT_KEY_PEM, $bundle->tlsConfig->clientKey);
+    }
+
+    public function testCaCertPemIsUsedWhenNoFilePathIsGiven(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => ['caCertPem' => self::CA_PEM]],
+        );
+
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertSame(self::CA_PEM, $bundle->tlsConfig->caCert);
+    }
+
+    public function testCaCertFileIsReadFromTheConfiguredBaseDir(): void
+    {
+        $caPath = $this->writeTlsFile('ca.crt', self::CA_PEM);
+
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCertFile' => $caPath,
+                'caCertBaseDir' => $this->tempDir,
+            ]],
+        );
+
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertSame(self::CA_PEM, $bundle->tlsConfig->caCert);
+    }
+
+    /**
+     * The deprecated `caCert` key guesses file vs inline content; inline
+     * content is the documented use.
+     */
+    public function testLegacyCaCertOptionAcceptsInlinePem(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => ['caCert' => self::CA_PEM]],
+        );
+
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertSame(self::CA_PEM, $bundle->tlsConfig->caCert);
+    }
+
+    public function testClientCertFilePairIsApplied(): void
+    {
+        $caPath = $this->writeTlsFile('ca.crt', self::CA_PEM);
+        $certPath = $this->writeTlsFile('client.crt', self::CLIENT_CERT_PEM);
+        $keyPath = $this->writeTlsFile('client.key', self::CLIENT_KEY_PEM);
+
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCertFile' => $caPath,
+                'clientCertFile' => $certPath,
+                'clientKeyFile' => $keyPath,
+                'clientCertBaseDir' => $this->tempDir,
+            ]],
+        );
+
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertSame(self::CLIENT_CERT_PEM, $bundle->tlsConfig->clientCert);
+        $this->assertSame(self::CLIENT_KEY_PEM, $bundle->tlsConfig->clientKey);
+    }
+
+    public function testClientCertPemPairIsApplied(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCertPem' => self::CA_PEM,
+                'clientCertPem' => self::CLIENT_CERT_PEM,
+                'clientKeyPem' => self::CLIENT_KEY_PEM,
+            ]],
+        );
+
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertSame(self::CLIENT_CERT_PEM, $bundle->tlsConfig->clientCert);
+        $this->assertSame(self::CLIENT_KEY_PEM, $bundle->tlsConfig->clientKey);
+    }
+
+    public function testLegacyClientCertPairAcceptsInlinePem(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCert' => self::CA_PEM,
+                'clientCert' => self::CLIENT_CERT_PEM,
+                'clientKey' => self::CLIENT_KEY_PEM,
+            ]],
+        );
+
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertSame(self::CLIENT_CERT_PEM, $bundle->tlsConfig->clientCert);
+        $this->assertSame(self::CLIENT_KEY_PEM, $bundle->tlsConfig->clientKey);
+    }
+
+    private function writeTlsFile(string $name, string $content): string
+    {
+        $path = $this->tempDir . '/' . $name;
+        file_put_contents($path, $content);
+
+        return $path;
     }
 }

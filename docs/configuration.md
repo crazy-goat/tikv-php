@@ -746,6 +746,12 @@ $options = [
 ];
 ```
 
+When both forms are given for the same credential, the explicit file path wins:
+`caCertFile` takes priority over `caCertPem`, and a complete
+`clientCertFile` + `clientKeyFile` pair takes priority over
+`clientCertPem` + `clientKeyPem`. Supplying both is redundant rather than an
+error, but the file is the one that is read.
+
 ### Deprecated TLS Option Keys
 
 `caCert`, `clientCert` and `clientKey` are **deprecated**. They still work for
