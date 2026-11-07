@@ -145,14 +145,17 @@ final class TxnKvClient
     public const OPT_EAGER_PESSIMISTIC_LOCKS = 'eagerPessimisticLocks';
 
     /**
-     * begin() options[] key for the pessimistic-lock wait timeout in
-     * milliseconds (issue #443, DIV-07): how long TiKV may block on a
-     * contended key before it answers with a "locked" error, which the
-     * client then retries within its lock-wait budget. Default:
+     * options[] key for the pessimistic-lock wait timeout in milliseconds
+     * (issue #443, DIV-07; client-wide default added by issue #229, TXN-24):
+     * how long TiKV may block on a contended key before it answers with a
+     * "locked" error, which the client then retries within its lock-wait
+     * budget. Accepted by `create()` as the default for every transaction of
+     * the client and by `begin()` as a per-transaction override. Default:
      * {@see Transaction::DEFAULT_LOCK_WAIT_TIME_MS} (1000 ms, the same value
      * TiKV applies by default). 0 means "let TiKV use its own default
      * timeout" — the only value that is not shrunk as the budget is
-     * consumed. Must be >= 0.
+     * consumed. A positive value is also capped by the request's gRPC
+     * deadline, so it never exceeds the write timeout. Must be >= 0.
      */
     public const OPT_LOCK_WAIT_TIME_MS = 'lockWaitTimeMs';
 
@@ -312,7 +315,11 @@ final class TxnKvClient
      *                                      built by the application — the client
      *                                      uses it and never closes it, so one
      *                                      transport can be shared with other
-     *                                      clients)
+     *                                      clients).
+     *                                      Transaction defaults are accepted
+     *                                      too, e.g. 'lockWaitTimeMs' (the
+     *                                      client-wide pessimistic-lock wait
+     *                                      timeout, issue #229).
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
@@ -354,6 +361,7 @@ final class TxnKvClient
             storeCache: $bundle->storeCache,
             requestContext: self::resolveRequestContext($options),
             resourceControl: ResourceControl::fromOptions($options),
+            lockWaitTimeMs: self::resolveLockWaitTimeMs($options, Transaction::DEFAULT_LOCK_WAIT_TIME_MS),
         );
     }
 
@@ -439,12 +447,22 @@ final class TxnKvClient
          * default, which sends no resource-control field.
          */
         private readonly ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Client-wide default for the pessimistic-lock wait timeout in
+         * milliseconds (issue #229, TXN-24), inherited by every transaction
+         * and overridable per begin() call. 0 means "let TiKV use its own
+         * default timeout". Must be >= 0.
+         */
+        private readonly int $lockWaitTimeMs = Transaction::DEFAULT_LOCK_WAIT_TIME_MS,
     ) {
         if ($regionCacheRefreshMs < 0) {
             throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
         }
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
+        }
+        if ($this->lockWaitTimeMs < 0) {
+            throw new InvalidArgumentException('lockWaitTimeMs must be >= 0');
         }
         // Arm the shutdown flag before any destructor can consult it; the
         // registered callback runs before PHP destroys the remaining
@@ -633,6 +651,12 @@ final class TxnKvClient
      *     lock-resolution RPCs are always Normal: they resolve locks of
      *     other transactions.
      *     `lockWaitTimeMs` bounds how long TiKV waits for a contended
+     *     pessimistic lock, in milliseconds (issue #443, DIV-07). It
+     *     defaults to the client-wide value from `create()` (itself
+     *     {@see Transaction::DEFAULT_LOCK_WAIT_TIME_MS}); a value here
+     *     overrides it for this transaction only. `0` means "let TiKV use
+     *     its own default timeout"; a positive value is capped by the
+     *     request's gRPC deadline. Must be >= 0.
      *     `optimisticLockTtlMs` (default 3000) and `pessimisticLockTtlMs`
      *     (default 30000) set the lock TTLs in milliseconds, each between 1 and
      *     120000 (issue #429). A pessimistic transaction extends its primary
@@ -668,7 +692,7 @@ final class TxnKvClient
         $enable1Pc = $this->resolveEnableFlag($options, self::OPT_ENABLE_1PC);
         $enableAsyncCommit = $this->resolveEnableFlag($options, self::OPT_ENABLE_ASYNC_COMMIT);
         $eagerPessimisticLocks = $this->resolveEagerPessimisticLocks($options);
-        $lockWaitTimeMs = $this->resolveLockWaitTimeMs($options);
+        $lockWaitTimeMs = self::resolveLockWaitTimeMs($options, $this->lockWaitTimeMs);
         $optimisticLockTtlMs = $this->resolveLockTtlMs(
             $options,
             self::OPT_OPTIMISTIC_LOCK_TTL_MS,
@@ -956,17 +980,21 @@ final class TxnKvClient
     }
 
     /**
-     * Resolve the begin() option 'lockWaitTimeMs' (see
+     * Resolve the 'lockWaitTimeMs' option (see
      * {@see self::OPT_LOCK_WAIT_TIME_MS}): how long TiKV may wait for a
      * contended pessimistic lock, in milliseconds. 0 means "use TiKV's own
      * default timeout"; a negative value is rejected.
      *
+     * `create()` calls it with the built-in default to resolve the
+     * client-wide value; `begin()` calls it with the client-wide value so a
+     * per-transaction entry overrides it (issue #229, TXN-24).
+     *
      * @param array<string, mixed> $options
      */
-    private function resolveLockWaitTimeMs(array $options): int
+    private static function resolveLockWaitTimeMs(array $options, int $default): int
     {
         if (!array_key_exists(self::OPT_LOCK_WAIT_TIME_MS, $options)) {
-            return Transaction::DEFAULT_LOCK_WAIT_TIME_MS;
+            return $default;
         }
 
         $value = $options[self::OPT_LOCK_WAIT_TIME_MS];

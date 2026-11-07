@@ -149,6 +149,57 @@ class TimestampOracleTest extends TestCase
         $oracle->getTimestamp();
     }
 
+    /**
+     * A present but zero-valued timestamp must be rejected (issue #230,
+     * TXN-25): TiKV reads timestamp 0 as "no version", so a transaction
+     * started with it would read nothing and write locks no correct
+     * resolver can reason about.
+     */
+    public function testGetTimestampThrowsOnZeroValuedTimestamp(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($this->makeTsoResponse(0, 0, 1));
+
+        $oracle = $this->makeOracle($grpc);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('TSO response contained an invalid physical timestamp');
+        $oracle->getTimestamp();
+    }
+
+    /**
+     * The validation lives in the shared extraction path, so an explicit
+     * batch is covered too — including a zero physical part hidden behind
+     * a non-zero logical counter (issue #230, TXN-25).
+     */
+    public function testGetTimestampBatchThrowsOnZeroPhysicalWithNonZeroLogical(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($this->makeTsoResponse(0, 7, 1));
+
+        $oracle = $this->makeOracle($grpc);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('TSO response contained an invalid physical timestamp');
+        $oracle->getTimestampBatch(1);
+    }
+
+    /**
+     * A negative physical component is equally unusable and must fail
+     * closed on the low-resolution path as well (issue #230, TXN-25).
+     */
+    public function testGetLowResolutionTimestampThrowsOnNegativePhysical(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($this->makeTsoResponse(-1, 0, 1));
+
+        $oracle = $this->makeOracle($grpc);
+
+        $this->expectException(TiKvException::class);
+        $this->expectExceptionMessage('TSO response contained an invalid physical timestamp');
+        $oracle->getLowResolutionTimestamp();
+    }
+
     public function testGetTimestampThrowsOnGrpcExceptionInsteadOfFabricating(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
@@ -453,6 +504,20 @@ class TimestampOracleTest extends TestCase
     // Batch TSO (issue #420, GAP-06)
     // ==================================================================
 
+    /**
+     * Realistic physical base (milliseconds since the epoch) for the pooled
+     * timestamp tests. Since issue #230 a response with a zero physical
+     * component is rejected, so a pooled handout can no longer be modelled
+     * as a bare small integer: the tests keep their readable offsets
+     * (1000, 1001, …) on top of this base.
+     */
+    private const TS_BASE = 1715000000000 << 18;
+
+    private function pooledTs(int $offset): int
+    {
+        return self::TS_BASE + $offset;
+    }
+
     private function makeTsoResponse(int $physical, int $logical, int $count): TsoResponse
     {
         $ts = new Timestamp();
@@ -469,8 +534,10 @@ class TimestampOracleTest extends TestCase
     private function makePooledResponse(int $firstTs, int $count): TsoResponse
     {
         // PD's response timestamp is the highest (last) of the granted
-        // range; the oracle derives `first … last` from it.
-        $last = $firstTs + $count - 1;
+        // range; the oracle derives `first … last` from it. $firstTs is an
+        // offset from TS_BASE so the response always carries a positive
+        // physical component (issue #230).
+        $last = self::TS_BASE + $firstTs + $count - 1;
         $ts = new Timestamp();
         $ts->setPhysical($last >> 18);
         $ts->setLogical($last & ((1 << 18) - 1));
@@ -600,10 +667,10 @@ class TimestampOracleTest extends TestCase
 
         $oracle = $this->makeOracle($grpc, clock: static fn (): int => 1_000_000, poolSize: 4);
 
-        $this->assertSame(1000, $oracle->getTimestamp());
-        $this->assertSame(1001, $oracle->getTimestamp());
-        $this->assertSame(1002, $oracle->getTimestamp());
-        $this->assertSame(1003, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1001), $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1002), $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1003), $oracle->getTimestamp());
     }
 
     public function testGetTimestampPoolSizeOneDisablesPooling(): void
@@ -629,9 +696,9 @@ class TimestampOracleTest extends TestCase
 
         $oracle = $this->makeOracle($grpc, poolSize: 1);
 
-        $this->assertSame(1000, $oracle->getTimestamp());
-        $this->assertSame(1001, $oracle->getTimestamp());
-        $this->assertSame(1002, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1001), $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1002), $oracle->getTimestamp());
     }
 
     public function testGetTimestampRejectsPoolSizeBelowOne(): void
@@ -763,10 +830,10 @@ class TimestampOracleTest extends TestCase
         };
         $oracle = $this->makeOracle($grpc, clock: $clock, poolSize: 64, poolMaxAgeMs: 100);
 
-        $this->assertSame(1000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
         $nowMs = 1_000_200; // age 200ms > the 100ms window: pool must be discarded
 
-        $this->assertSame(2000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(2000), $oracle->getTimestamp());
     }
 
     public function testDefaultPoolMaxAgeIsFiveMilliseconds(): void
@@ -794,10 +861,10 @@ class TimestampOracleTest extends TestCase
         // No explicit poolMaxAgeMs: pins the shipped default bound.
         $oracle = $this->makeOracle($grpc, clock: $clock);
 
-        $this->assertSame(1000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
         $nowMs += TimestampOracle::DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS;
 
-        $this->assertSame(1001, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1001), $oracle->getTimestamp());
     }
 
     public function testDefaultPoolMaxAgeRefillsOncePastTheBound(): void
@@ -817,11 +884,11 @@ class TimestampOracleTest extends TestCase
         // No explicit poolMaxAgeMs: pins the shipped default bound.
         $oracle = $this->makeOracle($grpc, clock: $clock);
 
-        $this->assertSame(1000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
         $nowMs += TimestampOracle::DEFAULT_TIMESTAMP_POOL_MAX_AGE_MS + 1;
 
         // The stale pool must not be served; a fresh grant is required.
-        $this->assertSame(2000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(2000), $oracle->getTimestamp());
     }
 
     public function testGetTimestampDiscardsPoolWhenClusterIdChanges(): void
@@ -853,10 +920,10 @@ class TimestampOracleTest extends TestCase
             static fn (): int => 1_000_000,
         );
 
-        $this->assertSame(1000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
         $clusterId = 2;
 
-        $this->assertSame(2000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(2000), $oracle->getTimestamp());
     }
 
     public function testGetTimestampDiscardsPoolAfterProcessChange(): void
@@ -878,10 +945,10 @@ class TimestampOracleTest extends TestCase
             },
         );
 
-        $this->assertSame(1000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
         $pid = 2000; // simulate the pool crossing a fork boundary
 
-        $this->assertSame(2000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(2000), $oracle->getTimestamp());
     }
 
     public function testGetTimestampBatchDiscardsPool(): void
@@ -899,9 +966,9 @@ class TimestampOracleTest extends TestCase
 
         // Fill the pool with 1000..1063; the batch advances PD to 5000 and
         // must drop the pool so getTimestamp() cannot return 1001 next.
-        $this->assertSame(1000, $oracle->getTimestamp());
-        $this->assertSame([5000], $oracle->getTimestampBatch(1));
-        $this->assertSame(6000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
+        $this->assertSame([$this->pooledTs(5000)], $oracle->getTimestampBatch(1));
+        $this->assertSame($this->pooledTs(6000), $oracle->getTimestamp());
     }
 
     public function testLowResolutionTimestampDoesNotDisturbPool(): void
@@ -921,12 +988,12 @@ class TimestampOracleTest extends TestCase
         );
 
         // Fill the pooled range 1000..1063; 1000 is served by the first call.
-        $this->assertSame(1000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
         // The low-resolution path fetches its own timestamp and must not
         // drop or perturb the pool.
         $this->assertSame(((1715000000000 << 18) + 9), $oracle->getLowResolutionTimestamp());
         // Still served from the pool: no third RPC.
-        $this->assertSame(1001, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1001), $oracle->getTimestamp());
     }
 
     public function testFailedPoolRefillLeavesNothingPooledToServe(): void
@@ -946,8 +1013,8 @@ class TimestampOracleTest extends TestCase
             poolSize: 2,
         );
 
-        $this->assertSame(1000, $oracle->getTimestamp());
-        $this->assertSame(1001, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1000), $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(1001), $oracle->getTimestamp());
 
         try {
             // Pool exhausted -> refill; the TSO RPC fails closed.
@@ -958,7 +1025,7 @@ class TimestampOracleTest extends TestCase
 
         // Nothing from the failed refill may be served: the next call must
         // perform a fresh RPC rather than replay a pooled/stale value.
-        $this->assertSame(2000, $oracle->getTimestamp());
+        $this->assertSame($this->pooledTs(2000), $oracle->getTimestamp());
     }
 
     // ==================================================================

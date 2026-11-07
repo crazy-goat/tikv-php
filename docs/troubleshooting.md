@@ -450,6 +450,7 @@ an idempotent operation once PD is healthy is safe.
 TiKvException: PD GetRegion returned no region for key
 TiKvException: TSO request failed: gRPC error: ...
 TiKvException: TSO response missing timestamp
+TiKvException: TSO response contained an invalid physical timestamp
 TransactionConflictException: Heartbeat failed: retryable: ...
 TxnRetryableException: Heartbeat failed: locked key #a3f5c8e1d4b79026 (4 bytes)
 TiKvException: Heartbeat failed: TxnNotFound
@@ -588,11 +589,16 @@ Retry in a new transaction after jittered backoff. Inspect
 
 **Error:**
 ```
-LockWaitTimeoutException: Lock wait timeout for key: <redacted> (<maxBackoffMs>ms)
+LockWaitTimeoutException: Lock wait timeout for key: <redacted> (budget <maxBackoffMs>ms, per-request wait <lockWaitTimeMs>ms)
 ```
 
 **What it means:** A pessimistic lock wait exhausted its wait budget
 (`maxBackoffMs`, default 20000 ms) without acquiring the lock (issue #219).
+`getTimeoutMs()` / `getBudgetMs()` report that budget; `getConfiguredWaitTimeoutMs()`
+reports the configured per-request `lockWaitTimeMs`. The value actually sent
+is capped by the remaining budget and by the gRPC deadline (write timeout
+minus 100 ms), so it can be smaller than the configured value (issue #229). A
+configured `0` is rendered as "TiKV default".
 
 **Likely cause:** A competing transaction holds the lock longer than your
 budget — long-running transaction, or a genuinely stuck lock.
@@ -600,9 +606,12 @@ budget — long-running transaction, or a genuinely stuck lock.
 **Solution:** Increase `maxBackoffMs` only if the holder is legitimately
 slow; otherwise retry in a new transaction. The competing key is redacted in
 the message; call `getKey()` for the actual key if your log pipeline is
-allowed to see it. `begin(['lockWaitTimeMs' => N])` tunes how long *one*
-lock request may block on the server (default 1000 ms); it never exceeds the
-remaining budget (issue #443).
+allowed to see it. `lockWaitTimeMs` tunes how long *one* lock request may
+block on the server (default 1000 ms); it can be set client-wide on
+`TxnKvClient::create()` or per transaction on `begin(['lockWaitTimeMs' =>
+N])` (issue #443). It never exceeds the remaining budget, and a positive
+value is capped by the request's gRPC deadline (write timeout minus 100 ms)
+so TiKV can answer before the client cancels the call (issue #229).
 
 #### Txn Retryable (Lock Resolved Mid-Operation)
 

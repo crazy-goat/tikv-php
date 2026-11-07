@@ -1776,9 +1776,13 @@ final class RawKvClient
 
     /**
      * Get the learned cluster ID, or null if not yet discovered.
+     *
+     * @throws ClientClosedException When the client has been closed
      */
     public function getClusterId(): ?int
     {
+        $this->ensureOpen();
+
         return $this->pdClient->getClusterId();
     }
 
