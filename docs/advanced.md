@@ -534,6 +534,18 @@ The three time/backoff budgets are scoped to **one logical operation**
 `commit()` share them, and a later operation starts from zero. The attempt
 cap is per retry loop (one region/page).
 
+With the default 60 s ServerBusy budget and 30 s deadline, the deadline is
+the binding bound: the budget is charged from the scheduled backoff before
+the sleep is clamped, so the accumulated charge is bounded by roughly
+`deadline + 10 s` ≈ 40 s, still below 60 s. The deadline is guaranteed to
+bind first only while the budget is at least one maximum ServerBusy backoff
+(~10 s) above it; when the budget is within ~10 s of the deadline or below
+it, either can bind. Under the defaults a sustained `ServerIsBusy` storm
+therefore surfaces as
+`RetryBudgetExhaustedException` with the region error in `getPrevious()`; a
+budget that binds first rethrows the original `ServerIsBusy` error. See
+[ServerBusy Budget vs Retry Deadline](configuration.md#serverbusy-budget-vs-retry-deadline).
+
 What you should handle at the application level instead:
 
 ```php
