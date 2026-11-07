@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `RawKvClient::scanIterator()` / `scanPrefixIterator()` no longer treat a short page as the end of the range (RAW-10, issue #195). Termination is driven solely by an empty scan response or a resume key that reaches `endKey`, so a page returning fewer than `batchSize` rows — a skipped region, a per-region server-side cap, a region-boundary effect — can no longer silently truncate the iteration. The trade-off is at most one extra scan RPC per iterator.
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added
