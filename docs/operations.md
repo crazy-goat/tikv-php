@@ -1323,9 +1323,11 @@ A failing step is logged at error level and does not stop the others, so:
 - `close()` is **idempotent** — a second call does nothing;
 - `close()` **never throws**.
 
-A rollback that fails during `close()` is logged and the transaction stays
-active; its destructor keeps the existing best-effort rollback fallback. A
-transaction that already committed or rolled back is not rolled back again.
+A rollback that fails during `close()` is logged, and the transaction is
+still terminal (`RolledBack`, closed) afterwards (issue #231): neither the
+destructor nor a second `close()` retries it, and any locks the failed RPC
+left behind expire with their TTL. A transaction that already committed or
+rolled back is not rolled back again.
 The rollback is a real RPC, so `close()` can block while it retries; its
 retry budget is the transaction's usual one. The rollback is attempted for a
 client that shares the application's transport (`options['grpcClient']`)
@@ -1365,11 +1367,12 @@ because the PD client resets the cached cluster ID). A `Transaction` obtained
 before `close()` holds the transport and the PD client directly and does not
 check the client's closed flag. Outside PHP's shutdown sequence,
 `TxnKvClient::close()` rolls back the transactions it began while they are
-still active, so a successfully rolled back transaction is closed and cannot
-be used afterwards. If that rollback fails, the transaction stays active:
-with an owned transport its RPCs then fail with `InvalidStateException`;
-with a shared transport they can still reach TiKV. Finish open transactions
-before closing the client (see below).
+still active. Whether that rollback succeeds or fails, the transaction ends
+`RolledBack` and closed (issue #231) and cannot be used afterwards; if the RPC
+failed, its remaining locks expire with their TTL. Once PHP is shutting down
+the rollback is skipped and the locks expire with the lock TTL (see
+[Shutdown and destructors](configuration.md#shutdown-and-destructors)).
+Finish open transactions before closing the client (see below).
 
 ### Transactions
 
@@ -1386,12 +1389,14 @@ That is still not the contract:
 - call `commit()` or `rollback()` explicitly. Destructor and `close()` timing
   are not guaranteed, either rollback is a real RPC that can block shutdown
   while it retries, and at shutdown the rollback is skipped altogether;
-- until the rollback succeeds or the lock TTL expires, the transaction's
-  server-side locks stay in place and block other writers;
+- an attempted rollback is terminal even when its RPC fails (issue #231): the
+  transaction is marked `RolledBack` and closed, and any server-side locks the
+  failed cleanup left in place stay until their TTL expires and block other
+  writers;
 - a rollback that fails inside `close()` is only logged — `close()` never
-  throws — so the locks stay until the transaction's destructor succeeds or
-  their TTL expires. Do not rely on `close()` to clean up transactions:
-  finish them explicitly before closing the client.
+  throws — and the transaction is not retried by its destructor. Do not rely
+  on `close()` to clean up transactions: finish them explicitly before
+  closing the client.
 
 ## Cluster and lifecycle
 
