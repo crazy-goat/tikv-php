@@ -45,7 +45,8 @@ In `CHANGELOG.md`:
 
 - Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`.
 - Add a fresh empty `## [Unreleased]` above it.
-- Group entries under Added, Changed, Deprecated, Removed, Fixed, Security.
+- Group entries under Added, Changed, Deprecated, Removed, Fixed, Security — one
+  heading of each type, with every entry of that type under it.
 - Update the compare links at the bottom, if the file has them.
 - Bump the version in files that carry it (`composer.json` does not need it, but
   `package.json`, `version.go`, extension headers do). See `AGENTS.md`.
