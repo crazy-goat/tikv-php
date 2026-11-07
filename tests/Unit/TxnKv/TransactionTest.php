@@ -7723,7 +7723,9 @@ class TransactionTest extends TestCase
 
         $txn->__destruct();
 
-        $this->assertSame(TransactionStatus::Active, $txn->getStatus());
+        // The throwing logger must not escape the destructor; the failed
+        // rollback still leaves the transaction terminal (issue #231).
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
     }
 
     /**
