@@ -9,8 +9,10 @@ namespace CrazyGoat\TiKV\Client\Observability;
  * implementation (Prometheus, StatsD, OpenTelemetry, in-memory test recorder, …).
  *
  * All methods are best-effort: implementations must never throw. The
- * library guarantees a no-op default via {@see NoOpMetrics} so callers
- * who do not opt in pay zero cost.
+ * library guarantees a no-op default via {@see NoOpMetrics}, so callers
+ * who do not opt in pay one empty-method dispatch plus a cheap
+ * `instanceof DetailedMetricsInterface` probe; the detailed timings are only
+ * taken on the 2PC and lock-resolution paths.
  *
  * RPC and region-cache counters are tagged by operation; retry counters are
  * tagged by the {@see \CrazyGoat\TiKV\Client\Retry\BackoffType} case name
@@ -23,7 +25,7 @@ namespace CrazyGoat\TiKV\Client\Observability;
  * for that interface, so adding those signals never breaks an existing
  * implementation.
  *
- * @see NoOpMetrics for the default zero-cost implementation.
+ * @see NoOpMetrics for the default no-op implementation.
  * @see DetailedMetricsInterface for the optional extended metric set.
  */
 interface MetricsInterface

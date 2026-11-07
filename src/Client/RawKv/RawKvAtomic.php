@@ -82,6 +82,9 @@ final readonly class RawKvAtomic
             $columnFamily,
             &$targetStoreId,
         ): CasResult {
+            // Reset per attempt: a failure inside getRegionInfo() must not
+            // report the previous attempt's store (issue #197, #434).
+            $targetStoreId = null;
             $region = $this->regionResolver->getRegionInfo($key);
             $targetStoreId = $region->leaderStoreId;
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
