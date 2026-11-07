@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Batch;
 
 use Closure;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -72,6 +73,35 @@ final readonly class CheckedGrpcFuture
                 $response = $future->wait();
                 RegionErrorHandler::check($response);
                 return $response;
+            },
+        );
+    }
+
+    /**
+     * Wrap an un-waited gRPC future for a RawBatchGet response.
+     *
+     * The waiter checks the response and collects its pairs into a
+     * key => value map in a single traversal (issue #303), so
+     * RawKvBatch::batchGet() does not have to walk the repeated field a
+     * second time. The region error is still checked first, inside the
+     * per-region retry wrapper, so the exception surface is unchanged: on
+     * the unary path a per-pair KeyError is still wrapped in
+     * {@see \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException} by
+     * BatchAsyncExecutor.
+     *
+     * The future resolves to `array<array-key, ?string>`, not to the raw
+     * message.
+     */
+    public static function fromBatchGetFuture(GrpcFuture $future): self
+    {
+        return new self(
+            inner: $future,
+            hasInnerFuture: true,
+            waiter: static function () use ($future): array {
+                $response = $future->wait();
+                assert($response instanceof RawBatchGetResponse);
+
+                return RegionErrorHandler::checkAndCollectBatchGet($response);
             },
         );
     }

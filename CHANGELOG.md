@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Performance
+
+- `RegionErrorHandler::check()` no longer performs two `method_exists()` reflection lookups on the universal response path (issue #303, PERF-16). The checks are now `instanceof` matches over the closed set of response types the client sends, and a batch-get response is traversed once instead of twice: the new `checkAndCollectBatchGet()` / `collectBatchGetPairs()` check each pair's `KeyError` and collect its key => value in the same loop, so `RawKvBatch::batchGet()` no longer walks the repeated `pairs` field again to build the result map. The exception surface is unchanged — the unary path still raises the per-pair `KeyErrorException` inside the per-region retry wrapper (wrapped in `BatchPartialFailureException` by the executor) and the multiplexed path still raises it directly. (#303)
+
 ### Docs
 
 - `RawKvScanner::batchScan()` / `RawKvClient::batchScan()` now document what the method actually does (issue #442, DIV-06): it is a **client-side loop of per-range `RawScan` requests, not the `RawBatchScan` RPC**. The docblock, `docs/operations.md` and the README Scanning example state the cost model — the RPC count is linear in the number of ranges and the regions they cover, because every range independently resolves its own regions, so fifty ranges cost roughly fifty scans — while noting that the per-range sends are fanned out concurrently (bounded by `options['maxConcurrency']`) and share one batch deadline, which overlaps wall-clock latency but does not change the total work. They also pin the result shape (one inner list per range — input order for a list, non-sequential keys re-indexed in ascending key order — at most `eachLimit` ascending rows, `null` values under `keyOnly`) and that `eachLimit` is required and must be greater than zero, so `batchScan()` cannot omit the per-range cap or request an unbounded result set the way `scan(..., limit: 0)` can; empty bounds remain valid, so `batchScan([['', '']], eachLimit: 100)` scans the whole keyspace and returns at most 100 rows. No behaviour changes. (#442)

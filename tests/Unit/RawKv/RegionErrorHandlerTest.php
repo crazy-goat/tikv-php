@@ -502,6 +502,15 @@ class RegionErrorHandlerTest extends TestCase
         return $pair;
     }
 
+    private function kvPair(string $key, string $value): KvPair
+    {
+        $pair = new KvPair();
+        $pair->setKey($key);
+        $pair->setValue($value);
+
+        return $pair;
+    }
+
     public function testTopLevelKeyErrorOnBatchGetResponseThrows(): void
     {
         $keyError = new KeyError();
@@ -596,5 +605,82 @@ class RegionErrorHandlerTest extends TestCase
         $this->expectException(RegionException::class);
 
         RegionErrorHandler::check($response, keyErrorsHandledByCaller: true);
+    }
+
+    // ========================================================================
+    // Issue #303 (PERF-16): one traversal for the batch-get pair check and
+    // value collection, and no reflection on the response path.
+    // ========================================================================
+
+    public function testCheckAndCollectBatchGetReturnsKeyValueMap(): void
+    {
+        $response = new RawBatchGetResponse();
+        $response->setPairs([$this->kvPair('k1', 'v1'), $this->kvPair('k2', 'v2')]);
+
+        self::assertSame(
+            ['k1' => 'v1', 'k2' => 'v2'],
+            RegionErrorHandler::checkAndCollectBatchGet($response),
+        );
+    }
+
+    public function testCheckAndCollectBatchGetThrowsOnPerPairError(): void
+    {
+        $response = new RawBatchGetResponse();
+        $response->setPairs([$this->kvPair('ok', 'v'), $this->errorPair('bad')]);
+
+        $this->expectException(KeyErrorException::class);
+        $this->expectExceptionMessage('BatchGet failed');
+
+        RegionErrorHandler::checkAndCollectBatchGet($response);
+    }
+
+    public function testCheckAndCollectBatchGetChecksTheRegionErrorBeforeThePairs(): void
+    {
+        $error = new Error();
+        $error->setMessage('epoch not match');
+        $error->setEpochNotMatch(new EpochNotMatch());
+
+        $response = new RawBatchGetResponse();
+        $response->setRegionError($error);
+        $response->setPairs([$this->errorPair('bad')]);
+
+        $this->expectException(RegionException::class);
+        $this->expectExceptionMessage('epoch not match');
+
+        RegionErrorHandler::checkAndCollectBatchGet($response);
+    }
+
+    public function testCheckCanDeferThePairCheckToTheCollector(): void
+    {
+        $response = new RawBatchGetResponse();
+        $response->setPairs([$this->errorPair('bad')]);
+
+        // Deferred: the caller's collection loop owns the per-pair check.
+        RegionErrorHandler::check($response, checkPairErrors: false);
+
+        $this->expectException(KeyErrorException::class);
+        RegionErrorHandler::collectBatchGetPairs($response);
+    }
+
+    public function testCollectBatchGetPairsReturnsTheValues(): void
+    {
+        $response = new RawBatchGetResponse();
+        $response->setPairs([$this->kvPair('k1', 'v1')]);
+
+        self::assertSame(['k1' => 'v1'], RegionErrorHandler::collectBatchGetPairs($response));
+    }
+
+    public function testRegionErrorHandlerSourceHasNoMethodExistsLookup(): void
+    {
+        $file = (new \ReflectionClass(RegionErrorHandler::class))->getFileName();
+        self::assertIsString($file);
+        $source = file_get_contents($file);
+        self::assertIsString($source);
+
+        self::assertStringNotContainsString(
+            'method_exists(',
+            $source,
+            'Issue #303: the response path must use instanceof, not reflection.',
+        );
     }
 }
