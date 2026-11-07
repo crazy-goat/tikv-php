@@ -679,7 +679,7 @@ a decorator to time operations — the library already reports RPC counts,
 per-RPC latency, retries and region-cache behaviour from inside the client,
 which an external wrapper cannot see.
 
-The interface has six methods (full reference with emitted tag examples:
+The interface has seven methods (full reference with emitted tag examples:
 [Configuration → Metrics and Observability](configuration.md#metrics-and-observability)):
 
 | Method                 | Reported when                                            |
@@ -690,11 +690,12 @@ The interface has six methods (full reference with emitted tag examples:
 | `regionCacheHit()`     | A region was served from the client's region cache        |
 | `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
 | `regionInvalidated()`  | A region was dropped from the cache (e.g. `region_error:epoch_not_match`, `retry_region_error:epoch_not_match`, `fatal_region_error`); non-routing errors keep the entry, and a successful executor-side `EpochNotMatch` `current_regions` refresh is a superseding `put()` that emits nothing of its own (issue #246) |
+| `storeHealthChanged()` | A store entered its failure cooldown or recovered from one (issue #424) |
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
 
 Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from both `rpcStarted()` and `rpcCompleted()`, so the transport exception of a gRPC call is never replaced. The retry and region-cache counters are emitted directly and are not protected yet. The default is a zero-cost no-op
-(`NoOpMetrics`). A ready-made in-memory recorder for tests and benchmarks
+(`NoOpMetrics`): it accepts every call — empty, binary or oversized tags, negative durations and store IDs included — and records nothing, so no call site can fail on the default backend. A ready-made in-memory recorder for tests and benchmarks
 ships as [`InMemoryMetrics`](../src/Client/Observability/InMemoryMetrics.php)
 with `getRpcStarted(string $operation)`, `getRpcSucceeded(string $operation)`,
 `getRetries(string $operation)`, `getCacheHits(string $operation)`,
