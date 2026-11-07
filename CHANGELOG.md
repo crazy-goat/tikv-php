@@ -33,6 +33,7 @@ policy now classifies as internal.
 ### Tests
 
 - The transactional `get()` path is now pinned to fail closed on a response-level `KeyError` variant it does not handle (issue #221, TXN-16). `TransactionTest::testGetRejectsUnhandledResponseKeyError()` answers `KvGet` with `KeyError.txn_not_found` and asserts that `get()` throws the base `TiKvException` (`Get failed: TxnNotFound`) instead of returning `""`, that the error is not retried, and that the failed read is not cached in the read set. No production behaviour changes — `TxnReader::handleReadKeyError()` has thrown for every unhandled variant since #263; this adds the `get()` regression coverage the audit issue asked for. (#221)
+- `NotLeader` backoff is now pinned as jittered rather than deterministic (issue #296, PERF-09). The fix itself shipped with #242, which made `BackoffType::equalJitter()` return `true` for every type, so this issue is a duplicate with no production change: `BackoffTest::testNotLeaderSleepIsJitteredWithinEqualJitterRange()` asserts that repeated `sleepMs($attempt)` calls for `NotLeader` stay within `[expo/2, expo]` and produce more than one value across attempts 0–11, which is the acceptance criterion the audit asked for. `docs/helpers/faq.md` records the duplicate so the next audit import is closed instead of re-implementing the jitter. (#296)
 
 ### Performance
 
