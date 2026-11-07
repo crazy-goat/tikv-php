@@ -9,6 +9,7 @@ use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Tests\Unit\Support\ContextRecordingLogger;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -20,7 +21,7 @@ final class BatchAsyncExecutorLabelsTest extends TestCase
 {
     public function testFailureReportsTheRealRegionIdAndSubBatchIndex(): void
     {
-        $logger = new RecordingLogger();
+        $logger = new ContextRecordingLogger();
         $executor = new BatchAsyncExecutor($logger);
 
         $calls = [
@@ -46,13 +47,13 @@ final class BatchAsyncExecutorLabelsTest extends TestCase
         }
 
         $failure = $this->warning($logger, 'Region failed during dispatch');
-        self::assertSame(11, $failure['context']['regionId']);
-        self::assertSame(0, $failure['context']['subBatchIndex']);
+        self::assertSame(11, $failure['regionId']);
+        self::assertSame(0, $failure['subBatchIndex']);
     }
 
     public function testTwoSubBatchesOfOneRegionDoNotCollide(): void
     {
-        $logger = new RecordingLogger();
+        $logger = new ContextRecordingLogger();
         $executor = new BatchAsyncExecutor($logger);
 
         $calls = [
@@ -80,13 +81,13 @@ final class BatchAsyncExecutorLabelsTest extends TestCase
 
         $warnings = $this->warnings($logger, 'Region failed during dispatch');
         self::assertCount(2, $warnings);
-        self::assertSame(0, $warnings[0]['context']['subBatchIndex']);
-        self::assertSame(1, $warnings[1]['context']['subBatchIndex']);
+        self::assertSame(0, $warnings[0]['subBatchIndex']);
+        self::assertSame(1, $warnings[1]['subBatchIndex']);
     }
 
     public function testUnlabelledCallsLogAnHonestCallKeyInsteadOfARegionId(): void
     {
-        $logger = new RecordingLogger();
+        $logger = new ContextRecordingLogger();
         $executor = new BatchAsyncExecutor($logger);
 
         $calls = [
@@ -103,13 +104,13 @@ final class BatchAsyncExecutorLabelsTest extends TestCase
         }
 
         $failure = $this->warning($logger, 'Region failed during dispatch');
-        self::assertArrayNotHasKey('regionId', $failure['context']);
-        self::assertSame(3, $failure['context']['callKey']);
+        self::assertArrayNotHasKey('regionId', $failure);
+        self::assertSame(3, $failure['callKey']);
     }
 
     public function testDeadlineContextNamesRealRegionIds(): void
     {
-        $logger = new RecordingLogger();
+        $logger = new ContextRecordingLogger();
         $executor = new BatchAsyncExecutor($logger);
 
         $calls = [
@@ -146,9 +147,9 @@ final class BatchAsyncExecutorLabelsTest extends TestCase
     }
 
     /**
-     * @return array{level: mixed, message: string, context: array<string, mixed>}
+     * @return array<string, mixed>
      */
-    private function warning(RecordingLogger $logger, string $message): array
+    private function warning(ContextRecordingLogger $logger, string $message): array
     {
         $matches = $this->warnings($logger, $message);
         self::assertCount(1, $matches);
@@ -157,13 +158,10 @@ final class BatchAsyncExecutorLabelsTest extends TestCase
     }
 
     /**
-     * @return list<array{level: mixed, message: string, context: array<string, mixed>}>
+     * @return list<array<string, mixed>>
      */
-    private function warnings(RecordingLogger $logger, string $message): array
+    private function warnings(ContextRecordingLogger $logger, string $message): array
     {
-        return array_values(array_filter(
-            $logger->records,
-            static fn(array $record): bool => $record['message'] === $message,
-        ));
+        return $logger->contextsFor($message);
     }
 }

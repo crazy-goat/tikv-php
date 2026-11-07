@@ -65,9 +65,11 @@ final class BatchPartialFailureException extends TiKvException
     }
 
     /**
-     * The failed calls keyed by the same fan-out call index as
-     * {@see self::getRegionErrors()}. Keys with no descriptor (a call site
-     * that did not pass labels) are omitted.
+     * The failed calls keyed by the fan-out call index.
+     *
+     * Every failed slot is present here, whether or not the call site
+     * supplied a descriptor; use {@see self::getFailedCallIds()} for the
+     * region/sub-batch identity of a slot.
      *
      * @return array<int, TiKvException>
      */
@@ -112,7 +114,8 @@ final class BatchPartialFailureException extends TiKvException
      * fan-out call index as {@see self::getRegionErrors()}.
      *
      * Several sub-batches of one region are reported separately and cannot
-     * collide: each carries its own `subBatchIndex`.
+     * collide: each carries its own `subBatchIndex`. Keys with no descriptor
+     * (a call site that did not pass labels) are omitted.
      *
      * @return array<int, BatchCallId>
      */

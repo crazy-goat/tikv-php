@@ -538,11 +538,11 @@ final readonly class TwoPhaseCommitter
          * A partial failure is aggregated, not truncated (issue #431,
          * GAP-17): the executor waits for every in-flight region and
          * collects each region's failure, so one region's error neither
-         * cancels its peers nor hides them. The aggregate is logged with
-         * the identity of every failing region (the exception's own keys
-         * are group indices, which name no region) and the error of the
-         * first failing group in dispatch order — the one the sequential
-         * loop would have thrown — is rethrown.
+         * cancels its peers nor hides them. The aggregate is logged with a
+         * descriptor for every failed call — the real region ID and
+         * sub-batch index — and the error of the first failing group in
+         * dispatch order — the one the sequential loop would have thrown —
+         * is rethrown.
          */
         $prewriteSecondaries = function () use (
             $secondaryGroups,
