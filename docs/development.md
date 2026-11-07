@@ -111,10 +111,11 @@ Located in `src/Client/Retry/`.
 
 **BackoffType** (`BackoffType.php`):
 - Defines retry strategies — see `docs/architecture.md`
-  for the full list with base/cap backoff values): `None`, `ServerBusy`,
-  `StaleCmd`, `RegionMiss`, `TiKvRpc`, `NotLeader`, `DiskFull`,
+  for the full list with base/cap backoff values): `None`, `EpochNotMatch`,
+  `ServerBusy`, `StaleCmd`, `RegionMiss`, `TiKvRpc`, `NotLeader`, `DiskFull`,
   `RegionNotInitialized`, `ReadIndexNotReady`, `ProposalInMergingMode`,
-  `RecoveryInProgress`, `IsWitness`, `MaxTimestampNotSynced`, `TxnLock`
+  `RecoveryInProgress`, `IsWitness`, `MaxTimestampNotSynced`, `TxnLock`,
+  `TxnLockFast`, `TxnNotFound`, `CommitTSLag`, `PDRpc`
 - `ServerBusy` (separate budget, 60 s)
 
 **Error Classification** — `ErrorClassifier::classifyByKind()`

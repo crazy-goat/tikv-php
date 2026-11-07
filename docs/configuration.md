@@ -1027,6 +1027,32 @@ raised to `INFO` keeps building a context that is discarded. Configure the
 logger's level and handlers **before** you create the client, and create a
 new client after you change them.
 
+### Shutdown and destructors
+
+Logging from a destructor is best-effort. PHP releases objects in an order
+that is not guaranteed, so a handler's stream, buffer or network transport
+may already be gone when a client's destructor closes its channels or rolls
+back an abandoned transaction. The client therefore emits every record on a
+close or destructor path through a guard that swallows a logger failure: a
+broken logger cannot replace the original diagnostic with `Fatal error:
+Uncaught ... thrown in destructor`. Those records are lost in that case.
+
+Once PHP has entered its shutdown sequence, `Transaction::__destruct()` and
+`TxnKvClient::close()` also skip the rollback RPC: ext-grpc may already be in
+or past module shutdown, where a call's behaviour is undefined. An abandoned
+transaction keeps its locks until the lock TTL expires, so callers that need
+an immediate release must `commit()` or `rollback()` explicitly, or call
+`close()` before shutdown. An explicit `close()` outside shutdown still rolls
+back the live transactions before it releases the transport.
+
+The flag is set by a callback registered with `register_shutdown_function()`,
+and shutdown callbacks run in registration order. An object released by a
+shutdown callback that was registered **before** the client was created —
+a bootstrap cleanup function, say — is therefore destroyed before the flag
+is set and keeps the normal destructor behaviour (including the rollback
+RPC). Register the client's cleanup after the bootstrap callbacks, or call
+`close()` explicitly, if that ordering matters.
+
 ### What Gets Logged
 
 The client writes these levels:
@@ -1941,7 +1967,7 @@ envelope before jitter, in milliseconds.
 | `EpochNotMatch` | 2 → 500 | equal | `EpochNotMatch` — stale region epoch |
 | `ServerBusy` | 2000 → 10000 | equal | `ServerIsBusy`; gRPC `RESOURCE_EXHAUSTED`. Charged to the separate 60 s ServerBusy budget |
 | `StaleCmd` | 2 → 1000 | equal | `StaleCommand` |
-| `RegionMiss` | 2 → 500 | equal | `RegionNotFound`, `StoreNotMatch`, `MismatchPeerId`, `BucketVersionNotMatch`, `UndeterminedResult` |
+| `RegionMiss` | 2 → 500 | equal | `RegionNotFound`, `StoreNotMatch`, `MismatchPeerId`, `BucketVersionNotMatch`, `UndeterminedResult`, an `errorpb.Error` variant the client does not know yet (bounded retry) |
 | `TiKvRpc` | 100 → 2000 | equal | gRPC `UNAVAILABLE`, `ABORTED`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`; a store in health cooldown (`StoreUnavailableException`) |
 | `NotLeader` | 2 → 500 | equal | `NotLeader` — leader transfer |
 | `DiskFull` | 500 → 5000 | equal | `DiskFull` |
@@ -1956,9 +1982,12 @@ envelope before jitter, in milliseconds.
 The mapping lives in `ErrorClassifier::classifyByKind()` (the typed `ErrorKind`
 carried by `RegionException`), `ErrorClassifier::classifyGrpcStatus()` (gRPC
 status codes) and the message-text fallback in
-`ErrorClassifier::classifyToBackoffType()` for exceptions without a typed kind.
+`ErrorClassifier::classifyToBackoffType()` for non-region exceptions without a
+typed kind.
 See [Retry Strategies](advanced.md#retry-strategies) for the retry budgets and
 why an application-level retry loop on top of the client is counterproductive.
+
+Region errors are classified from the typed `errorpb.Error` oneof only. Message text is never inspected on that path: a TiKV wording change, or a key embedded in the message, cannot reclassify an error. A synthetic `RegionException` that wraps a response-level error string or a top-level `KeyError` is not a region error and stays fatal.
 
 ### Non-Retryable Errors
 
@@ -2057,6 +2086,11 @@ subclassing — there is no `classifyError()` hook on the client and no
   path, including region invalidation and the broken-channel cleanup;
 - `RetryVerdict::pass()` falls through to the built-in classification, which
   itself always answers Retry or Fatal and never Pass.
+
+The backoff taxonomy mirrors client-go's set: besides the region-error curves,
+`BackoffType` exposes `PDRpc` (500–3000 ms), `TxnLockFast` (10–3000 ms), and
+`TxnNotFound` and `CommitTSLag` (2–500 ms each), the equivalents of client-go's
+`BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound` and `BoCommitTSLag`.
 
 Note that a `NotLeader` error is classified before your classifier is
 consulted.
