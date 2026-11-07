@@ -336,8 +336,154 @@ final class TransactionReverseScanTest extends TestCase
         $result = $this->createTransaction(2)->reverseScan('k9', '', 0);
 
         $this->assertSame(['k2', 'k1'], array_column($result, 'key'));
-        // The probe runs and answers empty; the range is complete.
-        $this->assertCount(2, $capturedRequests);
+        // The probe answers empty, is re-asked once (issue #512) and answers
+        // empty again; the range is complete.
+        $this->assertCount(3, $capturedRequests);
         $this->assertSame('k1', $capturedRequests[1]->getStartKey());
+        $this->assertSame('k1', $capturedRequests[2]->getStartKey());
+    }
+
+    public function testReverseScanContinuesAboveASplitRegionAndTrimsTheSplicedBatch(): void
+    {
+        // The outer enumeration sees the pre-split region [ "", "z"), but the
+        // fresh lookup inside the scan sees two halves. The upper remainder
+        // ["m", "z") must be spliced BEFORE the lower batch in descending
+        // order, and the lower batch must be trimmed to the remaining limit.
+        $preSplit = $this->makeRegion(1, '', 'z');
+        $freshLower = $this->makeRegion(2, '', 'm');
+        $freshUpper = $this->makeRegion(3, 'm', 'z');
+
+        $this->regionCache->method('getRegionBelow')->willReturn($preSplit);
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $freshLower : $freshUpper,
+        );
+        $this->regionCache->method('put');
+
+        /** @var list<ScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $this->stubReverseScan(['k1', 'k2', 'm1', 'm2'], $capturedRequests);
+
+        $result = $this->createTransaction()->reverseScan('z', '', 3);
+
+        $this->assertSame(['m2', 'm1', 'k2'], array_column($result, 'key'));
+
+        $this->assertCount(2, $capturedRequests);
+        // The lower half is sent first, then the upper remainder.
+        $this->assertSame('m', $capturedRequests[0]->getStartKey());
+        $this->assertSame('', $capturedRequests[0]->getEndKey());
+        $this->assertSame('z', $capturedRequests[1]->getStartKey());
+        $this->assertSame('m', $capturedRequests[1]->getEndKey());
+    }
+
+    public function testReverseScanReasksATransientEmptyBatchOnce(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->stubRegions([$region]);
+
+        /** @var list<ScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $call = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$call,
+                &$capturedRequests,
+            ): ScanResponse {
+                $this->assertSame('KvScan', $method);
+                $this->assertInstanceOf(ScanRequest::class, $request);
+                $this->assertTrue($request->getReverse());
+                $capturedRequests[] = $request;
+
+                $response = new ScanResponse();
+                if (++$call === 1) {
+                    // The diagnosed transient shape: an empty answer while
+                    // rows exist. The reverse path must re-ask once.
+                    return $response;
+                }
+
+                foreach (['k2', 'k1'] as $key) {
+                    $pair = new KvPair();
+                    $pair->setKey($key);
+                    $pair->setValue('v-' . $key);
+                    $response->setPairs([...$response->getPairs(), $pair]);
+                }
+
+                return $response;
+            },
+        );
+
+        $result = $this->createTransaction()->reverseScan('k9', '');
+
+        $this->assertSame(['k2', 'k1'], array_column($result, 'key'));
+        $this->assertCount(2, $capturedRequests);
+        $this->assertSame('k9', $capturedRequests[0]->getStartKey());
+        $this->assertSame('k9', $capturedRequests[1]->getStartKey());
+    }
+
+    public function testReverseScanReasksATransientEmptyTruncationProbe(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        $this->stubRegions([$region]);
+
+        /** @var list<ScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $call = 0;
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$call,
+                &$capturedRequests,
+            ): ScanResponse {
+                $this->assertSame('KvScan', $method);
+                $this->assertInstanceOf(ScanRequest::class, $request);
+                $this->assertTrue($request->getReverse());
+                $capturedRequests[] = $request;
+
+                $response = new ScanResponse();
+                $call++;
+
+                if ($call === 1) {
+                    // The main scan spends the whole cap on [k2, k9).
+                    foreach (['k3', 'k2'] as $key) {
+                        $pair = new KvPair();
+                        $pair->setKey($key);
+                        $pair->setValue('v-' . $key);
+                        $response->setPairs([...$response->getPairs(), $pair]);
+                    }
+
+                    return $response;
+                }
+
+                if ($call === 2) {
+                    // The truncation probe answers empty transiently.
+                    return $response;
+                }
+
+                // The re-asked probe finds the row that proves truncation.
+                $pair = new KvPair();
+                $pair->setKey('k1');
+                $pair->setValue('v-k1');
+                $response->setPairs([$pair]);
+
+                return $response;
+            },
+        );
+
+        try {
+            $this->createTransaction(2)->reverseScan('k9', '', 0);
+            $this->fail('Expected ScanLimitExceededException was not thrown');
+        } catch (ScanLimitExceededException) {
+            $this->assertCount(3, $capturedRequests);
+            $this->assertSame('k2', $capturedRequests[1]->getStartKey());
+            $this->assertSame('k2', $capturedRequests[2]->getStartKey());
+        }
     }
 }

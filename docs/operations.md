@@ -642,7 +642,10 @@ tombstone for each key, so the deletion is **atomic with the transaction** —
 it becomes visible only at `commit()` and `rollback()` discards it. It is
 bounded by the same 10240-row scan cap and by the transaction's write-set
 limits (`maxTxnEntryCount`, `maxTxnEntrySize`, `maxTxnTotalSize`), and a
-failure before the scan completes buffers nothing. For an unbounded range,
+failure before the scan completes buffers nothing, and the whole batch is
+validated against the write-set limits before any pessimistic lock is
+acquired, so an oversized range fails without buffering or locking anything.
+For an unbounded range,
 delete in explicit batches across several transactions, or use the raw,
 non-transactional `RawKvClient::deleteRange()`.
 

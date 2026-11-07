@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
@@ -90,6 +93,96 @@ final class TransactionDeleteRangeTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturn([$region]);
         $this->regionCache->method('getByKey')->willReturn($region);
         $this->regionCache->method('put');
+    }
+
+    private function createPessimisticTransaction(RegionCache $cache, int $maxTxnEntryCount = 0): Transaction
+    {
+        $regionResolver = new RegionResolver($this->pdClient, $cache);
+
+        return new Transaction(
+            txnId: 'test-txn-delete-range-pessimistic',
+            startTs: 1000,
+            pessimistic: true,
+            priority: 0,
+            pdClient: $this->pdClient,
+            grpc: $this->grpc,
+            regionCache: $cache,
+            lockResolver: new LockResolver($this->grpc, $regionResolver, $cache, $this->pdClient, 1000),
+            regionResolver: $regionResolver,
+            eagerPessimisticLocks: true,
+            maxTxnEntryCount: $maxTxnEntryCount,
+        );
+    }
+
+    /**
+     * @param list<string> $stored
+     * @param list<ScanRequest> $scanRequests
+     * @param list<PessimisticLockRequest> $lockRequests
+     */
+    private function stubPessimisticGrpc(
+        RegionCache $cache,
+        array $stored,
+        array &$scanRequests,
+        array &$lockRequests,
+    ): void {
+        $region = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: '',
+        );
+        $cache->put($region);
+        $this->pdClient->method('getRegion')->willReturn($region);
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $address,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                $stored,
+                &$scanRequests,
+                &$lockRequests,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $this->assertInstanceOf(PessimisticLockRequest::class, $request);
+                    $lockRequests[] = $request;
+
+                    return new PessimisticLockResponse();
+                }
+
+                $this->assertSame('KvScan', $method);
+                $this->assertInstanceOf(ScanRequest::class, $request);
+                $this->assertFalse($request->getReverse());
+                $scanRequests[] = $request;
+
+                $matching = [];
+                foreach ($stored as $key) {
+                    if (KeyOrder::inRange($key, $request->getStartKey(), $request->getEndKey())) {
+                        $matching[] = $key;
+                    }
+                }
+                sort($matching, SORT_STRING);
+
+                $response = new ScanResponse();
+                $pairs = [];
+                foreach (array_slice($matching, 0, $request->getLimit()) as $key) {
+                    $pair = new KvPair();
+                    $pair->setKey($key);
+                    $pair->setValue('v-' . $key);
+                    $pairs[] = $pair;
+                }
+                $response->setPairs($pairs);
+
+                return $response;
+            },
+        );
     }
 
     /**
@@ -222,5 +315,52 @@ final class TransactionDeleteRangeTest extends TestCase
         $this->expectException(TransactionTooLargeException::class);
 
         $txn->deleteRange('', 'k4');
+    }
+
+    public function testPessimisticEagerDeleteRangeLocksTheWholeRangeInOneBatch(): void
+    {
+        $cache = new RegionCache();
+
+        /** @var list<ScanRequest> $scanRequests */
+        $scanRequests = [];
+        /** @var list<PessimisticLockRequest> $lockRequests */
+        $lockRequests = [];
+        $this->stubPessimisticGrpc($cache, ['k1', 'k2', 'k3'], $scanRequests, $lockRequests);
+
+        $txn = $this->createPessimisticTransaction($cache);
+
+        $this->assertSame(3, $txn->deleteRange('', 'k4'));
+
+        // One batched KvPessimisticLock for the whole range, not one per key.
+        $this->assertCount(1, $lockRequests);
+        $lockedKeys = [];
+        foreach ($lockRequests[0]->getMutations() as $mutation) {
+            $lockedKeys[] = $mutation->getKey();
+        }
+        $this->assertSame(['k1', 'k2', 'k3'], $lockedKeys);
+        $this->assertSame(['k1' => null, 'k2' => null, 'k3' => null], $txn->getWriteSet());
+    }
+
+    public function testPessimisticEagerDeleteRangeRejectsACumulativeLimitBeforeAnyLockRpc(): void
+    {
+        $cache = new RegionCache();
+
+        /** @var list<ScanRequest> $scanRequests */
+        $scanRequests = [];
+        /** @var list<PessimisticLockRequest> $lockRequests */
+        $lockRequests = [];
+        $this->stubPessimisticGrpc($cache, ['k1', 'k2', 'k3'], $scanRequests, $lockRequests);
+
+        $txn = $this->createPessimisticTransaction($cache, maxTxnEntryCount: 2);
+
+        try {
+            $txn->deleteRange('', 'k4');
+            $this->fail('Expected TransactionTooLargeException was not thrown');
+        } catch (TransactionTooLargeException) {
+            // The cumulative count is 3 > 2, so the batch is rejected before
+            // lockKeys() sends any KvPessimisticLock, and nothing is buffered.
+            $this->assertSame([], $lockRequests);
+            $this->assertSame([], $txn->getWriteSet());
+        }
     }
 }

@@ -1086,107 +1086,133 @@ final readonly class TxnReader
     ): array {
         $resolutionKey = $endKey;
         $freshEndKey = '';
-        $excludedStore = null;
-        $targetStoreId = null;
+        $emptyReattempts = 0;
         // The same operation budget bounds lock resolution triggered by a
         // locked key in this sub-range (issue #569).
         $budget = $retryExecutor->currentBudget();
 
-        $batch = $retryExecutor->execute($resolutionKey, function () use (
-            $startKey,
-            $endKey,
-            $limit,
-            $maxScanLimit,
-            $resolutionKey,
-            &$excludedStore,
-            &$freshEndKey,
-            &$targetStoreId,
-            $budget,
-        ): array {
-            // Resolve the region on every attempt so cache invalidation and
-            // leader switching performed by the retry executor take effect
-            // (issue #267): a stale captured region would otherwise reproduce
-            // the original error on each retry.
-            $fresh = $this->regionResolver->getRegionInfo($resolutionKey);
-            $target = RegionContextFactory::resolveTarget(
-                $fresh,
-                $this->replicaReadPolicy,
-                $this->regionResolver->getStore(...),
-                excludedStoreId: $excludedStore,
-                priority: $this->priority,
-                requestContext: $this->requestContext,
-                resourceControl: $this->resourceControl,
-                storeAvailable: $this->regionResolver->isStoreAvailable(...),
-            );
+        while (true) {
+            $freshEndKey = '';
             $excludedStore = null;
-            $targetStoreId = $target->storeId;
-            $address = $this->regionResolver->resolveStoreAddress($target->storeId);
-            $freshEndKey = $fresh->endKey;
+            $targetStoreId = null;
 
-            // After a split the fresh region is smaller: clip the wire start
-            // (upper) key down to the fresh region's end. TiKV rejects ranges
-            // that cross region boundaries.
-            $wireStartKey = $startKey;
-            if ($freshEndKey !== '' && KeyOrder::lt($freshEndKey, $wireStartKey)) {
-                $wireStartKey = $freshEndKey;
-            }
-
-            $request = new ScanRequest();
-            $request->setContext($target->context);
-            $request->setStartKey($wireStartKey);
-            if ($endKey !== '') {
-                $request->setEndKey($endKey);
-            }
-            $request->setLimit($limit > 0 ? $limit : $maxScanLimit);
-            $request->setVersion($this->startTs);
-            $request->setReverse(true);
-
-            try {
-                /** @var ScanResponse $response */
-                $response = $this->grpc->call(
-                    $address,
-                    'tikvpb.Tikv',
-                    'KvScan',
-                    $request,
-                    ScanResponse::class,
-                    $this->timeoutMsWithinBudget($this->timeoutMs('scan'), $budget),
+            $batch = $retryExecutor->execute($resolutionKey, function () use (
+                $startKey,
+                $endKey,
+                $limit,
+                $maxScanLimit,
+                $resolutionKey,
+                &$excludedStore,
+                &$freshEndKey,
+                &$targetStoreId,
+                $budget,
+            ): array {
+                // Resolve the region on every attempt so cache invalidation
+                // and leader switching performed by the retry executor take
+                // effect (issue #267): a stale captured region would
+                // otherwise reproduce the original error on each retry.
+                $fresh = $this->regionResolver->getRegionInfo($resolutionKey);
+                $target = RegionContextFactory::resolveTarget(
+                    $fresh,
+                    $this->replicaReadPolicy,
+                    $this->regionResolver->getStore(...),
+                    excludedStoreId: $excludedStore,
+                    priority: $this->priority,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
-                RegionErrorHandler::check(
-                    $response,
-                    $this->regionCache,
-                    $fresh->regionId,
-                    keyErrorsHandledByCaller: true,
-                );
-            } catch (RegionException $e) {
-                if ($e->errorKind === ErrorKind::DataIsNotReady) {
-                    $excludedStore = $target->storeId;
+                $excludedStore = null;
+                $targetStoreId = $target->storeId;
+                $address = $this->regionResolver->resolveStoreAddress($target->storeId);
+                $freshEndKey = $fresh->endKey;
+
+                // After a split the fresh region is smaller: clip the wire
+                // start (upper) key down to the fresh region's end. TiKV
+                // rejects ranges that cross region boundaries.
+                $wireStartKey = $startKey;
+                if ($freshEndKey !== '' && KeyOrder::lt($freshEndKey, $wireStartKey)) {
+                    $wireStartKey = $freshEndKey;
                 }
-                throw $e;
-            }
 
-            $error = $response->getError();
-            if ($error instanceof KeyError) {
-                $this->handleReadKeyError($error, $resolutionKey, 'Scan', $budget);
-            }
-
-            $subResults = [];
-            $pairErrors = [];
-            foreach ($response->getPairs() as $pair) {
-                $pairError = $pair->getError();
-                if ($pairError instanceof KeyError) {
-                    $pairErrors[] = [$pairError, $pair->getKey()];
+                $request = new ScanRequest();
+                $request->setContext($target->context);
+                $request->setStartKey($wireStartKey);
+                if ($endKey !== '') {
+                    $request->setEndKey($endKey);
                 }
-                $subResults[] = [
-                    'key' => $pair->getKey(),
-                    'value' => $pair->getValue(),
-                ];
-            }
-            $this->handleReadKeyErrors($pairErrors, 'Scan', $budget);
+                $request->setLimit($limit > 0 ? $limit : $maxScanLimit);
+                $request->setVersion($this->startTs);
+                $request->setReverse(true);
 
-            return $subResults;
-        }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
-            return $targetStoreId;
-        });
+                try {
+                    /** @var ScanResponse $response */
+                    $response = $this->grpc->call(
+                        $address,
+                        'tikvpb.Tikv',
+                        'KvScan',
+                        $request,
+                        ScanResponse::class,
+                        $this->timeoutMsWithinBudget($this->timeoutMs('scan'), $budget),
+                    );
+                    RegionErrorHandler::check(
+                        $response,
+                        $this->regionCache,
+                        $fresh->regionId,
+                        keyErrorsHandledByCaller: true,
+                    );
+                } catch (RegionException $e) {
+                    if ($e->errorKind === ErrorKind::DataIsNotReady) {
+                        $excludedStore = $target->storeId;
+                    }
+                    throw $e;
+                }
+
+                $error = $response->getError();
+                if ($error instanceof KeyError) {
+                    $this->handleReadKeyError($error, $resolutionKey, 'Scan', $budget);
+                }
+
+                $subResults = [];
+                $pairErrors = [];
+                foreach ($response->getPairs() as $pair) {
+                    $pairError = $pair->getError();
+                    if ($pairError instanceof KeyError) {
+                        $pairErrors[] = [$pairError, $pair->getKey()];
+                    }
+                    $subResults[] = [
+                        'key' => $pair->getKey(),
+                        'value' => $pair->getValue(),
+                    ];
+                }
+                $this->handleReadKeyErrors($pairErrors, 'Scan', $budget);
+
+                return $subResults;
+            }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            });
+
+            // A transient empty answer is a diagnosed failure mode (issue
+            // #512): when the region covers the whole sub-range and the
+            // caller still wants rows, re-ask the same range once before
+            // accepting the empty answer. This also covers the whole-range
+            // truncation probe, whose sub-range is one region wide.
+            $terminal = $freshEndKey === '' || KeyOrder::gte($freshEndKey, $startKey);
+            if (!$terminal || $batch !== [] || $limit <= 0) {
+                break;
+            }
+            if ($emptyReattempts < self::MAX_EMPTY_SCAN_REATTEMPTS) {
+                usleep(BackoffType::RegionMiss->sleepMs($emptyReattempts) * 1000);
+                $emptyReattempts++;
+                continue;
+            }
+            $this->logger->debug('TxnKV reverse scan accepted an empty batch after re-attempts', [
+                'startKey' => KeyRedactor::redact($startKey),
+                'endKey' => KeyRedactor::redact($endKey),
+                'reattempts' => $emptyReattempts,
+            ]);
+            break;
+        }
 
         // If the fresh region covers only [endKey, freshEndKey), the higher
         // remainder [freshEndKey, startKey) belongs BEFORE this batch in the

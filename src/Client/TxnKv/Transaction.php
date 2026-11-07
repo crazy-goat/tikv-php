@@ -612,11 +612,13 @@ final class Transaction
      * cap: a range holding more than {@see self::MAX_SCAN_LIMIT} rows throws
      * {@see ScanLimitExceededException} instead of silently deleting a part.
      * The buffered deletes also count against the transaction's write-set
-     * limits (`maxTxnEntryCount`, `maxTxnTotalSize`, …) and the whole range
-     * is one transaction, so this method is meant for bounded ranges. For a
-     * range of unbounded size use `RawKvClient::deleteRange()` (a raw,
-     * non-transactional range delete) or delete in explicit batches across
-     * several transactions.
+     * limits (`maxTxnEntryCount`, `maxTxnTotalSize`, …). The whole batch is
+     * validated against the projected write set before any pessimistic lock
+     * is acquired, so an oversized range fails without locking or buffering
+     * anything. The whole range is one transaction, so this method is meant
+     * for bounded ranges. For a range of unbounded size use
+     * `RawKvClient::deleteRange()` (a raw, non-transactional range delete) or
+     * delete in explicit batches across several transactions.
      *
      * @param string $startKey Inclusive lower bound
      * @param string $endKey   Exclusive upper bound; `''` means the end of the
@@ -652,14 +654,16 @@ final class Transaction
             return 0;
         }
 
+        // Validate the whole batch against the *projected* write set before
+        // any lock or buffer mutation: a per-key assertWriteAllowed() would
+        // each see the unchanged set and miss a cumulative count/size
+        // overflow (issue #435).
+        $this->state->assertDeletesFit($keys);
+
         if ($this->pessimistic && $this->eagerPessimisticLocks) {
-            // Validate every write before acquiring any lock, exactly like
-            // set()/delete(): an oversized range fails before an RPC. Then
-            // take every physical lock in one batched lockKeys() call (it
-            // groups the keys by region) instead of one RPC per key.
-            foreach ($keys as $key) {
-                $this->state->assertWriteAllowed($key, null);
-            }
+            // Take every physical lock in one batched lockKeys() call (it
+            // groups the keys by region) instead of one RPC per key, then
+            // buffer the tombstones without re-locking.
             $this->lockKeys(...$keys);
             foreach ($keys as $key) {
                 $this->state->setWrite($key, null);

@@ -386,6 +386,34 @@ class TxnKvE2ETest extends TestCase
         $txn->rollback();
     }
 
+    public function testDeleteRangeCommitsTheDeletion(): void
+    {
+        $prefix = 'txn-delete-range-' . uniqid();
+        $keys = [$prefix . '-a', $prefix . '-b', $prefix . '-c'];
+        foreach ($keys as $key) {
+            $this->keysToCleanup[] = $key;
+        }
+
+        $setupTxn = $this->testClient->begin(['pessimistic' => false]);
+        foreach ($keys as $index => $key) {
+            $setupTxn->set($key, 'value-' . $index);
+        }
+        $setupTxn->commit();
+
+        $txn = $this->testClient->begin(['pessimistic' => false]);
+        $deleted = $txn->deleteRange($prefix, $prefix . '~');
+
+        $this->assertSame(3, $deleted);
+        $txn->commit();
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+
+        $check = $this->testClient->begin(['pessimistic' => false]);
+        foreach ($keys as $key) {
+            $this->assertNull($check->get($key), sprintf('deleteRange must remove %s', $key));
+        }
+        $check->rollback();
+    }
+
     // ========================================================================
     // Pessimistic transactions
     // ========================================================================
@@ -1017,6 +1045,65 @@ PHP;
         foreach ($keys as $i => $key) {
             $this->assertSame('value-' . $i, $scannedMap[$key] ?? null, sprintf('scan of key %s', bin2hex($key)));
         }
+    }
+
+    public function testReverseScanAcrossPreSplitRegionsWithBufferedWrites(): void
+    {
+        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', (string) getenv('PD_ENDPOINTS')) : ['pd:2379'];
+
+        $this->splitTxnKeyspaceIntoRegions($pdEndpoints, 3);
+
+        $suffix = '-' . uniqid();
+        // One key per pre-split region: "\x00" is in [empty, "\x01\x00"),
+        // "\x01\x00" starts the middle region and "mrr" the last one. The
+        // suffix keeps them unique to this run.
+        $keyRegion1 = "\x00" . $suffix;
+        $keyRegion2 = "\x01\x00" . $suffix;
+        $keyRegion3 = 'mrr' . $suffix;
+        $keyRegion3b = 'qzzz' . $suffix;
+        $bufferedKey = 'qrev' . $suffix;
+        $deletedKey = $keyRegion3;
+
+        foreach ([$keyRegion1, $keyRegion2, $keyRegion3, $keyRegion3b, $bufferedKey] as $key) {
+            $this->keysToCleanup[] = $key;
+        }
+
+        $setupTxn = $this->testClient->begin(['pessimistic' => false]);
+        foreach ([$keyRegion1, $keyRegion2, $keyRegion3, $keyRegion3b] as $index => $key) {
+            $setupTxn->set($key, 'stored-' . $index);
+        }
+        $setupTxn->commit();
+
+        // The scanning transaction buffers a set above every stored key and a
+        // delete of the "mrr" key: read-your-writes must hold in reverse too.
+        $txn = $this->testClient->begin(['pessimistic' => false]);
+        $txn->set($bufferedKey, 'buffered');
+        $txn->delete($deletedKey);
+
+        $scanned = $txn->reverseScan("\x72", "\x00");
+        $txn->rollback();
+
+        $keys = array_column($scanned, 'key');
+        $this->assertNotEmpty($keys);
+
+        // The whole result is in descending byte order, including the rows
+        // from the other regions and the buffered key.
+        $sorted = $keys;
+        rsort($sorted, SORT_STRING);
+        $this->assertSame($sorted, $keys, 'reverseScan must return keys in descending order');
+
+        // Our own keys keep the same descending order; the deleted key is
+        // hidden and the buffered set appears in its sorted position.
+        $ours = array_values(array_filter(
+            $keys,
+            static fn(string $key): bool => str_contains($key, $suffix),
+        ));
+        $this->assertSame(
+            [$keyRegion3b, $bufferedKey, $keyRegion2, $keyRegion1],
+            $ours,
+            'reverseScan must span the pre-split regions and apply buffered writes',
+        );
+        $this->assertNotContains($deletedKey, $ours);
     }
 
     /**
