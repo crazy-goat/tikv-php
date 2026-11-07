@@ -187,9 +187,10 @@ final class Transaction
          */
         private readonly int $maxReadSetTotalSize = 0,
         /**
-         * Whether get()/batchGet() retain their values in the read set
-         * (issue #297). Off by default: nothing in the commit path consumes
-         * it, so keeping it on the hot read path would grow without bound.
+         * Whether get()/batchGet()/getForUpdate() retain their values in the
+         * read set (issue #297). Off by default: nothing in the commit path
+         * consumes it, so keeping it on the hot read path would grow without
+         * bound.
          */
         private readonly bool $trackReadSet = false,
         /**
@@ -372,7 +373,8 @@ final class Transaction
      * (issue #261; see {@see getWriteSet()}).
      *
      * Empty unless the transaction was created with `trackReadSet: true`;
-     * only `get()` and `batchGet()` populate it — `scan()` does not.
+     * only `get()`, `batchGet()` and `getForUpdate()` populate it — `scan()`
+     * does not.
      *
      * @return array<array-key, ?string>
      */
@@ -896,8 +898,15 @@ final class Transaction
      * snapshot `get()`, which costs a second round trip and returns the
      * `startTs` value.
      *
+     * A value consumed from the lock response is recorded in the tracked read
+     * set (issue #228, TXN-23), so `getReadSet()` sees a `SELECT ... FOR
+     * UPDATE` read exactly like a `get()`; a missing key is recorded as
+     * `null`.
+     *
      * @throws InvalidStateException when the transaction is optimistic, not
      *         active, or already unusable after a failed lock statement
+     * @throws TransactionTooLargeException when the consumed value would
+     *         exceed `maxReadSetEntries` or `maxReadSetTotalSize`
      * @throws TransactionConflictException
      * @throws DeadlockException
      * @throws LockWaitTimeoutException
@@ -927,7 +936,10 @@ final class Transaction
                 $this->state,
                 $this->pdClient->getTimestamp(),
                 $primary,
-                true,
+                // A buffered write wins over the response value, so in
+                // deferred mode (no lock yet) only the lock is needed; asking
+                // for values would transfer and discard them (issue #228).
+                !$this->state->hasWriteSetKey($key),
                 $this->retryExecutor()->beginOperation(),
             );
         } catch (\Throwable $failure) {
@@ -941,7 +953,14 @@ final class Transaction
             return $this->state->getWriteSetValue($key);
         }
         if (array_key_exists($key, $values)) {
-            return $values[$key];
+            // The lock response is a real read of the committed value, so it
+            // belongs in the tracked read set exactly like a get() (issue
+            // #228, TXN-23): the value TiKV returned for the lock is consumed
+            // rather than discarded.
+            $value = $values[$key];
+            $this->state->setReadValue($key, $value);
+
+            return $value;
         }
 
         return $this->reader->get(
