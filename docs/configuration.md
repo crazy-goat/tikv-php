@@ -1585,23 +1585,36 @@ so the per-RPC timeout guidance above applies to them too.
 
 A pessimistic-lock request tells TiKV how long it may block on a contended
 key before it answers with a "locked" error, which the client then retries
-inside its lock-wait budget (`maxBackoffMs`). The wait is configured per
-transaction, on `begin()` (issue #443, DIV-07):
+inside its lock-wait budget (`maxBackoffMs`). The wait is configured
+client-wide on `create()` and overridable per transaction on `begin()`
+(issue #443, DIV-07; client-wide default from issue #229, TXN-24):
 
 ```php
-$txn = $client->begin([
+// Client-wide default for every transaction this client begins
+$client = TxnKvClient::create(['127.0.0.1:2379'], options: [
     'lockWaitTimeMs' => 1000, // default; 0 = "let TiKV use its own default"
+]);
+
+// Per-transaction override
+$txn = $client->begin([
+    'lockWaitTimeMs' => 500,
 ]);
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
-| `lockWaitTimeMs` | `1000` (the same timeout TiKV applies by default, `pessimistic-txn.wait-for-lock-timeout`) | How long TiKV may wait for a contended key, in milliseconds. `0` means "use TiKV's own default timeout" — the only value that is not shrunk as the budget is consumed. Must be `>= 0`; anything else throws `InvalidArgumentException`. |
+| `lockWaitTimeMs` | `1000` (the same timeout TiKV applies by default, `pessimistic-txn.wait-for-lock-timeout`) | How long TiKV may wait for a contended key, in milliseconds. Accepted by `create()` (client-wide) and `begin()` (per transaction; the `begin()` value wins). `0` means "use TiKV's own default timeout" — the only value that is not shrunk or capped as the budget is consumed. Must be `>= 0`; anything else throws `InvalidArgumentException`. |
 
 The value is sent as `PessimisticLockRequest.wait_timeout` and is
-`min(lockWaitTimeMs, remaining lock-wait budget)`: it never exceeds the
-budget and shrinks as the budget is consumed (client-go's
-`calculateEffectiveWaitTime`). TiKV caps the wait at its own
+`min(lockWaitTimeMs, remaining lock-wait budget, RPC deadline - 100 ms)`: it
+never exceeds the budget and shrinks as the budget is consumed (client-go's
+`calculateEffectiveWaitTime`). The deadline cap keeps the server's wait
+shorter than the gRPC deadline of the same request, so TiKV can answer with
+`KeyIsLocked` before the client cancels the call; without it a
+`lockWaitTimeMs` at or above the write timeout would surface as a
+`GrpcException` (`DEADLINE_EXCEEDED`) instead of a lock error. When the RPC
+deadline is shorter than the 100 ms headroom the request carries the
+protobuf's "do not wait" value (`-1`) instead. TiKV caps the wait at its own
 `pessimistic-txn.wait-for-lock-timeout` (1000 ms by default), so a larger
 `lockWaitTimeMs` does not make the server wait longer. When the budget runs
 out, the transaction fails with `LockWaitTimeoutException` — it never
