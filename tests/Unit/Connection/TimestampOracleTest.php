@@ -353,6 +353,79 @@ class TimestampOracleTest extends TestCase
         $oracle->getTimestamp();
     }
 
+    public function testLaterTsoResponseHeaderWithDifferentClusterIdThrows(): void
+    {
+        $matching = $this->makeTsoResponse(1715000000000, 5, 1);
+        $matchingHeader = new ResponseHeader();
+        $matchingHeader->setClusterId(100);
+        $matching->setHeader($matchingHeader);
+
+        $mismatching = $this->makeTsoResponse(1715000000001, 6, 1);
+        $mismatchingHeader = new ResponseHeader();
+        $mismatchingHeader->setClusterId(999);
+        $mismatching->setHeader($mismatchingHeader);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnOnConsecutiveCalls($matching, $mismatching);
+
+        $clusterId = null;
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            function () use (&$clusterId): ?int {
+                return $clusterId;
+            },
+            function (int $id) use (&$clusterId): void {
+                $clusterId = $id;
+            },
+            new NullLogger(),
+        );
+
+        $this->assertSame([(1715000000000 << 18) + 5], $oracle->getTimestampBatch(1));
+        $this->assertSame(100, $clusterId);
+
+        try {
+            $oracle->getTimestampBatch(1);
+            $this->fail('Expected TiKvException for a later TSO response from another cluster');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: established 100, server reported 999',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(100, $clusterId);
+    }
+
+    public function testTsoHeaderClusterIdZeroIsNotLearned(): void
+    {
+        $response = $this->makeTsoResponse(1715000000000, 5, 1);
+        $header = new ResponseHeader();
+        $header->setClusterId(0);
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $clusterId = null;
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            function () use (&$clusterId): ?int {
+                return $clusterId;
+            },
+            function (int $id) use (&$clusterId): void {
+                $clusterId = $id;
+            },
+            new NullLogger(),
+        );
+
+        $this->assertSame((1715000000000 << 18) + 5, $oracle->getTimestamp());
+        $this->assertNull($clusterId);
+    }
+
     public function testGetTimestampRejectsClusterIdMismatchThatWouldOverwriteEstablishedId(): void
     {
         $grpc = $this->createMock(GrpcClientInterface::class);
