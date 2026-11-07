@@ -2960,3 +2960,22 @@ wait does not prove the shared budget.
 
 The experimental BatchCommands multiplex path (`RawKvBatch::tryMultiplex`) is bounded per call
 only. It does not use the batch deadline.
+
+## Destructors log best-effort and skip rollback during shutdown (#287)
+
+PHP runs `register_shutdown_function()` callbacks before it destroys the
+remaining objects, so `Util\ShutdownState` flips a process-wide flag from one
+of them and the destructors that do network I/O consult it. `TxnKvClient` and
+`Transaction` register the callback when they are constructed. During
+shutdown `Transaction::__destruct()` and `TxnKvClient::close()` skip the
+rollback RPC — ext-grpc may already be in or past module shutdown — and the
+transaction's locks expire with the lock TTL. An explicit `close()` before
+shutdown still rolls the live transactions back.
+
+Every record on a close or destructor path goes through
+`Observability\SafeLogging::log()`, which swallows any `Throwable` from the
+logger. Do not add a direct `$this->logger->...()` call to `close()`,
+`closeChannel()`, `closeChannelObject()` or `Transaction::__destruct()`: a
+Monolog `StreamHandler` whose stream is already closed throws on `write()`,
+and that throw would escape the destructor as a fatal error and hide the real
+failure. The regression tests use `tests/Unit/Support/ThrowingLogger.php`.
