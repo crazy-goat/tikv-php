@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- The transactional `get()` path is now pinned to fail closed on a response-level `KeyError` variant it does not handle (issue #221, TXN-16). `TransactionTest::testGetRejectsUnhandledResponseKeyError()` answers `KvGet` with `KeyError.txn_not_found` and asserts that `get()` throws the base `TiKvException` (`Get failed: TxnNotFound`) instead of returning `""`, that the error is not retried, and that the failed read is not cached in the read set. No production behaviour changes — `TxnReader::handleReadKeyError()` has thrown for every unhandled variant since #263; this adds the `get()` regression coverage the audit issue asked for. (#221)
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added
