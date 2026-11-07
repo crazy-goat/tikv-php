@@ -325,8 +325,8 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->startRpc($operation);
         $start = hrtime(true);
+        $this->startRpc($operation, $start);
         $success = false;
         try {
             $channel = $this->getChannel($address);
@@ -385,8 +385,8 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->startRpc($operation);
         $start = hrtime(true);
+        $this->startRpc($operation, $start);
         $success = false;
         $call = null;
         try {
@@ -529,8 +529,8 @@ final class GrpcClient implements GrpcClientInterface
         $timeout = $this->resolveTimeoutMs($timeoutMs);
 
         $operation = $service . '/' . $method;
-        $this->startRpc($operation);
         $start = hrtime(true);
+        $this->startRpc($operation, $start);
 
         try {
             $channel = $this->getChannel($address);
@@ -582,7 +582,7 @@ final class GrpcClient implements GrpcClientInterface
      * `rpcStarted()` alone breaks it — its own counters are not trustworthy
      * in that case.
      */
-    private function startRpc(string $operation): void
+    private function startRpc(string $operation, int|float $startNs): void
     {
         try {
             $this->metrics->rpcStarted($operation);
@@ -596,6 +596,7 @@ final class GrpcClient implements GrpcClientInterface
         try {
             $this->tracer->traceEvent(TraceCategory::KV_REQUEST, 'rpc_started', [
                 'operation' => $operation,
+                'eventId' => (string) $startNs,
             ]);
         } catch (\Throwable $e) {
             $this->logger->warning('Trace backend threw from rpc_started', [
@@ -626,6 +627,7 @@ final class GrpcClient implements GrpcClientInterface
         try {
             $this->tracer->traceEvent(TraceCategory::KV_REQUEST, 'rpc_completed', [
                 'operation' => $operation,
+                'eventId' => (string) $startNs,
                 'durationMs' => $durationMs,
                 'success' => $success,
             ]);

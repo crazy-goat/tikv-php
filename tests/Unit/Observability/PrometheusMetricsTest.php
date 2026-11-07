@@ -172,4 +172,52 @@ class PrometheusMetricsTest extends TestCase
     {
         $this->assertSame('text/plain; version=0.0.4; charset=utf-8', PrometheusMetrics::CONTENT_TYPE);
     }
+
+    public function testHistogramExpositionIsCumulativeAndConsistent(): void
+    {
+        $metrics = new PrometheusMetrics();
+        $metrics->rpcCompleted('op', 0.5, true);   // 0.0005 s
+        $metrics->rpcCompleted('op', 20.0, true);  // 0.02 s
+        $metrics->rpcCompleted('op', 5000.0, true); // 5 s
+
+        $rendered = $metrics->render();
+
+        $expectedBuckets = [
+            '0.001' => 1,
+            '0.0025' => 1,
+            '0.005' => 1,
+            '0.01' => 1,
+            '0.025' => 2,
+            '0.05' => 2,
+            '0.1' => 2,
+            '0.25' => 2,
+            '0.5' => 2,
+            '1' => 2,
+            '2.5' => 2,
+            '5' => 3,
+            '10' => 3,
+            '+Inf' => 3,
+        ];
+        $previous = 0;
+        foreach ($expectedBuckets as $le => $cumulative) {
+            $line = 'tikv_client_rpc_duration_seconds_bucket{operation="op",status="success",le="'
+                . $le . '"} ' . $cumulative;
+            $this->assertStringContainsString($line, $rendered);
+            $this->assertGreaterThanOrEqual($previous, $cumulative);
+            $previous = $cumulative;
+        }
+
+        $this->assertStringContainsString(
+            'tikv_client_rpc_duration_seconds_sum{operation="op",status="success"} 5.0205',
+            $rendered,
+        );
+        $this->assertStringContainsString(
+            'tikv_client_rpc_duration_seconds_count{operation="op",status="success"} 3',
+            $rendered,
+        );
+        $this->assertStringContainsString(
+            'tikv_client_rpc_duration_seconds_bucket{operation="op",status="success",le="+Inf"} 3',
+            $rendered,
+        );
+    }
 }

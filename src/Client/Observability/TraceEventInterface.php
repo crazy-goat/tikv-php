@@ -16,8 +16,12 @@ namespace CrazyGoat\TiKV\Client\Observability;
  *
  * Events carry a category from {@see TraceCategory} and a short event name;
  * `$fields` holds scalar attributes (store IDs, durations, error kinds).
- * Implementations must be cheap and must never throw: a tracing backend is
- * observability, not part of the data path.
+ * A paired `*_started` / `*_completed` event carries the same opaque
+ * `eventId` field (a string) on both sides, so a bridge can correlate them
+ * without relying on the category or the operation name, which are not
+ * unique while several calls are in flight. Implementations must be cheap
+ * and must never throw: a tracing backend is observability, not part of the
+ * data path.
  */
 interface TraceEventInterface
 {
@@ -25,6 +29,7 @@ interface TraceEventInterface
      * @param string $category One of the {@see TraceCategory} constants.
      * @param string $event    Short event name, e.g. "rpc_started".
      * @param array<string, string|int|float|bool|null> $fields Scalar attributes.
+     *        Paired start/completion events share the same `eventId`.
      */
     public function traceEvent(string $category, string $event, array $fields = []): void;
 }

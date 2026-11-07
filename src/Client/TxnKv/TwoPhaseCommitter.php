@@ -712,6 +712,7 @@ final readonly class TwoPhaseCommitter
 
         $prewritePhaseStartNs = hrtime(true);
         $this->trace(TraceCategory::TXN_2PC, 'prewrite_started', [
+            'eventId' => (string) $prewritePhaseStartNs,
             'startTs' => $this->startTs,
             'mutationCount' => count($allKeys),
             'regionCount' => count($keysByRegion),
@@ -762,6 +763,7 @@ final readonly class TwoPhaseCommitter
         } catch (\Throwable $e) {
             $this->recordTwoPhasePhase('prewrite', $prewritePhaseStartNs, false);
             $this->trace(TraceCategory::TXN_2PC, 'prewrite_completed', [
+                'eventId' => (string) $prewritePhaseStartNs,
                 'success' => false,
                 'durationMs' => $this->elapsedMs($prewritePhaseStartNs),
             ]);
@@ -770,6 +772,7 @@ final readonly class TwoPhaseCommitter
 
         $this->recordTwoPhasePhase('prewrite', $prewritePhaseStartNs, true);
         $this->trace(TraceCategory::TXN_2PC, 'prewrite_completed', [
+            'eventId' => (string) $prewritePhaseStartNs,
             'success' => true,
             'durationMs' => $this->elapsedMs($prewritePhaseStartNs),
         ]);
@@ -779,6 +782,7 @@ final readonly class TwoPhaseCommitter
             $state->setStatus(TransactionStatus::Committed);
             $this->logger->debug('One-phase commit done', ['commitTs' => $onePcCommitTs]);
             $this->trace(TraceCategory::TXN_2PC, 'one_pc_completed', [
+                'eventId' => (string) $prewritePhaseStartNs,
                 'commitTs' => $onePcCommitTs,
             ]);
             return;
@@ -804,6 +808,7 @@ final readonly class TwoPhaseCommitter
             $state->setStatus(TransactionStatus::Committed);
             $this->logger->debug('Async commit done', ['commitTs' => $commitTs]);
             $this->trace(TraceCategory::TXN_2PC, 'async_commit_completed', [
+                'eventId' => (string) $prewritePhaseStartNs,
                 'commitTs' => $commitTs,
             ]);
             return;
@@ -821,6 +826,7 @@ final readonly class TwoPhaseCommitter
             $commitTs = $state->getCommitTs() ?? $this->pdClient->getTimestamp();
             $state->setCommitTs($commitTs);
             $this->trace(TraceCategory::TXN_2PC, 'commit_started', [
+                'eventId' => (string) $commitPhaseStartNs,
                 'commitTs' => $commitTs,
             ]);
 
@@ -833,6 +839,7 @@ final readonly class TwoPhaseCommitter
         } catch (\Throwable $e) {
             $this->recordTwoPhasePhase('commit', $commitPhaseStartNs, false);
             $this->trace(TraceCategory::TXN_2PC, 'commit_completed', [
+                'eventId' => (string) $commitPhaseStartNs,
                 'success' => false,
                 'durationMs' => $this->elapsedMs($commitPhaseStartNs),
             ]);
@@ -841,6 +848,7 @@ final readonly class TwoPhaseCommitter
 
         $this->recordTwoPhasePhase('commit', $commitPhaseStartNs, true);
         $this->trace(TraceCategory::TXN_2PC, 'commit_completed', [
+            'eventId' => (string) $commitPhaseStartNs,
             'success' => true,
             'durationMs' => $this->elapsedMs($commitPhaseStartNs),
         ]);

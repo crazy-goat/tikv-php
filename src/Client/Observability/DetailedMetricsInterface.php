@@ -23,8 +23,8 @@ namespace CrazyGoat\TiKV\Client\Observability;
  * A backend that implements only {@see MetricsInterface} keeps working
  * unchanged and simply does not receive these calls. {@see PrometheusMetrics}
  * and {@see InMemoryMetrics} implement this interface; the default
- * {@see NoOpMetrics} deliberately does not, so the zero-cost path stays free
- * of the extra `instanceof` dispatch.
+ * {@see NoOpMetrics} deliberately does not, so a base-only backend keeps the
+ * per-call cost to one cheap `instanceof` probe.
  *
  * All methods are best-effort, like the base interface: implementations must
  * never throw.
@@ -43,11 +43,13 @@ interface DetailedMetricsInterface extends MetricsInterface
     /**
      * Record one RPC attempt against a store.
      *
-     * Called after every attempt the retry executor runs, when the store the
-     * attempt targeted is known (from the caller's target provider or the
-     * cached region's leader). $errorKind is null on success, otherwise the
-     * region error kind (e.g. "server_is_busy") or "transport" for a gRPC
-     * transport failure, and "unknown" for an unclassified error.
+     * Called after every attempt the retry executor runs, when the caller
+     * supplied a `targetStoreId` provider and it returned a store ID. An
+     * unknown store records nothing: the retry path does not fall back to a
+     * region-cache lookup just to attribute a metric. $errorKind is null on
+     * success, otherwise the region error kind (e.g. "server_is_busy") or
+     * "transport" for a gRPC transport failure, and "unknown" for an
+     * unclassified error.
      *
      * The store ID is an integer because it is a stable cluster identifier;
      * implementations that expose it as a tag should render it as a decimal

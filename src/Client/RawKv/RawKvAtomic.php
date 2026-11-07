@@ -72,14 +72,18 @@ final readonly class RawKvAtomic
             return ErrorClassifier::classify($e);
         };
 
+        $targetStoreId = null;
+
         return $retryExecutor->execute($key, function () use (
             $key,
             $expectedValue,
             $newValue,
             $ttl,
             $columnFamily,
+            &$targetStoreId,
         ): CasResult {
             $region = $this->regionResolver->getRegionInfo($key);
+            $targetStoreId = $region->leaderStoreId;
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawCASRequest();
@@ -147,7 +151,9 @@ final readonly class RawKvAtomic
                 swapped: $response->getSucceed(),
                 previousValue: $response->getPreviousNotExist() ? null : $response->getPreviousValue(),
             );
-        }, $classifier);
+        }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+            return $targetStoreId;
+        });
     }
 
     /**

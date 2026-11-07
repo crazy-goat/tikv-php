@@ -114,6 +114,7 @@ final readonly class LockResolver
         $startNs = hrtime(true);
         $lockTs = (int) $lock->getLockVersion();
         $this->trace('lock_resolve_started', [
+            'eventId' => (string) $startNs,
             'lockTs' => $lockTs,
             'lockCount' => 1,
         ]);
@@ -170,6 +171,7 @@ final readonly class LockResolver
     ): void {
         $startNs = hrtime(true);
         $this->trace('lock_resolve_started', [
+            'eventId' => (string) $startNs,
             'lockCount' => count($locks),
         ]);
 
@@ -339,6 +341,7 @@ final readonly class LockResolver
         }
 
         $this->trace('lock_resolve_completed', [
+            'eventId' => (string) $startNs,
             'result' => $result,
             'durationMs' => $durationMs,
         ]);

@@ -707,8 +707,12 @@ The interface has seven methods (full reference with emitted tag examples:
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).
 
-Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from both `rpcStarted()` and `rpcCompleted()`, so the transport exception of a gRPC call is never replaced. The retry and region-cache counters are emitted directly and are not protected yet. The default is a zero-cost no-op
-(`NoOpMetrics`): it accepts every call — empty, binary or oversized tags, negative durations and store IDs included — and records nothing, so no call site can fail on the default backend. A ready-made in-memory recorder for tests and benchmarks
+Implementations must never throw; if one does, `GrpcClient` logs a warning and swallows the error from both `rpcStarted()` and `rpcCompleted()`, so the transport exception of a gRPC call is never replaced. The retry and region-cache counters are emitted directly and are not protected yet. The default is a no-op backend (`NoOpMetrics`): a call pays one empty-method
+dispatch, and the 2PC and lock-resolution paths take one timestamp for the
+optional detailed timings. It accepts every call — empty, binary or
+oversized tags, negative durations and store IDs included — and records
+nothing, so no call site can fail on the default backend. A ready-made
+in-memory recorder for tests and benchmarks
 ships as [`InMemoryMetrics`](../src/Client/Observability/InMemoryMetrics.php)
 with `getRpcStarted(string $operation)`, `getRpcSucceeded(string $operation)`,
 `getRetries(string $operation)`, `getCacheHits(string $operation)`,
@@ -753,8 +757,9 @@ across instances. For cross-process aggregation, implement
 
 `MetricsInterface` is frozen, so the richer signals live in the optional
 [`DetailedMetricsInterface`](../src/Client/Observability/DetailedMetricsInterface.php).
-Implement it **in addition to** `MetricsInterface` (or extend
-`PrometheusMetrics` / use `InMemoryMetrics`) to receive:
+Implement it **in addition to** `MetricsInterface` (use
+`PrometheusMetrics` or `InMemoryMetrics`, or copy either as a starting
+point) to receive:
 
 | Method | Reported when |
 |---|---|
@@ -795,10 +800,12 @@ to spans is up to you, so the library needs no OpenTelemetry dependency.
 | `TraceCategory::TXN_2PC` | `prewrite_started`, `prewrite_completed`, `commit_started`, `commit_completed`, `one_pc_completed`, `async_commit_completed` | `TxnKv` commit |
 | `TraceCategory::TXN_LOCK_RESOLVE` | `lock_resolve_started`, `lock_resolve_completed` | Lock resolution |
 
-Fields are scalar attributes (`operation`, `durationMs`, `success`,
-`storeId`, `commitTs`, `result`, …). A tracer that throws is logged and
-swallowed, exactly like a metrics backend, so tracing never breaks the data
-path.
+Fields are scalar attributes (`operation`, `eventId`, `durationMs`,
+`success`, `commitTs`, `result`, …). A paired `*_started` / `*_completed`
+event carries the same opaque `eventId`, so a bridge can correlate them
+even while several calls or transactions are in flight. A tracer that throws
+is logged and swallowed, exactly like a metrics backend, so tracing never
+breaks the data path.
 
 An OpenTelemetry bridge is a few lines:
 
@@ -819,7 +826,7 @@ final class OpenTelemetryTracer implements TraceEventInterface
 
     public function traceEvent(string $category, string $event, array $fields = []): void
     {
-        $key = $category . ':' . ($fields['operation'] ?? $fields['lockTs'] ?? 'default');
+        $key = $category . ':' . ($fields['eventId'] ?? 'default');
 
         if (str_ends_with($event, '_started')) {
             $this->spans[$key] = $this->tracer

@@ -22,7 +22,12 @@ final class TraceCategory
     /** An outbound KV or PD gRPC call. */
     public const KV_REQUEST = 'kv_request';
 
-    /** Region cache lookup, miss and invalidation events. */
+    /**
+     * Region cache lookup, miss and invalidation events.
+     *
+     * Reserved: the constant mirrors client-go's `CategoryRegionCache`, but
+     * the region cache does not emit trace events yet.
+     */
     public const REGION_CACHE = 'region_cache';
 
     private function __construct()

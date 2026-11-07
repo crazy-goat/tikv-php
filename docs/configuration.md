@@ -2514,8 +2514,10 @@ change rather than only as an uptime check.
 
 The library exposes an opt-in `MetricsInterface` for capturing operational
 counters (RPC counts and latency, retry counts, region-cache hit/miss,
-region-cache invalidations). The default is a zero-cost no-op, so callers
-that do not opt in pay a single empty-method dispatch per call site.
+region-cache invalidations). The default is a no-op backend, so callers
+that do not opt in pay one empty-method dispatch per RPC; the optional
+detailed signals add an `instanceof` probe and a timestamp on the 2PC and
+lock-resolution paths.
 `PrometheusMetrics` is a dependency-free adapter that renders the Prometheus
 text exposition format; no extra Composer package is required.
 

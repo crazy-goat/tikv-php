@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Observability;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+
 /**
  * Dependency-free Prometheus adapter for {@see MetricsInterface} and
  * {@see DetailedMetricsInterface} (issue #434, GAP-20).
@@ -90,16 +92,16 @@ final class PrometheusMetrics implements DetailedMetricsInterface
     {
         $buckets = $durationBuckets ?? self::DEFAULT_DURATION_BUCKETS;
         if ($buckets === []) {
-            throw new \InvalidArgumentException('durationBuckets must not be empty');
+            throw new InvalidArgumentException('durationBuckets must not be empty');
         }
 
         $previous = -1.0;
         foreach ($buckets as $bucket) {
             if (!is_finite($bucket) || $bucket <= 0.0) {
-                throw new \InvalidArgumentException('durationBuckets must contain positive finite values');
+                throw new InvalidArgumentException('durationBuckets must contain positive finite values');
             }
             if ($bucket <= $previous) {
-                throw new \InvalidArgumentException('durationBuckets must be strictly ascending');
+                throw new InvalidArgumentException('durationBuckets must be strictly ascending');
             }
             $previous = $bucket;
         }

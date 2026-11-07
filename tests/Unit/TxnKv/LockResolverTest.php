@@ -18,18 +18,22 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Observability\InMemoryTracer;
 use CrazyGoat\TiKV\Client\Observability\TraceCategory;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
+use CrazyGoat\TiKV\Tests\Unit\Support\ThrowingTracer;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -95,7 +99,7 @@ class LockResolverTest extends TestCase
         int $callerStartTs = self::CALLER_START_TS,
         ?callable $tso = null,
         ?InMemoryMetrics $metrics = null,
-        ?InMemoryTracer $tracer = null,
+        ?TraceEventInterface $tracer = null,
     ): LockResolver {
         $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
@@ -366,6 +370,72 @@ class LockResolverTest extends TestCase
             ['lock_resolve_started', 'lock_resolve_completed'],
             $tracer->eventNames(TraceCategory::TXN_LOCK_RESOLVE),
         );
+    }
+
+    public function testResolveLockRecordsLiveResolution(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(commitVersion: 0, lockTtl: 30000),
+        );
+
+        $metrics = new InMemoryMetrics();
+        $tracer = new InMemoryTracer();
+        $resolver = $this->createResolver(metrics: $metrics, tracer: $tracer);
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected active lock to request a retry');
+        } catch (TxnRetryableException) {
+            // expected
+        }
+
+        $this->assertSame(1, $metrics->getLockResolutions('live'));
+        $this->assertSame(0, $metrics->getLockResolutions('resolved'));
+        $events = $tracer->getEvents();
+        $this->assertSame('live', $events[1]['fields']['result']);
+        $this->assertSame($events[0]['fields']['eventId'], $events[1]['fields']['eventId']);
+    }
+
+    public function testResolveLockRecordsErrorResolution(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->grpc->method('call')->willThrowException(
+            new GrpcException('check failed', GrpcStatusCode::Unavailable->value),
+        );
+
+        $metrics = new InMemoryMetrics();
+        $tracer = new InMemoryTracer();
+        $resolver = $this->createResolver(metrics: $metrics, tracer: $tracer);
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected the status check to fail');
+        } catch (GrpcException) {
+            // expected
+        }
+
+        $this->assertSame(1, $metrics->getLockResolutions('error'));
+        $this->assertSame(0, $metrics->getLockResolutions('resolved'));
+        $events = $tracer->getEvents();
+        $this->assertSame('error', $events[1]['fields']['result']);
+        $this->assertSame($events[0]['fields']['eventId'], $events[1]['fields']['eventId']);
+    }
+
+    public function testThrowingTracerDoesNotBreakLockResolution(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->mockGrpcCallsAndCaptureResolve($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+        $metrics = new InMemoryMetrics();
+        $resolver = $this->createResolver(metrics: $metrics, tracer: new ThrowingTracer());
+
+        $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+        $this->assertSame(1, $metrics->getLockResolutions('resolved'));
     }
 
     public function testResolveLockWithZeroCommitTsRollsBack(): void

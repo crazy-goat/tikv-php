@@ -14,11 +14,14 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
 use CrazyGoat\TiKV\Client\Observability\InMemoryTracer;
 use CrazyGoat\TiKV\Client\Observability\TraceCategory;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
+use CrazyGoat\TiKV\Tests\Unit\Support\ThrowingTracer;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -86,7 +89,7 @@ class TwoPhaseObservabilityTest extends TestCase
 
     private function createTransaction(
         InMemoryMetrics $metrics,
-        InMemoryTracer $tracer,
+        TraceEventInterface $tracer,
         bool $enable1Pc = false,
     ): Transaction {
         return new Transaction(
@@ -137,6 +140,11 @@ class TwoPhaseObservabilityTest extends TestCase
             ],
             $tracer->eventNames(TraceCategory::TXN_2PC),
         );
+
+        $events = $tracer->getEvents();
+        $this->assertSame($events[0]['fields']['eventId'], $events[1]['fields']['eventId']);
+        $this->assertSame($events[2]['fields']['eventId'], $events[3]['fields']['eventId']);
+        $this->assertNotSame($events[0]['fields']['eventId'], $events[2]['fields']['eventId']);
     }
 
     public function testOnePhaseCommitRecordsOnlyPrewritePhase(): void
@@ -158,6 +166,42 @@ class TwoPhaseObservabilityTest extends TestCase
             ['prewrite_started', 'prewrite_completed', 'one_pc_completed'],
             $tracer->eventNames(TraceCategory::TXN_2PC),
         );
+
+        $events = $tracer->getEvents();
+        $this->assertSame($events[0]['fields']['eventId'], $events[1]['fields']['eventId']);
+        $this->assertSame($events[0]['fields']['eventId'], $events[2]['fields']['eventId']);
+    }
+
+    public function testTxnKvClientPropagatesTracerToTransactions(): void
+    {
+        $this->stubSingleRegion();
+        $this->mockGrpc(new PrewriteResponse());
+
+        $metrics = new InMemoryMetrics();
+        $tracer = new InMemoryTracer();
+        $client = new TxnKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            metrics: $metrics,
+            tracer: $tracer,
+        );
+
+        $txn = $client->beginOptimistic();
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $this->assertSame(
+            [
+                'prewrite_started',
+                'prewrite_completed',
+                'commit_started',
+                'commit_completed',
+            ],
+            $tracer->eventNames(TraceCategory::TXN_2PC),
+        );
+        $this->assertSame(1, $metrics->getTwoPhaseCount('prewrite'));
+        $this->assertSame(1, $metrics->getTwoPhaseCount('commit'));
     }
 
     public function testPrewriteFailureRecordsFailedPhase(): void
@@ -195,5 +239,19 @@ class TwoPhaseObservabilityTest extends TestCase
         $this->assertSame(1, $metrics->getTwoPhaseCount('prewrite'));
         $this->assertSame(1, $metrics->getTwoPhaseFailures('prewrite'));
         $this->assertSame(0, $metrics->getTwoPhaseCount('commit'));
+    }
+
+    public function testThrowingTracerDoesNotBreakCommit(): void
+    {
+        $this->stubSingleRegion();
+        $this->mockGrpc(new PrewriteResponse());
+
+        $metrics = new InMemoryMetrics();
+        $txn = $this->createTransaction($metrics, new ThrowingTracer());
+        $txn->set('k1', 'v1');
+        $txn->commit();
+
+        $this->assertSame(1, $metrics->getTwoPhaseCount('prewrite'));
+        $this->assertSame(1, $metrics->getTwoPhaseCount('commit'));
     }
 }
