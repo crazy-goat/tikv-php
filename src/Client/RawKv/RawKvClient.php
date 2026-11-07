@@ -99,7 +99,13 @@ use Psr\Log\NullLogger;
  */
 final class RawKvClient
 {
-    public const MAX_SCAN_LIMIT = 10240;
+    /**
+     * Maximum rows per scan RPC, and the upper bound on a `ScanIterator`
+     * `batchSize`. Kept as an alias of the canonical
+     * {@see RawKvScanner::MAX_SCAN_LIMIT} so the public iterator bound and the
+     * wire-enforced scan bound cannot drift apart.
+     */
+    public const MAX_SCAN_LIMIT = RawKvScanner::MAX_SCAN_LIMIT;
 
     public const MAX_BATCH_LIMIT = 512;
 
@@ -290,6 +296,13 @@ final class RawKvClient
 
     /** Opt-in region-cache refresh and preload (#425). */
     private readonly RegionCacheWarmer $regionCacheWarmer;
+
+    /**
+     * The resolver every component of this client shares, so per-store
+     * health state learned by one retry loop is visible to the next
+     * (issue #424).
+     */
+    private readonly RegionResolver $regionResolver;
 
     /**
      * @param string[] $pdEndpoints
@@ -483,6 +496,7 @@ final class RawKvClient
             $this->epochNotMatchCodec(),
             $this->storeCache,
         );
+        $this->regionResolver = $regionResolver;
         $this->regionCacheWarmer = $regionCacheWarmer
             ?? new RegionCacheWarmer($pdClient, $regionCache, $this->logger, $regionCacheRefreshMs);
         $this->crud = $crud ?? new RawKvCrud(
@@ -919,25 +933,12 @@ final class RawKvClient
 
     private function createRetryExecutor(): RetryExecutor
     {
-        $regionResolver = new RegionResolver(
-            $this->pdClient,
-            $this->regionCache,
-            $this->metrics,
-            $this->allowedStoreHosts,
-            $this->storeHostPolicy,
-            $this->logger,
-            $this->pdEndpoints,
-            $this->allowedStorePorts,
-            $this->epochNotMatchCodec(),
-            $this->storeCache,
-        );
-
         return new RetryExecutor(
             $this->maxBackoffMs,
             $this->serverBusyBudgetMs,
             $this->regionCache,
             $this->grpc,
-            $regionResolver,
+            $this->regionResolver,
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
@@ -1013,6 +1014,12 @@ final class RawKvClient
     }
 
     /**
+     * Get the remaining TTL of a key in seconds.
+     *
+     * Returns `null` in two different situations: the key does not exist, or
+     * the key exists but has no expiry. Callers that must tell them apart use
+     * {@see getKeyTTLResult()}, which reports existence separately.
+     *
      * @throws ClientClosedException
      * @throws InvalidArgumentException
      * @throws RegionException
@@ -1030,7 +1037,41 @@ final class RawKvClient
         $this->validateKeyNotEmpty($key, 'getKeyTTL');
         $this->validateKeySize($key, 'getKeyTTL');
 
-        return $this->crud->getKeyTTL($key, $this->createRetryExecutor(), $this->columnFamily);
+        return $this->lookupKeyTtl($key)->ttlSeconds;
+    }
+
+    /**
+     * Look up a key's TTL, distinguishing a missing key from one without an
+     * expiry.
+     *
+     * The returned {@see KeyTtl} reports `exists` and `ttlSeconds`: a missing
+     * key is `exists: false, ttlSeconds: null`, a key without an expiry is
+     * `exists: true, ttlSeconds: null`, and a key with an expiry is
+     * `exists: true, ttlSeconds: > 0`.
+     *
+     * @throws ClientClosedException
+     * @throws InvalidArgumentException
+     * @throws RegionException
+     * @throws GrpcException
+     * @throws TiKvException When a region lookup fails closed (for example PD
+     *         returned no region for the key)
+     * @throws StoreNotFoundException When PD no longer knows the store that
+     *         backs the region
+     * @throws RetryBudgetExhaustedException When the retry attempt cap or the
+     *         wall-clock deadline is exhausted
+     */
+    public function getKeyTTLResult(string $key): KeyTtl
+    {
+        $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'getKeyTTLResult');
+        $this->validateKeySize($key, 'getKeyTTLResult');
+
+        return $this->lookupKeyTtl($key);
+    }
+
+    private function lookupKeyTtl(string $key): KeyTtl
+    {
+        return $this->crud->getKeyTTLResult($key, $this->createRetryExecutor(), $this->columnFamily);
     }
 
     // ========================================================================

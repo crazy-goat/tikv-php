@@ -141,6 +141,7 @@ the commit/rollback decision (issue #224, TXN-19).
 | [`RegionException`](../src/Client/Exception/RegionException.php) | `TiKvException` | Region-level error reported by TiKV (NotLeader, EpochNotMatch, ServerIsBusy, …); carries `public readonly ?NotLeader $notLeader`, `?ErrorKind $errorKind`, the `?EpochNotMatch $epochNotMatch` payload and the `?RegionInfo $cachedRegion` entry that produced the error (used to seed the new regions' leader on the `current_regions` refresh path, issue #246) |
 | [`ScanLimitExceededException`](../src/Client/Exception/ScanLimitExceededException.php) | `TiKvException` | An unbounded scan (`limit: 0`) hit a row cap: the RawKV path collected more than `options['maxScanRows']` rows (default 100000, issue #191), the transactional path more than `Transaction::MAX_SCAN_LIMIT` rows (10240, issue #440); accessors: `getMaxRows()`, `getScannedRows()`. Thrown instead of silently truncating. On the RawKV path the cap is `options['maxScanRows']` (raise it, or switch to `scanIterator()`/`scanPrefixIterator()`); the transactional path has no option (its cap is `Transaction::MAX_SCAN_LIMIT`) and has to page the range explicitly — the iterators are a **raw** read and do not see the transaction's own writes |
 | [`StoreNotFoundException`](../src/Client/Exception/StoreNotFoundException.php) | `TiKvException` | The store backing a region leader is missing from PD; carries `public readonly int $storeId` |
+| [`StoreUnavailableException`](../src/Client/Exception/StoreUnavailableException.php) | `TiKvException` | The store is in its health cooldown (issue #424, GAP-10), so `RegionResolver::resolveStoreAddress()` refused to route to it. Carries `public readonly int $storeId`; classified as a retryable `TiKvRpc` backoff, so the caller's retry loop waits the cooldown out and then probes the store again |
 | [`RetryBudgetExhaustedException`](../src/Client/Retry/RetryBudgetExhaustedException.php) | `TiKvException` | The internal retry loop exhausted its attempt cap or wall-clock deadline; accessors: `attempts()`, `elapsedOrBackoffMs()`, `getPrevious()` (original error), `getRawKey()` (the un-redacted key, kept out of the message — see #269) |
 | [`DeadlockException`](../src/Client/TxnKv/Exception/DeadlockException.php) | `TiKvException` | Pessimistic locking detected a deadlock; accessors: `getDeadlockKey()`, `getDeadlockKeyHash()`, `getLockTs()` |
 | [`LockWaitTimeoutException`](../src/Client/TxnKv/Exception/LockWaitTimeoutException.php) | `TiKvException` | A pessimistic lock wait exhausted its budget (`maxBackoffMs`); the per-request wait is `begin(['lockWaitTimeMs' => …])` (issue #443); accessors: `getKey()` (redacted message), `getTimeoutMs()` |
@@ -178,7 +179,8 @@ Verdict legend:
 | `InvalidArgumentException` | **Never retry** — programming or input error |
 | `InvalidStateException` | **Never retry** — fix the calling code / lifecycle first |
 | `ClientClosedException` | **Never retry** on that client instance — reopen a new client if appropriate |
-| `InvalidStoreAddressException` | **Never retry** — classified fatal before any retry backoff (`ErrorClassifier::classify()` returns null), so the client did not retry and will not succeed next time without configuration change |
+| `InvalidStoreAddressException` | **Never retry** — classified fatal before any retry backoff (`ErrorClassifier::classify()` returns a fatal `RetryVerdict`), so the client did not retry and will not succeed next time without configuration change |
+| `StoreUnavailableException` | **Retried automatically** — the store is in its one-second health cooldown and the client's own retry loop waits it out; seeing it means the retry budget ran out before the store recovered, so re-driving the operation later is safe for idempotent calls |
 | `KeyErrorException` | **Never retry** — a per-pair key error is a deterministic rejection of that key; fix the request, not the retry count |
 | `KeyOutOfBoundsException` | **Never retry** — API V2 only: the key is outside the configured keyspace (or its prefix is malformed). Fix the key or the keyspace configuration |
 | `PdException` | **Do not retry blindly** — read `getErrorType()` first. A **not-leader** rejection (`isNotLeader()`) is the one header error another endpoint can satisfy, and the client already rotated the PD endpoint and retried once per remaining endpoint before letting it reach you, so a second failure means no configured endpoint can serve the call. `NOT_BOOTSTRAPPED` and `INCOMPATIBLE_VERSION` resolve on their own (wait for the cluster, upgrade PD) and retrying only multiplies the RPC load; `INVALID_VALUE` means the request itself is wrong. **No user data was touched** — the failure is in the metadata plane — so re-driving the operation is safe for idempotent ops once PD is healthy (issue #234) |
@@ -303,6 +305,7 @@ only the timing it produces differs.
 |---|---|---|---|
 | `RawKvClient::get()` | Yes | Yes | Read-only. A repeated read returns the *current* value, which may differ from the first answer when a concurrent write landed in between |
 | `RawKvClient::getKeyTTL()` | Yes | Yes | Read-only. The TTL keeps counting down, so the second answer can be smaller |
+| `RawKvClient::getKeyTTLResult()` | Yes | Yes | Read-only. The TTL keeps counting down, so the second answer can be smaller; `exists` can also change if the key expires or is written in between |
 | `RawKvClient::batchGet()` | Yes | Yes | Read-only. A `BatchPartialFailureException` returns **no** results — re-run the whole call |
 | `RawKvClient::scan()`, `RawKvClient::scanPrefix()`, `RawKvClient::reverseScan()`, `RawKvClient::batchScan()` | Yes | Yes | Read-only. The rows are the same set the first call returned unless the data changed in between |
 | `RawKvClient::scanIterator()`, `RawKvClient::scanPrefixIterator()` | Yes | Yes | Read-only, but **lazy**: the failure surfaces from the iteration, not from the factory call. A new iterator starts again at the beginning of the range. Exception: the cursor-progress `TiKvException` (#312) is not transient, so do not loop on it |
@@ -337,6 +340,7 @@ only the timing it produces differs.
 | `TxnKvClient::create()`, `TxnKvClient::close()` | Yes | Yes | `create()` validates the options and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent; it rolls back the client's still-active transactions before releasing the resources they depend on, and a rollback failure is logged rather than thrown |
 | `TxnKvClient::getClusterId()`, `TxnKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
 | `TxnKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `TxnKvClient::pdClient()` | Yes | Yes | Pure accessor; returns the PD client the TxnKV client owns. It is closed by `TxnKvClient::close()`, so treat the reference as stale afterwards |
 | `TxnKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 | `TxnKvClient::refreshRegionCache()`, `TxnKvClient::preloadRegions()` | Yes | Yes | Cache warming only: re-reads region metadata from PD and stores it; no user data is touched. A PD failure is logged and the old cache entry is kept (nothing is thrown for it); both are no-ops after `close()` |
 | `Transaction::get()`, `Transaction::batchGet()`, `Transaction::scan()` | Yes | Yes | Read-only inside the transaction's snapshot at `startTs`, so a repeated read sees the same version of the data |
@@ -462,15 +466,20 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\UndeterminedCommitException;
 
 const TXN_ATTEMPTS = 3;
 
+$value = 'v';
+
 for ($attempt = 1; $attempt <= TXN_ATTEMPTS; $attempt++) {
     $txn = $tikv->begin();      // a NEW transaction every round
     try {
-        $txn->set('k', 'v');
+        // Re-read before writing: a previous round may have committed.
+        if ($txn->get('k') !== $value) {
+            $txn->set('k', $value);
+        }
         $txn->commit();
         break;
     } catch (UndeterminedCommitException $e) {
-        // The commit may already be applied. Re-read the key in a NEW
-        // transaction and only re-apply it if it is not there.
+        // The commit may already be applied. The next round re-reads the
+        // key in a NEW transaction and re-applies only if it is not there.
         if ($attempt === TXN_ATTEMPTS) {
             throw $e;
         }
@@ -529,7 +538,8 @@ an earlier group already landed (issue #197).
 | `get(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Key validated non-empty + size limit before the RPC. `RetryBudgetExhaustedException` means the internal retry loop exhausted its attempt cap or wall-clock deadline |
 | `put(string, string, int $ttl = 0)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Same validation as `get()` plus value size |
 | `delete(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Idempotent at the TiKV level |
-| `getKeyTTL(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Returns `null` when the key has no TTL |
+| `getKeyTTL(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Returns `null` both when the key is missing and when it has no TTL; use `getKeyTTLResult()` to tell them apart |
+| `getKeyTTLResult(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Returns a `KeyTtl` with `exists` and `ttlSeconds`, distinguishing a missing key (`exists: false`) from one without an expiry (`exists: true, ttlSeconds: null`) |
 | `compareAndSwap(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `CasIndeterminateException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | `InvalidStateException` with `CompareAndSwap requires atomic mode (enable via setAtomicForCAS(true))` when atomic mode is off. `CasIndeterminateException` means the swap may have been applied; a `GrpcException` here means the request was never sent or was rejected before it was applied, so the swap definitively did not happen |
 | `putIfAbsent(...)` | `ClientClosedException`, `InvalidArgumentException`, `InvalidStateException`, `RegionException`, `CasIndeterminateException`, `GrpcException`, `TiKvException`, `StoreNotFoundException`, `RetryBudgetExhaustedException` | Delegates to `compareAndSwap()`; requires atomic mode (`setAtomicForCAS(true)`), same `InvalidStateException` message. `CasIndeterminateException` means the value may have been stored |
 | `batchGet(array)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `KeyErrorException`, `StoreNotFoundException`, `TiKvException` | Empty input returns `[]` without RPC. A region's `RetryBudgetExhaustedException` is reported inside `BatchPartialFailureException::getRegionErrors()`. `KeyErrorException` and `StoreNotFoundException` escape directly only with `options['batchCommands']` enabled. `TiKvException` is the fail-closed unresolved-region error before any send |
@@ -740,7 +750,7 @@ Notes:
   (#247)
 - The channel a transport failure closes is the one of the store the failed
   attempt actually targeted, not one re-derived from the region cache. Every
-  retrying RPC path — RawKV `get`/`getKeyTTL`/`put`/`delete`, `batchGet`/
+  retrying RPC path — RawKV `get`/`getKeyTTL`/`getKeyTTLResult`/`put`/`delete`, `batchGet`/
   `batchPut`/`batchDelete`, forward and reverse scans, `deleteRange` and
   `checksum`, and TxnKV `get`/`batchGet`/`scan`, prewrite, secondary commit,
   rollback, pessimistic rollback, heartbeat and lock resolution — reports its

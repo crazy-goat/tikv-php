@@ -24,6 +24,7 @@ use CrazyGoat\TiKV\Client\Region\ReplicaReadMode;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -100,7 +101,7 @@ class RetryExecutorStoreInvalidationTest extends TestCase
 
     private function zeroSleepClassifier(): \Closure
     {
-        return static fn (TiKvException $e): BackoffType => BackoffType::None;
+        return static fn (TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None);
     }
 
     /**

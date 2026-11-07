@@ -19,9 +19,9 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -62,9 +62,11 @@ final readonly class RawKvAtomic
         // A GrpcException from region or store resolution (PD unreachable)
         // is definitive — the request was never sent — so it is rethrown
         // unchanged instead of being reported as an indeterminate swap.
-        $classifier = static function (TiKvException $e): ?BackoffType {
+        // The fatal verdict runs the executor's own fatal path, which also
+        // closes a broken channel (issue #534).
+        $classifier = static function (TiKvException $e): RetryVerdict {
             if ($e instanceof GrpcException) {
-                throw $e;
+                return RetryVerdict::fatal();
             }
 
             return ErrorClassifier::classify($e);
