@@ -337,7 +337,11 @@ Two additional APIs reduce PD traffic where that is safe and explicit:
 
 Additionally, the pessimistic-lock path in `TwoPhaseCommitter` acquires
 one `for_update_ts` per locking pass instead of one per region, cutting
-one PD round trip per additional region.
+one PD round trip per additional region. The same timestamp is reused by
+every retry of that pass: only a new statement allocates a new read
+timestamp, so a retried lock cannot silently advance past a concurrent
+commit and let a stale read-modify-write pass the prewrite constraint
+check.
 
 ### Store Address Validation
 
