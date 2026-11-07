@@ -114,7 +114,10 @@ combinations (and the `test` profile); `bin/worktree-done.sh` calls it.
 `.github/workflows/ci.yml` runs on pull requests to `master` and on pushes to `master`. The
 `changes` job detects documentation-only changes and the `docs` job checks them fast. `lint`,
 the unit matrix, `grpc-unit-tests`, `integration-tests`, `e2e-tests` and `e2e-tests-apiv2` run only
-for code changes. `ci-ok` aggregates the results and is the check to require. The `lint` job does
+for code changes. None of them has a path filter of its own: a pull request that touches only
+`tests/Unit/**` still runs both E2E jobs, and `tests/Unit/Ci/CiWorkflowGateTest.php` fails when a
+narrower gate or a `paths` trigger filter is reintroduced (issue #365). `ci-ok` aggregates the
+results and is the check to require. The `lint` job does
 the setup (PHP, Composer, hadolint), runs `composer audit --locked` and then `bin/lint.sh`. Workflow runs of external
 contributors need maintainer approval (repository setting); there is no custom actor gate.
 

@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- The CI gate that makes the E2E jobs run on every code change is now pinned by a test (issue #365, audit finding CI-08). `tests/Unit/Ci/CiWorkflowGateTest.php` fails when the workflow gains a `paths`/`paths-ignore` trigger filter, when a heavy job (`lint`, the unit matrix, `grpc-unit-tests`, `integration-tests`, `e2e-tests`, `e2e-tests-apiv2`) is gated on a narrower `changes` output instead of `code`, when `ci-ok` stops requiring one of them, or when the `docs-regex` classifies `tests/Unit/**`, `src/**` or `tests/E2E/**` as documentation-only. A pull request that touches only unit tests therefore keeps getting E2E signal, and a reintroduced filter fails the build instead of silently skipping the only cluster-backed suites. No production or CI behaviour changes: the guard protects what #617 established.
+
 ## [v0.12.0] - 2026-11-07
 
 ### Added
