@@ -45,6 +45,7 @@ use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\RawKv\CasResult;
 use CrazyGoat\TiKV\Client\RawKv\ChecksumResult;
+use CrazyGoat\TiKV\Client\RawKv\KeyTtl;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\RawKv\ScanIterator;
@@ -424,6 +425,7 @@ class RawKvClientTest extends TestCase
         yield 'deleteRange' => ['deleteRange', ['start', 'end']];
         yield 'deletePrefix' => ['deletePrefix', ['prefix']];
         yield 'getKeyTTL' => ['getKeyTTL', ['key']];
+        yield 'getKeyTTLResult' => ['getKeyTTLResult', ['key']];
         yield 'compareAndSwap' => ['compareAndSwap', ['key', 'old', 'new']];
         yield 'putIfAbsent' => ['putIfAbsent', ['key', 'value']];
         yield 'checksum' => ['checksum', ['start', 'end']];
@@ -2959,11 +2961,65 @@ class RawKvClientTest extends TestCase
         $this->assertNull($this->client->getKeyTTL('no-ttl'));
     }
 
+    public function testGetKeyTTLResultDistinguishesMissingFromNoTtl(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $missing = new RawGetKeyTTLResponse();
+        $missing->setNotFound(true);
+
+        $noTtl = new RawGetKeyTTLResponse();
+        $noTtl->setNotFound(false);
+        $noTtl->setTtl(0);
+
+        $this->grpc->method('call')->willReturnOnConsecutiveCalls($missing, $noTtl);
+
+        $missingResult = $this->client->getKeyTTLResult('missing');
+        $noTtlResult = $this->client->getKeyTTLResult('no-ttl');
+
+        $this->assertInstanceOf(KeyTtl::class, $missingResult);
+        $this->assertFalse($missingResult->exists);
+        $this->assertNull($missingResult->ttlSeconds);
+
+        $this->assertInstanceOf(KeyTtl::class, $noTtlResult);
+        $this->assertTrue($noTtlResult->exists);
+        $this->assertNull($noTtlResult->ttlSeconds);
+    }
+
+    public function testGetKeyTTLResultReturnsTtl(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new RawGetKeyTTLResponse();
+        $response->setTtl(42);
+        $response->setNotFound(false);
+
+        $this->grpc->method('call')->willReturn($response);
+
+        $result = $this->client->getKeyTTLResult('key');
+
+        $this->assertTrue($result->exists);
+        $this->assertSame(42, $result->ttlSeconds);
+    }
+
     public function testGetKeyTTLThrowsOnEmptyKey(): void
     {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('Key must not be empty');
         $this->client->getKeyTTL('');
+    }
+
+    public function testGetKeyTTLResultThrowsOnEmptyKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Key must not be empty');
+        $this->client->getKeyTTLResult('');
     }
 
     public function testGetKeyTTLThrowsOnOversizedKey(): void

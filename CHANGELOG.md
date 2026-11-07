@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Added
+
+- `RawKvClient::getKeyTTLResult()` (issue #199, RAW-14) returns a `KeyTtl` with `exists: bool` and `ttlSeconds: ?int`, so a missing key (`exists: false`) is distinguishable from a key that exists without an expiry (`exists: true, ttlSeconds: null`) and from one with a remaining TTL (`exists: true, ttlSeconds: > 0`). `getKeyTTL()` keeps its `?int` signature and now delegates to the new method; its docblock and `docs/operations.md` state that its `null` means either "key missing" or "key has no TTL". Documented in `docs/error-handling.md` too.
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added

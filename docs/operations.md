@@ -735,31 +735,49 @@ $client->put('ratelimit:ip:192.168.1.1', '100', ttl: 60);
 
 ### Get Key TTL
 
-Check remaining time-to-live:
+Check remaining time-to-live. The lookup has three possible outcomes, and
+`getKeyTTLResult()` reports all of them separately:
 
 ```php
-$ttl = $client->getKeyTTL('session:123');
-// Returns: int (seconds remaining) or null (not found/no TTL)
+$result = $client->getKeyTTLResult('session:123');
+
+$result->exists;      // bool: whether the key exists
+$result->ttlSeconds;  // ?int: seconds remaining, or null when it has no expiry
 ```
+
+| Key state | `exists` | `ttlSeconds` |
+|---|---|---|
+| Missing (never written, deleted or expired) | `false` | `null` |
+| Present, no expiry | `true` | `null` |
+| Present, expires | `true` | `int > 0` |
+
+The convenience method `getKeyTTL()` returns only `ttlSeconds`, so its
+`null` means either "key missing" or "key present without an expiry". Use
+`getKeyTTLResult()` whenever the two states lead to different actions, such
+as an expiry monitor that must not report a deleted key as permanent.
 
 **Parameters:**
 - `key` (string): Key to check
 
-**Returns:** `?int` - Seconds remaining, or null if key not found or has no TTL
+**Returns:** `getKeyTTLResult()` returns a `KeyTtl` with `exists: bool` and
+`ttlSeconds: ?int`; `getKeyTTL()` returns `?int` and collapses both `null`
+cases.
 
 **Example:**
 
 ```php
-$ttl = $client->getKeyTTL('session:abc123');
+$result = $client->getKeyTTLResult('session:abc123');
 
-if ($ttl === null) {
+if (!$result->exists) {
     echo "Session not found or expired\n";
-} elseif ($ttl < 300) {
-    echo "Session expires soon ($ttl seconds left)\n";
+} elseif ($result->ttlSeconds === null) {
+    echo "Session has no expiry\n";
+} elseif ($result->ttlSeconds < 300) {
+    echo "Session expires soon ({$result->ttlSeconds} seconds left)\n";
     // Refresh session
     $client->put('session:abc123', $data, ttl: 7200);
 } else {
-    echo "Session valid for $ttl seconds\n";
+    echo "Session valid for {$result->ttlSeconds} seconds\n";
 }
 ```
 
