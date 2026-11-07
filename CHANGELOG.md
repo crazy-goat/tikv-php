@@ -23,6 +23,8 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+## [v0.13.0] - 2026-11-07
+
 ### Changed
 
 - `StoreCache` eviction is now O(1) instead of a linear scan over the store map (issue #255, REG-24). Its LRU index is a recency-ordered hash — `touch()` removes the key before appending it, the pattern `RegionCache` has used since #289 — so the least recently used store is the index's first key and `array_key_first()` replaces the `foreach`. `RegionCache::put()` already met the issue's target (its LRU maintenance and eviction have been constant-time since #289), so this change finishes the same pattern in the last cache that still scanned it. No behaviour change: strict LRU is preserved, so the hit rate is identical. `benchmarks/RegionCacheBenchmark.php` now also prints the cost of a `put()` that evicts, swept over capacities 1 000 / 10 000 / 50 000, which must stay logarithmic rather than grow with the number of cached entries.
@@ -59,6 +61,7 @@ policy now classifies as internal.
 
 - `RawKvScanner::batchScan()` / `RawKvClient::batchScan()` now document what the method actually does (issue #442, DIV-06): it is a **client-side loop of per-range `RawScan` requests, not the `RawBatchScan` RPC**. The docblock, `docs/operations.md` and the README Scanning example state the cost model — the RPC count is linear in the number of ranges and the regions they cover, because every range independently resolves its own regions, so fifty ranges cost roughly fifty scans — while noting that the per-range sends are fanned out concurrently (bounded by `options['maxConcurrency']`) and share one batch deadline, which overlaps wall-clock latency but does not change the total work. They also pin the result shape (one inner list per range — input order for a list, non-sequential keys re-indexed in ascending key order — at most `eachLimit` ascending rows, `null` values under `keyOnly`) and that `eachLimit` is required and must be greater than zero, so `batchScan()` cannot omit the per-range cap or request an unbounded result set the way `scan(..., limit: 0)` can; empty bounds remain valid, so `batchScan([['', '']], eachLimit: 100)` scans the whole keyspace and returns at most 100 rows. No behaviour changes. (#442)
 - `docs/helpers/faq.md` records issue #259 (audit REG-28) as a premise-expiry duplicate: the duplicated `@return Store[]` docblock above `PdClient::getAllStores()` was removed by PR #612 (issue #234, `6c7cbf2`) while it rewrote the PD `ResponseHeader.error` handling, so the audit import needed no source or test change. (#259)
+- The README now points at the `docs/` tree from the top of the page (issue #412, DOC-46). A **Documentation** section immediately after **Installation** links the [documentation index](docs/README.md) and the getting-started, configuration, operations, advanced, architecture, error-handling and troubleshooting guides, so the detailed documentation is reachable from the GitHub and Packagist landing page instead of only by browsing the file tree. The duplicate section near the bottom of the README is removed, and its TxnKV note moves up with it. The audit's premise that the README never mentions `docs/` was already stale — it links the guides throughout — but nothing linked the index itself. (#412)
 
 ### Performance
 

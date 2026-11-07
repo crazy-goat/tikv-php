@@ -22,6 +22,8 @@ Contributing to the project or need deep technical details?
 - **[Development Guide](development.md)** - Technical implementation details, adding features, testing strategies
 - **[Architecture](architecture.md)** - System architecture, design decisions, component details
 - **[Workflow](workflow.md)** - Full issue→branch→implementation→review→PR→CI→merge workflow
+- **[Release Workflow](release-workflow.md)** - Release checklist, changelog finalization and tagging
+- **[Knowledge Base](helpers/README.md)** - FAQ and recorded decisions for contributors
 
 ### Reference
 
