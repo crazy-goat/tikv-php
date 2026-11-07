@@ -362,57 +362,116 @@ class RawKvClientTest extends TestCase
         // A second close() must not close the gRPC transport or PD client
         // again: closing a gRPC channel twice is undefined behaviour in the C
         // extension (issue #344).
-        $this->grpc->expects($this->once())->method('close');
-        $this->pdClient->expects($this->once())->method('close');
+        $grpcCloses = 0;
+        $this->grpc->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+            });
+        $pdCloses = 0;
+        $this->pdClient->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+            });
 
         $this->client->close();
         $this->client->close();
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses, 'the gRPC transport must be closed exactly once');
+        $this->assertSame(1, $pdCloses, 'the PD client must be closed exactly once');
     }
 
     public function testCloseContinuesWhenGrpcCloseThrows(): void
     {
+        $grpcCloses = 0;
         $this->grpc->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('grpc boom'));
-        $this->pdClient->expects($this->once())->method('close');
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+                throw new \RuntimeException('grpc boom');
+            });
+        $pdCloses = 0;
+        $this->pdClient->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+            });
 
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses);
+        $this->assertSame(1, $pdCloses, 'a throwing gRPC close must not skip the PD close');
     }
 
     public function testCloseContinuesWhenPdCloseThrows(): void
     {
-        $this->grpc->expects($this->once())->method('close');
+        $grpcCloses = 0;
+        $this->grpc->expects($this->once())
+            ->method('close')
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+            });
+        $pdCloses = 0;
         $this->pdClient->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('pd boom'));
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+                throw new \RuntimeException('pd boom');
+            });
 
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses, 'a throwing PD close must not undo the gRPC close');
+        $this->assertSame(1, $pdCloses);
     }
 
     public function testCloseSwallowsBothSubCloseExceptions(): void
     {
+        $grpcCloses = 0;
         $this->grpc->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('grpc boom'));
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+                throw new \RuntimeException('grpc boom');
+            });
+        $pdCloses = 0;
         $this->pdClient->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('pd boom'));
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+                throw new \RuntimeException('pd boom');
+            });
 
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses);
+        $this->assertSame(1, $pdCloses);
     }
 
     public function testCloseIsIdempotentAfterSubCloseThrows(): void
     {
+        $grpcCloses = 0;
         $this->grpc->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('grpc boom'));
+            ->willReturnCallback(static function () use (&$grpcCloses): void {
+                ++$grpcCloses;
+                throw new \RuntimeException('grpc boom');
+            });
+        $pdCloses = 0;
         $this->pdClient->expects($this->once())
             ->method('close')
-            ->willThrowException(new \RuntimeException('pd boom'));
+            ->willReturnCallback(static function () use (&$pdCloses): void {
+                ++$pdCloses;
+                throw new \RuntimeException('pd boom');
+            });
 
         $this->client->close();
         $this->client->close();
+
+        $this->assertSame(1, $grpcCloses, 'a failed first close must still mark the client closed');
+        $this->assertSame(1, $pdCloses, 'a failed first close must still mark the client closed');
     }
 
     // ========================================================================

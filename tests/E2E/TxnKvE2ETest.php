@@ -406,6 +406,54 @@ class TxnKvE2ETest extends TestCase
         $readTxn->rollback();
     }
 
+    public function testGetForUpdateReturnsTheValueAndLockOnlyCommitReleasesTheLock(): void
+    {
+        $key = $this->uniqueKey('txn-get-for-update');
+        $this->keysToCleanup[] = $key;
+
+        $setup = $this->testClient->begin(['pessimistic' => false]);
+        $setup->set($key, 'initial');
+        $setup->commit();
+
+        $locker = $this->testClient->begin(['pessimistic' => true]);
+        $this->assertSame('initial', $locker->getForUpdate($key));
+        $locker->commit();
+        $this->assertSame(TransactionStatus::Committed, $locker->getStatus());
+
+        // The lock-only commit must release the lock: the next writer takes it
+        // immediately instead of waiting for the pessimistic TTL.
+        $writer = $this->testClient->begin(['pessimistic' => true]);
+        $writer->set($key, 'written-after-lock');
+        $writer->commit();
+
+        $verify = $this->testClient->begin(['pessimistic' => false]);
+        $this->assertSame('written-after-lock', $verify->get($key));
+        $verify->rollback();
+    }
+
+    public function testLockKeysWithAPartialWriteCommitsTheLockOnlyKey(): void
+    {
+        $lockedKey = $this->uniqueKey('txn-lock-only');
+        $writtenKey = $this->uniqueKey('txn-lock-partial-write');
+        $this->keysToCleanup[] = $lockedKey;
+        $this->keysToCleanup[] = $writtenKey;
+
+        $setup = $this->testClient->begin(['pessimistic' => false]);
+        $setup->set($lockedKey, 'locked-value');
+        $setup->commit();
+
+        $txn = $this->testClient->begin(['pessimistic' => true]);
+        $txn->lockKeys($lockedKey);
+        $txn->set($writtenKey, 'written-value');
+        $txn->commit();
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+
+        $verify = $this->testClient->begin(['pessimistic' => false]);
+        $this->assertSame('locked-value', $verify->get($lockedKey));
+        $this->assertSame('written-value', $verify->get($writtenKey));
+        $verify->rollback();
+    }
+
     public function testPessimisticReadModifyWriteDetectsInterveningCommit(): void
     {
         $key = $this->uniqueKey('txn-pess-rmw-conflict');

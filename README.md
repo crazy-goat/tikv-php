@@ -255,7 +255,13 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // to a key to make the upper bound inclusive of that key.
 $results = $client->reverseScan('log;', 'log:', limit: 100);
 
-// Scan multiple non-contiguous ranges
+// Scan multiple non-contiguous ranges. This is a client-side loop of
+// per-range RawScan requests, not the RawBatchScan RPC: the RPC count is
+// linear in the number of ranges and the regions they cover (each range
+// resolves its own regions), although the per-range sends are fanned out
+// concurrently up to options['maxConcurrency']. eachLimit is required and
+// must be > 0. Returns one list per range: a list input keeps its order,
+// while non-sequential keys are re-indexed in ascending key order.
 $results = $client->batchScan([['a:', 'a;'], ['b:', 'b;']], eachLimit: 50);
 ```
 
@@ -292,8 +298,15 @@ Requires `enable-ttl=true` in tikv.toml configuration.
 // Store with expiration (TTL in seconds)
 $client->put('session', 'data', ttl: 3600);        // expires in 1 hour
 
-// Get remaining TTL
-$remaining = $client->getKeyTTL('session');          // seconds remaining, or null if not found/no TTL
+// getKeyTTL() returns ?int and collapses two cases: null means either that
+// the key does not exist or that it exists without an expiry.
+$remaining = $client->getKeyTTL('session');
+
+// getKeyTTLResult() keeps the cases apart:
+//   missing key       -> exists: false, ttlSeconds: null
+//   present, no TTL   -> exists: true,  ttlSeconds: null
+//   present, with TTL -> exists: true,  ttlSeconds: int > 0
+$result = $client->getKeyTTLResult('session');
 ```
 
 ### Atomic Operations
@@ -497,6 +510,27 @@ TiKV applies by default). The value sent to TiKV is
 and shrinks as the budget is consumed. When the budget runs out the
 transaction fails with `LockWaitTimeoutException` instead of committing
 without the lock. See [Configuration](docs/configuration.md#pessimistic-lock-wait-timeout-txnkv).
+
+A pessimistic transaction can also take a lock explicitly, without writing a
+value:
+
+```php
+$txn->lockKeys('account:1', 'account:2');   // lock now, no value written
+$current = $txn->getForUpdate('account:1'); // lock + read in one round trip
+```
+
+`getForUpdate()` is the `SELECT ... FOR UPDATE` primitive: it returns the
+latest committed value at the lock's `for_update_ts` (not the snapshot value),
+and a missing key returns `null`. Both methods are pessimistic-only; an
+optimistic transaction throws `InvalidStateException`. The locks are released
+by `commit()` or `rollback()`: a key that was locked but never written is
+committed as an `Op::Lock` mutation, so a lock-only transaction commits
+normally instead of being rolled back.
+
+The value is read from the legacy `values` / `not_founds` response fields or,
+on servers that use the newer wake-up mode, from the per-key `results` field.
+If a server populates neither, `getForUpdate()` falls back to a snapshot
+`get()`, which costs a second round trip and returns the `startTs` value.
 
 #### Isolation, timestamps and status
 
@@ -869,9 +903,16 @@ try {
     }
     echo "Total users: $userCount\n";
     
-    // Check TTL
-    $ttl = $client->getKeyTTL('user:123');
-    echo "TTL remaining: $ttl seconds\n";
+    // Check TTL. getKeyTTLResult() tells a missing key apart from a key
+    // without an expiry; getKeyTTL() returns null for both.
+    $ttl = $client->getKeyTTLResult('user:123');
+    if (!$ttl->exists) {
+        echo "TTL: key not found\n";
+    } elseif ($ttl->ttlSeconds === null) {
+        echo "TTL: no expiry\n";
+    } else {
+        echo "TTL remaining: {$ttl->ttlSeconds} seconds\n";
+    }
     
     // Enable atomic mode for CAS operations
     $client->setAtomicForCAS(true);
@@ -1161,7 +1202,7 @@ $options = [
     // disables that one operation type.
     // See docs/configuration.md#slow-operation-logging.
     'slowLog' => [
-        'readThresholdMs'        => 100,  // default 100  (get, getKeyTTL)
+        'readThresholdMs'        => 100,  // default 100  (get, getKeyTTL, getKeyTTLResult)
         'writeThresholdMs'       => 200,  // default 200  (put, delete, CAS)
         'batchReadThresholdMs'   => 500,  // default 500  (batchGet)
         'batchWriteThresholdMs'  => 500,  // default 500  (batchPut, batchDelete)
