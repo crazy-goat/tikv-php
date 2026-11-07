@@ -366,7 +366,10 @@ $client->ingest(['k1' => 'v1', 'k2' => 'v2'], ttl: 3600);
 > switched into import mode and switched back on completion. The switch-back
 > runs in a `finally` block, so exceptions are safe — but a killed process
 > (OOM killer, deploy restart, `max_execution_time`) leaves the cluster in
-> import mode, degrading it for all clients. Run `ingest()` only from a
+> import mode, degrading it for all clients. Retryable region errors are
+> retried per region, but the import is not atomic across regions: a permanent
+> failure throws `IngestPartialFailureException` with the applied region IDs,
+> and re-running the whole call is the recovery. Run `ingest()` only from a
 > dedicated, supervised CLI process, and see
 > [Bulk Import (SST Ingest)](docs/operations.md#bulk-import-sst-ingest) in the
 > operations guide for the full semantics, the configurable ingest deadline
@@ -901,7 +904,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 - ✅ **Checksum** — CRC64-XOR checksum over key range with `ChecksumResult`
 
 ### Bulk Import
-- ✅ **Ingest** — SST bulk import: the key/value pairs are sorted and written straight into the regions, bypassing the Raft write path (optional TTL); the payload is streamed in chunks, and `options['maxIngestSize']` optionally bounds it before any RPC
+- ✅ **Ingest** — SST bulk import: the key/value pairs are sorted and written straight into the regions, bypassing the Raft write path (optional TTL); the payload is streamed in chunks, retryable region errors are retried per region, `IngestPartialFailureException` reports a partial import, and `options['maxIngestSize']` optionally bounds the payload before any RPC
 
 ### Transaction Capabilities
 - ✅ **TxnKvClient / Transaction** — ACID transactions with snapshot reads and two-phase commit
