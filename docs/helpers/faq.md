@@ -155,8 +155,31 @@ from `HOST_UID`/`HOST_GID`; the `Makefile` and the E2E runner scripts fill both
 from `id -u` / `id -g`. A direct `docker compose build`/`run` on a host whose
 owner is not `1000` needs them in the environment, and changing them requires a
 rebuild because they are build args. The symptom of a mismatch is
-`Permission denied` under `/app` during `composer install` or a test run. The
-base image digest is pinned in `Dockerfile`; bump it together with the
+`Permission denied` under `/app` during `composer install` or a test run.
+
+A host GID that already exists in Alpine does not fail the build. macOS
+`staff` is GID 20 and Alpine owns several low GIDs, so the `app` group falls
+back to a free GID and the build prints a warning; the bind mount is governed
+by the owner UID, so writes still work. A host UID that already exists (for
+example `ntp` or `guest`) is reused numerically, and `USER` is numeric so no
+passwd entry is required. `APP_UID=0` is refused with an explicit error
+instead of silently building a root-running image.
+
+If you used the previous root-running image, `vendor/` and `.phpunit.cache/`
+in an existing checkout are root-owned and the first run as `app` fails with
+`Permission denied`. Fix it once:
+
+```bash
+sudo chown -R "$(id -u):$(id -g)" vendor .phpunit.cache
+```
+
+or remove both and let Composer and PHPUnit recreate them:
+
+```bash
+rm -rf vendor .phpunit.cache && composer install
+```
+
+The base image digest is pinned in `Dockerfile`; bump it together with the
 `alpine:3.21` tag.
 
 ## Protobuf `RepeatedField` is not a PHP array — `iterator_to_array()` before `array_map()`

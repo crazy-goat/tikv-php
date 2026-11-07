@@ -7,19 +7,22 @@ proto/kvproto/.git/
 
 # Never bake local credentials, local environment files or test artifacts into
 # an image layer: `COPY . .` would otherwise include them, and a later layer
-# that deletes them would not remove them from the image.
-.env*
-*.pem
-*.crt
-*.key
-*.p12
-*.pfx
-*.jks
-*.keystore
-*.log
-coverage.xml
-coverage-clover.xml
-coverage-html/
+# that deletes them would not remove them from the image. Docker matches
+# patterns against the full relative path and `*` does not cross `/`, so the
+# credential patterns need `**/` to cover nested files (`**` matches zero or
+# more directories, which also covers the repository root).
+**/.env*
+**/*.pem
+**/*.crt
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/*.log
+**/coverage.xml
+**/coverage-clover.xml
+**/coverage-html/
 
 # Local tooling and scratch files that are not part of the build.
 .worktrees/

@@ -811,8 +811,15 @@ pass the same IDs and rebuild after changing them:
 ```bash
 export HOST_UID=$(id -u) HOST_GID=$(id -g)
 docker compose build
-docker compose run --rm php-client vendor/bin/phpunit --testsuite Unit
+docker compose run --rm --no-deps php-client vendor/bin/phpunit --testsuite Unit
 ```
+
+If you built the image before the non-root change, `vendor/` and
+`.phpunit.cache/` may still be owned by root; the first run as `app` then fails
+with `Permission denied`. Fix it once with
+`sudo chown -R "$(id -u):$(id -g)" vendor .phpunit.cache`, or remove both and
+let Composer and PHPUnit recreate them. `docs/helpers/faq.md` also covers the
+build-time GID/UID collision fallbacks.
 
 ## Recognition
 

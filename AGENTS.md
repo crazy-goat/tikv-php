@@ -115,8 +115,13 @@ is a bind mount: Composer and PHPUnit must be able to write `vendor/` and `.phpu
 checkout. The `Makefile` and the E2E runner scripts export both from `id -u`/`id -g`, so `make` and
 `composer test:e2e` need no setup; a direct `docker compose` call needs them in the environment
 (`HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ...`), and changing them needs `make build`
-because they are build args. The base image is pinned by digest, and `.dockerignore` keeps local
-credentials (`*.pem`, `*.crt`, `*.key`, `*.p12`, …) and `.env*` files out of every layer.
+because they are build args. A host GID that collides with an Alpine system group falls back to a
+free GID for `app` (the bind mount is governed by the owner UID), a host UID that already exists is
+reused numerically, and `APP_UID=0` is refused. The base image is pinned by digest, and
+`.dockerignore` keeps local credentials (`**/*.pem`, `**/*.crt`, `**/*.key`, `**/*.p12`, …) and
+`**/.env*` files out of every layer. Existing checkouts whose `vendor/` and `.phpunit.cache/` were
+created by the old root container need a one-time `sudo chown -R "$(id -u):$(id -g)" vendor
+.phpunit.cache` (see `docs/helpers/faq.md`).
 
 ## CI
 
