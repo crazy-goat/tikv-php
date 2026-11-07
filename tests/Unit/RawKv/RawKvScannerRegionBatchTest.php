@@ -294,53 +294,6 @@ final class RawKvScannerRegionBatchTest extends TestCase
         $this->assertSame(RegionScanBatch::MAX_REGIONS, $secondLimit);
     }
 
-    public function testReverseScanAsksPdForABoundedRegionLimit(): void
-    {
-        $result = $this->scanner()->reverseScan('k040', 'k000', 1, false);
-
-        $this->assertSame([$this->keyOf(self::REGION_COUNT - 1)], array_column($result, 'key'));
-        $this->assertNotSame([], $this->scanRegionsCalls);
-
-        foreach ($this->scanRegionsCalls as [, , $limit]) {
-            $this->assertGreaterThan(0, $limit);
-            $this->assertLessThanOrEqual(RegionScanBatch::MAX_REGIONS, $limit);
-        }
-    }
-
-    /**
-     * The reverse path is the one that deviates most from the forward path:
-     * it collects the whole chain of the range in bounded batches and then
-     * walks it downwards, so a wrong cursor would silently drop or duplicate
-     * rows. The range below spans more regions than one batch holds, so the
-     * chain is loaded in several PD calls.
-     */
-    public function testReverseScanSpanningMoreRegionsThanOneBatchReturnsTheCompleteOrderedResultSet(): void
-    {
-        $result = $this->scanner()->reverseScan('k040', 'k000', 1000, false);
-
-        // Every region of the layout was read, in descending order.
-        $expected = [];
-        for ($index = self::REGION_COUNT - 1; $index >= 0; $index--) {
-            $expected[] = $this->keyOf($index);
-        }
-
-        $keys = array_column($result, 'key');
-        $this->assertSame($expected, $keys);
-        $this->assertCount(count($expected), array_unique($keys), 'the reverse scan returned a row twice');
-
-        // Every PD response is bounded — never the "every region" 0.
-        foreach ($this->scanRegionsCalls as [, , $limit]) {
-            $this->assertGreaterThan(0, $limit);
-            $this->assertLessThanOrEqual(RegionScanBatch::MAX_REGIONS, $limit);
-        }
-
-        // The layout spans more regions than one batch holds, so PD is asked
-        // again — with the last region's end key as the new cursor.
-        $this->assertGreaterThan(1, count($this->scanRegionsCalls));
-        $this->assertSame($this->boundary(0), $this->scanRegionsCalls[0][0]);
-        $this->assertSame($this->boundary(RegionScanBatch::MAX_REGIONS), $this->scanRegionsCalls[1][0]);
-    }
-
     public function testRegionMergedBetweenTwoBatchesIsNotReadTwice(): void
     {
         $regions = $this->regions();

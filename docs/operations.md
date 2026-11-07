@@ -553,6 +553,11 @@ region or transport error, or a region that split after enumeration, falls
 back to the sequential retrying path. A bounded reverse scan
 (`limit > 0`) stays sequential.
 
+Regions are resolved from the upper bound downwards in bounded batches
+(issue #198): the region cache answers the common case and a miss asks PD for
+the region containing the cursor or the adjacent region below it, so a narrow
+reverse scan does not enumerate the rest of the range.
+
 **Example:**
 
 ```php
