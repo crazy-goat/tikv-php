@@ -77,6 +77,70 @@ class PdClientTest extends TestCase
         $this->assertSame(10, $result->epochVersion);
     }
 
+    public function testGetPrevRegionReturnsRegionInfo(): void
+    {
+        $response = $this->makeGetRegionResponse();
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                'GetPrevRegion',
+                $this->callback(function (GetRegionRequest $req): bool {
+                    $this->assertSame('my-key', $req->getRegionKey());
+                    return true;
+                }),
+                $this->anything(),
+            )
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $result = $client->getPrevRegion('my-key');
+
+        $this->assertInstanceOf(RegionInfo::class, $result);
+        $this->assertSame(1, $result->regionId);
+    }
+
+    public function testGetPrevRegionReturnsNullWhenPdHasNoPreviousRegion(): void
+    {
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+
+        $response = new GetRegionResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+
+        $this->assertNull($client->getPrevRegion('my-key'));
+    }
+
+    public function testGetPrevRegionSendsMceEncodedKeyInTxnMode(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                'GetPrevRegion',
+                $this->callback(function (GetRegionRequest $req): bool {
+                    // EncodeBytes("my-key") = 6d 79 2d 6b 65 79 00 00 fd.
+                    $this->assertSame('6d792d6b65790000fd', bin2hex($req->getRegionKey()));
+                    return true;
+                }),
+                $this->anything(),
+            )
+            ->willReturn($this->makeGetRegionResponse());
+
+        $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
+        $client->getPrevRegion('my-key');
+    }
+
     public function testClusterIdMismatchRetries(): void
     {
         $header = new ResponseHeader();

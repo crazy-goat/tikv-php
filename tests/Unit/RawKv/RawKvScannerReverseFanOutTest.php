@@ -91,9 +91,43 @@ final class RawKvScannerReverseFanOutTest extends TestCase
                 return null;
             },
         );
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static fn(string $key): ?RegionInfo => self::regionBelow($regions, $key),
+        );
         $this->regionCache->method('put');
         $this->pdClient->expects($this->never())->method('scanRegions');
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+    }
+
+    /**
+     * The region holding the greatest key strictly less than $key, mirroring
+     * RegionCache::getRegionBelow() including its gap guard (issue #198).
+     *
+     * @param list<RegionInfo> $regions
+     */
+    private static function regionBelow(array $regions, string $key): ?RegionInfo
+    {
+        $best = null;
+        foreach ($regions as $region) {
+            if (KeyOrder::gte($region->startKey, $key)) {
+                continue;
+            }
+            if ($region->endKey !== '' && KeyOrder::lte($region->endKey, $region->startKey)) {
+                continue;
+            }
+            if ($best === null || KeyOrder::gte($region->startKey, $best->startKey)) {
+                $best = $region;
+            }
+        }
+
+        if ($best === null) {
+            return null;
+        }
+        if ($best->endKey !== '' && KeyOrder::lt($best->endKey, $key)) {
+            return null;
+        }
+
+        return $best;
     }
 
     /**
@@ -269,8 +303,10 @@ final class RawKvScannerReverseFanOutTest extends TestCase
         $result = $this->scanner(scanPageSize: 2)->reverseScan('z', 'a', 0, false);
 
         $this->assertSame(['y', 'x', 's', 'p', 'k', 'b'], array_column($result, 'key'));
-        // Page 1 dispatched [z, t), [t, m) and [m, a) together.
-        $this->assertSame(['z', 't', 'm'], array_slice($dispatchedStarts, 0, 3));
+        // Each page loads at most its row budget in regions, so page 1
+        // dispatched [z, t) and [t, m) together; page 2 then resumed from
+        // the page's last key ('x') with the next two regions.
+        $this->assertSame(['z', 't', 'x'], array_slice($dispatchedStarts, 0, 3));
     }
 
     public function testBoundedReverseScanStaysSequential(): void
@@ -364,6 +400,9 @@ final class RawKvScannerReverseFanOutTest extends TestCase
         ];
 
         $this->regionCache->method('getRegionsInRange')->willReturn($stale);
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static fn(string $key): ?RegionInfo => self::regionBelow($stale, $key),
+        );
         $this->regionCache->method('getByKey')->willReturnCallback(
             static function (string $key) use ($fresh): ?RegionInfo {
                 foreach ($fresh as $region) {
