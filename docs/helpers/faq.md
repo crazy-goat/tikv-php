@@ -1537,6 +1537,18 @@ still passes the identity assertions while every counter goes nowhere.
 `rpcStarted()`, and asserts the transport's `rpcStarted()` / `rpcCompleted()`
 for both factories plus the client-side `regionCacheMiss` on the RawKV path.
 
+The same premise expiry closed issue #259 (audit REG-28, "duplicated
+`getAllStores()` docblock"): 0c50f7e added two identical
+`/** @return Store[] */` blocks above `PdClient::getAllStores()`, and 6c7cbf2
+(PR #612, issue #234, the PD `ResponseHeader.error` rewrite) deleted the first
+block while it was already editing that docblock. Current `master` therefore has one block
+and `phpcs` reports nothing, so no source or test change is needed;
+`git log -S '@return Store[]' -- src/Client/Connection/PdClient.php` shows both
+the introduction and the removal. A duplicate docblock of the same shape still
+sits above `ApiV2GrpcClient::call()`
+(`src/Client/Grpc/ApiV2GrpcClient.php:57-66`, added by a1415aa0) — a separate
+finding, not part of this issue.
+
 ## A stray Markdown fence can become a legitimate closer — render the file before deleting it
 
 Issue #381 (DOC-15) reported an orphan closing fence after the TLS "manual
