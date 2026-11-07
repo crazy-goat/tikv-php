@@ -373,11 +373,12 @@ it builds the `RegionException` first and gates its own drop on
 `invalidatesRoutingKind()`, keeping the handler-specific `region_error:<kind>`
 reason because it is a separate drop path, not the pre-retry executor path.
 
-`RetryBudgetExhaustedException` is fatal before the message fallback, even
-though its ServerBusy-budget message contains `ServerIsBusy` and would
-otherwise classify as retryable. An outer executor must never retry an inner
-executor's give-up; the typed fatal arm is what makes that true if nested
-execution ever becomes real (issue #256).
+`RetryBudgetExhaustedException` is fatal before the message fallback. The
+library's `ServerBusy budget (…)` message contains `ServerBusy`, not the
+classifier's `ServerIsBusy` keyword, so today it falls through to the fatal
+default; the typed arm keeps the verdict fatal if the message ever names
+`ServerIsBusy` (or a caller constructs one), because an outer executor must
+never retry an inner executor's give-up (issue #256).
 
 The kind-level predicate is a compatibility commitment, not a convenience:
 `RetryExecutor` is a documented user-constructible collaborator

@@ -255,16 +255,16 @@ class ErrorClassifierTest extends TestCase
     }
 
     /**
-     * The ServerBusy-budget message contains "ServerIsBusy", which the
-     * message fallback would map back to a retryable backoff. The typed
-     * exception must win: an outer executor must never retry a give-up
-     * (issue #256).
+     * The library's ServerBusy-budget message says "ServerBusy", but a
+     * give-up message that names the underlying "ServerIsBusy" error would
+     * match the fallback and classify as retryable. The typed exception must
+     * win: an outer executor must never retry a give-up (issue #256).
      */
     public function testRetryBudgetExhaustedIsFatalDespiteServerBusyMessage(): void
     {
         $this->assertVerdict(null, ErrorClassifier::classify(
             new RetryBudgetExhaustedException(
-                'ServerBusy budget (60000 ms) exhausted for key #abc123 (3 bytes)',
+                'ServerIsBusy budget (60000 ms) exhausted for key #abc123 (3 bytes)',
                 0,
                 60000,
             ),
