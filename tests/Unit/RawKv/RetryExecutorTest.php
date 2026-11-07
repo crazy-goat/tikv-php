@@ -319,7 +319,7 @@ class RetryExecutorTest extends TestCase
                     $callCount++;
                     throw new TiKvException('EpochNotMatch');
                 },
-                static fn(TiKvException $e): BackoffType => BackoffType::None,
+                static fn(TiKvException $e): RetryVerdict => RetryVerdict::retry(BackoffType::None),
             );
         } finally {
             // The first attempt must run, and the deadline must terminate the

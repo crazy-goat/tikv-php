@@ -10,6 +10,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStoreAddressException;
 use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\StoreUnavailableException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
@@ -362,6 +363,14 @@ class ErrorClassifierTest extends TestCase
         $this->assertVerdict(null, ErrorClassifier::classify(
             new InvalidStoreAddressException('PD returned store address "127.0.0.1:20160" outside the allowed set'),
         ));
+    }
+
+    public function testStoreUnavailableExceptionIsRetriedAsTransportError(): void
+    {
+        $this->assertVerdict(
+            BackoffType::TiKvRpc,
+            ErrorClassifier::classify(new StoreUnavailableException(7)),
+        );
     }
 
     /**

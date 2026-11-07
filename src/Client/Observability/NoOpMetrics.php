@@ -38,4 +38,8 @@ final class NoOpMetrics implements MetricsInterface
     public function regionInvalidated(string $reason): void
     {
     }
+
+    public function storeHealthChanged(int $storeId, bool $healthy): void
+    {
+    }
 }

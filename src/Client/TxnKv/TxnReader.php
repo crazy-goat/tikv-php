@@ -138,6 +138,7 @@ final readonly class TxnReader
                     priority: $this->priority,
                     requestContext: $this->requestContext,
                     resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -558,6 +559,7 @@ final readonly class TxnReader
             priority: $this->priority,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            storeAvailable: $this->regionResolver->isStoreAvailable(...),
         );
         $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
@@ -745,6 +747,7 @@ final readonly class TxnReader
                     priority: $this->priority,
                     requestContext: $this->requestContext,
                     resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
