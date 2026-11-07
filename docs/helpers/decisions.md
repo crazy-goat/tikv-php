@@ -1534,6 +1534,24 @@ key is the +infinity sentinel for forward operations (`scan('', '')` covers the 
 and the keyspace start for `reverseScan()`, so `reverseScan('', '')` is empty.
 `deleteRange('', '')` keeps its explicit no-op guard rather than deleting the whole keyspace.
 
+## Reverse scan has no +infinity upper-bound sentinel (RAW-09, #194)
+
+A forward range treats an empty end key as +infinity. Reverse scan has no
+equivalent: TiKV's `RawScan` carries `start_key` as required bytes, and its
+reverse path calls `reverse_seek(start_key)`. An empty `start_key` seeks for
+the largest key not greater than the empty key and finds nothing, so the RPC
+returns zero rows rather than scanning from the top. The TiKV Go client
+documents the same restriction ("doesn't support scanning from \"\"") because
+there is no finite byte string greater than every key.
+
+The client therefore rejects `reverseScan('', $lower)` with a non-empty lower
+bound with `InvalidArgumentException` before any RPC; the error names the
+empty upper bound instead of the generic reversed-range message. It does not
+try to translate `''` into a region bound: the last region's end key is empty
+too, and sending no `start_key` reproduces the same empty seek. Pass an
+explicit upper bound, usually the prefix end key (`log;` for `log:`).
+`reverseScan('', '')` stays the documented empty range from #343.
+
 ## Rollback KeyErrors fail closed; only `txn_not_found` / `txn_lock_not_found` are success (#559)
 
 `TwoPhaseCommitter::handleRollbackError()` is shared by `batchRollback()` and

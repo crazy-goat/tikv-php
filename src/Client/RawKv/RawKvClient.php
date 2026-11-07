@@ -1488,6 +1488,13 @@ final class RawKvClient
      * reverse scan fans its per-region reads out concurrently in windows of
      * at most `options['maxConcurrency']` regions (default 16).
      *
+     * Reverse scan has no +infinity upper-bound sentinel: `$startKey` is an
+     * explicit exclusive upper bound, and an empty `$startKey` with a
+     * non-empty `$endKey` is a reversed range that throws
+     * {@see InvalidArgumentException} before any RPC. This differs from the
+     * forward operations, where an empty start key means the start of the
+     * keyspace. `reverseScan('', '')` is the documented empty range.
+     *
      * @param int $limit Maximum rows to return; 0 = the whole range
      *                   (paginated internally, guarded by maxScanRows). A
      *                   negative value throws InvalidArgumentException before
@@ -1495,8 +1502,9 @@ final class RawKvClient
      * @return array<array{key: string, value: ?string}>
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException When the limit is invalid or the range
-     *         is reversed (`$startKey` sorts before a non-empty `$endKey`)
+     * @throws InvalidArgumentException When the limit is invalid, `$startKey`
+     *         is empty with a non-empty `$endKey`, or the range is reversed
+     *         (`$startKey` sorts before a non-empty `$endKey`)
      * @throws RegionException
      * @throws GrpcException
      * @throws KeyErrorException When the response carries a per-pair key error

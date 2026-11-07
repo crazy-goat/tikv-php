@@ -318,7 +318,12 @@ Every range operation takes a half-open `[startKey, endKey)` range. An empty
 `batchScan()`, `deleteRange()` and `checksum()`, and the start of the keyspace
 for `reverseScan()`, whose arguments are `[upper bound, lower bound)`. An
 empty `startKey` is valid for a forward range (it means the start of the
-keyspace).
+keyspace), but it is **not** a valid reverse-scan upper bound: reverse scan
+has no +infinity sentinel. `reverseScan('', $lower)` with a non-empty lower
+bound is rejected with `InvalidArgumentException` before any RPC, while
+`reverseScan('', '')` is the documented empty range. To read from the top of
+a prefix, pass the prefix's end key as the upper bound (for example `log;`
+for the prefix `log:`).
 
 A **reversed** range is rejected with `InvalidArgumentException` before any PD
 or store RPC: `startKey > endKey` for the forward operations (`scan()`,
@@ -572,6 +577,9 @@ $messages = $client->reverseScan($newest . "\x00", 'msg:user:123:', limit: 5);
 - `startKey` = upper bound (exclusive) — the **first** argument
 - `endKey` = lower bound (inclusive) — the **second** argument
 - Results are in descending order
+- The upper bound must be explicit: an empty `startKey` is not +infinity.
+  With a non-empty `endKey` it is rejected with `InvalidArgumentException`
+  before any RPC, and `reverseScan('', '')` is the empty range.
 
 Passing the bounds the other way round is the most common mistake here. It is
 rejected with `InvalidArgumentException` before any RPC instead of returning a
@@ -1135,7 +1143,7 @@ Its message names the size and the method, for example `Value size (5242880) exc
 The key and value checks apply to `get`, `put`, `delete`, `getKeyTTL`, `getKeyTTLResult`, `compareAndSwap`, `putIfAbsent`, `batchGet`, `batchPut`, `batchDelete` and `ingest`.
 `putIfAbsent` calls `compareAndSwap`, so its error message names `compareAndSwap`.
 A batch method checks every key and value before it sends the first RPC.
-`scan` and `reverseScan` check the size of the start key and of the end key. They accept an empty start key.
+`scan` and `reverseScan` check the size of the start key and of the end key. `scan` accepts an empty start key (the keyspace start); `reverseScan` accepts it only together with an empty end key (`reverseScan('', '')`, the empty range), because it has no +infinity upper-bound sentinel.
 
 ### Batch auto-split
 

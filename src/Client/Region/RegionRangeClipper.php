@@ -51,10 +51,24 @@ final readonly class RegionRangeClipper
      * `endKey` means the start of the keyspace and is always valid;
      * `startKey === endKey` is a valid empty range, not a reversed one.
      *
-     * @throws InvalidArgumentException When `startKey` sorts before a non-empty `endKey`
+     * An empty `startKey` is not a +infinity upper bound (RAW-09, #194):
+     * with a non-empty `endKey` it sorts before the lower bound and is
+     * rejected with a message that names the empty upper bound. Only
+     * `reverseScan('', '')` remains valid, as the documented empty range.
+     *
+     * @throws InvalidArgumentException When `startKey` is empty and `endKey`
+     *         is not, or when `startKey` sorts before a non-empty `endKey`
      */
     public static function assertReverseRangeOrder(string $startKey, string $endKey, string $method): void
     {
+        if ($startKey === '' && $endKey !== '') {
+            throw new InvalidArgumentException(sprintf(
+                'Invalid range in %s: an empty start key is not a valid upper bound; '
+                . 'reverse scan requires an explicit upper bound',
+                $method,
+            ));
+        }
+
         if ($endKey !== '' && KeyOrder::lt($startKey, $endKey)) {
             throw new InvalidArgumentException(sprintf(
                 'Invalid range in %s: start key must not sort before end key',
