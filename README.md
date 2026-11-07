@@ -255,7 +255,13 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // to a key to make the upper bound inclusive of that key.
 $results = $client->reverseScan('log;', 'log:', limit: 100);
 
-// Scan multiple non-contiguous ranges
+// Scan multiple non-contiguous ranges. This is a client-side loop of
+// per-range RawScan requests, not the RawBatchScan RPC: the RPC count is
+// linear in the number of ranges and the regions they cover (each range
+// resolves its own regions), although the per-range sends are fanned out
+// concurrently up to options['maxConcurrency']. eachLimit is required and
+// must be > 0. Returns one list per range: a list input keeps its order,
+// while non-sequential keys are re-indexed in ascending key order.
 $results = $client->batchScan([['a:', 'a;'], ['b:', 'b;']], eachLimit: 50);
 ```
 
