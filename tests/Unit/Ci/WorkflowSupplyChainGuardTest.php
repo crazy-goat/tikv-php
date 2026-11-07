@@ -23,17 +23,11 @@ use PHPUnit\Framework\TestCase;
  */
 final class WorkflowSupplyChainGuardTest extends TestCase
 {
-    private const WORKFLOW_FILES = [
-        '.github/workflows/ci.yml',
-        '.github/workflows/mutation.yml',
-        '.github/workflows/release.yaml',
-    ];
-
     public function testEveryActionIsPinnedToACommitSha(): void
     {
         $references = 0;
 
-        foreach (self::WORKFLOW_FILES as $file) {
+        foreach ($this->workflowFiles() as $file) {
             foreach ($this->usesReferences($file) as $line => $reference) {
                 ++$references;
 
@@ -93,9 +87,39 @@ final class WorkflowSupplyChainGuardTest extends TestCase
     }
 
     /**
+     * Every workflow file, as a path relative to the repository root. The
+     * list is discovered rather than hard-coded, so a workflow added later
+     * cannot escape the guard.
+     *
+     * @return list<string>
+     */
+    private function workflowFiles(): array
+    {
+        $root = dirname(__DIR__, 3);
+        $files = glob($root . '/.github/workflows/*.y*ml');
+        self::assertIsArray($files, 'Unable to list the workflow files');
+        self::assertNotEmpty(
+            $files,
+            'The guard found no workflow files, so it cannot check the pins (issue #316, SEC-13).',
+        );
+
+        $relative = array_map(
+            static fn (string $file): string => substr($file, strlen($root) + 1),
+            $files,
+        );
+        sort($relative);
+
+        return $relative;
+    }
+
+    /**
      * The `uses:` values of a workflow, keyed by their 1-based line number.
      * Local actions (`./…`) and container images (`docker://…`) are not
      * repository references and are skipped.
+     *
+     * A line that mentions `uses:` but does not match the strict pattern is
+     * collected as unparsed and fails the test: silently skipping it would
+     * let an unpinned action hide behind a malformed trailing comment.
      *
      * @return array<int, array{uses: string, comment: string}>
      */
@@ -105,10 +129,17 @@ final class WorkflowSupplyChainGuardTest extends TestCase
         self::assertIsArray($lines, sprintf('Unable to split %s into lines', $file));
 
         $references = [];
+        $unparsed = [];
 
         foreach ($lines as $index => $line) {
+            if (preg_match('/^\s*(?:-\s+)?uses:/', $line) !== 1) {
+                continue;
+            }
+
             $matches = [];
-            if (preg_match('/^\s*(?:-\s+)?uses:\s*(\S+)(?:\s+#\s*(\S.*?))?\s*$/', $line, $matches) !== 1) {
+            if (preg_match('/^\s*(?:-\s+)?uses:\s*(\S+)(?:\s+#\s*(.*?))?\s*$/', $line, $matches) !== 1) {
+                $unparsed[] = sprintf('%s:%d %s', $file, $index + 1, trim($line));
+
                 continue;
             }
 
@@ -122,6 +153,13 @@ final class WorkflowSupplyChainGuardTest extends TestCase
                 'comment' => $matches[2] ?? '',
             ];
         }
+
+        self::assertSame(
+            [],
+            $unparsed,
+            'The guard could not parse these "uses:" lines, so an unpinned action could hide '
+            . 'behind a malformed trailing comment (issue #316, SEC-13):',
+        );
 
         return $references;
     }
