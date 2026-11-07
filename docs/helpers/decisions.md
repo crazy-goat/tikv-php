@@ -839,8 +839,11 @@ Do not collapse the three bounds into one value: the 30 s wall clock is the
 binding one for a `ServerBusy` storm (1–2 s sleeps), the sleep budgets are what
 bound a millisecond-scale retry storm that no wall clock would catch. Note
 that the ServerBusy budget is not live under the defaults at all: the 30 s
-deadline is reached before the 60 s budget, so the budget only binds when
-`retryDeadlineMs` is disabled or configured longer (issue #535; see
+deadline is reached before the 60 s budget because the budget is charged
+pre-clamp and stays below the budget. The deadline is guaranteed to bind
+first only while the budget is at least one maximum ServerBusy backoff
+(~10 s) above it; when the budget is within ~10 s of the deadline or below
+it, either can bind (issue #535; see
 [ServerBusy Budget vs Retry Deadline](../configuration.md#serverbusy-budget-vs-retry-deadline)).
 
 ## A non-positive timeout is a configuration error, not a "disabled" spelling (issue #276)

@@ -704,11 +704,16 @@ Notes:
   behaviour).
 - The ServerBusy budget and the deadline are independent, and the deadline
   is checked (with each backoff sleep clamped to the remaining budget)
-  before the sleep. With the defaults the 30 s deadline always binds before
-  the 60 s ServerBusy budget, so a sustained `ServerIsBusy` episode surfaces
-  as `RetryBudgetExhaustedException` with the `ServerIsBusy` error in
-  `getPrevious()`, not as a rethrown region error; the ServerBusy budget
-  only binds when `retryDeadlineMs` is `0` or larger than it. See
+  before the sleep. The budget is charged from the scheduled backoff before
+  that clamp, so with the defaults (30 s deadline, 60 s budget) the
+  accumulated charge is bounded by roughly `deadline + 10 s` ≈ 40 s and the
+  30 s deadline always binds before the 60 s ServerBusy budget: a sustained
+  `ServerIsBusy` episode surfaces as `RetryBudgetExhaustedException` with
+  the `ServerIsBusy` error in `getPrevious()`, not as a rethrown region
+  error. The deadline is guaranteed to bind first only while the budget is
+  at least one maximum ServerBusy backoff (~10 s) above it; when the budget
+  is within ~10 s of the deadline or below it, either can bind, and a
+  budget that binds first rethrows the original `ServerIsBusy` error. See
   [ServerBusy Budget vs Retry Deadline](configuration.md#serverbusy-budget-vs-retry-deadline).
 - Deadline checks run *before* each attempt; worst-case worker occupancy is
   therefore approximately the deadline plus one more in-flight attempt

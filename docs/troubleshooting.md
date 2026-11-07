@@ -327,10 +327,13 @@ overloaded (raft too busy, scheduler congested).
 
 **Solution:** The client retries internally with backoff. Under the default
 30 s retry deadline a sustained `ServerIsBusy` episode surfaces as
-`RetryBudgetExhaustedException` — the deadline binds before the separate
-60 s ServerBusy budget, which only applies when the deadline is disabled or
-configured longer. `getPrevious()` holds the `ServerIsBusy` error. If you
-see this repeatedly, shed load or scale the cluster. See
+`RetryBudgetExhaustedException`: the 60 s ServerBusy budget is charged from
+the scheduled backoff before the sleep is clamped, and with the budget at
+least ~10 s above the deadline the deadline binds first. `getPrevious()`
+holds the `ServerIsBusy` error. If the budget is tuned to within ~10 s of
+the deadline or below it, either can bind and the budget path rethrows the
+raw `ServerIsBusy` instead. If you see this repeatedly, shed load or scale the
+cluster. See
 [Retry Budgets Behind Every Operation](error-handling.md#retry-budgets-behind-every-operation)
 and
 [ServerBusy Budget vs Retry Deadline](configuration.md#serverbusy-budget-vs-retry-deadline).

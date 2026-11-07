@@ -1866,14 +1866,15 @@ $client = RawKvClient::create(['127.0.0.1:2379'], [
 > **Worker occupancy note:** `serverBusyBudgetMs` is a worker-occupancy
 > setting — it caps how long ONE operation may block a PHP process in
 > `usleep()` while TiKV reports `ServerIsBusy`. It is **not** the binding
-> bound under the defaults: the 30 s deadline is reached first, and each
-> sleep is clamped to the remaining deadline (see
+> bound under the defaults: the 30 s deadline is reached first, because the
+> budget sits far enough above it (see
 > [ServerBusy Budget vs Retry Deadline](#serverbusy-budget-vs-retry-deadline)).
 > The default of 60 seconds suits request-driven runtimes such as PHP-FPM.
 > Long-running CLI workers that prefer to wait out long overload episodes
-> must raise the deadline (or disable it with `'retryDeadlineMs' => 0`) —
-> raising `serverBusyBudgetMs` alone changes nothing while the deadline is
-> lower.
+> must raise `serverBusyBudgetMs` **as well**: raising or disabling only
+> `retryDeadlineMs` still caps the wait at the 60 s budget. Keep the
+> deadline above the new budget (or disable it with
+> `'retryDeadlineMs' => 0`) so the deadline does not bind first.
 
 ### GC Safe Points (TxnKV)
 
@@ -1959,18 +1960,19 @@ ordinary one-retry-per-region traffic.
 
 The deadline is checked before every attempt **and** before every backoff
 sleep, and the sleep is clamped to the remaining deadline. A ServerBusy
-backoff therefore cannot push an operation past its deadline. With the
-defaults the deadline always binds first: an operation cannot accumulate
-60 s of ServerBusy sleep inside a 30 s wall clock. The 60 s ServerBusy
-budget is effectively dead configuration in that case — it never emits the
-`ServerBusy budget exhausted` log line, and raising it alone changes
-nothing.
+backoff therefore cannot push an operation past its deadline. The budget,
+however, is charged from the scheduled backoff **before** that clamp, so
+the accumulator can exceed the wall clock by up to one maximum ServerBusy
+sleep. With the defaults (30 s deadline, 60 s budget) the accumulated
+charge is bounded by roughly `deadline + 10 s` ≈ 40 s, still below the
+60 s budget: the deadline always binds first and the budget never fires —
+raising it alone changes nothing.
 
-The ServerBusy budget is the binding bound only when the deadline is
-disabled (`retryDeadlineMs => 0`) or configured **above** the budget. If
-`serverBusyBudgetMs` is tuned below the deadline, the budget binds first;
-the budget check runs before `usleep()`, so an over-budget charge throws
-without sleeping.
+The deadline is guaranteed to bind first only while the budget is at least
+one maximum ServerBusy backoff (~10 s) above it, as with the defaults. When
+the two are within ~10 s of each other, either can bind; when the budget is
+below the deadline, the budget usually binds first. The budget check runs
+before `usleep()`, so an over-budget charge throws without sleeping.
 
 The exhaustion paths also differ, which matters when reading logs or
 `catch` blocks:
@@ -1982,9 +1984,10 @@ The exhaustion paths also differ, which matters when reading logs or
 
 A sustained `ServerIsBusy` episode under the default configuration therefore
 surfaces as `RetryBudgetExhaustedException`, not as the raw region error;
-the `ServerIsBusy` error is available through `getPrevious()`. Both budgets
-are scoped to one logical operation (issue #223), like the other time
-budgets.
+the `ServerIsBusy` error is available through `getPrevious()`. A
+configuration where the budget binds first yields the original
+`ServerIsBusy` exception instead. Both budgets are scoped to one logical
+operation (issue #223), like the other time budgets.
 
 ### Custom Retry (Advanced)
 
