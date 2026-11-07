@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
+use CrazyGoat\Proto\Errorpb\KeyNotInRegion;
+use CrazyGoat\Proto\ImportSstpb\Error as ImportSstError;
 use CrazyGoat\Proto\ImportSstpb\IngestResponse;
 use CrazyGoat\Proto\ImportSstpb\Pair;
 use CrazyGoat\Proto\ImportSstpb\RawWriteRequest;
@@ -478,6 +480,54 @@ class SstIngestorTest extends TestCase
         $this->expectException(RegionException::class);
 
         $this->ingestor->ingest(['key1' => 'value1']);
+    }
+
+    // ========================================================================
+    // RawWrite response error
+    // ========================================================================
+
+    /**
+     * Regression test for issue #307 (SEC-04): the RawWrite store error used
+     * to be JSON-encoded into the RegionException message, and an
+     * errorpb.Error carries raw key fields (KeyNotInRegion::key,
+     * StoreNotMatch, ...). Only its human-readable message may reach the
+     * exception, so a key the server echoes back cannot leak into the logs.
+     */
+    public function testRawWriteStoreErrorDoesNotLeakRawKey(): void
+    {
+        $store = $this->defaultStore();
+        $region = $this->defaultRegion();
+        $this->setupStandardPdMocks($region, $store);
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+
+        $rawKey = 'user_email:alice@example.com';
+
+        $keyNotInRegion = new KeyNotInRegion();
+        $keyNotInRegion->setKey($rawKey);
+        $keyNotInRegion->setRegionId(1);
+
+        $storeError = new Error();
+        $storeError->setMessage('store rejected the region');
+        $storeError->setKeyNotInRegion($keyNotInRegion);
+
+        $writeError = new ImportSstError();
+        $writeError->setMessage('raw write failed');
+        $writeError->setStoreError($storeError);
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setError($writeError);
+        $this->grpc->method('callStreaming')->willReturn($writeResponse);
+
+        try {
+            $this->ingestor->ingest([$rawKey => 'value']);
+            self::fail('Expected RegionException for a RawWrite store error');
+        } catch (RegionException $e) {
+            $message = $e->getMessage();
+            self::assertStringNotContainsString($rawKey, $message);
+            self::assertStringContainsString('raw write failed', $message);
+            self::assertStringContainsString('store rejected the region', $message);
+        }
     }
 
     // ========================================================================

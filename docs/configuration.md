@@ -1038,7 +1038,10 @@ retry warning — and that message can be TiKV's own text:
 `RegionException::fromRegionError()` copies `errorpb.Error::getMessage()`
 verbatim. TiKV can name a key in such a message, and the client cannot
 redact a key it never saw. Every key the client itself holds is redacted; a
-key only the server ever saw is not (tracked in issue #307).
+key only the server ever saw is not. The structured `errorpb` fields that do
+carry keys are never serialized into a message: `SstIngestor` appends only
+the store error's `message` to a `RawWrite` failure, not the protobuf
+(issue #307).
 
 The redactor is applied wherever a key can reach a log line:
 
@@ -1061,7 +1064,9 @@ the region-shrink error (`RawKvRangeOps`), the heartbeat and primary-key
 errors of the committer (`TwoPhaseCommitter` — a retryable
 `TxnRetryableException` and a fatal `InvalidStateException`), the
 retry-budget and lock-wait exceptions (`RetryBudgetExhaustedException`,
-`LockWaitTimeoutException`) and the API V2 keyspace check
+`LockWaitTimeoutException`), the SST-write store error (`SstIngestor` — only
+the store error's message is appended, never the serialized protobuf) and
+the API V2 keyspace check
 (`KeyOutOfBoundsException`) therefore name the redacted key. When your own
 code needs the raw key, read it from the typed accessor instead of parsing
 it out of a message — `RetryBudgetExhaustedException::getRawKey()` and
