@@ -30,6 +30,10 @@ policy now classifies as internal.
 - `reverseScan('', $lower)` with a non-empty lower bound now fails with an `InvalidArgumentException` that names the empty upper bound, instead of the generic "start key must not sort before end key" text. Reverse scan has no +infinity sentinel (TiKV's reverse `RawScan` seeks for the largest key not greater than the empty `start_key` and finds nothing), so the call was already rejected by the reversed-range check from #343; `docs/operations.md` now states the restriction explicitly and an E2E test pins the rejection. `reverseScan('', '')` remains the documented empty range. (#194)
 - SST ingest now sends the true CRC32 of the region payload in `SSTMeta.crc32` (issue #196). `SstIngestor` computed the `crc32b` digest correctly but cast the hexadecimal string returned by `hash_final()` straight to `int`, which stops at the first non-digit: `"352441c2"` became `352441` and a digest starting with a letter became `0`. The digest is now decoded with `hexdec()` before the cast. The target TiKV version does not validate this field on the `RawWrite` path (it builds the SST server-side and `Ingest` checks only the API version), so no behaviour changes today, but the field no longer carries a value that is not the checksum of anything. (#196)
 
+### Tests
+
+- `RetryExecutorTest::testWallClockDeadlineTerminatesZeroBackoffLoop` no longer uses a 1 ms deadline that could expire before the first attempt on a loaded runner. It now uses a 100 ms deadline and asserts that the deadline — not the 100000-attempt cap — ends the loop (`callCount >= 1` and `callCount < 100000`), with a zero-sleep classifier keeping the run fast. (#872)
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added
