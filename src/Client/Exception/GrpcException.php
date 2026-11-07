@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Exception;
 
+use CrazyGoat\TiKV\Client\Util\ServerText;
+
 final class GrpcException extends TiKvException
 {
     /**
@@ -18,6 +20,8 @@ final class GrpcException extends TiKvException
         public readonly int $grpcStatusCode,
         public readonly ?string $targetAddress = null,
     ) {
-        parent::__construct("gRPC error: {$details}", $grpcStatusCode);
+        // $details comes straight off the wire; sanitise it before it
+        // reaches a log sink (SEC-11, issue #314).
+        parent::__construct('gRPC error: ' . ServerText::sanitise($details), $grpcStatusCode);
     }
 }

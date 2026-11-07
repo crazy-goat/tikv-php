@@ -48,6 +48,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+use CrazyGoat\TiKV\Client\Util\ServerText;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -897,6 +898,10 @@ final readonly class TxnReader
      */
     private function gcExceptionFromAbort(string $abort): TiKvException
     {
+        // The abort text is server-supplied; sanitise it before it becomes
+        // an exception message (SEC-11, issue #314).
+        $abort = ServerText::sanitise($abort);
+
         if (str_contains($abort, 'GC life time is shorter')) {
             return new TxnAbortedByGcException($abort);
         }
