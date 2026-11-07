@@ -1433,6 +1433,36 @@ class RawKvE2ETest extends TestCase
         }
     }
 
+    public function testScanIteratorYieldsEveryKeyAcrossRegionSplits(): void
+    {
+        // RAW-10: a short page must not end the iteration. Write a prefix large
+        // enough that the cluster may serve it from several regions, then page
+        // it with a batch size far below the key count. Before the fix a single
+        // short page (a skipped region or a region-boundary effect) silently
+        // truncated the result; the yielded count must always equal the written
+        // count.
+        $prefix = 'sit-split-' . uniqid() . '-';
+        $total = 600;
+
+        try {
+            $pairs = [];
+            for ($i = 0; $i < $total; $i++) {
+                $pairs[sprintf('%s%04d', $prefix, $i)] = 'value-' . $i;
+            }
+            $this->testClient->batchPut($pairs);
+
+            $results = iterator_to_array($this->testClient->scanPrefixIterator($prefix, 64));
+
+            $this->assertCount($total, $results);
+            for ($i = 0; $i < $total; $i++) {
+                $key = sprintf('%s%04d', $prefix, $i);
+                $this->assertSame('value-' . $i, $results[$key] ?? null);
+            }
+        } finally {
+            $this->deletePrefixQuietly($prefix);
+        }
+    }
+
     public function testScanIteratorRewind(): void
     {
         $pairs = ['sit-rew-a' => 'va', 'sit-rew-b' => 'vb'];

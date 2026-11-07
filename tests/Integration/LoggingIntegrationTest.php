@@ -370,12 +370,19 @@ class LoggingIntegrationTest extends TestCase
         $this->assertNotEmpty($warningRecords);
         $record = reset($warningRecords);
         $this->assertInstanceOf(\Monolog\LogRecord::class, $record);
-        // Key context should be redacted, not contain the raw key
+        // The context carries the same keyed-hash token the redactor produces
+        // for this key, so log lines about one key correlate, and the token is
+        // not a reversible encoding of the raw key (issue #279, GRPC-20).
         $this->assertArrayHasKey('key', $record->context);
         $key = $record->context['key'];
         $this->assertIsString($key);
-        $this->assertStringContainsString('bytes', $key);
+        $this->assertSame(KeyRedactor::redact('contextkey'), $key);
+        $this->assertMatchesRegularExpression('/\A#[0-9a-f]{16} \(10 bytes\)\z/', $key);
+        // The old default put the hex of the first 8 bytes in the token slot;
+        // the keyed hash must not reproduce that encoding (issue #279).
         $this->assertStringNotContainsString('contextkey', $key);
+        $this->assertStringNotContainsString(bin2hex('contextkey'), $key);
+        $this->assertNotSame(bin2hex(substr('contextkey', 0, 8)), substr($key, 1, 16));
         $this->assertSame(0, $record->context['attempt']);
         $this->assertSame('EpochNotMatch', $record->context['backoffType']);
         $sleepMs = $record->context['sleepMs'];

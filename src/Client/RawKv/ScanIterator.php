@@ -216,10 +216,13 @@ final class ScanIterator implements Iterator
 
         $this->currentStartKey = $nextStartKey;
 
-        if (count($results) < $this->batchSize) {
-            $this->exhausted = true;
-        }
-
+        // A short page is not proof of exhaustion: scan() may return fewer
+        // rows than requested while data remains (a skipped region, a
+        // server-side per-region cap, a region-boundary effect). Only an
+        // empty response, or a cursor that reached endKey (checked before
+        // the RPC), ends the iteration. The price is at most one extra
+        // round trip per iterator, and correctness no longer depends on
+        // scan() always filling a page.
         $this->buffer = $results;
         $this->bufferIndex = 0;
     }
