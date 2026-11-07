@@ -322,10 +322,13 @@ Two traps when measuring coverage:
 2. **A local run needs a coverage driver.** PCOV wins over Xdebug when both are installed
    (`SebastianBergmann\CodeCoverage\Driver\Selector` checks PCOV first), and the two measure the
    same metric within a few tenths of a point — but only with Xdebug in coverage mode
-   (`xdebug.mode=coverage`; the default `develop` mode makes PHPUnit report "No code coverage
-   driver is available"). `composer test:coverage` passes `-d xdebug.mode=coverage` for that
-   reason. `ext-grpc` is required too: the `Grpc` suite mocks `\Grpc\Call`, which is a hard error
-   (not a skip) without the extension.
+   (`xdebug.mode=coverage`; the default `develop` mode makes PHPUnit refuse to collect and warn
+   that `XDEBUG_MODE=coverage` has to be set). `composer test:coverage` passes
+   `-d xdebug.mode=coverage` for that reason. `ext-grpc` is required too: the `Grpc` suite mocks
+   `\Grpc\Call`, which is a hard error (not a skip) without the extension. Neither driver is a
+   project dependency: install PCOV with `sudo apt-get install php-pcov` or `pecl install pcov`
+   (then add `extension=pcov.so` to `php.ini`). `composer test:coverage` also raises
+   `memory_limit` to `-1`, because the combined run does not fit the common 128M default.
 
 `phpunit.xml` configures no coverage report on purpose (issue #556): a report block there makes
 every bare `vendor/bin/phpunit` run request a driver, so on the documented local setup

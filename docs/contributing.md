@@ -21,6 +21,8 @@ Before you start developing, ensure you have:
 - **PHP >= 8.2** with extensions:
   - `grpc` - gRPC extension (1.57 or newer)
   - `protobuf` - Protocol Buffers extension
+  - `pcov` (optional) - coverage driver for `composer test:coverage`
+    (see [Coverage Lane](development.md#coverage-lane))
 - **Composer** - PHP dependency manager
 - **Docker & Docker Compose** - For running TiKV cluster locally
 - **Git** - Version control
@@ -321,10 +323,7 @@ make test-unit
 # Run specific test
 vendor/bin/phpunit --filter RawKvClientTest
 
-# Run with coverage
-vendor/bin/phpunit --coverage-html coverage/
-
-# Run the suites CI measures, then check the coverage floor
+# Run the suites CI measures under a coverage driver, then check the floor
 composer test:coverage
 ```
 
