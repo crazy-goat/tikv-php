@@ -292,6 +292,13 @@ final class RawKvClient
     private readonly RegionCacheWarmer $regionCacheWarmer;
 
     /**
+     * The resolver every component of this client shares, so per-store
+     * health state learned by one retry loop is visible to the next
+     * (issue #424).
+     */
+    private readonly RegionResolver $regionResolver;
+
+    /**
      * @param string[] $pdEndpoints
      * @param array<string, mixed> $options Client options. Besides the
      *        RawKV-specific ones, the shared transport options are accepted:
@@ -483,6 +490,7 @@ final class RawKvClient
             $this->epochNotMatchCodec(),
             $this->storeCache,
         );
+        $this->regionResolver = $regionResolver;
         $this->regionCacheWarmer = $regionCacheWarmer
             ?? new RegionCacheWarmer($pdClient, $regionCache, $this->logger, $regionCacheRefreshMs);
         $this->crud = $crud ?? new RawKvCrud(
@@ -919,25 +927,12 @@ final class RawKvClient
 
     private function createRetryExecutor(): RetryExecutor
     {
-        $regionResolver = new RegionResolver(
-            $this->pdClient,
-            $this->regionCache,
-            $this->metrics,
-            $this->allowedStoreHosts,
-            $this->storeHostPolicy,
-            $this->logger,
-            $this->pdEndpoints,
-            $this->allowedStorePorts,
-            $this->epochNotMatchCodec(),
-            $this->storeCache,
-        );
-
         return new RetryExecutor(
             $this->maxBackoffMs,
             $this->serverBusyBudgetMs,
             $this->regionCache,
             $this->grpc,
-            $regionResolver,
+            $this->regionResolver,
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,

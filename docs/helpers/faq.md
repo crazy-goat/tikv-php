@@ -76,6 +76,36 @@ no fresh budget after an earlier one spent it), while two calls to
 per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
 on ordinary one-retry-per-region traffic.
 
+## Store-health invalidation runs after the retry invalidation, so only sibling regions remain
+
+Issue #424 records a transport failure at the end of `RetryExecutor`'s catch,
+after the existing routing invalidation has already dropped the region the
+failed attempt was routed through. `RegionResolver::recordStoreFailure()`
+therefore invalidates the *other* cached regions whose leader is the same
+store, with reason `store_unhealthy`; the failing region is already gone under
+`retry_region_error` (or `fatal_region_error`). A test that asserts one
+`store_unhealthy` emission must cache a second region on the same store.
+Success recording is skipped when the caller supplied no target-store provider
+and no failure state is tracked, so the common success path does not pay an
+extra cache lookup; once a failure is recorded, the leader lookup runs so a
+success can reset the counter.
+
+Failure recording uses the exception's own `targetAddress`, resolved through
+`RegionResolver`'s address-to-store index, not the outer operation's provider.
+That is what keeps a PD outage (`pd:2379` is a configured PD endpoint and is
+never in the index) and a nested lock-resolution RPC against store B from
+demoting store A. An address that was never validated through
+`RegionResolver::validateStoreAddress()` is deliberately not guessed: a
+synthetic or direct `GrpcClient` address records nothing. `CasIndeterminateException`
+is unwrapped to its underlying `GrpcException` before this check.
+
+The consecutive-failure counter expires after `DEFAULT_FAILURE_WINDOW_MS`
+(60 s), so isolated failures spread over time never accumulate into a
+demotion. An unhealthy store does **not** become healthy when its cooldown
+expires: it is half-open and routable, but `isHealthy()` and a gauge fed from
+`storeHealthChanged()` stay false until a probe actually succeeds. This is
+intentional — the cooldown is not evidence of recovery.
+
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
 A test like `try { $executor->execute($k, fn () => throw …); $this->fail(...); } catch (TiKvException) {}`
@@ -1071,6 +1101,25 @@ single seam — its output is the effective channel key material — and it is
 unit-tested via reflection in the Unit suite (`GrpcClientChannelArgsTest`)
 without ext-grpc, since no real channel is created.
 
+## There is no `grpc.http2.initial_window_size` channel arg (#423)
+
+The gRPC HTTP/2 initial stream window is not a channel argument of its own.
+`grpc.http2.lookahead_bytes` (`GRPC_ARG_HTTP2_STREAM_LOOKAHEAD_BYTES`) is the
+knob: `chttp2_transport.cc::read_channel_args()` feeds it to
+`settings.SetInitialWindowSize()` and `flow_control.set_target_initial_window_size()`.
+`grpc.http2.initial_window_size` — the name used in issue #423's sketch — does
+not exist and is silently ignored by the core, so `GrpcClient` maps
+`initialWindowSizeBytes` to `lookahead_bytes`.
+
+`lookahead_bytes` alone does **not** pin the window: while
+`grpc.http2.bdp_probe` is true (the default) the chttp2 transport's
+`PeriodicUpdate()` overwrites `target_initial_window_size_` from its BDP
+estimate and memory pressure almost immediately, so the configured value is
+only a starting point. `GrpcClient` therefore also emits
+`grpc.http2.bdp_probe => 0` when `initialWindowSizeBytes > 0`; the cost is a
+fixed window that no longer adapts to the link. Do not "fix" that by dropping
+the bdp_probe arg — the configured window would not stick.
+
 ## ext-grpc's persistent channels are shared and reference-counted (#283)
 
 `Grpc\Channel` keys its process-global persistent-channel table on the
@@ -1153,10 +1202,13 @@ consecutive-return stub needs one more value. The truncation probe is
 re-asked too: a transient empty probe would otherwise make `scan(limit: 0)`
 return a truncated range silently.
 
-E2E note: `docker-compose run --rm php-test …` recreates the tikv
+E2E note: `docker compose run --rm php-test …` recreates the tikv
 containers it depends on; if the cluster was just (re)started the run
 container's DNS can fail with "Name does not resolve tikv1:20160" and the
-whole suite errors — wait ~20 s after `make up` before running E2E.
+whole suite errors. `scripts/test-e2e.sh` now waits until all four service
+containers are running and PD reports all three stores `Up` before the first
+test (issue #514), so the flake is gone from the full run; a manual `make up`
+followed by a per-mode script still needs ~20 s.
 
 ## `git log master..HEAD --oneline` is the definitive "what's in this PR" check
 
@@ -1335,6 +1387,15 @@ so compute the attempt count from the exponential sequence (2+4=6 ≤ 6 allows
 two retries; 6+8=14 > 6 aborts the third), and an operation that "fails twice
 then succeeds" needs a per-call failure counter (a shared `$calls % 3`
 pattern silently gives the second execute() zero retries).
+
+The same premise expiry closed issue #296 (audit PERF-09, jitter for
+`NotLeader` / `RegionMiss` / `StaleCmd`): 54036f8 (issue #242) had already
+made `BackoffType::equalJitter()` return `true` for every type, so the
+deterministic 2, 4, 8, ... ms schedule the audit describes no longer existed,
+and `BackoffTest` already asserted both the `[expo/2, expo]` range and
+non-constant values for all types. The #296 change adds only a
+NotLeader-specific pin and this note; no production code changed. Close such
+an audit import as a duplicate instead of re-implementing the jitter.
 
 ## Equal-jitter randomness can collapse the separating boundary in budget assertions — assert `<=` over more iterations, never strict `<`
 

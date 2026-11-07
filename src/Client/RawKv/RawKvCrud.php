@@ -60,6 +60,7 @@ final readonly class RawKvCrud
                     excludedStoreId: $excludedStore,
                     requestContext: $this->requestContext,
                     resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
@@ -226,6 +227,7 @@ final readonly class RawKvCrud
                     excludedStoreId: $excludedStore,
                     requestContext: $this->requestContext,
                     resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
