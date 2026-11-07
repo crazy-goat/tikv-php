@@ -175,8 +175,8 @@ class BackoffTest extends TestCase
     //
     // Jitter is intentionally not asserted here: client-go uses NoJitter for
     // BoTxnNotFound and BoCommitTSLag, while PHP currently applies equal
-    // jitter to every BackoffType. That broader per-type jitter gap is
-    // recorded in findings.md rather than silently advertised as parity.
+    // jitter to every BackoffType. The parity below is base/cap only rather
+    // than silently advertised as full parity.
 
     /**
      * @return array<string, array{BackoffType, int, int}>

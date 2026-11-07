@@ -643,8 +643,7 @@ enum BackoffType
 ```
 
 PHP currently applies equal jitter to every case; client-go uses `NoJitter` for
-`BoTxnNotFound` and `BoCommitTSLag` (the per-type jitter gap is recorded in
-`findings.md`).
+`BoTxnNotFound` and `BoCommitTSLag`.
 
 **Retry Budgets**:
 - **Scope**: one budget per logical operation (issue #223). `RetryExecutor::beginOperation()` returns an executor whose `execute()` calls share the same `maxBackoffMs`, `serverBusyBudgetMs` and wall-clock deadline, and every client fan-out entry point (`scan()`/`reverseScan()`/`batchScan()`, the batch methods, transactional reads, `commit()`, `rollback()`, `deleteRange()`, `checksum()`) uses one for all its regions and pages. A later operation starts from zero, so a read-heavy transaction cannot starve its commit. The attempt cap stays per `execute()` call (one retry loop), so a wide fan-out does not exhaust it on one retry per region.

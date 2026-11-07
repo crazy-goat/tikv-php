@@ -402,7 +402,7 @@ types that had no PHP equivalent (`BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound`,
 (10–3000 ms), and `TxnNotFound` / `CommitTSLag` (2–500 ms each), so a custom
 classifier can use the same curves. client-go applies `NoJitter` to
 `BoTxnNotFound` and `BoCommitTSLag`, while PHP currently applies equal jitter to
-every `BackoffType`; that per-type jitter gap is recorded in `findings.md`.
+every `BackoffType`.
 
 ## `notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)
 
