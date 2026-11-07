@@ -14,9 +14,13 @@ use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
  *
  * A store is marked unhealthy after {@see self::DEFAULT_FAILURE_THRESHOLD}
  * consecutive transport failures and stays unavailable for
- * {@see self::DEFAULT_COOLDOWN_MS}. When the cooldown elapses the store is
- * half-open: the next request is allowed through as a probe. A success resets
- * the state, a failure starts a fresh cooldown.
+ * {@see self::DEFAULT_COOLDOWN_MS}. Failures older than
+ * {@see self::DEFAULT_FAILURE_WINDOW_MS} are forgotten, so isolated failures
+ * spread over a long period never accumulate into a demotion. When the
+ * cooldown elapses the store is half-open: the next request is allowed through
+ * as a probe. A success resets the state, a failure starts a fresh cooldown.
+ * A half-open store still reports itself unhealthy until a request succeeds;
+ * the cooldown alone is not evidence of recovery.
  *
  * The tracker is deliberately time-based rather than RPC-based: PHP has no
  * background health-check loop, so the retry loop of the next request is what
@@ -38,8 +42,20 @@ final class StoreHealthTracker
      */
     public const DEFAULT_COOLDOWN_MS = 1000;
 
+    /**
+     * How long a failure counts toward the consecutive-failure threshold, in
+     * milliseconds. Failures older than this are forgotten, so two failures
+     * hours apart do not demote a store that was healthy in between. The
+     * default is deliberately generous: it only expires genuinely idle state,
+     * not the burst of failures a real outage produces.
+     */
+    public const DEFAULT_FAILURE_WINDOW_MS = 60_000;
+
     /** @var array<int, int> storeId => consecutive failures since the last success */
     private array $consecutiveFailures = [];
+
+    /** @var array<int, int> storeId => monotonic time of the last failure (ms) */
+    private array $lastFailureMs = [];
 
     /** @var array<int, true> storeId => currently marked unhealthy */
     private array $unhealthy = [];
@@ -59,12 +75,16 @@ final class StoreHealthTracker
         private readonly int $cooldownMs = self::DEFAULT_COOLDOWN_MS,
         private readonly MetricsInterface $metrics = new NoOpMetrics(),
         ?Closure $clockMs = null,
+        private readonly int $failureWindowMs = self::DEFAULT_FAILURE_WINDOW_MS,
     ) {
         if ($failureThreshold < 1) {
             throw new \InvalidArgumentException('failureThreshold must be >= 1');
         }
         if ($cooldownMs < 0) {
             throw new \InvalidArgumentException('cooldownMs must be >= 0');
+        }
+        if ($failureWindowMs < 1) {
+            throw new \InvalidArgumentException('failureWindowMs must be >= 1');
         }
 
         $this->clockMs = $clockMs ?? static fn (): int => (int) (hrtime(true) / 1_000_000);
@@ -86,6 +106,7 @@ final class StoreHealthTracker
         $wasUnhealthy = $this->unhealthy[$storeId] ?? false;
         unset(
             $this->consecutiveFailures[$storeId],
+            $this->lastFailureMs[$storeId],
             $this->unhealthy[$storeId],
             $this->unhealthyUntilMs[$storeId],
         );
@@ -108,8 +129,12 @@ final class StoreHealthTracker
             return false;
         }
 
+        $now = $this->nowMs();
+        $this->pruneExpired($now);
+
         $failures = ($this->consecutiveFailures[$storeId] ?? 0) + 1;
         $this->consecutiveFailures[$storeId] = $failures;
+        $this->lastFailureMs[$storeId] = $now;
 
         if ($failures < $this->failureThreshold) {
             return false;
@@ -117,7 +142,7 @@ final class StoreHealthTracker
 
         $wasUnhealthy = $this->unhealthy[$storeId] ?? false;
         $this->unhealthy[$storeId] = true;
-        $this->unhealthyUntilMs[$storeId] = $this->nowMs() + $this->cooldownMs;
+        $this->unhealthyUntilMs[$storeId] = $now + $this->cooldownMs;
 
         if ($wasUnhealthy) {
             // A failed half-open probe starts a fresh cooldown without
@@ -162,6 +187,8 @@ final class StoreHealthTracker
      */
     public function getConsecutiveFailures(int $storeId): int
     {
+        $this->pruneExpired($this->nowMs());
+
         return $this->consecutiveFailures[$storeId] ?? 0;
     }
 
@@ -183,18 +210,37 @@ final class StoreHealthTracker
      */
     public function hasTrackedFailures(): bool
     {
-        return $this->consecutiveFailures !== [];
-    }
+        $this->pruneExpired($this->nowMs());
 
-    public function reset(): void
-    {
-        $this->consecutiveFailures = [];
-        $this->unhealthy = [];
-        $this->unhealthyUntilMs = [];
+        return $this->unhealthy !== [] || $this->consecutiveFailures !== [];
     }
 
     private function nowMs(): int
     {
         return ($this->clockMs)();
+    }
+
+    /**
+     * Forget failures older than the failure window for stores that are not
+     * currently unhealthy.
+     *
+     * An unhealthy store keeps its state until a request succeeds: the
+     * cooldown only makes it routable again (half-open), it does not make it
+     * healthy without evidence. Pruning those entries would silently flip a
+     * store that never recovered back to healthy.
+     */
+    private function pruneExpired(int $nowMs): void
+    {
+        foreach ($this->lastFailureMs as $storeId => $lastFailureMs) {
+            if ($this->unhealthy[$storeId] ?? false) {
+                continue;
+            }
+
+            if ($nowMs - $lastFailureMs <= $this->failureWindowMs) {
+                continue;
+            }
+
+            unset($this->consecutiveFailures[$storeId], $this->lastFailureMs[$storeId]);
+        }
     }
 }

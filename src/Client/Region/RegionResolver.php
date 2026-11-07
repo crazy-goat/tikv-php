@@ -39,6 +39,12 @@ final readonly class RegionResolver
     private StoreHealthTracker $storeHealth;
 
     /**
+     * Address-to-store index used to attribute a transport failure to the
+     * store the failing RPC actually targeted (issue #424).
+     */
+    private StoreAddressIndex $storeAddresses;
+
+    /**
      * Host names that grpc-core interprets as URI schemes when they appear
      * as the host part of a channel target (unix:20160 is a socket target,
      * not a host "unix" on port 20160). Rejected case-insensitively for
@@ -90,6 +96,13 @@ final readonly class RegionResolver
     private const MAX_SCAN_PAGES = 1024;
 
     /**
+     * How many invalidated region IDs a store-unhealthy transition logs.
+     * The count is always logged; the ID list is only a bounded sample so a
+     * store leading thousands of regions does not emit a huge log record.
+     */
+    private const LOG_REGION_SAMPLE_SIZE = 5;
+
+    /**
      * @param string[] $allowedStoreHosts Exact hostnames, DNS suffixes
      *     (leading dot: matches the domain itself and any subdomain) or
      *     CIDR ranges the store host must match.
@@ -137,8 +150,10 @@ final readonly class RegionResolver
          * the scope of one client's routing decisions (issue #424, GAP-10).
          */
         ?StoreHealthTracker $storeHealth = null,
+        ?StoreAddressIndex $storeAddresses = null,
     ) {
         $this->storeHealth = $storeHealth ?? new StoreHealthTracker(metrics: $this->metrics);
+        $this->storeAddresses = $storeAddresses ?? new StoreAddressIndex();
     }
 
     public function getRegionInfo(string $key): RegionInfo
@@ -666,19 +681,24 @@ final readonly class RegionResolver
             return;
         }
 
-        $invalidatedRegionIds = [];
+        $invalidatedRegionCount = 0;
+        $invalidatedRegionIdSample = [];
         foreach ($this->regionCache->getCachedRegions() as $region) {
             if ($region->leaderStoreId !== $storeId) {
                 continue;
             }
 
             $this->regionCache->invalidate($region->regionId, 'store_unhealthy');
-            $invalidatedRegionIds[] = $region->regionId;
+            $invalidatedRegionCount++;
+            if (count($invalidatedRegionIdSample) < self::LOG_REGION_SAMPLE_SIZE) {
+                $invalidatedRegionIdSample[] = $region->regionId;
+            }
         }
 
         $this->logger->warning('Store marked unhealthy, invalidated its leader regions', [
             'storeId' => $storeId,
-            'invalidatedRegionIds' => $invalidatedRegionIds,
+            'invalidatedRegionCount' => $invalidatedRegionCount,
+            'invalidatedRegionIdSample' => $invalidatedRegionIdSample,
         ]);
     }
 
@@ -688,6 +708,33 @@ final readonly class RegionResolver
     public function isStoreAvailable(int $storeId): bool
     {
         return $storeId <= 0 || $this->storeHealth->isAvailable($storeId);
+    }
+
+    /**
+     * The store a previously validated address belongs to, or null when the
+     * address was never resolved through this resolver (issue #424).
+     *
+     * The retry executor uses this to attribute a transport failure to the
+     * store the failing RPC actually targeted instead of the outer
+     * operation's target. An unknown address is not guessed: a PD endpoint,
+     * a synthetic test address, or a direct `GrpcClient` call must not demote
+     * a store.
+     */
+    public function storeIdForAddress(string $address): ?int
+    {
+        return $this->storeAddresses->storeIdForAddress($address);
+    }
+
+    /**
+     * Whether an address is one of the configured PD endpoints.
+     *
+     * A PD transport failure must never be recorded as a TiKV store failure
+     * (issue #424), even in the unlikely case where a store address collides
+     * with a PD endpoint.
+     */
+    public function isPdEndpointAddress(string $address): bool
+    {
+        return in_array($address, $this->pdEndpoints, true);
     }
 
     /**
@@ -789,6 +836,11 @@ final readonly class RegionResolver
                 $storeId,
             ));
         }
+
+        // Remember the address for failure attribution (issue #424): a
+        // GrpcException carries the address, not the store ID, and the retry
+        // executor must not guess the store from the outer operation.
+        $this->storeAddresses->record($address, $storeId);
     }
 
     /**

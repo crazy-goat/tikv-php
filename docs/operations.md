@@ -1397,11 +1397,14 @@ write path through your application's own traffic and the counters exposed by
 `getMetrics()`.
 
 The data path has its own per-store failover (issue #424): after three
-consecutive transport failures the client marks a store unhealthy for a
-one-second cooldown, drops the cached regions it led and refuses to route to it
-until the cooldown elapses, then probes it again. That is transparent to
-`healthCheck()`, which remains a PD-only probe and does not report individual
-store health; the state changes are visible through
+consecutive `UNAVAILABLE` or `DEADLINE_EXCEEDED` transport failures within a
+60-second window the client marks a store unhealthy for a one-second cooldown,
+drops the cached regions it led and refuses to route to it until the cooldown
+elapses, then probes it again. Failures are attributed to the store the failing
+RPC actually targeted, so a PD outage or a nested RPC against another store does
+not demote the outer store; replica reads skip a store in cooldown. That is
+transparent to `healthCheck()`, which remains a PD-only probe and does not report
+individual store health; the state changes are visible through
 `MetricsInterface::storeHealthChanged()` when a metrics backend is configured.
 
 **`getClusterId()`** returns the cluster ID the client has already learned, or

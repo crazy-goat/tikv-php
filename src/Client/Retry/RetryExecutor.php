@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\Retry;
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
@@ -145,9 +146,6 @@ final readonly class RetryExecutor
             } catch (TiKvException $e) {
                 $lastError = $e;
                 $attemptBeforeInspection = $attempt;
-                $failedStoreIdAtFailure = $e instanceof GrpcException
-                    ? $this->failedStoreIdFor($key, $targetStoreId)
-                    : null;
 
                 $backoffType = $this->handleNotLeader($e, $key);
 
@@ -186,7 +184,7 @@ final readonly class RetryExecutor
                             'key' => KeyRedactor::redact($key),
                             'error' => $e->getMessage(),
                         ]);
-                        $this->recordStoreFailure($e, $failedStoreIdAtFailure);
+                        $this->recordStoreFailure($e);
                         throw $e;
                     }
 
@@ -290,7 +288,7 @@ final readonly class RetryExecutor
                     }
                 }
 
-                $this->recordStoreFailure($e, $failedStoreIdAtFailure);
+                $this->recordStoreFailure($e);
 
                 $sleepMs = $backoffType->sleepMs($attemptBeforeInspection);
 
@@ -759,21 +757,35 @@ final readonly class RetryExecutor
     }
 
     /**
-     * Record a failed attempt against the store it was routed to
+     * Record a failed attempt against the store the RPC actually targeted
      * (issue #424, GAP-10).
      *
-     * Only a `GrpcException` with a status that reflects the store's
-     * reachability is evidence about store health — `UNAVAILABLE` (the
-     * connection failed) or `DEADLINE_EXCEEDED` (no answer in time). A region
-     * error means the request reached the store, a `StoreNotMatch` means the
-     * address was wrong, and a fatal status such as `UNAUTHENTICATED` is a
-     * client or request problem, not a dead store. The store ID comes from
-     * the caller's target provider when it has one, otherwise from the cached
-     * region's leader.
+     * The store is taken from the exception's own `targetAddress`, not from
+     * the outer operation's provider: a nested RPC (lock resolution, a
+     * fan-out sub-call) can fail against a different store, and PD is called
+     * inside the same operation. An address that was never resolved to a
+     * store — a PD endpoint, a synthetic test address, a parse error — is not
+     * guessed and records nothing. This also unwraps
+     * {@see CasIndeterminateException}, whose transport failure is otherwise
+     * invisible to the tracker (issue #239 keeps the CAS outcome typed).
+     *
+     * Only `UNAVAILABLE` and `DEADLINE_EXCEEDED` say something about the
+     * store's reachability. A region error means the request reached the
+     * store, a `StoreNotMatch` means the address was wrong, and a fatal status
+     * such as `UNAUTHENTICATED` is a client or request problem, not a dead
+     * store.
      */
-    private function recordStoreFailure(TiKvException $e, ?int $storeId): void
+    private function recordStoreFailure(TiKvException $e): void
     {
-        if (!$e instanceof GrpcException || $storeId === null || $storeId <= 0) {
+        if ($e instanceof CasIndeterminateException) {
+            $previous = $e->getPrevious();
+            if (!$previous instanceof GrpcException) {
+                return;
+            }
+            $e = $previous;
+        }
+
+        if (!$e instanceof GrpcException || $e->targetAddress === null) {
             return;
         }
 
@@ -785,6 +797,16 @@ final readonly class RetryExecutor
         // and must not demote it.
         $status = GrpcStatusCode::tryFrom($e->grpcStatusCode);
         if ($status !== GrpcStatusCode::Unavailable && $status !== GrpcStatusCode::DeadlineExceeded) {
+            return;
+        }
+
+        // A PD transport failure must never demote a TiKV store (issue #424).
+        if ($this->regionResolver->isPdEndpointAddress($e->targetAddress)) {
+            return;
+        }
+
+        $storeId = $this->regionResolver->storeIdForAddress($e->targetAddress);
+        if ($storeId === null) {
             return;
         }
 

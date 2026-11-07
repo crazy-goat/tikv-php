@@ -62,6 +62,10 @@ final class RegionContextFactory
      *     (the default) writes neither field. Applied before
      *     $requestContext, so a non-default field of the latter wins when
      *     both name the same Context field.
+     * @param (Closure(int): bool)|null $storeAvailable Optional health filter
+     *     (issue #424): a replica whose store is in its health cooldown is
+     *     skipped, so a retry does not re-select the same unhealthy replica.
+     *     Null keeps the historical selection unchanged.
      */
     public static function resolveTarget(
         RegionInfo $region,
@@ -72,6 +76,7 @@ final class RegionContextFactory
         int $priority = CommandPri::Normal,
         ?RequestContextOptions $requestContext = null,
         ?ResourceControl $resourceControl = null,
+        ?Closure $storeAvailable = null,
     ): ReplicaReadTarget {
         $leader = self::leaderPeer($region);
         $leaderTarget = new ReplicaReadTarget(
@@ -93,10 +98,12 @@ final class RegionContextFactory
         }
 
         $labels = $policy->matchStoreLabels;
+        $leaderAvailable = !$storeAvailable instanceof \Closure || $storeAvailable($region->leaderStoreId);
 
         if (
             $policy->mode === ReplicaReadMode::PreferLeader
             && $excludedStoreId !== $region->leaderStoreId
+            && $leaderAvailable
             && self::storeMatchesLabels($region->leaderStoreId, $labels, $storeLookup)
         ) {
             return $leaderTarget;
@@ -105,7 +112,8 @@ final class RegionContextFactory
         $candidates = array_values(array_filter(
             $region->peers,
             static fn (PeerInfo $peer): bool => $peer->storeId !== $excludedStoreId
-                && ($policy->mode === ReplicaReadMode::Mixed || $peer->storeId !== $region->leaderStoreId),
+                && ($policy->mode === ReplicaReadMode::Mixed || $peer->storeId !== $region->leaderStoreId)
+                && (!$storeAvailable instanceof \Closure || $storeAvailable($peer->storeId)),
         ));
 
         if ($labels !== []) {

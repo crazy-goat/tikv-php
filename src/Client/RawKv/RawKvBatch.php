@@ -343,6 +343,7 @@ final readonly class RawKvBatch
             $this->regionResolver->getStore(...),
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            storeAvailable: $this->regionResolver->isStoreAvailable(...),
         );
         $targetStoreId = $target->storeId;
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
@@ -571,6 +572,7 @@ final readonly class RawKvBatch
             $this->regionResolver->getStore(...),
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            storeAvailable: $this->regionResolver->isStoreAvailable(...),
         );
 
         $request = new RawBatchGetRequest();

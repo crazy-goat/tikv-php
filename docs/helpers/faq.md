@@ -90,6 +90,22 @@ and no failure state is tracked, so the common success path does not pay an
 extra cache lookup; once a failure is recorded, the leader lookup runs so a
 success can reset the counter.
 
+Failure recording uses the exception's own `targetAddress`, resolved through
+`RegionResolver`'s address-to-store index, not the outer operation's provider.
+That is what keeps a PD outage (`pd:2379` is a configured PD endpoint and is
+never in the index) and a nested lock-resolution RPC against store B from
+demoting store A. An address that was never validated through
+`RegionResolver::validateStoreAddress()` is deliberately not guessed: a
+synthetic or direct `GrpcClient` address records nothing. `CasIndeterminateException`
+is unwrapped to its underlying `GrpcException` before this check.
+
+The consecutive-failure counter expires after `DEFAULT_FAILURE_WINDOW_MS`
+(60 s), so isolated failures spread over time never accumulate into a
+demotion. An unhealthy store does **not** become healthy when its cooldown
+expires: it is half-open and routable, but `isHealthy()` and a gauge fed from
+`storeHealthChanged()` stay false until a probe actually succeeds. This is
+intentional — the cooldown is not evidence of recovery.
+
 ## PHPStan: `$this->fail()` directly after a call whose closure always throws is dead code
 
 A test like `try { $executor->execute($k, fn () => throw …); $this->fail(...); } catch (TiKvException) {}`

@@ -132,6 +132,36 @@ class StoreHealthTrackerTest extends TestCase
         $this->assertSame(0, $tracker->getConsecutiveFailures(0));
     }
 
+    public function testFailuresOlderThanWindowAreForgotten(): void
+    {
+        $clock = new MutableClock();
+        $tracker = $this->tracker($clock, failureWindowMs: 1000);
+
+        $tracker->recordFailure(1);
+        $tracker->recordFailure(1);
+
+        $clock->nowMs = 1001;
+        $this->assertFalse($tracker->hasTrackedFailures());
+        $this->assertSame(0, $tracker->getConsecutiveFailures(1));
+
+        $this->assertFalse($tracker->recordFailure(1));
+        $this->assertSame(1, $tracker->getConsecutiveFailures(1));
+        $this->assertTrue($tracker->isHealthy(1));
+    }
+
+    public function testUnhealthyStoreStaysUnhealthyAfterCooldownUntilAProbeSucceeds(): void
+    {
+        $clock = new MutableClock();
+        $tracker = $this->tracker($clock);
+        $this->markUnhealthy($tracker);
+
+        $clock->nowMs = 3_600_000;
+
+        $this->assertTrue($tracker->isAvailable(1));
+        $this->assertFalse($tracker->isHealthy(1));
+        $this->assertTrue($tracker->hasTrackedFailures());
+    }
+
     public function testConstructorRejectsInvalidConfiguration(): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -144,6 +174,12 @@ class StoreHealthTrackerTest extends TestCase
         new StoreHealthTracker(cooldownMs: -1);
     }
 
+    public function testConstructorRejectsInvalidFailureWindow(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new StoreHealthTracker(failureWindowMs: 0);
+    }
+
     private function markUnhealthy(StoreHealthTracker $tracker): void
     {
         $tracker->recordFailure(1);
@@ -151,13 +187,18 @@ class StoreHealthTrackerTest extends TestCase
         $tracker->recordFailure(1);
     }
 
-    private function tracker(MutableClock $clock, int $threshold = 3, int $cooldownMs = 1000): StoreHealthTracker
-    {
+    private function tracker(
+        MutableClock $clock,
+        int $threshold = 3,
+        int $cooldownMs = 1000,
+        int $failureWindowMs = StoreHealthTracker::DEFAULT_FAILURE_WINDOW_MS,
+    ): StoreHealthTracker {
         return new StoreHealthTracker(
             $threshold,
             $cooldownMs,
             $this->metrics,
             static fn (): int => $clock->nowMs,
+            $failureWindowMs,
         );
     }
 }
