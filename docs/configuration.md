@@ -1898,8 +1898,11 @@ cluster-wide `gc_life_time`.
 ### Retry Behavior
 
 `ErrorClassifier` maps each retryable error to a real `BackoffType` case
-(`src/Client/Retry/BackoffType.php`). The case name is also what the retry log
-and the `retries_total` metric report as `backoff_type`.
+(`src/Client/Retry/BackoffType.php`). The case name is what the retry log
+records under `backoffType` and what `MetricsInterface::retryAttempted()`
+receives, so a metrics adapter can label retries by backoff type (the
+Prometheus example in [Metrics Collection](advanced.md#metrics-collection) uses
+`retries_total{backoff_type}`).
 
 For attempt *n*, `BackoffType::sleepMs()` computes
 `min(cap, base × 2^n)` and then applies **equal jitter**: the actual sleep is
@@ -1909,7 +1912,7 @@ envelope before jitter, in milliseconds.
 
 | `BackoffType` | Base → cap (ms) | Jitter | Retried error / condition |
 |---------------|-----------------|--------|---------------------------|
-| `None` | 0 (no sleep) | — | `DataIsNotReady` — replica lag on a follower or stale read |
+| `None` | 0 (no sleep) | none (no sleep) | `DataIsNotReady` — replica lag on a follower or stale read |
 | `EpochNotMatch` | 2 → 500 | equal | `EpochNotMatch` — stale region epoch |
 | `ServerBusy` | 2000 → 10000 | equal | `ServerIsBusy`; gRPC `RESOURCE_EXHAUSTED`. Charged to the separate 60 s ServerBusy budget |
 | `StaleCmd` | 2 → 1000 | equal | `StaleCommand` |
