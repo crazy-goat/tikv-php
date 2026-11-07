@@ -571,6 +571,9 @@ public function getKeyTTL(string $key): ?int;
 
 ### Pull Request Process
 
+The full issue-to-merge process lives in [`workflow.md`](workflow.md); this
+section is the short version for contributors.
+
 1. **Push your branch**:
    ```bash
    git push origin feature/my-feature
@@ -579,23 +582,25 @@ public function getKeyTTL(string $key): ?int;
 2. **Create Pull Request** on GitHub:
    - Use clear title following commit convention
    - Fill in the PR template
-   - Link related issues
+   - Link related issues (`Closes #<N>`)
 
 3. **PR Checklist**:
    - [ ] Tests pass
    - [ ] Code style passes
    - [ ] Documentation updated
-   - [ ] CHANGELOG.md updated (if applicable)
+   - [ ] `CHANGELOG.md` updated under `## [Unreleased]` (never under a released
+         version heading) when the change is user-visible
    - [ ] Examples updated (if applicable)
 
 4. **Code Review**:
    - Address reviewer comments
    - Keep commits clean (squash if needed)
-   - Rebase on master if there are conflicts
+   - Merge or rebase `master` into your branch if there are conflicts
 
 5. **Merge**:
-   - Maintainers will merge when approved
-   - Use "Squash and merge" for clean history
+   - Maintainers merge once `ci-ok` is green and the branch is up to date with
+     `master`
+   - Squash merge only: `gh pr merge --squash --delete-branch`
 
 ### What to Include
 

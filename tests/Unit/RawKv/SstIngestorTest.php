@@ -426,6 +426,80 @@ class SstIngestorTest extends TestCase
     }
 
     // ========================================================================
+    // Ingest deadline
+    // ========================================================================
+
+    public function testIngestAppliesTheConfiguredIngestTimeout(): void
+    {
+        $this->setupStandardPdMocks($this->defaultRegion(), $this->defaultStore());
+
+        /** @var array<string, int|null> $timeouts */
+        $timeouts = [];
+
+        $this->grpc->method('callAsync')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+                string $responseClass,
+                ?int $timeoutMs = null,
+            ) use (&$timeouts): GrpcFuture {
+                $timeouts['SwitchMode'] = $timeoutMs;
+                return GrpcFuture::completed(new SwitchModeResponse());
+            });
+
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+                string $responseClass,
+                ?int $timeoutMs = null,
+            ) use (&$timeouts): Message {
+                $timeouts['Ingest'] = $timeoutMs;
+                return new IngestResponse();
+            });
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+        $this->grpc->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                iterable $requests,
+                string $responseClass,
+                ?int $timeoutMs = null,
+            ) use (
+                &$timeouts,
+                $writeResponse
+            ): Message {
+                $timeouts['RawWrite'] = $timeoutMs;
+                return $writeResponse;
+            });
+
+        $ingestor = new SstIngestor(
+            $this->grpc,
+            $this->pdClient,
+            $this->regionResolver,
+            new TimeoutConfig(ingestTimeoutMs: 45000),
+            new NullLogger(),
+            $this->regionCache,
+        );
+
+        $ingestor->ingest(['key1' => 'value1']);
+
+        // Every RPC of the import applies the configured deadline, not the
+        // 60000 ms default (issue #383, DOC-17).
+        self::assertSame(
+            ['SwitchMode' => 45000, 'RawWrite' => 45000, 'Ingest' => 45000],
+            $timeouts,
+        );
+    }
+
+    // ========================================================================
     // Switch mode error handling
     // ========================================================================
 
