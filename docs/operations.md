@@ -334,7 +334,10 @@ has no +infinity sentinel. `reverseScan('', $lower)` with a non-empty lower
 bound is rejected with `InvalidArgumentException` before any RPC, while
 `reverseScan('', '')` is the documented empty range. To read from the top of
 a prefix, pass the prefix's end key as the upper bound (for example `log;`
-for the prefix `log:`).
+for the prefix `log:`). Compute it with
+`RawKvSplitter::calculatePrefixEndKey($prefix)` rather than hand-rolling
+`chr($lastByte + 1)`: the helper trims trailing `0xFF` bytes and increments
+the preceding byte, so it is also correct for `0xFF`-terminated prefixes.
 
 A **reversed** range is rejected with `InvalidArgumentException` before any PD
 or store RPC: `startKey > endKey` for the forward operations (`scan()`,
@@ -583,7 +586,9 @@ reverse scan does not enumerate the rest of the range.
 // reverseScan($startKey, $endKey) scans [$endKey, $startKey) descending, so the
 // FIRST argument is the UPPER bound and must sort AFTER the second one. To
 // cover every key with a prefix, bump the prefix's last byte: 'log:' -> 'log;'
-// (':' is 0x3A, the next byte ';' is 0x3B).
+// (':' is 0x3A, the next byte ';' is 0x3B). For a real prefix use
+// RawKvSplitter::calculatePrefixEndKey('log:'), which also handles a trailing
+// 0xFF where a naive byte bump wraps to 0x00 and inverts the range.
 $logs = $client->reverseScan('log;', 'log:', limit: 10);
 
 // Get the last 5 messages for a user, newest first.
