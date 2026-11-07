@@ -335,8 +335,11 @@ rule, so all of them declare `array-key`:
 correctness-of-the-declaration fix only, not an API change.
 
 Pinned by `tests/Unit/RawKv/RawKvBatchArrayKeyTest.php` (the BatchCommands
-multiplexer is the ext-grpc-free transport seam) and
-`tests/Unit/TxnKv/TxnReaderArrayKeyTest.php`.
+multiplexer is the ext-grpc-free transport seam), its public-boundary sibling
+`tests/Unit/RawKv/RawKvClientBatchGetArrayKeyTest.php` (issue #202, RAW-17 —
+the same finding as #261, filed separately by the audit; the production fix
+already shipped in #603, so only the client-level regression test was added)
+and `tests/Unit/TxnKv/TxnReaderArrayKeyTest.php`.
 
 ## There is no pre-push hook in this repo
 
@@ -1588,6 +1591,28 @@ sits above `ApiV2GrpcClient::call()`
 (`src/Client/Grpc/ApiV2GrpcClient.php:57-66`, added by a1415aa0) — a separate
 finding, not part of this issue.
 
+The same premise expiry closed issue #227 (audit TXN-22, "the `priority`
+option is never written to the request `Context`"): the audit's line
+references are stale. `TxnKvClient::begin()` has read `options['priority']`
+since the option was introduced in 7404768 and passed it to `Transaction`;
+`TwoPhaseCommitter` has received it since it was split out of `Transaction`
+in 32f8948 (#173). The write path has set `Context.priority` since #441
+(`fc3c7c1`); the read path followed in #336 (`739b1c1`), which added the
+`priority` argument to `RegionContextFactory::fromRegionInfo()` and
+`resolveTarget()` and made `TxnReader` pass it at all three read
+context-building call sites. `begin(['priority' => 2])` therefore reaches
+`KvGet`, `KvBatchGet`, `KvScan`, `KvPrewrite`, `KvCommit`,
+`KvPessimisticLock`, `TxnHeartBeat` and both rollback RPCs; the
+lock-resolution RPCs stay Normal by design, because they resolve other
+transactions' locks. Pinned by
+`TransactionTest::testPriorityIsCarriedOnEveryRequestContext()`,
+`::testPriorityIsCarriedOnEveryReadRequestContext()`,
+`::testPriorityIsCarriedOnPessimisticLockContext()`,
+`::testPriorityIsCarriedOnRollbackContexts()` and
+`TxnKvClientTest::testBeginWithPriorityReachesTheRpcContext()`, so no source
+or test change is needed. The user-facing behaviour is documented in
+`docs/configuration.md#transaction-priority-txnkv`.
+
 ## A stray Markdown fence can become a legitimate closer — render the file before deleting it
 
 Issue #381 (DOC-15) reported an orphan closing fence after the TLS "manual
@@ -2052,6 +2077,39 @@ inspects `getRegionError()` on each sub-response and re-runs that sub-range
 through `executeScanForRegion()` (the concurrent send is awaited outside the
 per-range retry loop, so a region error there is neither retried nor
 invalidated otherwise).
+
+## `RawBatchScan` returns a flat kv list — per-range grouping needs disjoint ranges (#433)
+
+`kvrpcpb.RawBatchScanResponse` carries only `region_error` and a flat `kvs`
+list; unlike the client's `batchScan()` return shape it has no per-range
+boundaries. TiKV concatenates each requested range's results in request
+order and applies `each_limit` **per region and per range**, so the client
+restores the per-range grouping by walking the clipped bounds of each entry
+in the per-region request. That walk is unambiguous only when the requested
+ranges are pairwise disjoint (the common case); an overlapping pair can
+return the same key for both ranges, so `batchScan()` keeps the per-range
+`RawScan` path for such a call. The same fallback covers a region error,
+transport failure, missing store or an older TiKV that does not implement
+`RawBatchScan` (gRPC `UNIMPLEMENTED`): reads are idempotent, so the whole
+call is re-run through the retrying per-range path. Because TiKV's
+`each_limit` is per region, a range spanning several regions can return up
+to `eachLimit` rows from each; the client trims the merged ascending rows to
+`eachLimit` before returning. A clipped range with an empty end key
+(+infinity) must stay last in a per-region request: TiKV reads an empty end
+key on a non-final range as "up to the next range's start". The client
+therefore sorts each region's entries by start key.
+
+The fallback starts its own retry budget and receives only the part of
+`options['timeout']['batchDeadlineMs']` that the region path did not consume.
+The deadline covers region enumeration too (it is checked before every
+range's `resolveScanRegions()`), so a cold cache cannot spend an unbounded
+number of PD round trips outside the budget. A PD failure during enumeration
+is wrapped in `BatchPartialFailureException` — before #433 the enumeration ran
+inside the per-range callables and the batch executor produced that type — so
+the documented exception surface does not widen. The fallback is a deliberate
+deviation from a strict regroup-and-retry: it re-reads every range instead of
+regrouping only the failed regions, which is safe because reads are
+idempotent.
 
 ## TxnKV region lookups must be MCE-encoded (GAP-01)
 

@@ -133,8 +133,9 @@ interface GrpcClientInterface
      *   same transport can be shared by several clients. Close it yourself
      *   when the application is done with it;
      * - a client assembled by hand (`new RawKvClient($pdClient, $grpc)`) is
-     *   given a transport it did not create and closes it here anyway — pass
-     *   `ownsGrpcClient: false` to keep the ownership with the application.
+     *   given a transport it did not create and does not close it; pass
+     *   `ownsGrpcClient: true` to transfer ownership. `TxnKvClient` has the
+     *   same flag but still defaults to `true`.
      *
      * "Close" means this client's handles: ext-grpc keeps the underlying
      * channel in its process-global persistent table, so the TCP connection

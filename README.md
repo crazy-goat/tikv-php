@@ -272,17 +272,21 @@ foreach ($client->scanIterator('a', 'b', batchSize: 256, keyOnly: true) as $key 
 // Reverse scan (descending order)
 // Note the order: startKey = UPPER bound (exclusive), endKey = LOWER bound
 // (inclusive) — the first argument must sort after the second. Bump the last
-// byte of a prefix to cover all of its keys ('log:' -> 'log;'); append "\x00"
-// to a key to make the upper bound inclusive of that key.
+// byte of a prefix to cover all of its keys ('log:' -> 'log;');
+// RawKvSplitter::calculatePrefixEndKey('log:') computes that end key safely
+// (including a trailing 0xFF). Append "\x00" to a key to make the upper bound
+// inclusive of that key.
 $results = $client->reverseScan('log;', 'log:', limit: 100);
 
-// Scan multiple non-contiguous ranges. This is a client-side loop of
-// per-range RawScan requests, not the RawBatchScan RPC: the RPC count is
-// linear in the number of ranges and the regions they cover (each range
-// resolves its own regions), although the per-range sends are fanned out
-// concurrently up to options['maxConcurrency']. eachLimit is required and
-// must be > 0. Returns one list per range: a list input keeps its order,
-// while non-sequential keys are re-indexed in ascending key order.
+// Scan multiple non-contiguous ranges. The client groups the ranges by
+// region and sends one RawBatchScan request per region, so the RPC count is
+// the number of regions touched rather than one per range. Requests to
+// distinct regions are dispatched concurrently up to
+// options['maxConcurrency']. eachLimit is required and must be > 0; each
+// range returns at most eachLimit rows. Overlapping ranges, and a region
+// error or transport failure, fall back to the per-range RawScan path.
+// Returns one list per range: a list input keeps its order, while
+// non-sequential keys are re-indexed in ascending key order.
 $results = $client->batchScan([['a:', 'a;'], ['b:', 'b;']], eachLimit: 50);
 ```
 
@@ -766,7 +770,9 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 The `*BaseDir` options are optional and restrict **where** the certificate
 files may live: the path is canonicalized with `realpath()` before the
 comparison, so a `..` segment or a symlink cannot pull in a file from outside
-the base directory. `caCertBaseDir` guards `caCertFile`; `clientCertBaseDir`
+the base directory, and the comparison uses directory boundaries rather than a
+string prefix, so a sibling like `/etc/tikv-attacker` cannot pass a base of
+`/etc/tikv`. `caCertBaseDir` guards `caCertFile`; `clientCertBaseDir`
 guards `clientCertFile` and `clientKeyFile`.
 
 > **Deprecated:** the legacy `caCert`, `clientCert` and `clientKey` keys guess
@@ -804,9 +810,11 @@ Closing is the mirror image of creating:
 - a transport **you** build and pass in (`options['grpcClient']`) belongs to
   your application — the client never closes it, so the same transport can
   serve a RawKV and a transactional client. Close it yourself;
-- a client you assemble by hand (`new RawKvClient($pdClient, $grpc)`) closes
-  the transport it was **given** — pass `ownsGrpcClient: false` when your
-  application keeps the transport and wants to close it itself.
+- a client you assemble by hand (`new RawKvClient($pdClient, $grpc)`) does not
+  own the transport or the PD client it is **given** — `close()` and the
+  destructor leave both open, so you can share them with other clients and
+  close them yourself. Pass `ownsGrpcClient: true` / `ownsPdClient: true` to
+  transfer ownership; the client still clears its own region cache.
 
 ```php
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
@@ -1315,6 +1323,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **PD connection reuse** — `TxnKvClient::pdClient()` exposes the client's own `PdClientInterface` for cluster inspection and tests ([#515](https://github.com/crazy-goat/tikv-php/issues/515))
 - ✅ **Explicit pessimistic key locking** — `Transaction::lockKeys()` and `getForUpdate()` acquire locks without writing, with the same conflict, deadlock and wait-timeout handling ([#436](https://github.com/crazy-goat/tikv-php/issues/436))
 - ✅ **Peer-role awareness** — `PeerInfo` carries the TiKV role and a learner or witness can never be adopted as the leader ([#258](https://github.com/crazy-goat/tikv-php/issues/258))
+- ✅ **`RawBatchScan` for multi-range scans** — `batchScan()` groups the ranges by region and sends one `RawBatchScan` per region, with the per-range result shape unchanged ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
 
 ### Planned
 
@@ -1327,7 +1336,6 @@ feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
 - ⬜ **Prometheus exporter and tracing hooks** — a ready-made metrics backend and request tracing ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
-- ⬜ **`RawBatchScan` RPC for multi-range scans** — `batchScan()` is a client-side loop today ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
 - ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 
 ## Contributing

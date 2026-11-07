@@ -32,9 +32,9 @@ use Psr\Log\NullLogger;
  * itself and closes it in `close()`. A transport the application passes in
  * (the `grpcClient` option) belongs to the application: the client never
  * closes it, so the same transport can serve several clients. A client
- * assembled by hand (`new RawKvClient($pdClient, $grpc)`) closes the
- * transport it was given unless `ownsGrpcClient: false` is passed. See
- * {@see GrpcClientInterface::close()}.
+ * assembled by hand (`new RawKvClient($pdClient, $grpc)`) does not own the
+ * transport it is given, so it never closes it; pass `ownsGrpcClient: true`
+ * to transfer ownership. See {@see GrpcClientInterface::close()}.
  *
  * ## ext-grpc channel semantics (issue #283)
  *
@@ -240,6 +240,13 @@ final class GrpcClient implements GrpcClientInterface
      *                                         `new Call(...)`). Internal testing seam:
      *                                         it lets a test drive the send loop with a
      *                                         mock call, without a server.
+     * @param (\Closure(?string, ?string, ?string): ChannelCredentials)|null $credentialsFactory
+     *                                         Factory for TLS credentials (default
+     *                                         `ChannelCredentials::createSsl(...)`). Internal
+     *                                         testing seam: it exposes the certificate material
+     *                                         a channel is rebuilt from, so a test can pin that
+     *                                         eviction and reconnection reuse the intact
+     *                                         `TlsConfig` (issue #315).
      */
     public function __construct(
         private readonly LoggerInterface $logger = new NullLogger(),
@@ -257,6 +264,7 @@ final class GrpcClient implements GrpcClientInterface
         private readonly int $initialWindowSizeBytes = self::DEFAULT_INITIAL_WINDOW_SIZE_BYTES,
         private readonly ?\Closure $clock = null,
         private readonly ?\Closure $callFactory = null,
+        private readonly ?\Closure $credentialsFactory = null,
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -1176,6 +1184,11 @@ final class GrpcClient implements GrpcClientInterface
 
         $certChain = $this->tlsConfig->clientCert;
         $privateKey = $this->tlsConfig->clientKey;
+        $factory = $this->credentialsFactory;
+
+        if ($factory instanceof \Closure) {
+            return $factory($this->tlsConfig->caCert, $certChain, $privateKey);
+        }
 
         return ChannelCredentials::createSsl(
             $this->tlsConfig->caCert,

@@ -59,6 +59,8 @@ final class SafeLoggingTest extends TestCase
             $grpc,
             $regionCache,
             logger: new ThrowingLogger(),
+            ownsGrpcClient: true,
+            ownsPdClient: true,
         );
 
         $this->expectNotToPerformAssertions();
