@@ -9,6 +9,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\SafeLogging;
 use CrazyGoat\TiKV\Client\Tls\TlsConfig;
 use Google\Protobuf\Internal\Message;
 use Grpc\Call;
@@ -645,7 +646,7 @@ final class GrpcClient implements GrpcClientInterface
             return;
         }
 
-        $this->logger->debug('Channel closed', ['address' => $address]);
+        SafeLogging::log($this->logger, 'debug', 'Channel closed', ['address' => $address]);
         $this->closeChannelObject($address, $entry['channel']);
     }
 
@@ -892,7 +893,7 @@ final class GrpcClient implements GrpcClientInterface
             'inFlight' => $entry['inFlight'],
         ];
 
-        $this->logger->debug('Channel close deferred until in-flight calls settle', [
+        SafeLogging::log($this->logger, 'debug', 'Channel close deferred until in-flight calls settle', [
             'address' => $address,
             'inFlight' => $entry['inFlight'],
         ]);
@@ -960,7 +961,10 @@ final class GrpcClient implements GrpcClientInterface
         try {
             $channel->close();
         } catch (\Throwable $e) {
-            $this->logger->error('Failed to close gRPC channel', [
+            // close() is destructor-reachable: a logger that is already
+            // torn down during shutdown must not escape the destructor
+            // (issue #287, GRPC-28).
+            SafeLogging::log($this->logger, 'error', 'Failed to close gRPC channel', [
                 'address' => $address,
                 'exception' => $e,
             ]);

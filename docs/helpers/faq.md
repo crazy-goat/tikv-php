@@ -145,6 +145,43 @@ The `E2E-RawKV` and `E2E-TxnKV` testsuites require real TiKV nodes. Start
 the cluster with `make up` (PD on 2379, tikv1/2/3 on 20160/20161/20162),
 stop with `make down`. If state gets corrupted: `make clean && make up`.
 
+## The Compose image runs as a non-root user; match `HOST_UID`/`HOST_GID`
+
+`Dockerfile` creates an unprivileged `app` user and runs Composer, PHPUnit and
+the default `CMD` as it. `docker-compose.yml` bind-mounts the checkout at
+`/app`, so the image user must be the checkout owner or Composer cannot write
+`vendor/` and PHPUnit cannot write `.phpunit.cache/`. Compose builds the user
+from `HOST_UID`/`HOST_GID`; the `Makefile` and the E2E runner scripts fill both
+from `id -u` / `id -g`. A direct `docker compose build`/`run` on a host whose
+owner is not `1000` needs them in the environment, and changing them requires a
+rebuild because they are build args. The symptom of a mismatch is
+`Permission denied` under `/app` during `composer install` or a test run.
+
+A host GID that already exists in Alpine does not fail the build. macOS
+`staff` is GID 20 and Alpine owns several low GIDs, so the `app` group falls
+back to a free GID and the build prints a warning; the bind mount is governed
+by the owner UID, so writes still work. A host UID that already exists (for
+example `ntp` or `guest`) is reused numerically, and `USER` is numeric so no
+passwd entry is required. `APP_UID=0` is refused with an explicit error
+instead of silently building a root-running image.
+
+If you used the previous root-running image, `vendor/` and `.phpunit.cache/`
+in an existing checkout are root-owned and the first run as `app` fails with
+`Permission denied`. Fix it once:
+
+```bash
+sudo chown -R "$(id -u):$(id -g)" vendor .phpunit.cache
+```
+
+or remove both and let Composer and PHPUnit recreate them:
+
+```bash
+rm -rf vendor .phpunit.cache && composer install
+```
+
+The base image digest is pinned in `Dockerfile`; bump it together with the
+`alpine:3.21` tag.
+
 ## Protobuf `RepeatedField` is not a PHP array — `iterator_to_array()` before `array_map()`
 
 Proto getters returning repeated fields (`PrewriteRequest::getMutations()`,
@@ -587,6 +624,37 @@ rather than `retry_region_error:<kind>`: the latter means "RetryExecutor
 dropped the entry before scheduling another attempt", while `check()` may run
 outside any retry executor. Do not collapse the two labels, and do not
 assume the executor owns every drop.
+
+## `RegionErrorHandler::check()` is a closed-set `instanceof` dispatch, not duck typing (PERF-16, issue #303)
+
+`check()` used to call `method_exists()` twice on every response. It now
+matches the response against the explicit set of types the client sends
+(`RawGetResponse`, `RawBatchGetResponse`, the transactional responses, …) and
+calls the getter only in the matching arm. The generated protobuf classes
+share no interface, so the set lives in the two `match (true)` blocks inside
+`check()` (region error first, then the top-level error); a new response type
+that can carry a `region_error` or a top-level `error` must be added there, or
+`check()` will silently treat it as clean. That is deliberate for an object
+the handler does not know (the `stdClass` test pins it): the handler only
+sees the client's own response types in production, and duck-typing a
+`getRegionError()` method was exactly the reflection cost the issue removed.
+The `regionErrorResponseProvider` / `topLevelErrorResponseProvider` data
+providers in `RegionErrorHandlerTest` enumerate the 24 region-error types and
+the 18 `getError()` types, so removing one from a match fails the suite
+instead of silently accepting that response.
+
+The batch-get path also walks its repeated `pairs` field once. The unary path
+resolves to the collected `array<array-key, ?string>` from
+`CheckedGrpcFuture::fromBatchGetFuture()` /
+`RegionErrorHandler::checkAndCollectBatchGet()`; the multiplexed path calls
+`check(..., checkPairErrors: false)` in `tryMultiplex()` and collects with
+`RegionErrorHandler::collectBatchGetPairs()` in `RawKvBatch::batchGet()`.
+Both loops throw the same `KeyErrorException` at the same point in the order
+(region error first, then the first bad pair), so the exception surface is
+unchanged: the unary path still wraps it in `BatchPartialFailureException`,
+the multiplexed path still lets it escape. Do not "simplify" by moving the
+pair check out of the per-region waiter on the unary path — that would change
+the wrapper the caller sees.
 
 ## PHPStan `ternary.alwaysFalse` fires for by-ref bool flags mutated in a sibling closure — sequence mocks instead
 
@@ -2924,3 +2992,22 @@ wait does not prove the shared budget.
 
 The experimental BatchCommands multiplex path (`RawKvBatch::tryMultiplex`) is bounded per call
 only. It does not use the batch deadline.
+
+## Destructors log best-effort and skip rollback during shutdown (#287)
+
+PHP runs `register_shutdown_function()` callbacks before it destroys the
+remaining objects, so `Util\ShutdownState` flips a process-wide flag from one
+of them and the destructors that do network I/O consult it. `TxnKvClient` and
+`Transaction` register the callback when they are constructed. During
+shutdown `Transaction::__destruct()` and `TxnKvClient::close()` skip the
+rollback RPC — ext-grpc may already be in or past module shutdown — and the
+transaction's locks expire with the lock TTL. An explicit `close()` before
+shutdown still rolls the live transactions back.
+
+Every record on a close or destructor path goes through
+`Observability\SafeLogging::log()`, which swallows any `Throwable` from the
+logger. Do not add a direct `$this->logger->...()` call to `close()`,
+`closeChannel()`, `closeChannelObject()` or `Transaction::__destruct()`: a
+Monolog `StreamHandler` whose stream is already closed throws on `write()`,
+and that throw would escape the destructor as a fatal error and hide the real
+failure. The regression tests use `tests/Unit/Support/ThrowingLogger.php`.

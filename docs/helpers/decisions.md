@@ -223,6 +223,24 @@ the diff:
    unbounded path passes no limit to the merge: the cap bounds the TiKV read,
    and the transaction's own writes must stay visible (read-your-writes).
 
+## A PHP-level merge of scan rows is slower than the native `array_unique()` + `sort()` it replaces (issue #302)
+
+`TxnReader::finalizeScanResults()` merges the scanned rows with the
+transaction's in-range write-set keys. The obvious optimisation — sort only the
+write keys and merge the two sorted sequences in one linear pass — was
+implemented, measured and rejected: `array_unique()` and `sort()` are C, while
+the merge compares one row at a time in PHP and appends to a PHP array, so the
+"linear" version cost about 13 ms for 10,240 rows plus 100 write keys against
+about 7 ms for the code it replaced. The shipped version keeps the per-row work
+in C: it copies runs of scanned rows as `array_slice()`s and inserts each
+write key at its lower bound (binary search, so only
+`|writeSet| × log(rows)` comparisons run in PHP). Do not "simplify" this back
+into a row-by-row loop without re-running `benchmarks/TxnScanMergeBenchmark.php`.
+The invariant the merge relies on — TiKV returns scan rows in ascending byte
+order, pages continuing from the region boundary and regions clipped in
+ascending order — is why the scanned rows need no sort at all; a per-row
+fallback sort would silently reintroduce the cost.
+
 ## All key ordering goes through `Client\Util\KeyOrder`, enforced by a PHPStan rule (issue #186)
 
 TiKV orders keys by unsigned byte value, PHP 8 compares two numeric strings
@@ -1705,6 +1723,23 @@ A split that shrinks a group's region below the group's last key is still not
 re-grouped (the retry only re-resolves the first key and fails closed once the
 budget is exhausted). That limitation is deliberate for this issue; fixing it
 means re-grouping the remaining keys inside the retried closure.
+
+## Compose ports bind to loopback, not `0.0.0.0` (issue #318, SEC-15)
+
+`docker-compose.yml` publishes PD and the three TiKV ports as
+`127.0.0.1:${PD_PORT:-2379}:2379` and the matching `TIKV*_PORT` entries. The short
+`"HOST:CONTAINER"` form without a host address binds to `0.0.0.0`, which exposes an
+unauthenticated, unencrypted development cluster to every host that can route to the
+machine. The published ports exist only for host-side manual work (`curl`, PD's HTTP
+API, the `PD_ENDPOINTS=localhost:...` E2E runner) and for the CI readiness probes; the
+E2E tests themselves run inside the compose network and reach `pd:2379` by service
+name, so the binding does not affect them.
+
+Do not make the host address configurable with a default of `0.0.0.0`: that recreates
+the exposure on any machine that does not set the variable. A workflow that really
+needs remote access should pass its own compose override or use an SSH tunnel.
+`tests/Unit/Ci/DockerComposePortBindingTest.php` pins the loopback prefix for every
+published port in every `docker-compose*.yml`.
 
 ## gRPC receive limit defaults to 64 MB, not the core's 4 MB (SEC-16, issue #319)
 

@@ -4,11 +4,16 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Batch;
 
+use CrazyGoat\Proto\Kvrpcpb\KeyError;
+use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
+use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
+use Google\Protobuf\Internal\Message;
 use Grpc\Call;
 use PHPUnit\Framework\TestCase;
 
@@ -82,6 +87,47 @@ class CheckedGrpcFutureTest extends TestCase
         $checked = CheckedGrpcFuture::fromGrpcFuture($future);
 
         $this->expectException(TiKvException::class);
+        $checked->waitForExecutor();
+    }
+
+    /**
+     * Issue #303 (PERF-16): the batch-get variant resolves to the collected
+     * key => value map, not to the raw RawBatchGetResponse, so the caller
+     * never walks the repeated pairs field again.
+     */
+    public function testFromBatchGetFutureResolvesToCollectedKeyValueMap(): void
+    {
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setValue('v1');
+
+        $response = new RawBatchGetResponse();
+        $response->setPairs([$pair]);
+
+        $future = GrpcFuture::fromWaiter(static fn(): Message => $response);
+        $checked = CheckedGrpcFuture::fromBatchGetFuture($future);
+
+        self::assertSame($future, $checked->inner());
+        self::assertSame(['k1' => 'v1'], $checked->waitForExecutor());
+    }
+
+    public function testFromBatchGetFutureChecksPerPairErrors(): void
+    {
+        $keyError = new KeyError();
+        $keyError->setRetryable('too old');
+
+        $pair = new KvPair();
+        $pair->setKey('k1');
+        $pair->setError($keyError);
+
+        $response = new RawBatchGetResponse();
+        $response->setPairs([$pair]);
+
+        $checked = CheckedGrpcFuture::fromBatchGetFuture(
+            GrpcFuture::fromWaiter(static fn(): Message => $response),
+        );
+
+        $this->expectException(KeyErrorException::class);
         $checked->waitForExecutor();
     }
 
