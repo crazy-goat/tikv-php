@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- PD cluster identity is now verified on every response, not only when it is first learned (issue #250, REG-19). Once a cluster ID has been adopted, a later PD response header naming a different cluster raises `TiKvException` (`Cluster ID mismatch: established X, server reported Y`) instead of being accepted, so a PD endpoint repointed at another cluster (a VIP move, a restored backup, staging pointed at production) can no longer silently take over region routing; `setClusterId()` applies the same no-overwrite rule. A reported cluster ID of `0` — proto3's unset value — is treated as "not learned": it is never adopted, `healthCheck()` / `getClusterId()` keep returning `null` instead of pinning the client to cluster 0, and `setClusterId()` rejects non-positive IDs. The learning/verification rules and the `mismatch cluster id, need X but got Y` parsing now live in one shared `ClusterIdGuard` used by `PdClient` and `TimestampOracle`, instead of two divergent copies. (#250)
+
 ## [v0.11.0] - 2026-11-07
 
 ### Added

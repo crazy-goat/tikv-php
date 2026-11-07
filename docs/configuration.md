@@ -276,10 +276,18 @@ example from `pd-ctl cluster` or a trusted client. When it is set:
   cluster-id mismatch errors, so the timestamp path cannot be redirected
   either.
 
-Independently of the option, once a cluster ID has been established, an
-error string naming a different ID is rejected instead of silently
-overwriting it. That no-overwrite rule is unconditional: it also applies when
-`expectedClusterId` is unset, because the issue requires it.
+Independently of the option, once a cluster ID has been established, every
+later PD response header must report the same ID; a different ID throws
+`TiKvException` (`Cluster ID mismatch: established X, server reported Y`)
+before the response reaches the caller. An error string naming a different ID
+is rejected the same way instead of silently overwriting the established ID.
+Both rules are unconditional: they also apply when `expectedClusterId` is
+unset. A reported ID of `0` means "not reported" (proto3 omits an unset
+scalar), so it is never adopted and never treated as a mismatch:
+`healthCheck()` and `getClusterId()` keep returning `null` instead of pinning
+the client to cluster 0. The header and error-string rules live in one shared
+`ClusterIdGuard` used by `PdClient` and `TimestampOracle` (issue #250,
+REG-19).
 
 An absent or explicitly `null` option keeps the historical initial
 learn-and-adopt behaviour: the first cluster ID PD reports is adopted.
