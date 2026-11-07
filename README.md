@@ -1139,6 +1139,11 @@ make example          # Run basic example
 make shell            # Open development shell
 ```
 
+The Compose containers run as an unprivileged user, so the image is built with
+the host owner's UID/GID (`HOST_UID`/`HOST_GID`) to keep the bind-mounted
+checkout writable. `make` and the E2E scripts detect both automatically; set
+them explicitly only for a direct `docker compose` call, then rebuild.
+
 ## Examples
 
 See the `examples/` directory for complete working examples:

@@ -2050,6 +2050,51 @@ class TransactionTest extends TestCase
         $this->assertSame('k3', $result[1]['key']);
     }
 
+    public function testScanMergePlacesWriteSetKeysAroundScannedRows(): void
+    {
+        // The merge places every in-range write-set key relative to the
+        // already-sorted scanned rows (issue #302): before the first row,
+        // between two rows, exactly on a row (override or tombstone) and after
+        // the last row. The write set is deliberately not in key order — only
+        // the write keys are sorted, never the scanned rows.
+        $region = $this->makeRegion(1, '', '');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->stubScanRegionLookup([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $response = $this->makeScanResponse([
+            'k2' => 'scanned-v2',
+            'k4' => 'scanned-v4',
+        ]);
+        $this->grpc->method('call')->willReturnCallback(
+            static fn(string $addr, string $svc, string $method): object => match ($method) {
+                'KvScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false]);
+        $txn->set('k4', 'local-v4');
+        $txn->set('k1', 'local-v1');
+        $txn->delete('k2');
+        $txn->set('k5', 'local-v5');
+        $txn->set('k3', 'local-v3');
+
+        $result = $txn->scan('', '', 0);
+
+        $this->assertSame(['k1', 'k3', 'k4', 'k5'], array_column($result, 'key'));
+        $this->assertSame(
+            ['local-v1', 'local-v3', 'local-v4', 'local-v5'],
+            array_column($result, 'value'),
+        );
+
+        // The limit truncates the merged sequence after tombstones are
+        // dropped, so the deleted 'k2' does not consume one of the two rows.
+        $limited = $txn->scan('', '', 2);
+
+        $this->assertSame(['k1', 'k3'], array_column($limited, 'key'));
+    }
+
     // ========================================================================
     // Retry / error classification
     // ========================================================================
