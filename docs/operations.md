@@ -256,15 +256,22 @@ All three batch operations share the same execution model
    if most regions succeeded.
 
 **The exception's diagnostics:** `getRegionErrors()` returns
-`array<int, TiKvException>` (failed sub-batch index → exception) and
-`getTotalRegions()` returns the number of sub-batch units in the batch. The
-message summarises both: `Batch operation partially failed: <n> of <total>
-regions failed. First error: ...`.
+`array<int, TiKvException>` (failed fan-out call index → exception),
+`getFailedRegionIds()` returns the real TiKV region IDs of the failed calls
+(unique, ascending) and `getFailedCallIds()` maps each failed call index to
+a `BatchCallId` carrying `regionId` and `subBatchIndex`. `getTotalRegions()`
+returns the number of sub-batch units in the batch. The message summarises
+the count: `Batch operation partially failed: <n> of <total> regions failed.
+First error: ...`.
 
-> **Note:** the array keys in `getRegionErrors()` are internal sub-batch
-> indices, *not* TiKV region IDs and not your keys — the client does not
-> expose which user keys belonged to a failed sub-batch. In practice, treat
-> the batch as "partially applied with unknown affected keys".
+> **Note:** the array keys in `getRegionErrors()` remain internal call
+> indices, *not* TiKV region IDs and not your keys. Use
+> `getFailedRegionIds()` to correlate the failure with `pd-ctl` and
+> cluster-side metrics; a region split into several sub-batches is reported
+> by `getFailedCallIds()` as one entry per sub-batch (`subBatchIndex`), so
+> identifiers never collide. The client still does not expose which user
+> keys belonged to a failed sub-batch, so treat the batch as "partially
+> applied with unknown affected keys".
 
 **Recovery patterns:**
 
@@ -275,9 +282,10 @@ try {
     $client->batchPut($pairs);
 } catch (BatchPartialFailureException $e) {
     printf(
-        "%d of %d sub-batches failed\n",
+        "%d of %d sub-batches failed (regions: %s)\n",
         count($e->getRegionErrors()),
         $e->getTotalRegions(),
+        implode(', ', $e->getFailedRegionIds()),
     );
 
     // Idempotent work (fixed key/value set): a full retry is safe and
@@ -308,6 +316,9 @@ which ones must not be repeated after an ambiguous failure — see
 `BatchAsyncExecutor` when the wall-clock batch deadline expires (the
 `batchDeadlineMs` timeout option, 60000 ms by default; `0` disables it);
 in-flight futures are cancelled, so the applied subset is likewise unknown.
+When the call site supplied fan-out descriptors, `getContext()` also carries
+`dispatchedRegionIds` and `pendingRegionIds` (the real TiKV region IDs) next
+to the historical `dispatchedRegions`/`pendingRegions` slot indices.
 
 ## Scanning Operations
 
@@ -1300,9 +1311,13 @@ userland state, and a live channel is not serializable.
 first rolls back the transactions it began that are still active
 (`RawKvClient` has no transactions), then the client clears the region cache,
 closes the gRPC transport if the client owns it, and closes the PD client
-(always — there is no ownership flag for it). The transaction rollback runs
-while the region cache, transport and PD client are still usable, so an
-abandoned transaction does not leave its locks behind until the TTL expires.
+(always — there is no ownership flag for it). Outside PHP's shutdown
+sequence, the transaction rollback runs while the region cache, transport
+and PD client are still usable, so an abandoned transaction does not leave
+its locks behind until the TTL expires. Once PHP is shutting down, the
+rollback is skipped — ext-grpc may already be in or past module shutdown —
+and the locks then expire with the lock TTL (see
+[Shutdown and destructors](configuration.md#shutdown-and-destructors)).
 A failing step is logged at error level and does not stop the others, so:
 
 - `close()` is **idempotent** — a second call does nothing;
@@ -1350,23 +1365,30 @@ setters remain callable: `close()`, `reapIdleChannels()`,
 `getColumnFamily()` and `getClusterId()` (which returns `null` after close
 because the PD client resets the cached cluster ID). A `Transaction` obtained
 before `close()` holds the transport and the PD client directly and does not
-check the client's closed flag. `TxnKvClient::close()` rolls back the
-transactions it began while they are still active. Whether that rollback
-succeeds or fails, the transaction ends `RolledBack` and closed (issue #231)
-and cannot be used afterwards; if the RPC failed, its remaining locks expire
-with their TTL. Finish open transactions before closing the client (see
-below).
+check the client's closed flag. Outside PHP's shutdown sequence,
+`TxnKvClient::close()` rolls back the transactions it began while they are
+still active. Whether that rollback succeeds or fails, the transaction ends
+`RolledBack` and closed (issue #231) and cannot be used afterwards; if the RPC
+failed, its remaining locks expire with their TTL. Once PHP is shutting down
+the rollback is skipped and the locks expire with the lock TTL (see
+[Shutdown and destructors](configuration.md#shutdown-and-destructors)).
+Finish open transactions before closing the client (see below).
 
 ### Transactions
 
 An active `Transaction` is rolled back by its destructor when it goes out of
 scope, and a failed destructor rollback is logged. `TxnKvClient::close()` is a
 second safety net: it rolls back the transactions it began that are still
-active before it releases the transport. That is still not the contract:
+active before it releases the transport. Both are skipped once PHP has
+entered its shutdown sequence, where ext-grpc may already be in or past
+module shutdown: the transaction then keeps its locks until the lock TTL
+expires (see
+[Shutdown and destructors](configuration.md#shutdown-and-destructors)).
+That is still not the contract:
 
 - call `commit()` or `rollback()` explicitly. Destructor and `close()` timing
-  are not guaranteed, and either rollback is a real RPC that can block
-  shutdown while it retries;
+  are not guaranteed, either rollback is a real RPC that can block shutdown
+  while it retries, and at shutdown the rollback is skipped altogether;
 - an attempted rollback is terminal even when its RPC fails (issue #231): the
   transaction is marked `RolledBack` and closed, and any server-side locks the
   failed cleanup left in place stay until their TTL expires and block other
@@ -1601,7 +1623,9 @@ positive integer).
    built on demand and released when the next chunk is requested, so the
    payload is not held as a full `Pair[]` array plus a full request array plus
    the serialised messages. The resulting SST is committed with the
-   **`Ingest`** RPC.
+   **`Ingest`** RPC. If the stream fails while it is being sent, the transport
+   cancels the RPC so the store stops working on the abandoned import instead
+   of waiting for its own deadline (issue #286).
 
 This bypasses the normal Raft write path and writes pre-sorted data directly
 into regions, giving far higher throughput than `batchPut()` on large loads.

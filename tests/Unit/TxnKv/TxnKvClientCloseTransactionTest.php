@@ -19,6 +19,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+use CrazyGoat\TiKV\Client\Util\ShutdownState;
 use CrazyGoat\TiKV\Tests\Unit\Support\RecordingLogger;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -96,6 +97,33 @@ class TxnKvClientCloseTransactionTest extends TestCase
             array_slice($this->rpcMethods, -2),
             'the transport and the PD client must be closed after the rollback RPC',
         );
+    }
+
+    /**
+     * Issue #287 (GRPC-28): once PHP is shutting down, close() must not
+     * issue a rollback RPC — ext-grpc may already be past module shutdown.
+     * The transaction keeps its locks until the lock TTL expires.
+     */
+    public function testCloseSkipsLiveTransactionRollbackDuringShutdown(): void
+    {
+        $this->stubRpcResponses();
+        $client = $this->createClient();
+        $transaction = $client->beginOptimistic();
+        $transaction->set('key1', 'value1');
+
+        ShutdownState::markShutdown();
+        try {
+            $client->close();
+
+            $this->assertSame(TransactionStatus::Active, $transaction->getStatus());
+            $this->assertSame([], $this->rpcMethods, 'close() must not issue a rollback RPC during shutdown');
+
+            // Destroy the transaction while the flag is still set, so its
+            // destructor also skips the rollback RPC.
+            unset($transaction);
+        } finally {
+            ShutdownState::resetForTests();
+        }
     }
 
     public function testCloseDoesNotRollBackCommittedTransaction(): void

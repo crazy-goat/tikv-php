@@ -25,12 +25,14 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\SafeLogging;
 use CrazyGoat\TiKV\Client\Region\RegionCacheWarmer;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnAbortedByGcException;
+use CrazyGoat\TiKV\Client\Util\ShutdownState;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -444,6 +446,10 @@ final class TxnKvClient
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
         }
+        // Arm the shutdown flag before any destructor can consult it; the
+        // registered callback runs before PHP destroys the remaining
+        // objects (issue #287, GRPC-28).
+        ShutdownState::ensureRegistered();
         $this->retryDeadlineMs = $retryDeadlineMs;
         $this->resolvedStatusCache = new ResolvedTxnStatusCache();
         $this->serviceId = self::SERVICE_ID_PREFIX . '-' . substr(md5(uniqid('svc', true)), 0, 8);
@@ -1323,6 +1329,14 @@ final class TxnKvClient
      *
      * Idempotent and never throws. The transaction rollback can perform
      * network I/O and block while its retry loop runs.
+     *
+     * Once PHP has entered its shutdown sequence the rollback of live
+     * transactions is skipped: ext-grpc may already be in or past module
+     * shutdown, where a call's behaviour is undefined rather than merely
+     * erroneous (issue #287, GRPC-28). The abandoned transactions then keep
+     * their locks until the lock TTL expires, so callers that need an
+     * immediate release must commit() or rollback() explicitly (or call
+     * close()) before shutdown.
      */
     public function close(): void
     {
@@ -1332,12 +1346,17 @@ final class TxnKvClient
 
         $this->closed = true;
 
-        $this->rollbackLiveTransactions();
+        if (!ShutdownState::isShuttingDown()) {
+            $this->rollbackLiveTransactions();
+        }
 
         try {
             $this->regionCache->clear();
         } catch (\Throwable $e) {
-            $this->logger->error('Failed to clear region cache', ['exception' => $e]);
+            // close() is destructor-reachable: a logger that is already
+            // torn down during shutdown must not escape the destructor
+            // (issue #287, GRPC-28).
+            SafeLogging::log($this->logger, 'error', 'Failed to clear region cache', ['exception' => $e]);
         }
 
         try {
@@ -1348,13 +1367,13 @@ final class TxnKvClient
                 $this->grpc->close();
             }
         } catch (\Throwable $e) {
-            $this->logger->error('Failed to close gRPC client', ['exception' => $e]);
+            SafeLogging::log($this->logger, 'error', 'Failed to close gRPC client', ['exception' => $e]);
         }
 
         try {
             $this->pdClient->close();
         } catch (\Throwable $e) {
-            $this->logger->error('Failed to close PD client', ['exception' => $e]);
+            SafeLogging::log($this->logger, 'error', 'Failed to close PD client', ['exception' => $e]);
         }
     }
 
@@ -1388,7 +1407,7 @@ final class TxnKvClient
             try {
                 $transaction->rollback();
             } catch (\Throwable $e) {
-                $this->logger->error('Transaction rollback failed during client close', [
+                SafeLogging::log($this->logger, 'error', 'Transaction rollback failed during client close', [
                     'txnId' => $transaction->getTxnId(),
                     'exception' => $e,
                 ]);
