@@ -335,8 +335,11 @@ rule, so all of them declare `array-key`:
 correctness-of-the-declaration fix only, not an API change.
 
 Pinned by `tests/Unit/RawKv/RawKvBatchArrayKeyTest.php` (the BatchCommands
-multiplexer is the ext-grpc-free transport seam) and
-`tests/Unit/TxnKv/TxnReaderArrayKeyTest.php`.
+multiplexer is the ext-grpc-free transport seam), its public-boundary sibling
+`tests/Unit/RawKv/RawKvClientBatchGetArrayKeyTest.php` (issue #202, RAW-17 —
+the same finding as #261, filed separately by the audit; the production fix
+already shipped in #603, so only the client-level regression test was added)
+and `tests/Unit/TxnKv/TxnReaderArrayKeyTest.php`.
 
 ## There is no pre-push hook in this repo
 
