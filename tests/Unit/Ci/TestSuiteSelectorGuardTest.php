@@ -18,7 +18,7 @@ use PHPUnit\Framework\TestCase;
  * suite: the shell scripts, the Makefile, the compose files and the CI
  * workflow.
  *
- * Five rules are pinned here, all of them cheap and cluster-free:
+ * Six rules are pinned here, all of them cheap and cluster-free:
  *
  *  1. every `--testsuite` selector used in the repository names a suite
  *     that `phpunit.xml` declares;
@@ -35,6 +35,13 @@ use PHPUnit\Framework\TestCase;
  *     `TIKV_API_VERSION=2`: without it the suite skips every one of its
  *     tests, and a skipped test counts as a test, so the run would be
  *     green having tested nothing.
+ *  6. coverage is opt-in on the command line: `phpunit.xml` configures no
+ *     coverage report, and every composer test script that does not ask for
+ *     a report passes `--no-coverage`. A report in `phpunit.xml` makes every
+ *     plain run request a coverage driver — it exits 1 with
+ *     "XDEBUG_MODE=coverage ... has to be set" when Xdebug is in `develop`
+ *     mode although every test passed, and writes `coverage.xml` /
+ *     `coverage-html/` when a driver is in coverage mode (issue #556).
  *
  * The selectors and the suite names are read out of the files themselves
  * rather than restated here: a copy in this file could agree with a
@@ -259,6 +266,63 @@ class TestSuiteSelectorGuardTest extends TestCase
             $violations,
             "Runs of the API V2 suite that can skip every test:\n" . implode("\n", $violations),
         );
+    }
+
+    /**
+     * Coverage must stay opt-in on the command line (issue #556).
+     *
+     * `phpunit.xml` used to configure a Clover and an HTML report. PHPUnit
+     * then requested a coverage driver on every run that did not pass
+     * `--no-coverage`: on the documented local setup (`xdebug.mode=debug`)
+     * the run exited 1 with "XDEBUG_MODE=coverage ... has to be set"
+     * although every test passed, and with a driver in coverage mode it
+     * left `coverage.xml` and `coverage-html/` behind. The report block is
+     * gone; the coverage runners pass `--coverage-clover=coverage.xml`,
+     * which works with the `<source>` set that scopes the metric.
+     */
+    public function testCoverageIsOptInOnTheCommandLine(): void
+    {
+        $xml = $this->readFile($this->repoRoot() . '/phpunit.xml');
+
+        self::assertDoesNotMatchRegularExpression(
+            '/<coverage\b/',
+            $xml,
+            'phpunit.xml must not configure a coverage report: a bare `vendor/bin/phpunit` '
+            . 'run would request a coverage driver and exit 1 with "XDEBUG_MODE=coverage ... '
+            . 'has to be set" although every test passed (or write coverage.xml / '
+            . 'coverage-html/ when a driver is in coverage mode). Pass '
+            . '--coverage-clover=coverage.xml from the coverage runner instead (issue #556).',
+        );
+
+        self::assertStringContainsString(
+            '<source>',
+            $xml,
+            'phpunit.xml must keep the <source> set: it scopes the coverage metric to the '
+            . 'hand-written client code and excludes the generated src/Proto classes (issue #556).',
+        );
+
+        foreach ($this->composerScripts() as $name => $commands) {
+            if (!str_starts_with($name, 'test')) {
+                continue;
+            }
+
+            foreach ($commands as $command) {
+                if (!$this->runsPhpunit($command) || str_contains($command, '--coverage-')) {
+                    continue;
+                }
+
+                self::assertStringContainsString(
+                    '--no-coverage',
+                    $command,
+                    sprintf(
+                        'composer script "%s" runs PHPUnit without --no-coverage and without a '
+                        . 'coverage report option, so it asks for a driver it does not use '
+                        . '(issue #556).',
+                        $name,
+                    ),
+                );
+            }
+        }
     }
 
     /**

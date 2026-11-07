@@ -87,10 +87,11 @@
             <directory>src/Proto</directory>
         </exclude>
     </source>
-    <coverage>
-        <report>
-            <clover outputFile="coverage.xml"/>
-            <html outputDirectory="coverage-html"/>
-        </report>
-    </coverage>
+    <!-- Coverage is opt-in on the command line. A coverage report block
+         here would make every plain `vendor/bin/phpunit` run request a
+         coverage driver and write coverage.xml / coverage-html/, so the run
+         exits 1 with "XDEBUG_MODE=coverage ... has to be set" on the
+         documented local setup although every test passed (issue #556).
+         `composer test:coverage` and the CI coverage job pass the Clover
+         report option on the command line instead. -->
 </phpunit>
