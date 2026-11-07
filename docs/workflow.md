@@ -158,6 +158,16 @@ gh pr update-branch            # merges the default branch into the PR branch
 On a conflict, merge or rebase the default branch into the worktree branch, resolve the
 conflicts, run the checks, push, and go back to **step 5**.
 
+When the branch is checked out in a linked worktree, the canonical
+`gh pr merge --squash --delete-branch` merges but fails at its local
+branch-deletion step with
+`fatal: '<branch>' is already used by worktree at '<path>'`. The merge has
+landed; delete the remote branch manually, and let step 8 remove the local one:
+
+```bash
+git push origin --delete <branch>
+```
+
 Then check that the issue was closed (`gh issue view <N> --json state`). When the merge
 empties the milestone, go to [release-workflow.md](release-workflow.md) after step 8.
 
