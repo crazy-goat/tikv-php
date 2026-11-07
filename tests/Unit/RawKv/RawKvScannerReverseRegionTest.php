@@ -47,11 +47,15 @@ final class RawKvScannerReverseRegionTest extends TestCase
     private GrpcClientInterface&MockObject $grpc;
     private RegionCacheInterface&MockObject $regionCache;
 
+    /** @var list<array{string, string}> the [lower, upper] of every reverse RawScan */
+    private array $scanRequests = [];
+
     protected function setUp(): void
     {
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
+        $this->scanRequests = [];
 
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->grpc->method('call')->willReturnCallback(
@@ -161,7 +165,8 @@ final class RawKvScannerReverseRegionTest extends TestCase
     }
 
     /**
-     * Emulate a TiKV raw scan: one key per region, honouring the wire range.
+     * Emulate a TiKV raw scan: every key of the layout inside the wire range,
+     * in descending order, capped by the request limit.
      */
     private function scanResponse(RawScanRequest $request): RawScanResponse
     {
@@ -172,36 +177,49 @@ final class RawKvScannerReverseRegionTest extends TestCase
 
         $lower = $request->getEndKey();
         $upper = $request->getStartKey();
+        $this->scanRequests[] = [$lower, $upper];
 
-        foreach ($this->regions() as $index => $region) {
-            if (!KeyOrder::inRange($lower, $region->startKey, $region->endKey)) {
+        $pairs = [];
+        for ($index = 0; $index < self::REGION_COUNT; $index++) {
+            $key = $this->keyOf($index);
+            if (!KeyOrder::gte($key, $lower)) {
+                continue;
+            }
+            if ($upper !== '' && KeyOrder::gte($key, $upper)) {
                 continue;
             }
 
-            $key = $this->keyOf($index);
-            if (KeyOrder::gte($key, $lower) && ($upper === '' || KeyOrder::lt($key, $upper))) {
-                $pair = new KvPair();
-                $pair->setKey($key);
-                $pair->setValue('v-' . $key);
-                $response->setKvs([$pair]);
-            }
-
-            break;
+            $pair = new KvPair();
+            $pair->setKey($key);
+            $pair->setValue('v-' . $key);
+            $pairs[] = $pair;
         }
+
+        $pairs = array_reverse($pairs);
+        if ($request->getLimit() > 0) {
+            $pairs = array_slice($pairs, 0, $request->getLimit());
+        }
+
+        $response->setKvs($pairs);
 
         return $response;
     }
 
     private function scanner(): RawKvScanner
     {
+        return $this->scannerWithCache($this->regionCache);
+    }
+
+    private function scannerWithCache(RegionCacheInterface $cache): RawKvScanner
+    {
         return new RawKvScanner(
             $this->pdClient,
             $this->grpc,
-            new RegionResolver($this->pdClient, $this->regionCache),
+            new RegionResolver($this->pdClient, $cache),
             new TimeoutConfig(),
             maxBackoffMs: 20000,
             serverBusyBudgetMs: 600000,
-            regionCache: $this->regionCache,
+            regionCache: $cache,
             logger: new NullLogger(),
         );
     }
@@ -282,18 +300,12 @@ final class RawKvScannerReverseRegionTest extends TestCase
         $this->pdClient->expects($this->never())->method('getRegion');
         $this->pdClient->expects($this->never())->method('getPrevRegion');
 
-        $scanner = new RawKvScanner(
-            $this->pdClient,
-            $this->grpc,
-            new RegionResolver($this->pdClient, $cache),
-            new TimeoutConfig(),
-            maxBackoffMs: 20000,
-            serverBusyBudgetMs: 600000,
-            regionCache: $cache,
-            logger: new NullLogger(),
+        $result = $this->scannerWithCache($cache)->reverseScan(
+            $this->upperBound(),
+            $this->boundary(0),
+            3,
+            false,
         );
-
-        $result = $scanner->reverseScan($this->upperBound(), $this->boundary(0), 3, false);
 
         $this->assertSame(
             [
@@ -303,6 +315,115 @@ final class RawKvScannerReverseRegionTest extends TestCase
             ],
             array_column($result, 'key'),
         );
+    }
+
+    /**
+     * A cache gap must not drop rows (review R-1): when the region below the
+     * cursor is not cached, the lookup misses and PD resolves the region that
+     * actually contains the cursor. Before the gap guard,
+     * `getRegionBelow('k039')` answered with [k037, k038) and the scan skipped
+     * the uncached [k038, k039).
+     */
+    public function testReverseScanOverAPartiallyWarmCacheResolvesTheUncachedRegionThroughPd(): void
+    {
+        $regions = $this->regions();
+
+        $cache = new RegionCache();
+        $cache->put($regions[37]); // [k037, k038)
+        $cache->put($regions[39]); // [k039, '')
+        // [k038, k039) is not cached: a gap between the two entries.
+
+        $this->stubPdRegionLookups();
+        $this->pdClient->expects($this->never())->method('scanRegions');
+
+        $result = $this->scannerWithCache($cache)->reverseScan(
+            $this->upperBound(),
+            $this->boundary(0),
+            2,
+            false,
+        );
+
+        $this->assertSame(
+            [$this->keyOf(39), $this->keyOf(38)],
+            array_column($result, 'key'),
+        );
+    }
+
+    /**
+     * A merge between two descending batches (review R-3): the second batch
+     * starts at k008, where a merged region spans [k007, k009). Its end is
+     * above the cursor, so the scanner must clamp it to k008; otherwise the
+     * already-read k008 is returned twice and the row below it is lost.
+     */
+    public function testMergedRegionSpanningTheReverseCursorIsNotReadTwice(): void
+    {
+        $regions = $this->regions();
+        $mergedCursor = $this->boundary(8); // the first cursor of the second batch
+        $merged = new RegionInfo(
+            regionId: 1000,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 2,
+            startKey: $this->boundary(7),
+            endKey: $this->boundary(9),
+        );
+
+        $this->regionCache->method('getRegionBelow')->willReturnCallback(
+            static function (string $key) use ($regions, $merged, $mergedCursor): ?RegionInfo {
+                if ($key === $mergedCursor) {
+                    return $merged;
+                }
+
+                $best = null;
+                foreach ($regions as $region) {
+                    if (KeyOrder::gte($region->startKey, $key)) {
+                        continue;
+                    }
+                    if ($best === null || KeyOrder::gte($region->startKey, $best->startKey)) {
+                        $best = $region;
+                    }
+                }
+
+                if ($best === null || ($best->endKey !== '' && KeyOrder::lt($best->endKey, $key))) {
+                    return null;
+                }
+
+                return $best;
+            },
+        );
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static function (string $key) use ($regions): ?RegionInfo {
+                foreach ($regions as $region) {
+                    if (KeyOrder::inRange($key, $region->startKey, $region->endKey)) {
+                        return $region;
+                    }
+                }
+
+                return null;
+            },
+        );
+        $this->regionCache->method('put');
+
+        $limit = RegionScanBatch::MAX_REGIONS + 2; // one full batch plus two rows
+        $result = $this->scanner()->reverseScan($this->upperBound(), $this->boundary(0), $limit, false);
+
+        $expected = [];
+        for ($index = self::REGION_COUNT - 1; $index >= 6; $index--) {
+            $expected[] = $this->keyOf($index);
+        }
+
+        $this->assertSame($expected, array_column($result, 'key'));
+        $this->assertCount(
+            count($expected),
+            array_unique(array_column($result, 'key')),
+            'the merged region was read twice',
+        );
+
+        // The merged region's request is clamped to the cursor; without the
+        // clamp it would be [k007, k009) and re-read k008.
+        $this->assertContains(['k007', 'k008'], $this->scanRequests);
+        $this->assertNotContains(['k007', 'k009'], $this->scanRequests);
     }
 
     public function testRegionBatchSizeForASmallReverseLimitIsTheRowBudget(): void

@@ -101,7 +101,7 @@ final class RawKvScannerReverseFanOutTest extends TestCase
 
     /**
      * The region holding the greatest key strictly less than $key, mirroring
-     * RegionCache::getRegionBelow() (issue #198).
+     * RegionCache::getRegionBelow() including its gap guard (issue #198).
      *
      * @param list<RegionInfo> $regions
      */
@@ -118,6 +118,13 @@ final class RawKvScannerReverseFanOutTest extends TestCase
             if ($best === null || KeyOrder::gte($region->startKey, $best->startKey)) {
                 $best = $region;
             }
+        }
+
+        if ($best === null) {
+            return null;
+        }
+        if ($best->endKey !== '' && KeyOrder::lt($best->endKey, $key)) {
+            return null;
         }
 
         return $best;

@@ -21,8 +21,14 @@ interface RegionCacheInterface
      * reverse scan asks "what is the highest region below my current
      * exclusive upper bound?" and walks the range downwards. When $endKey is
      * inside a region that region is returned; when it sits on a region
-     * boundary the adjacent region below is returned. Null means the cache
-     * cannot answer (cold, expired, or $endKey is the start of the keyspace).
+     * boundary the adjacent region below is returned.
+     *
+     * Null means the cache cannot answer: cold, expired, $endKey is the start
+     * of the keyspace, or there is a **gap** — the greatest cached region
+     * below $endKey ends before it, so the region that actually owns the keys
+     * just below $endKey is not cached. A caller must fall back to PD on
+     * null; returning the region below the gap would silently skip the
+     * uncached region.
      */
     public function getRegionBelow(string $endKey): ?RegionInfo;
 

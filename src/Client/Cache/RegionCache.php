@@ -145,6 +145,13 @@ class RegionCache implements RegionCacheInterface
      * a region boundary. Empty ranges are skipped, an expired entry is
      * dropped rather than reported, and a hit counts as a use for LRU, all
      * exactly as in `getByKey()`.
+     *
+     * A region that ends below $endKey is a **gap**, not an answer: the keys
+     * immediately below the cursor belong to a region the cache does not
+     * hold, so the lookup misses and the caller resolves the gap through PD.
+     * This is the mirror of `getByKey()`'s `endKey >= key` guard; returning
+     * the region below the gap would make a reverse scan skip the uncached
+     * region silently.
      */
     public function getRegionBelow(string $endKey): ?RegionInfo
     {
@@ -169,6 +176,11 @@ class RegionCache implements RegionCacheInterface
 
         if ($this->isExpired($entry)) {
             $this->removeById($entry->region->regionId);
+            $this->debugMiss($endKey);
+            return null;
+        }
+
+        if ($entry->region->endKey !== '' && KeyOrder::lt($entry->region->endKey, $endKey)) {
             $this->debugMiss($endKey);
             return null;
         }

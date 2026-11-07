@@ -154,7 +154,7 @@ class RawKvScannerTest extends TestCase
     /**
      * The region a reverse scan reads next: the one holding the greatest key
      * strictly less than $key (the same choice RegionCache::getRegionBelow()
-     * makes).
+     * makes, including its gap guard).
      *
      * @param RegionInfo[] $regions
      */
@@ -171,6 +171,13 @@ class RawKvScannerTest extends TestCase
             if ($best === null || KeyOrder::gte($region->startKey, $best->startKey)) {
                 $best = $region;
             }
+        }
+
+        if ($best === null) {
+            return null;
+        }
+        if ($best->endKey !== '' && KeyOrder::lt($best->endKey, $key)) {
+            return null;
         }
 
         return $best;

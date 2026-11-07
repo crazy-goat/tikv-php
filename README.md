@@ -990,7 +990,7 @@ Two settings are methods on the client rather than options:
 ### Infrastructure
 - ✅ **PD Region Discovery** — With RegionEpoch support
 - ✅ **Region Routing** — Direct to correct TiKV node
-- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. Both scan paths (RawKV and TxnKV `Transaction::scan()`) read the cache first and query PD only for the uncovered ranges, and report `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels
+- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. RawKV forward scans/iterators and TxnKV `Transaction::scan()` read the cache first and query PD only for the uncovered ranges, reporting `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels; RawKV `reverseScan()` resolves regions top-down through the region resolver and reports `region_resolution`
 - ✅ **Region cache refresh and preload** — opt-in, PHP-process-model friendly (no timers): call `refreshRegionCache()` from a worker tick (throttled by `options['regionCacheRefreshMs']`, default `0` = disabled) and `preloadRegions([['start', 'end'], ...])` at boot to warm the keys the worker will touch without serving a read. Both keep the old entry and only log when PD fails, and are no-ops after `close()` ([Region Cache Refresh and Preload](docs/configuration.md#region-cache-refresh-and-preload))
 - ✅ **Store Cache** — In-memory caching of store addresses
 - ✅ **Retry Logic** — Automatic retry with exponential backoff; the wall-clock bound of one retry loop is `options['retryDeadlineMs']` (see [Retry System](docs/architecture.md#8-retry-system))

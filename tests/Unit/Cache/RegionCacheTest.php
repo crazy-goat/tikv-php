@@ -331,12 +331,30 @@ class RegionCacheTest extends TestCase
         $cache->put($empty);
         $cache->put($region);
 
-        $this->assertSame($region, $cache->getRegionBelow('b'));
+        // 'a' is the region's exclusive end, so the non-empty ['', 'a') is
+        // the one that actually holds keys below the cursor.
+        $this->assertSame($region, $cache->getRegionBelow('a'));
+    }
+
+    public function testGetRegionBelowReturnsNullAcrossAGap(): void
+    {
+        $cache = new RegionCache();
+        $lower = $this->makeRegion(1, 'k037', 'k038');
+        $upper = $this->makeRegion(3, 'k039', '');
+        $cache->put($lower);
+        $cache->put($upper);
+
+        // Region [k038, k039) is not cached: the region below the cursor is
+        // a gap, not [k037, k038), and the caller must resolve it through PD.
+        $this->assertNull($cache->getRegionBelow('k039'));
+        $this->assertNull($cache->getRegionBelow('k038-00'));
+        // The cached upper region still answers for a cursor above it.
+        $this->assertSame($upper, $cache->getRegionBelow('k040'));
     }
 
     public function testGetRegionBelowDropsAnExpiredEntry(): void
     {
-        $cache = new TestableRegionCache(1000, 10);
+        $cache = new TestableRegionCache(1000, ttlSeconds: 10);
         $cache->put($this->makeRegion(1, '', 'a'));
         $cache->setTime(2000);
 
@@ -1033,7 +1051,7 @@ class RegionCacheTest extends TestCase
     {
         // Issue #425: a refresh tick is what revives a cache that sat idle
         // past its TTL, so the enumeration must not hide the expired entry.
-        $cache = new TestableRegionCache(1000, 10);
+        $cache = new TestableRegionCache(1000, ttlSeconds: 10);
         $region = $this->makeRegion(1, 'a', 'm');
         $cache->put($region);
 
