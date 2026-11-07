@@ -34,17 +34,27 @@ class ConnectionFactoryTest extends TestCase
 
     protected function tearDown(): void
     {
-        if (!is_dir($this->tempDir)) {
+        $this->removeTree($this->tempDir);
+    }
+
+    private function removeTree(string $dir): void
+    {
+        if (!is_dir($dir)) {
             return;
         }
 
-        foreach (scandir($this->tempDir) ?: [] as $entry) {
+        foreach (scandir($dir) ?: [] as $entry) {
             if ($entry === '.' || $entry === '..') {
                 continue;
             }
-            unlink($this->tempDir . '/' . $entry);
+            $path = $dir . '/' . $entry;
+            if (is_dir($path)) {
+                $this->removeTree($path);
+                continue;
+            }
+            unlink($path);
         }
-        rmdir($this->tempDir);
+        rmdir($dir);
     }
 
     public function testAllowedStorePortsDefaultsToNull(): void
@@ -1180,20 +1190,65 @@ class ConnectionFactoryTest extends TestCase
         $this->assertSame(self::CA_PEM, $bundle->tlsConfig->caCert);
     }
 
-    public function testCaCertFileIsReadFromTheConfiguredBaseDir(): void
+    public function testCaCertFileIsRead(): void
     {
         $caPath = $this->writeTlsFile('ca.crt', self::CA_PEM);
 
         $bundle = ConnectionFactory::create(
             ['127.0.0.1:2379'],
-            options: ['tls' => [
-                'caCertFile' => $caPath,
-                'caCertBaseDir' => $this->tempDir,
-            ]],
+            options: ['tls' => ['caCertFile' => $caPath]],
         );
 
         $this->assertNotNull($bundle->tlsConfig);
         $this->assertSame(self::CA_PEM, $bundle->tlsConfig->caCert);
+    }
+
+    /**
+     * The base directory is actually forwarded: a CA file outside it is
+     * rejected. Without the forwarding this test would build a TlsConfig.
+     */
+    public function testCaCertBaseDirRejectsAFileOutsideTheAllowedDirectory(): void
+    {
+        $caPath = $this->writeTlsFile('ca.crt', self::CA_PEM);
+        $allowedDir = $this->tempDir . '/allowed';
+        mkdir($allowedDir);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('TLS file path is outside the allowed base directory');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCertFile' => $caPath,
+                'caCertBaseDir' => $allowedDir,
+            ]],
+        );
+    }
+
+    /**
+     * Same for the client certificate pair: clientCertBaseDir is forwarded
+     * and restricts both files it covers.
+     */
+    public function testClientCertBaseDirRejectsAFileOutsideTheAllowedDirectory(): void
+    {
+        $caPath = $this->writeTlsFile('ca.crt', self::CA_PEM);
+        $certPath = $this->writeTlsFile('client.crt', self::CLIENT_CERT_PEM);
+        $keyPath = $this->writeTlsFile('client.key', self::CLIENT_KEY_PEM);
+        $allowedDir = $this->tempDir . '/allowed';
+        mkdir($allowedDir);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('TLS file path is outside the allowed base directory');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCertFile' => $caPath,
+                'clientCertFile' => $certPath,
+                'clientKeyFile' => $keyPath,
+                'clientCertBaseDir' => $allowedDir,
+            ]],
+        );
     }
 
     /**
