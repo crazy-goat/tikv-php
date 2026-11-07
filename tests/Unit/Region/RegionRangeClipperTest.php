@@ -376,7 +376,8 @@ final class RegionRangeClipperTest extends TestCase
     {
         // endKey '' is the keyspace start for reverse scan (not +infinity).
         // Region 1 starts at '', so its clipped lower bound stays '' and the
-        // `$scanEnd !== ''` guard must not skip the non-empty sub-range.
+        // sub-range is yielded even though that bound is empty: the skip test
+        // compares it with the non-empty upper bound 'a', not with ''.
         $regions = [
             $this->region('m', 'z', regionId: 3),
             $this->region('a', 'm', regionId: 2),
@@ -392,6 +393,19 @@ final class RegionRangeClipperTest extends TestCase
             ],
             $this->shape($results),
         );
+    }
+
+    public function testClipReverseEmptyBoundsKeepTheDegenerateKeyspaceStartSubRange(): void
+    {
+        // The `$scanEnd !== ''` skip guard is only reachable for a direct
+        // clipReverse('', ''): the region that starts at the keyspace start
+        // yields the degenerate ('', ''] sub-range. Without the guard the
+        // range would look empty and the region would be dropped. The public
+        // reverseScan('', '') short-circuits before the clipper (#343), so
+        // this is the seam that owns the guard for direct callers.
+        $results = iterator_to_array($this->clipper->clipReverse([$this->region('', 'a')], '', ''));
+
+        $this->assertSame([[1, '', '']], $this->shape($results));
     }
 
     // ========================================================================

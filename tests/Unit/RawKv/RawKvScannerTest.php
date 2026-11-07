@@ -1092,11 +1092,12 @@ class RawKvScannerTest extends TestCase
 
     public function testReverseScanRejectsAnEmptyStartKeyAcrossTwoRegionsBeforeRpc(): void
     {
-        // REG-23 (#254): with two regions configured, the empty upper bound is
-        // still rejected before the clipper sees them. Without the guard the
-        // last region would be clipped to an empty start_key, which TiKV reads
-        // as the keyspace minimum, so the caller would get no rows for the
-        // region it asked to scan backwards from the end of.
+        // REG-23 (#254): the empty upper bound is rejected before the clipper
+        // or any region lookup, so the two-region layout below is configured
+        // only to make the acceptance scenario explicit — it is deliberately
+        // never consulted. Without this entry guard the range would reach the
+        // clipper, which yields no sub-range at all (every region is skipped),
+        // and the caller would silently get no rows.
         $this->stubRegionLookup([
             $this->defaultRegion('a', 'm', regionId: 1),
             $this->defaultRegion('m', 'z', regionId: 2),
