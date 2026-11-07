@@ -373,6 +373,12 @@ it builds the `RegionException` first and gates its own drop on
 `invalidatesRoutingKind()`, keeping the handler-specific `region_error:<kind>`
 reason because it is a separate drop path, not the pre-retry executor path.
 
+`RetryBudgetExhaustedException` is fatal before the message fallback, even
+though its ServerBusy-budget message contains `ServerIsBusy` and would
+otherwise classify as retryable. An outer executor must never retry an inner
+executor's give-up; the typed fatal arm is what makes that true if nested
+execution ever becomes real (issue #256).
+
 The kind-level predicate is a compatibility commitment, not a convenience:
 `RetryExecutor` is a documented user-constructible collaborator
 (`docs/configuration.md`), so `invalidatesRoutingOnFatal()`'s name and
@@ -1046,7 +1052,12 @@ a `BatchPartialFailureException` and rethrows the **first failing region's own
 error**, so the sequential "abort at the first failing region" contract holds
 and `docs/error-handling.md`'s exception list for `Transaction::commit()` stays
 accurate — it does not mention `BatchPartialFailureException`, and callers
-catching `GrpcException` or `RegionException` around `commit()` keep working.
+catching `GrpcException` or `RegionException` around `commit()` keep working
+for the errors the per-region RPC raises. The one exception is retry-budget
+exhaustion: the region's executor now throws `RetryBudgetExhaustedException`
+(issue #256) with the original `GrpcException` / `RegionException` in
+`getPrevious()`, so a caller that wants to see that case must catch
+`TiKvException` (or `RetryBudgetExhaustedException`) as well.
 
 Issue #431 asked for the partial failures to be "aggregated and retried per
 region". Both halves were already in place: the fan-out waits for its

@@ -107,6 +107,14 @@ final class ErrorClassifier
             return self::classifyGrpcStatus($e->grpcStatusCode);
         }
 
+        // A retry-budget exhaustion is terminal. It must not re-enter an
+        // outer executor: the ServerBusy budget message contains
+        // "ServerIsBusy", which the fallback below would otherwise map back
+        // to a retryable backoff (issue #256).
+        if ($e instanceof RetryBudgetExhaustedException) {
+            return null;
+        }
+
         // === Fallback: message-text matching for exceptions without a typed kind ===
         $message = $e->getMessage();
 

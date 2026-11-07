@@ -331,8 +331,9 @@ overloaded (raft too busy, scheduler congested).
 the scheduled backoff before the sleep is clamped, and with the budget at
 least ~10 s above the deadline the deadline binds first. `getPrevious()`
 holds the `ServerIsBusy` error. If the budget is tuned to within ~10 s of
-the deadline or below it, either can bind and the budget path rethrows the
-raw `ServerIsBusy` instead. If you see this repeatedly, shed load or scale the
+the deadline or below it, either bound can bind; both paths throw
+`RetryBudgetExhaustedException`, with the `ServerIsBusy` error in
+`getPrevious()`. If you see this repeatedly, shed load or scale the
 cluster. See
 [Retry Budgets Behind Every Operation](error-handling.md#retry-budgets-behind-every-operation)
 and
