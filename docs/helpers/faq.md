@@ -76,6 +76,25 @@ no fresh budget after an earlier one spent it), while two calls to
 per `execute()` call (one retry loop), so a wide fan-out does not exhaust it
 on ordinary one-retry-per-region traffic.
 
+## With the default settings the retry deadline fires before the ServerBusy budget
+
+`RetryExecutor` charges `serverBusyBudgetMs` (60 s) only for `ServerBusy`
+backoff sleeps, while `retryDeadlineMs` (30 s) is checked before every
+attempt and before every sleep, with the sleep clamped to the remaining
+deadline. The budget accumulator is charged the pre-clamp sleep, so it can
+exceed the wall clock by up to one maximum ServerBusy sleep: the
+accumulated charge is bounded by roughly `deadline + 10 s` ≈ 40 s, still
+below the 60 s budget. With the defaults the deadline therefore always binds
+first and the ServerBusy budget is unreachable — raising it alone changes
+nothing. The deadline is guaranteed to bind first only while the budget is
+at least one maximum ServerBusy backoff (~10 s) above it; when the budget is
+within ~10 s of the deadline or below it, either can bind. Diagnostics
+differ too: the deadline throws
+`RetryBudgetExhaustedException` with the `ServerIsBusy` error in
+`getPrevious()`, while an exhausted ServerBusy budget rethrows the original
+`TiKvException`. See
+[ServerBusy Budget vs Retry Deadline](../configuration.md#serverbusy-budget-vs-retry-deadline).
+
 ## Store-health invalidation runs after the retry invalidation, so only sibling regions remain
 
 Issue #424 records a transport failure at the end of `RetryExecutor`'s catch,
@@ -322,10 +341,13 @@ Two traps when measuring coverage:
 2. **A local run needs a coverage driver.** PCOV wins over Xdebug when both are installed
    (`SebastianBergmann\CodeCoverage\Driver\Selector` checks PCOV first), and the two measure the
    same metric within a few tenths of a point — but only with Xdebug in coverage mode
-   (`xdebug.mode=coverage`; the default `develop` mode makes PHPUnit report "No code coverage
-   driver is available"). `composer test:coverage` passes `-d xdebug.mode=coverage` for that
-   reason. `ext-grpc` is required too: the `Grpc` suite mocks `\Grpc\Call`, which is a hard error
-   (not a skip) without the extension.
+   (`xdebug.mode=coverage`; the default `develop` mode makes PHPUnit refuse to collect and warn
+   that `XDEBUG_MODE=coverage` has to be set). `composer test:coverage` passes
+   `-d xdebug.mode=coverage` for that reason. `ext-grpc` is required too: the `Grpc` suite mocks
+   `\Grpc\Call`, which is a hard error (not a skip) without the extension. Neither driver is a
+   project dependency: install PCOV with `sudo apt-get install php-pcov` or `pecl install pcov`
+   (then add `extension=pcov.so` to `php.ini`). `composer test:coverage` also raises
+   `memory_limit` to `-1`, because the combined run does not fit the common 128M default.
 
 `phpunit.xml` configures no coverage report on purpose (issue #556): a report block there makes
 every bare `vendor/bin/phpunit` run request a driver, so on the documented local setup
@@ -1413,6 +1435,19 @@ and `BackoffTest` already asserted both the `[expo/2, expo]` range and
 non-constant values for all types. The #296 change adds only a
 NotLeader-specific pin and this note; no production code changed. Close such
 an audit import as a duplicate instead of re-implementing the jitter.
+
+The same happened to issue #320 (audit SEC-17, "pass the configured metrics
+instance through `RawKvClient::create()`"): 6911928 (#368) had already added
+`metrics: $bundle->metrics` to both `create()` methods and the region cache,
+retry executors and transactions. The acceptance criterion still open was the
+behavioural regression test — `getMetrics()` returning the injected instance
+proves the client property but not that the collaborators and the transport
+received the backend: a `GrpcClient` or resolver built with `NoOpMetrics`
+still passes the identity assertions while every counter goes nowhere.
+`MetricsWiringTest` drives one operation through each factory with
+`allowInsecure: false`, which fails closed in `getChannel()` right after
+`rpcStarted()`, and asserts the transport's `rpcStarted()` / `rpcCompleted()`
+for both factories plus the client-side `regionCacheMiss` on the RawKV path.
 
 ## A stray Markdown fence can become a legitimate closer — render the file before deleting it
 

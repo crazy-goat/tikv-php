@@ -1029,6 +1029,12 @@ final class GrpcClient implements GrpcClientInterface
      * a default-configured client keeps the same channel key it had before
      * these options existed.
      *
+     * `grpc.max_receive_message_length` is the enforcement point for the
+     * response-size bound (SEC-16, issue #319): grpc-core rejects an
+     * oversized frame before its payload is materialised as a PHP string.
+     * The post-allocation guard in {@see GrpcResponseParser} cannot do that
+     * and is only a secondary assertion.
+     *
      * @return array<string, int|string|bool>
      */
     private function channelArgs(): array

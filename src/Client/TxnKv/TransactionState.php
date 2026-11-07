@@ -510,6 +510,19 @@ final class TransactionState
         return in_array($key, $this->pessimisticLocks, true);
     }
 
+    /**
+     * Keys whose pessimistic lock TiKV acknowledged. Unlike
+     * {@see getPessimisticLockKeys()}, this excludes attempted and pending
+     * keys, so it is the set that commit can safely turn into `Op::Lock`
+     * mutations (issue #436).
+     *
+     * @return string[]
+     */
+    public function getAcknowledgedPessimisticLockKeys(): array
+    {
+        return $this->pessimisticLocks;
+    }
+
     public function hasAcknowledgedPessimisticLocks(): bool
     {
         return $this->pessimisticLocks !== [];
