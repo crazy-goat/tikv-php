@@ -13,6 +13,7 @@ use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -454,15 +455,19 @@ final readonly class TxnReader
         // first failing region throws the same exception the sequential loop
         // aborted with.
         $regionCalls = [];
-        foreach ($grouped as $regionData) {
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
+        foreach ($grouped as $regionId => $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
 
+            $slot = count($regionCalls);
             $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetForRegionWithRetry(
                 $regionKeys,
                 $retryExecutor,
                 $classifier,
             );
+            $labels[$slot] = new BatchCallId($regionId);
         }
 
         $batchExecutor = new BatchAsyncExecutor();
@@ -470,6 +475,7 @@ final readonly class TxnReader
             $regionResults = $batchExecutor->executeParallel(
                 $regionCalls,
                 $this->timeoutConfig->batchDeadlineMs,
+                $labels,
             );
         } catch (BatchPartialFailureException $e) {
             // The future-level RetryExecutor has already applied each
@@ -956,6 +962,17 @@ final readonly class TxnReader
      * Merge TiKV scan results with the local write set to enforce
      * read-your-writes semantics, then apply the limit.
      *
+     * TiKV returns rows in ascending byte order — every page continues from
+     * the previous region boundary and the regions are clipped in ascending
+     * order — so the scanned sequence is already sorted and only the
+     * write-set keys need a sort. Instead of re-sorting up to `MAX_SCAN_LIMIT`
+     * scanned rows (the `array_unique()` plus full `sort()` pair this method
+     * used to run, issue #302), each sorted write-set key is placed into the
+     * scanned sequence with a binary search and the untouched runs are copied
+     * as slices. A per-row PHP merge loop was measured slower than the native
+     * `sort()` it replaces — PHP's array functions are C, a userland loop is
+     * not — so the merge must stay at the slice level (issue #302).
+     *
      * A `null` limit means "no limit": the unbounded (`limit: 0`) path uses
      * it, because the write-set merge must not drop the transaction's own
      * in-range keys — the scan cap already bounds the TiKV read (issue #440).
@@ -977,41 +994,82 @@ final readonly class TxnReader
 
         // TiKV returns keys as strings, but integer-like keys ("12345",
         // "0") are stored as int keys by PHP; restore them so the state
-        // lookups and output records use strings (issue #322).
-        $allKeys = array_map(strval(...), array_keys($tikvMap));
+        // lookups and output records use strings (issue #322). Iterating the
+        // map preserves the insertion order, i.e. the ascending order TiKV
+        // returned (issue #302).
+        $tikvRows = [];
+        foreach ($tikvMap as $key => $value) {
+            $tikvRows[] = ['key' => (string) $key, 'value' => $value];
+        }
+
+        // Only the write-set keys are unordered: `getWriteKeys()` follows the
+        // transaction's write order, not key order. Byte-order sort
+        // (SORT_STRING), never SORT_REGULAR: PHP compares numeric strings
+        // numerically ("9" sorts before "10"), while TiKV orders keys
+        // bytewise — pagination resumes from the last returned key, so a
+        // numeric-order sort silently skips in-between keys (issue #331).
+        $writeKeys = [];
         foreach ($state->getWriteKeys() as $key) {
             // Byte-order comparison: numeric strings must never be compared
             // numerically ("9" >= "10" is true under PHP's loose comparison
             // but false in TiKV's byte order) (issue #331).
             if (KeyOrder::inRange($key, $startKey, $endKey)) {
-                $allKeys[] = $key;
+                $writeKeys[] = $key;
             }
         }
-        $allKeys = array_unique($allKeys);
-        // Byte-order sort (SORT_STRING), never SORT_REGULAR: PHP compares
-        // numeric strings numerically ("9" sorts before "10"), while TiKV
-        // orders keys bytewise — pagination resumes from the last returned
-        // key, so a numeric-order sort silently skips in-between keys
-        // (issue #331).
-        sort($allKeys, SORT_STRING);
+        sort($writeKeys, SORT_STRING);
 
-        $merged = [];
-        foreach ($allKeys as $key) {
-            if ($limit !== null && count($merged) >= $limit) {
-                break;
-            }
+        if ($writeKeys === []) {
+            // Nothing to merge: the scanned rows are already the result.
+            return $limit === null ? $tikvRows : array_slice($tikvRows, 0, $limit);
+        }
 
-            if ($state->hasWriteSetKey($key)) {
-                $writeValue = $state->getWriteSetValue($key);
-                if ($writeValue !== null) {
-                    $merged[] = ['key' => $key, 'value' => $writeValue];
+        $tikvCount = count($tikvRows);
+        $chunks = [];
+        $cursor = 0;
+
+        foreach ($writeKeys as $writeKey) {
+            // Lower bound: the first scanned row whose key is >= $writeKey.
+            // Only the write set is walked here; the scanned rows between two
+            // write keys are copied as one slice, so the merge costs
+            // `|writeSet| * log(rows)` key comparisons instead of one per row.
+            $low = $cursor;
+            $high = $tikvCount;
+            while ($low < $high) {
+                $mid = ($low + $high) >> 1;
+                if (KeyOrder::lt($tikvRows[$mid]['key'], $writeKey)) {
+                    $low = $mid + 1;
+                } else {
+                    $high = $mid;
                 }
-            } elseif (array_key_exists($key, $tikvMap)) {
-                $merged[] = ['key' => $key, 'value' => $tikvMap[$key]];
             }
+
+            if ($low > $cursor) {
+                $chunks[] = array_slice($tikvRows, $cursor, $low - $cursor);
+            }
+
+            // The write set wins over the scanned row, and a delete (null
+            // value) hides it (read-your-writes).
+            $writeValue = $state->getWriteSetValue($writeKey);
+            if ($writeValue !== null) {
+                $chunks[] = [['key' => $writeKey, 'value' => $writeValue]];
+            }
+
+            $cursor = $low < $tikvCount && KeyOrder::eq($tikvRows[$low]['key'], $writeKey)
+                ? $low + 1
+                : $low;
         }
 
-        return $merged;
+        if ($cursor < $tikvCount) {
+            $chunks[] = array_slice($tikvRows, $cursor);
+        }
+
+        $merged = $chunks === [] ? [] : array_merge(...$chunks);
+
+        // The limit is an upper bound on the merged rows, so truncating the
+        // finished sequence is the same result the old early `break` produced
+        // (tombstones were already skipped above, so they do not consume it).
+        return $limit === null ? $merged : array_slice($merged, 0, $limit);
     }
 
     private function timeoutMs(string $operationType): ?int

@@ -175,6 +175,8 @@ of the contract.
 - `Observability\DebugLogging` — the internal probe that decides whether a logger can emit a `debug` record
   when no `options['metrics']` is configured; write against
   `Observability\MetricsInterface`, which is covered;
+- `Observability\SafeLogging` — the guard that keeps a logger failure on a close or destructor path from
+  escaping the destructor;
 - `RawKv\Dto\` (the `RegionInfoMapper` helper) and `RawKv\RawKvSplitter`;
 - the collaborators behind the entry points: `RawKv\RawKvCrud`,
   `RawKv\RawKvAtomic`, `RawKv\RawKvBatch`, `RawKv\RawKvScanner`,

@@ -130,7 +130,10 @@ deprecations. That is not a failure. The `Unit` suite excludes the
 gRPC-dependent files and runs clean without `ext-grpc`; the `Integration` suite
 skips its gRPC tests when the extension is missing, and the `Grpc` suite
 (`composer test:grpc`) is the strict one: it runs those tests and treats a skip
-as a failure.
+as a failure. A skipped transport test is never silent: `phpunit.xml` enables
+the skipped-test and warning details, and the gRPC gate emits one warning per
+skipped class, so the run summary names the test class, its reason and
+`pecl install grpc` (issue #284).
 
 ### 4. Explore the Codebase
 

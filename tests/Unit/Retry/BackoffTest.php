@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Retry;
 
 use CrazyGoat\TiKV\Client\Retry\Backoff;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class BackoffTest extends TestCase
@@ -164,5 +165,36 @@ class BackoffTest extends TestCase
         // equal jitter: [cap/2, cap]
         $this->assertGreaterThanOrEqual(250, $sleep);
         $this->assertLessThanOrEqual(500, $sleep);
+    }
+
+    // Issue #444 (DIV-08): the missing client-go backoffer types are now
+    // part of the public taxonomy, with the same base/cap values as
+    // client-go's runtime curves. BoTxnLockFast's base comes from
+    // vars.BackoffLockFast (DefBackoffLockFast = 10 ms), not from the
+    // NewBackoffFnCfg argument, and its cap is 3000 ms.
+    //
+    // Jitter is intentionally not asserted here: client-go uses NoJitter for
+    // BoTxnNotFound and BoCommitTSLag, while PHP currently applies equal
+    // jitter to every BackoffType. The parity below is base/cap only rather
+    // than silently advertised as full parity.
+
+    /**
+     * @return array<string, array{BackoffType, int, int}>
+     */
+    public static function provideClientGoParityBackoffTypes(): array
+    {
+        return [
+            'BoTxnLockFast' => [BackoffType::TxnLockFast, 10, 3000],
+            'BoTxnNotFound' => [BackoffType::TxnNotFound, 2, 500],
+            'BoCommitTSLag' => [BackoffType::CommitTSLag, 2, 500],
+            'BoPDRPC' => [BackoffType::PDRpc, 500, 3000],
+        ];
+    }
+
+    #[DataProvider('provideClientGoParityBackoffTypes')]
+    public function testClientGoParityBackoffType(BackoffType $type, int $baseMs, int $capMs): void
+    {
+        $this->assertSame($baseMs, $type->baseMs());
+        $this->assertSame($capMs, $type->capMs());
     }
 }

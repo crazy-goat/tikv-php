@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Tests\Unit\RawKv\Dto;
 
 use CrazyGoat\Proto\Metapb\Peer;
+use CrazyGoat\Proto\Metapb\PeerRole;
 use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
@@ -58,6 +59,42 @@ class RegionInfoMapperTest extends TestCase
         $this->assertSame(1, $info->peers[0]->storeId);
         $this->assertSame(22, $info->peers[1]->peerId);
         $this->assertSame(2, $info->peers[1]->storeId);
+    }
+
+    public function testMapsPeerRoleAndWitnessFlag(): void
+    {
+        $epoch = new RegionEpoch();
+        $epoch->setConfVer(1);
+        $epoch->setVersion(1);
+
+        $voter = new Peer();
+        $voter->setId(11);
+        $voter->setStoreId(1);
+
+        $learner = new Peer();
+        $learner->setId(22);
+        $learner->setStoreId(2);
+        $learner->setRole(PeerRole::Learner);
+
+        $witness = new Peer();
+        $witness->setId(33);
+        $witness->setStoreId(3);
+        $witness->setIsWitness(true);
+
+        $region = new Region();
+        $region->setId(5);
+        $region->setRegionEpoch($epoch);
+        $region->setPeers([$voter, $learner, $witness]);
+
+        $info = RegionInfoMapper::fromProto($region, null);
+
+        $this->assertCount(3, $info->peers);
+        $this->assertSame(PeerRole::Voter, $info->peers[0]->role);
+        $this->assertFalse($info->peers[0]->isWitness);
+        $this->assertSame(PeerRole::Learner, $info->peers[1]->role);
+        $this->assertFalse($info->peers[1]->isWitness);
+        $this->assertSame(PeerRole::Voter, $info->peers[2]->role);
+        $this->assertTrue($info->peers[2]->isWitness);
     }
 
     public function testMissingLeaderReportsUnknownStoreIdZero(): void

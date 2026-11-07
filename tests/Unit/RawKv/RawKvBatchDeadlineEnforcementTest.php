@@ -192,6 +192,8 @@ final class RawKvBatchDeadlineEnforcementTest extends TestCase
             self::assertGreaterThanOrEqual(20, $e->getElapsedMs());
             self::assertSame([0], $e->getContext()['dispatchedRegions']);
             self::assertSame([1, 2], $e->getContext()['pendingRegions']);
+            self::assertSame([1], $e->getContext()['dispatchedRegionIds']);
+            self::assertSame([2, 3], $e->getContext()['pendingRegionIds']);
         }
     }
 
@@ -215,6 +217,8 @@ final class RawKvBatchDeadlineEnforcementTest extends TestCase
         } catch (BatchDeadlineExceededException $e) {
             self::assertSame(20, $e->getDeadlineMs());
             self::assertSame([0, 1, 2], $e->getContext()['pendingRegions']);
+            self::assertSame([1, 2], $e->getContext()['dispatchedRegionIds']);
+            self::assertSame([1, 2, 3], $e->getContext()['pendingRegionIds']);
         }
     }
 
