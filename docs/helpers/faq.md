@@ -33,7 +33,7 @@ Since issue #241 (REG-10) `EpochNotMatch` classifies as `BackoffType::EpochNotMa
 ~10 s of real wall clock and burns ~11 s of budget. To keep a retry test fast
 and deterministic: (a) throw `DataIsNotReady` — still the only zero-sleep class,
 so the attempt cap fires in milliseconds; (b) pass an explicit
-`fn () => BackoffType::None` classifier; or (c) when you WANT the new behavior,
+`fn (): RetryVerdict => RetryVerdict::retry(BackoffType::None)` classifier; or (c) when you WANT the new behavior,
 use a small `maxBackoffMs` (e.g. 50) so the sleep budget exhausts after a
 handful of 2/4/8/16 ms retries — a regression test can then assert
 `attempts < DEFAULT_MAX_ATTEMPTS` and a minimum wall-clock elapsed time.
@@ -1191,9 +1191,9 @@ status Active so a second `commit()` could reuse the timestamp — that premise
 expired with #215, and the test now asserts the failure is swallowed and
 exactly one timestamp is minted.
 
-## The issue's suggested classifier fix would silently fall back to the default classifier — return a decision or rethrow
+## The classifier contract is a RetryVerdict — return a decision, not a throw (issue #534)
 
-The RetryExecutor's classifier chain is `handleNotLeader → classifier → ErrorClassifier`; a classifier that returns `null` is NOT a "do not retry" verdict — the executor falls through to the default `ErrorClassifier::classify()`, which retries every `GrpcException` as `TiKvRpc`. Issue #239's suggested snippet (`if ($e instanceof GrpcException) { return null; }`) would therefore have retried CAS exactly as before. To make an exception non-retriable from a custom classifier without changing `RetryExecutor`'s signature, **rethrow** it inside the classifier (the throw escapes the executor's catch and propagates with the original type/trace) — that is what `RawKvAtomic::compareAndSwap()` now does for `GrpcException` (#239). Side effect: the executor's fatal path (`'Fatal error, not retrying'` log) and its post-classification region invalidation + `closeChannel()` on `GrpcException` are skipped for the rethrown error; if a CAS transport error needs channel cleanup, that logic would have to move. If this pattern recurs, consider promoting it: a classifier result type with an explicit `Rethrow`/`Fatal` variant instead of the throw-from-classifier trick.
+The RetryExecutor's classifier chain is `handleNotLeader → classifier → ErrorClassifier`. A classifier returns a `RetryVerdict`: `RetryVerdict::retry($backoff)` retries, `RetryVerdict::fatal()` stops immediately, and `RetryVerdict::pass()` falls through to the default `ErrorClassifier::classify()`. Before issue #534 the contract was `?BackoffType`, so `null` meant "no opinion" and a classifier that wanted a fatal verdict had to throw from inside the executor's catch block — which skipped the executor's fatal path (`'Fatal error, not retrying'` log, region invalidation and `closeChannel()` cleanup). Issue #239's snippet (`if ($e instanceof GrpcException) { return null; }`) is still wrong for a different reason: `null` (now `pass()`) is not "do not retry", it defers to the built-in classifier, which retries every retryable `GrpcException` as `TiKvRpc`. `RawKvAtomic::compareAndSwap()` therefore returns `RetryVerdict::fatal()` for a `GrpcException` (#239/#534), and a fatal `UNAVAILABLE` now closes the broken channel. Do not reintroduce the throw-from-classifier trick.
 
 ## A rebase can leave stray conflict markers in docs — grep before finishing
 

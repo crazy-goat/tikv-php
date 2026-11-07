@@ -125,6 +125,12 @@ the error-to-backoff mapping; message-based fallbacks live in
 public static function classifyByKind(ErrorKind $kind): ?BackoffType
 ```
 
+`ErrorClassifier::classify()` returns a `RetryVerdict`
+(`src/Client/Retry/RetryVerdict.php`) instead of `?BackoffType`, so a custom
+classifier can distinguish "no opinion" (`RetryVerdict::pass()`) from an
+explicit fatal verdict (`RetryVerdict::fatal()`); the mapping helpers above
+keep returning `?BackoffType` (issue #534).
+
 ## Adding New Features
 
 ### Step-by-Step Guide
