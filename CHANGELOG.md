@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Added
+
+- Snapshot reads now send the locks they have already resolved back to TiKV (issue #432, GAP-18). `LockResolver` records the start timestamp of every transaction it resolves in a per-transaction, bounded `ResolvedLockTracker`; timestamps resolved as committed go into a second set. `TxnReader` and `TwoPhaseCommitter` copy the sets onto later requests as `Context.resolved_locks` and `Context.committed_locks`, so a reader that retries after resolving a lock (for example on another key of the same transaction or after a region cache invalidation) tells TiKV to ignore that lock instead of paying the `CheckTxnStatus`/`ResolveLock` cycle again. Both sets are FIFO-bounded at 2048 entries, like the client-wide `ResolvedTxnStatusCache`, and an empty set leaves the Context fields unset. Documented in `docs/architecture.md` and `README.md`; covered by `tests/Unit/TxnKv/ResolvedLocksTest.php`. (#432)
+
 ### Fixed
 
 - **BREAKING**: `RawKvClient` now closes only the connections it owns (issue #204, RAW-19). A client assembled through the public constructor no longer closes the `PdClientInterface` or `GrpcClientInterface` it was given, neither from `close()` nor from `__destruct()`, so two clients can share one PD client and one transport without the first one's garbage collection breaking the other. `RawKvClient::create()` still owns and closes the PD client and the transport it builds; a transport supplied through `options['grpcClient']` remains the application's (issue #407). The hand-assembled defaults are now `ownsGrpcClient: false` and the new `ownsPdClient: false`; pass either as `true` to transfer ownership. **Migration:** code that builds a `RawKvClient` by hand and relied on its destructor (or `close()`) to close the supplied PD client or transport must either close those dependencies itself or construct the client with `ownsGrpcClient: true` / `ownsPdClient: true`. The client still clears its region cache on close. Documented in `docs/configuration.md` and `docs/operations.md`; covered by `tests/Unit/RawKv/RawKvClientOwnershipTest.php`.

@@ -9,6 +9,7 @@ use CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksResponse;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusRequest;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\Context;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
@@ -54,6 +55,14 @@ final readonly class LockResolver
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Locks this resolver has already resolved (issue #432, GAP-18).
+         * One resolver instance belongs to one transaction (created in
+         * `TxnKvClient::begin()`), so the tracker is per transaction; the
+         * reader and the committer copy it onto every subsequent request's
+         * Context.
+         */
+        private ResolvedLockTracker $resolvedLocks = new ResolvedLockTracker(),
     ) {
     }
 
@@ -279,6 +288,26 @@ final readonly class LockResolver
     public function getGrpc(): GrpcClientInterface
     {
         return $this->grpc;
+    }
+
+    /**
+     * Locks this transaction has already resolved (issue #432).
+     */
+    public function getResolvedLockTracker(): ResolvedLockTracker
+    {
+        return $this->resolvedLocks;
+    }
+
+    /**
+     * Copy the resolved/committed lock timestamps onto a request Context.
+     *
+     * Called by the reader and the committer before every request that may
+     * meet a lock, so a retried read or a prewrite after a resolution tells
+     * TiKV which locks it can ignore (issue #432, GAP-18).
+     */
+    public function applyResolvedLocks(Context $context): void
+    {
+        $this->resolvedLocks->applyTo($context);
     }
 
     /**
@@ -639,6 +668,8 @@ final readonly class LockResolver
                 keyErrorsHandledByCaller: true,
             );
         }
+
+        $this->resolvedLocks->record($lockTs, $commitTs);
     }
 
     /**
@@ -700,6 +731,8 @@ final readonly class LockResolver
 
             $this->invalidateRegionFor($regionData['keys'][0]);
         }
+
+        $this->resolvedLocks->record($lockTs, $commitTs);
     }
 
     private function resolveLockCommitted(
@@ -738,6 +771,8 @@ final readonly class LockResolver
             ResolveLockResponse::class,
             $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
         );
+
+        $this->resolvedLocks->record($lockTs, $commitTs);
     }
 
     private function resolveLockRolledBack(
@@ -774,6 +809,8 @@ final readonly class LockResolver
             ResolveLockResponse::class,
             $this->capTimeoutMs($this->timeoutConfig->lockResolveTimeoutMs, $deadlineAtMs),
         );
+
+        $this->resolvedLocks->record($lockTs, 0);
     }
 
     /**
