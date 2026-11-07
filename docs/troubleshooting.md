@@ -971,8 +971,9 @@ affects every client, not just the one that set it.
    the exact request shape.
 
 **Prevention:** run `ingest()` only from a dedicated, supervised CLI process
-with no execution-time limit; keep batches small enough to re-run (`ingest()`
-is not retried automatically). See
+with no execution-time limit; keep batches small enough to re-run (region
+errors are retried, but the import is not atomic across regions, so a
+permanent failure can leave a partial import). See
 [Bulk Import (SST Ingest)](operations.md#bulk-import-sst-ingest).
 
 ## Data Issues
