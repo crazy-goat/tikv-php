@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\E2E;
 
-use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use PHPUnit\Framework\TestCase;
@@ -35,7 +34,10 @@ final class GcSafePointE2ETest extends TestCase
         ClusterProbe::assertPdReachable($pdEndpoints);
 
         self::$txnClient = TxnKvClient::create($pdEndpoints);
-        self::$pdClient = ConnectionFactory::create($pdEndpoints)->pdClient;
+        // Reuse the client's PD connection instead of opening a second one
+        // with its own TSO stream (issue #515). The client owns it and closes
+        // it in tearDownAfterClass().
+        self::$pdClient = self::$txnClient->pdClient();
     }
 
     public static function tearDownAfterClass(): void

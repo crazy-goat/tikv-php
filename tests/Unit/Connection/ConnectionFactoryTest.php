@@ -164,6 +164,80 @@ class ConnectionFactoryTest extends TestCase
         );
     }
 
+    public function testGrpcKeepaliveWithoutCallsDefaultsToTrue(): void
+    {
+        $grpc = $this->grpcFromFactory(['127.0.0.1:2379']);
+
+        $this->assertTrue($this->grpcBoolProperty($grpc, 'keepalivePermitWithoutCalls'));
+    }
+
+    public function testGrpcCompressionAndWindowOptionsThreadedThroughToGrpcClient(): void
+    {
+        $grpc = $this->grpcFromFactory(['127.0.0.1:2379'], [
+            'grpc' => [
+                'keepalivePermitWithoutCalls' => false,
+                'compression' => GrpcClient::COMPRESSION_GZIP,
+                'initialWindowSizeBytes' => 1 << 27,
+            ],
+        ]);
+
+        $this->assertFalse($this->grpcBoolProperty($grpc, 'keepalivePermitWithoutCalls'));
+        $this->assertSame(GrpcClient::COMPRESSION_GZIP, $this->grpcStringProperty($grpc, 'compression'));
+        $this->assertSame(1 << 27, $this->grpcProperty($grpc, 'initialWindowSizeBytes'));
+    }
+
+    public function testGrpcOptionsRejectNonBoolKeepaliveWithoutCalls(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['grpc'][keepalivePermitWithoutCalls] must be a bool, got int",
+        );
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpc' => ['keepalivePermitWithoutCalls' => 1]],
+        );
+    }
+
+    public function testGrpcOptionsRejectUnknownCompressionAlgorithm(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['grpc'][compression] must be one of 'none', 'gzip', 'deflate', got 'snappy'",
+        );
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpc' => ['compression' => 'snappy']],
+        );
+    }
+
+    public function testGrpcOptionsRejectNegativeInitialWindowSize(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['grpc'][initialWindowSizeBytes] must be an int >= 0",
+        );
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpc' => ['initialWindowSizeBytes' => -1]],
+        );
+    }
+
+    public function testGrpcOptionsRejectNonIntInitialWindowSize(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['grpc'][initialWindowSizeBytes] must be an int >= 0, got string",
+        );
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpc' => ['initialWindowSizeBytes' => '1024']],
+        );
+    }
+
     // ========================================================================
     // options['tsoPoolSize'] — PD TSO timestamp pool (issue #292)
     // ========================================================================
@@ -707,6 +781,18 @@ class ConnectionFactoryTest extends TestCase
     private function grpcProperty(GrpcClient $grpc, string $property): int
     {
         /** @var int */
+        return (new \ReflectionProperty(GrpcClient::class, $property))->getValue($grpc);
+    }
+
+    private function grpcBoolProperty(GrpcClient $grpc, string $property): bool
+    {
+        /** @var bool */
+        return (new \ReflectionProperty(GrpcClient::class, $property))->getValue($grpc);
+    }
+
+    private function grpcStringProperty(GrpcClient $grpc, string $property): string
+    {
+        /** @var string */
         return (new \ReflectionProperty(GrpcClient::class, $property))->getValue($grpc);
     }
 

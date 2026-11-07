@@ -155,6 +155,9 @@ final class ConnectionFactory
                 maxSendMessageBytes: $grpcArgs['maxSendMessageBytes'],
                 keepaliveTimeMs: $grpcArgs['keepaliveTimeMs'],
                 keepaliveTimeoutMs: $grpcArgs['keepaliveTimeoutMs'],
+                keepalivePermitWithoutCalls: $grpcArgs['keepalivePermitWithoutCalls'],
+                compression: $grpcArgs['compression'],
+                initialWindowSizeBytes: $grpcArgs['initialWindowSizeBytes'],
             );
             $ownsGrpcClient = true;
         }
@@ -300,34 +303,41 @@ final class ConnectionFactory
     }
 
     /**
-     * Resolve gRPC channel options (issue #265): options['grpc'] carries
-     * maxReceiveMessageBytes / maxSendMessageBytes / keepaliveTimeMs /
-     * keepaliveTimeoutMs. Each entry is optional; defaults come from the
-     * GrpcClient constants.
+     * Resolve gRPC channel options (issues #265, #423): options['grpc']
+     * carries maxReceiveMessageBytes / maxSendMessageBytes /
+     * keepaliveTimeMs / keepaliveTimeoutMs / keepalivePermitWithoutCalls /
+     * compression / initialWindowSizeBytes. Each entry is optional; defaults
+     * come from the GrpcClient constants.
      *
      * @param array<string, mixed> $options
      * @return array{maxReceiveMessageBytes: int, maxSendMessageBytes: int,
-     *               keepaliveTimeMs: int, keepaliveTimeoutMs: int}
+     *               keepaliveTimeMs: int, keepaliveTimeoutMs: int,
+     *               keepalivePermitWithoutCalls: bool, compression: string,
+     *               initialWindowSizeBytes: int}
      */
     private static function resolveGrpcChannelArgs(array $options): array
     {
-        $defaults = [
+        $args = [
             'maxReceiveMessageBytes' => GrpcClient::DEFAULT_MAX_RECEIVE_MESSAGE_BYTES,
             'maxSendMessageBytes' => GrpcClient::DEFAULT_MAX_SEND_MESSAGE_BYTES,
             'keepaliveTimeMs' => GrpcClient::DEFAULT_KEEPALIVE_TIME_MS,
             'keepaliveTimeoutMs' => GrpcClient::DEFAULT_KEEPALIVE_TIMEOUT_MS,
+            'keepalivePermitWithoutCalls' => GrpcClient::DEFAULT_KEEPALIVE_PERMIT_WITHOUT_CALLS,
+            'compression' => GrpcClient::DEFAULT_COMPRESSION,
+            'initialWindowSizeBytes' => GrpcClient::DEFAULT_INITIAL_WINDOW_SIZE_BYTES,
         ];
 
         if (!isset($options['grpc']) || !is_array($options['grpc'])) {
-            return $defaults;
+            return $args;
         }
 
-        $args = $defaults;
-        foreach ($defaults as $key => $default) {
-            if (!array_key_exists($key, $options['grpc'])) {
+        $grpcOptions = $options['grpc'];
+
+        foreach (['maxReceiveMessageBytes', 'maxSendMessageBytes', 'keepaliveTimeMs', 'keepaliveTimeoutMs'] as $key) {
+            if (!array_key_exists($key, $grpcOptions)) {
                 continue;
             }
-            $value = $options['grpc'][$key];
+            $value = $grpcOptions[$key];
             if (!is_int($value) || $value < 1) {
                 throw new InvalidArgumentException(
                     "options['grpc'][{$key}] must be an int >= 1, "
@@ -336,6 +346,45 @@ final class ConnectionFactory
                 );
             }
             $args[$key] = $value;
+        }
+
+        if (array_key_exists('keepalivePermitWithoutCalls', $grpcOptions)) {
+            $value = $grpcOptions['keepalivePermitWithoutCalls'];
+            if (!is_bool($value)) {
+                throw new InvalidArgumentException(
+                    "options['grpc'][keepalivePermitWithoutCalls] must be a bool, "
+                    . 'got ' . get_debug_type($value),
+                );
+            }
+            $args['keepalivePermitWithoutCalls'] = $value;
+        }
+
+        if (array_key_exists('compression', $grpcOptions)) {
+            $value = $grpcOptions['compression'];
+            $allowed = [
+                GrpcClient::COMPRESSION_NONE,
+                GrpcClient::COMPRESSION_GZIP,
+                GrpcClient::COMPRESSION_DEFLATE,
+            ];
+            if (!is_string($value) || !in_array($value, $allowed, true)) {
+                throw new InvalidArgumentException(
+                    "options['grpc'][compression] must be one of 'none', 'gzip', 'deflate', "
+                    . 'got ' . (is_string($value) ? "'{$value}'" : get_debug_type($value)),
+                );
+            }
+            $args['compression'] = $value;
+        }
+
+        if (array_key_exists('initialWindowSizeBytes', $grpcOptions)) {
+            $value = $grpcOptions['initialWindowSizeBytes'];
+            if (!is_int($value) || $value < 0) {
+                throw new InvalidArgumentException(
+                    "options['grpc'][initialWindowSizeBytes] must be an int >= 0, "
+                    . 'got ' . get_debug_type($value)
+                    . (is_int($value) ? " ({$value})" : ''),
+                );
+            }
+            $args['initialWindowSizeBytes'] = $value;
         }
 
         return $args;

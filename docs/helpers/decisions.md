@@ -352,9 +352,13 @@ every case, so a case with no matching `errorpb.Error` oneof turns *every*
 `Error: Call to undefined method …`. That is not silent, but the blast radius
 is wrong for the mistake — the same sentinel measured 8 errors + 3 failures
 across 11 tests in `LockResolverTest`, `RawKvScannerTest`, `TxnReaderTest` and
-`TransactionTest`, and not one of those names the enum. A one-line test
-asserting `method_exists(Error::class, 'has' . PascalCase($kind->value))` for
-every case would turn that scatter into a legible failure.
+`TransactionTest`, and not one of those names the enum. `ErrorClassifierTest::
+testEveryErrorKindHasAnErrorpbOneofDetector()` now asserts
+`method_exists(Error::class, 'has' . PascalCase($kind->value))` for every
+`ErrorKind::cases()` entry, so that scatter is one failure naming the enum case
+and the missing `Error::has…()` method instead (issue #608).
+`testErrorKindMappingCoversEveryCase()` applies the same rule to the
+classification table, which PHPStan cannot see because it is an array literal.
 
 The retryable path now uses the same table (issue #245, REG-14):
 `RetryExecutor` gates its pre-retry drop on `invalidatesRoutingOnRetry()`, which
@@ -1630,9 +1634,11 @@ not be told.
 
 Four consequences to keep:
 
-1. **The classifier still rethrows a bare `GrpcException`.** That path is now
-   only reachable for pre-write failures; it preserves the "not retried"
-   behaviour of #239 and keeps the definitive failure typed as it was.
+1. **The classifier returns `RetryVerdict::fatal()` for a bare `GrpcException`.**
+   That path is now only reachable for pre-write failures; it preserves the
+   "not retried" behaviour of #239 and keeps the definitive failure typed as it
+   was. Since #534 the fatal verdict runs the executor's fatal path, so a
+   broken channel is closed; the old throw-from-classifier trick is gone.
 2. **The typed exception carries the original as `previous`.** It extends
    `TiKvException`, not `GrpcException` (`GrpcException` is `final`), so
    `getGrpcStatusCode()` is the accessor for the status code; callers that need

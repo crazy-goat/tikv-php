@@ -21,9 +21,9 @@ use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvScanner;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TxnReader;
@@ -947,7 +947,7 @@ class RawKvScannerTest extends TestCase
             $this->regionResolver,
             new NullLogger(),
         );
-        $classifier = static fn(): ?BackoffType => null;
+        $classifier = static fn(): RetryVerdict => RetryVerdict::pass();
 
         $txnReaderMessage = $this->captureNegativeLimitMessage(
             fn(): array => $txnReader->scan(

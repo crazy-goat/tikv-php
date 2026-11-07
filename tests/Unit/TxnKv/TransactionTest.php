@@ -44,6 +44,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionConflictException;
@@ -4359,7 +4360,14 @@ class TransactionTest extends TestCase
 
         $this->expectException(InvalidStateException::class);
         $this->expectExceptionMessage('refusing to commit an arbitrary region as primary');
-        $method->invoke($committer, ['k1'], 'other', $state, $retryExecutor, static fn (): ?BackoffType => null);
+        $method->invoke(
+            $committer,
+            ['k1'],
+            'other',
+            $state,
+            $retryExecutor,
+            static fn (): RetryVerdict => RetryVerdict::pass(),
+        );
     }
 
     public function testRollbackAfterCommitThrows(): void
@@ -4419,7 +4427,7 @@ class TransactionTest extends TestCase
             regionResolver: $this->regionResolver,
             logger: new \Psr\Log\NullLogger(),
         );
-        $committer->rollback($state, $retryExecutor, static fn (): ?BackoffType => null);
+        $committer->rollback($state, $retryExecutor, static fn (): RetryVerdict => RetryVerdict::pass());
     }
 
     public function testCommitWithNumericStringKeySucceeds(): void
