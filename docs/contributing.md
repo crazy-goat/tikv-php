@@ -333,6 +333,7 @@ tests/
 │   ├── Observability/   # Metrics and debug logging
 │   ├── Phpstan/         # Fixtures for the custom PHPStan rules
 │   ├── RawKv/           # RawKV client and operations
+│   │   └── Dto/         # RawKV DTO tests
 │   ├── Region/          # Region routing and cache warming
 │   ├── Retry/           # Retry and backoff
 │   ├── Security/        # Redaction guards
