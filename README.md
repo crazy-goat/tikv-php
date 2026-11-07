@@ -292,8 +292,15 @@ Requires `enable-ttl=true` in tikv.toml configuration.
 // Store with expiration (TTL in seconds)
 $client->put('session', 'data', ttl: 3600);        // expires in 1 hour
 
-// Get remaining TTL
-$remaining = $client->getKeyTTL('session');          // seconds remaining, or null if not found/no TTL
+// getKeyTTL() returns ?int and collapses two cases: null means either that
+// the key does not exist or that it exists without an expiry.
+$remaining = $client->getKeyTTL('session');
+
+// getKeyTTLResult() keeps the cases apart:
+//   missing key       -> exists: false, ttlSeconds: null
+//   present, no TTL   -> exists: true,  ttlSeconds: null
+//   present, with TTL -> exists: true,  ttlSeconds: int > 0
+$result = $client->getKeyTTLResult('session');
 ```
 
 ### Atomic Operations
@@ -869,9 +876,16 @@ try {
     }
     echo "Total users: $userCount\n";
     
-    // Check TTL
-    $ttl = $client->getKeyTTL('user:123');
-    echo "TTL remaining: $ttl seconds\n";
+    // Check TTL. getKeyTTLResult() tells a missing key apart from a key
+    // without an expiry; getKeyTTL() returns null for both.
+    $ttl = $client->getKeyTTLResult('user:123');
+    if (!$ttl->exists) {
+        echo "TTL: key not found\n";
+    } elseif ($ttl->ttlSeconds === null) {
+        echo "TTL: no expiry\n";
+    } else {
+        echo "TTL remaining: {$ttl->ttlSeconds} seconds\n";
+    }
     
     // Enable atomic mode for CAS operations
     $client->setAtomicForCAS(true);
@@ -1161,7 +1175,7 @@ $options = [
     // disables that one operation type.
     // See docs/configuration.md#slow-operation-logging.
     'slowLog' => [
-        'readThresholdMs'        => 100,  // default 100  (get, getKeyTTL)
+        'readThresholdMs'        => 100,  // default 100  (get, getKeyTTL, getKeyTTLResult)
         'writeThresholdMs'       => 200,  // default 200  (put, delete, CAS)
         'batchReadThresholdMs'   => 500,  // default 500  (batchGet)
         'batchWriteThresholdMs'  => 500,  // default 500  (batchPut, batchDelete)
