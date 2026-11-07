@@ -53,6 +53,8 @@ final class RegionInfoMapper
             $peers[] = new PeerInfo(
                 peerId: (int) $peer->getId(),
                 storeId: (int) $peer->getStoreId(),
+                role: (int) $peer->getRole(),
+                isWitness: $peer->getIsWitness(),
             );
         }
 
