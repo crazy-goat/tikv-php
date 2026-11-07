@@ -44,6 +44,7 @@ use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\LockWaitTimeoutException;
@@ -2313,7 +2314,11 @@ class TransactionTest extends TestCase
                 static function (string $addr, string $svc, string $method) use (&$getCalls, $response): object {
                     return match ($method) {
                         'KvGet' => ++$getCalls === 1
-                            ? throw new RegionException('test', 'RegionNotFound')
+                            ? throw new RegionException(
+                                'test',
+                                'RegionNotFound',
+                                errorKind: ErrorKind::RegionNotFound,
+                            )
                             : $response,
                         default => throw new \RuntimeException("Unexpected method: $method"),
                     };

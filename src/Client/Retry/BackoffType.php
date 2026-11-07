@@ -25,6 +25,12 @@ enum BackoffType
 
     // Transactional backoff types
     case TxnLock;
+    case TxnLockFast;
+    case TxnNotFound;
+    case CommitTSLag;
+
+    // PD RPC backoff (client-go's BoPDRPC)
+    case PDRpc;
 
     public function baseMs(): int
     {
@@ -51,6 +57,15 @@ enum BackoffType
             self::MaxTimestampNotSynced => 2,
             // Transactional backoff types
             self::TxnLock => 200,
+            // The fast/not-found/commit-ts-lag curves mirror client-go's
+            // BoTxnLockFast, BoTxnNotFound and BoCommitTSLag (2 ms base,
+            // 500 ms cap).
+            self::TxnLockFast => 2,
+            self::TxnNotFound => 2,
+            self::CommitTSLag => 2,
+            // client-go's BoPDRPC: a PD RPC gets a slower 500–3000 ms curve
+            // because the whole cluster shares the endpoint.
+            self::PDRpc => 500,
         };
     }
 
@@ -74,6 +89,10 @@ enum BackoffType
             self::MaxTimestampNotSynced => 500,
             // Transactional backoff types
             self::TxnLock => 3000,
+            self::TxnLockFast => 500,
+            self::TxnNotFound => 500,
+            self::CommitTSLag => 500,
+            self::PDRpc => 3000,
         };
     }
 

@@ -1916,7 +1916,10 @@ The client retries on these errors:
 | `ServerIsBusy` | Progressive | Server overloaded, increasing delays |
 | `RegionNotFound` | Medium | Region not found, moderate delay |
 | `StaleCommand` | Fast | Stale command, quick retry |
+| Unrecognised region error | Bounded `RegionMiss` (2–500 ms) | An `errorpb.Error` variant the client does not know yet (a newer TiKV release) is retried on a bounded curve instead of failing immediately |
 | gRPC errors | Progressive | Network issues, increasing delays |
+
+Region errors are classified from the typed `errorpb.Error` oneof only. Message text is never inspected on that path: a TiKV wording change, or a key embedded in the message, cannot reclassify an error. A synthetic `RegionException` that wraps a response-level error string or a top-level `KeyError` is not a region error and stays fatal.
 
 ### Non-Retryable Errors
 
@@ -1972,6 +1975,11 @@ subclassing — there is no `classifyError()` hook on the client and no
   path, including region invalidation and the broken-channel cleanup;
 - `RetryVerdict::pass()` falls through to the built-in classification, which
   itself always answers Retry or Fatal and never Pass.
+
+The backoff taxonomy mirrors client-go's set: besides the region-error curves,
+`BackoffType` exposes `PDRpc` (500–3000 ms), and `TxnLockFast`, `TxnNotFound`
+and `CommitTSLag` (2–500 ms each), the equivalents of client-go's `BoPDRPC`,
+`BoTxnLockFast`, `BoTxnNotFound` and `BoCommitTSLag`.
 
 Note that a `NotLeader` error is classified before your classifier is
 consulted.

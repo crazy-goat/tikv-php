@@ -25,10 +25,13 @@ final class ErrorClassifier
      * It never returns {@see RetryVerdict::pass()}, which exists for custom
      * classifiers that want to defer to this one (issue #534).
      *
-     * The primary classification path uses the typed ErrorKind carried by
-     * RegionException, eliminating dependence on message-string matching.
-     * For exceptions that do not carry a typed kind (legacy or non-region
-     * errors), a message-based fallback is used.
+     * A RegionException is classified from its typed ErrorKind only. An
+     * errorpb.Error whose variant the enum does not know yet (a newer TiKV
+     * release) gets a bounded RegionMiss retry instead of being matched
+     * against its message or failing immediately (issue #444, DIV-08). A
+     * synthetic RegionException without a kind stays fatal. Non-region
+     * exceptions without a typed kind still use the message-based fallback,
+     * which exists for errors such as PdException.
      */
     public static function classify(TiKvException $e): RetryVerdict
     {
@@ -76,8 +79,21 @@ final class ErrorClassifier
         }
 
         // === Primary path: typed error kind on RegionException ===
-        if ($e instanceof RegionException && $e->errorKind instanceof ErrorKind) {
-            return self::classifyByKind($e->errorKind);
+        //
+        // A region error never falls through to message matching: the typed
+        // oneof is the contract, and an unrecognised variant (a newer TiKV
+        // release) gets a bounded RegionMiss retry rather than an immediate
+        // failure. The retry path invalidates the cached region for a
+        // kind-less RegionException, so the next attempt re-resolves it.
+        if ($e instanceof RegionException) {
+            if ($e->errorKind instanceof ErrorKind) {
+                return self::classifyByKind($e->errorKind);
+            }
+
+            // Only an errorpb.Error is an unrecognised REGION error. A
+            // synthetic RegionException (a response-level error string or a
+            // top-level KeyError) is not a routing signal and stays fatal.
+            return $e->fromErrorpb ? BackoffType::RegionMiss : null;
         }
 
         // === GC aborted: a transaction whose start timestamp GC has passed
@@ -107,7 +123,12 @@ final class ErrorClassifier
             return self::classifyGrpcStatus($e->grpcStatusCode);
         }
 
-        // === Fallback: message-text matching for exceptions without a typed kind ===
+        // === Fallback: message-text matching for non-region exceptions ===
+        //
+        // RegionException returned above, so this path only sees errors that
+        // carry no typed variant at all (for example PdException, whose
+        // message is the only classification signal). It is never reached for
+        // an errorpb.Error.
         $message = $e->getMessage();
 
         // Fatal errors (non-retryable)
@@ -165,11 +186,10 @@ final class ErrorClassifier
             return BackoffType::MaxTimestampNotSynced;
         }
 
-        // Generic exception type checks. An unmapped RegionException (no typed
-        // ErrorKind) is fatal by default: unknown errors must not be retried
-        // (issue #251, REG-20). Retryable cases are enumerated explicitly
-        // above and via the typed ErrorKind path. A kind-less RegionException
-        // therefore falls through to the final fatal return below.
+        // A non-region error with no recognised text is fatal by default:
+        // unknown errors must not be retried (issue #251, REG-20). Region
+        // errors never reach this point — they are classified by their typed
+        // kind or get the bounded RegionMiss retry above (issue #444).
         return null;
     }
 
