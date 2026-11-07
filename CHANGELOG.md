@@ -25,7 +25,7 @@ policy now classifies as internal.
 
 ### Fixed
 
-- `RawKvClient::getClusterId()` now calls `ensureOpen()`, so a closed client throws `ClientClosedException` like the other cluster operations instead of returning the cache the closed PD client has reset (issue #203, RAW-18). This is the last handle that outlived the client: `scanIterator()` and `scanPrefixIterator()` already fail closed before every page fetch (issue #344), and both iterator factories plus `getClusterId()` are now covered by the closed-client test provider.
+- `RawKvClient::getClusterId()` now calls `ensureOpen()`, so a closed client throws `ClientClosedException` like the other cluster operations instead of returning the cache the closed PD client has reset (issue #203, RAW-18). This closes the last RawKV surface that outlived the client: `scanIterator()` and `scanPrefixIterator()` already fail closed before every page fetch (issue #344), and both iterator factories now get literal obtained-before-close tests while `getClusterId()` joins the closed-client test provider. The `TxnKvClient` equivalent is unchanged.
 
 ### Security
 
