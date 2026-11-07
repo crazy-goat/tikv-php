@@ -1158,8 +1158,8 @@ Three decisions inside it:
    it attempts the rollback before releasing its other resources; the transport
    itself is still never closed by the client. Finishing transactions
    explicitly stays the contract: a rollback failure inside `close()` is logged
-   (`close()` never throws), and with a shared transport the transaction can
-   still be used afterwards.
+   (`close()` never throws), and the transaction is terminal either way
+   (issue #231), so it cannot be used afterwards.
 
 ## The transaction mode is stated explicitly, but `begin()` keeps its pessimistic default (issue #439)
 
@@ -1475,9 +1475,10 @@ the missing part.
    deadline, the total elapsed time and every region without a result.
 7. TxnKV: a deadline in the secondary-commit fan-out happens after the commit point, so it is
    logged and `commit()` does not throw (a retrying caller could apply the transaction
-   twice). A deadline in a rollback fan-out throws, like a
-   partial failure: an early return would report a failed cleanup as a success, `rollback()`
-   would mark the state `RolledBack` and close it, and nobody would retry.
+   twice). A deadline in a rollback fan-out throws, like a partial failure: an early return
+   would report a failed cleanup as a success. Since issue #231 the transaction is marked
+   `RolledBack` and closed even on that path, but the exception is still what tells the caller
+   the cleanup did not complete — the remaining locks expire with their TTL.
 8. Not covered: the experimental BatchCommands multiplex path is bounded per call only.
 
 ## Transaction size limits are opt-in, request batching is on by default (#430)
@@ -1592,10 +1593,14 @@ defensive on this path — they are normally returned by `CheckTxnStatus` and
 `Commit`. client-go is stricter (`actionCleanup::handleSingleBatch()` treats
 every `BatchRollback` `KeyError` as a failure); this client keeps the two
 "already gone" variants as success because they cannot leave a lock behind,
-and throws for everything else. The transaction stays `Active` (rollback
-started, writes and commit blocked) after a thrown variant, so the caller can
-retry `rollback()`; the regression tests pin both the success and the
-fail-closed paths in `TransactionTest`.
+and throws for everything else. #559 and #231 answer different questions and
+are not in conflict: #559 makes sure a thrown variant still reaches the caller
+(the failure is never swallowed and reported as a confirmed rollback), while
+#231 makes the client-side transaction terminal even on that path. A thrown
+variant therefore propagates from `rollback()`, but a `finally` block has
+already cleared the sets, set the status to `RolledBack` and closed the state;
+the remaining locks expire with their TTL. The regression tests pin both the
+success and the fail-closed paths in `TransactionTest`.
 
 `KeyError` is a flat message, not a oneof envelope: TiKV co-sets the
 compatibility `retryable` string with `conflict` (all supported releases) and

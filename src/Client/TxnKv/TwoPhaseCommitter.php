@@ -734,6 +734,11 @@ final readonly class TwoPhaseCommitter
      * keys, then performs a batch rollback of the write set plus any
      * acknowledged pessimistic lock that was never written (issue #436).
      *
+     * The transaction is terminal once the rollback has been attempted, even
+     * when an RPC fails: the write and read sets are cleared, the status
+     * becomes {@see TransactionStatus::RolledBack} and the state is closed
+     * before the exception propagates (issue #231, TXN-26).
+     *
      * @throws TiKvException
      */
     public function rollback(
@@ -757,25 +762,33 @@ final readonly class TwoPhaseCommitter
             );
         }
 
-        if ($this->pessimistic) {
-            $this->pessimisticRollbackAll($state, $retryExecutor, $classifier);
+        try {
+            if ($this->pessimistic) {
+                $this->pessimisticRollbackAll($state, $retryExecutor, $classifier);
+            }
+
+            // Roll back the same key set commit would prewrite: write keys
+            // plus acknowledged pessimistic locks that were never written. A
+            // prewritten Op::Lock lock is not a pessimistic lock, so the
+            // pessimistic rollback above does not remove it (issue #436).
+            $rollbackKeys = array_map(
+                static fn (Mutation $mutation): string => $mutation->getKey(),
+                $this->buildMutations($state),
+            );
+            $this->batchRollback($rollbackKeys, $retryExecutor, $classifier);
+        } finally {
+            // Once a rollback has been attempted the transaction is terminal
+            // from the client's point of view (issue #231, TXN-26): a failing
+            // RPC must not leave it Active, or `getStatus()` would report a
+            // dead transaction as usable and the destructor would repeat the
+            // same failing rollback. Any lock the RPC left behind expires
+            // with its TTL and is the lock resolvers' responsibility.
+            $state->clearWriteSet();
+            $state->clearReadSet();
+            $state->setCommitTs(null);
+            $state->setStatus(TransactionStatus::RolledBack);
+            $state->close();
         }
-
-        // Roll back the same key set commit would prewrite: write keys plus
-        // acknowledged pessimistic locks that were never written. A prewritten
-        // Op::Lock lock is not a pessimistic lock, so the pessimistic rollback
-        // above does not remove it (issue #436).
-        $rollbackKeys = array_map(
-            static fn (Mutation $mutation): string => $mutation->getKey(),
-            $this->buildMutations($state),
-        );
-        $this->batchRollback($rollbackKeys, $retryExecutor, $classifier);
-
-        $state->clearWriteSet();
-        $state->clearReadSet();
-        $state->setCommitTs(null);
-        $state->setStatus(TransactionStatus::RolledBack);
-        $state->close();
     }
 
     // ---------------------------------------------------------------

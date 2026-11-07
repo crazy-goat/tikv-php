@@ -607,9 +607,9 @@ final class Transaction
                 $this->classifyError(...),
             );
         } catch (\Throwable $cleanupFailure) {
-            // Keep the transaction active-but-unwritable so the caller (or
-            // the destructor) can retry rollback; do not claim cleanup
-            // succeeded when the RPC failed.
+            // The rollback attempt made the transaction terminal even though
+            // its RPC failed (issue #231): the remaining locks expire with
+            // their TTL, and neither the caller nor the destructor retries.
             $this->logger->error('Pessimistic lock failure cleanup failed', [
                 'txnId' => $this->txnId,
                 'exception' => $cleanupFailure,
