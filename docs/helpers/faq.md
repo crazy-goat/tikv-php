@@ -594,13 +594,17 @@ assume the executor owns every drop.
 matches the response against the explicit set of types the client sends
 (`RawGetResponse`, `RawBatchGetResponse`, the transactional responses, …) and
 calls the getter only in the matching arm. The generated protobuf classes
-share no interface, so the set lives in the two `match (true)` blocks in
-`checkRegionError()` and `checkTopLevelError()`; a new response type that can
-carry a `region_error` or a top-level `error` must be added there, or
+share no interface, so the set lives in the two `match (true)` blocks inside
+`check()` (region error first, then the top-level error); a new response type
+that can carry a `region_error` or a top-level `error` must be added there, or
 `check()` will silently treat it as clean. That is deliberate for an object
 the handler does not know (the `stdClass` test pins it): the handler only
 sees the client's own response types in production, and duck-typing a
 `getRegionError()` method was exactly the reflection cost the issue removed.
+The `regionErrorResponseProvider` / `topLevelErrorResponseProvider` data
+providers in `RegionErrorHandlerTest` enumerate the 24 region-error types and
+the 18 `getError()` types, so removing one from a match fails the suite
+instead of silently accepting that response.
 
 The batch-get path also walks its repeated `pairs` field once. The unary path
 resolves to the collected `array<array-key, ?string>` from

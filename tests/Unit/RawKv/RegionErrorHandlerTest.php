@@ -8,18 +8,33 @@ use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
+use CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksResponse;
+use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\Deadlock;
+use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawCASResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawChecksumResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawDeleteRangeResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawDeleteResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawGetKeyTTLResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
+use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse;
 use CrazyGoat\Proto\Kvrpcpb\WriteConflict;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -682,5 +697,143 @@ class RegionErrorHandlerTest extends TestCase
             $source,
             'Issue #303: the response path must use instanceof, not reflection.',
         );
+    }
+
+    // ========================================================================
+    // Issue #303: the closed set is enumerated, so dropping a response type
+    // from either match fails the suite instead of silently treating that
+    // type's region/top-level error as clean.
+    // ========================================================================
+
+    /**
+     * The 24 response types the region-error match in
+     * RegionErrorHandler::check() covers, in the same order as the match.
+     *
+     * The list is typed as `class-string` and the setter is invoked through
+     * reflection on purpose: the generated protobuf classes share no
+     * interface, and the point of the test is the list, not a static type.
+     *
+     * @return iterable<string, array{object}>
+     */
+    public static function regionErrorResponseProvider(): iterable
+    {
+        $error = new Error();
+        $error->setMessage('region boom');
+
+        /** @var list<class-string> $types */
+        $types = [
+            RawGetResponse::class,
+            RawPutResponse::class,
+            RawDeleteResponse::class,
+            RawGetKeyTTLResponse::class,
+            RawCASResponse::class,
+            RawDeleteRangeResponse::class,
+            RawChecksumResponse::class,
+            RawScanResponse::class,
+            RawBatchGetResponse::class,
+            RawBatchPutResponse::class,
+            RawBatchDeleteResponse::class,
+            RawBatchScanResponse::class,
+            GetResponse::class,
+            BatchGetResponse::class,
+            ScanResponse::class,
+            CommitResponse::class,
+            BatchRollbackResponse::class,
+            CheckTxnStatusResponse::class,
+            CheckSecondaryLocksResponse::class,
+            ResolveLockResponse::class,
+            TxnHeartBeatResponse::class,
+            PrewriteResponse::class,
+            PessimisticLockResponse::class,
+            PessimisticRollbackResponse::class,
+        ];
+
+        foreach ($types as $type) {
+            yield $type => [self::responseWith($type, 'setRegionError', $error)];
+        }
+    }
+
+    /**
+     * The 18 response types that expose a singular getError(): nine carry a
+     * string error and nine a KeyError.
+     *
+     * @return iterable<string, array{object}>
+     */
+    public static function topLevelErrorResponseProvider(): iterable
+    {
+        /** @var list<class-string> $stringTypes */
+        $stringTypes = [
+            RawGetResponse::class,
+            RawPutResponse::class,
+            RawDeleteResponse::class,
+            RawGetKeyTTLResponse::class,
+            RawCASResponse::class,
+            RawDeleteRangeResponse::class,
+            RawChecksumResponse::class,
+            RawBatchPutResponse::class,
+            RawBatchDeleteResponse::class,
+        ];
+
+        foreach ($stringTypes as $type) {
+            yield $type . ' (string)' => [self::responseWith($type, 'setError', 'top-level boom')];
+        }
+
+        $keyError = new KeyError();
+        $keyError->setRetryable('too old');
+
+        /** @var list<class-string> $keyErrorTypes */
+        $keyErrorTypes = [
+            GetResponse::class,
+            BatchGetResponse::class,
+            ScanResponse::class,
+            CommitResponse::class,
+            BatchRollbackResponse::class,
+            CheckTxnStatusResponse::class,
+            CheckSecondaryLocksResponse::class,
+            ResolveLockResponse::class,
+            TxnHeartBeatResponse::class,
+        ];
+
+        foreach ($keyErrorTypes as $type) {
+            yield $type . ' (KeyError)' => [self::responseWith($type, 'setError', $keyError)];
+        }
+    }
+
+    /**
+     * @param class-string $type
+     */
+    private static function responseWith(string $type, string $setter, Error|string|KeyError $value): object
+    {
+        $response = new $type();
+        (new \ReflectionMethod($type, $setter))->invoke($response, $value);
+
+        return $response;
+    }
+
+    #[DataProvider('regionErrorResponseProvider')]
+    public function testEveryRegionErrorResponseTypeThrows(object $response): void
+    {
+        $this->expectException(RegionException::class);
+        $this->expectExceptionMessage('region boom');
+
+        RegionErrorHandler::check($response);
+    }
+
+    #[DataProvider('topLevelErrorResponseProvider')]
+    public function testEveryTopLevelErrorResponseTypeThrows(object $response): void
+    {
+        $this->expectException(RegionException::class);
+
+        RegionErrorHandler::check($response);
+    }
+
+    public function testRegionErrorClosedSetHas24Types(): void
+    {
+        self::assertCount(24, iterator_to_array(self::regionErrorResponseProvider()));
+    }
+
+    public function testTopLevelErrorClosedSetHas18Types(): void
+    {
+        self::assertCount(18, iterator_to_array(self::topLevelErrorResponseProvider()));
     }
 }

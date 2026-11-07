@@ -131,7 +131,9 @@ final readonly class RawKvBatch
         $results = [];
         foreach ($multiplexed as $response) {
             assert($response instanceof RawBatchGetResponse);
-            $results = array_replace($results, RegionErrorHandler::collectBatchGetPairs($response));
+            foreach (RegionErrorHandler::collectBatchGetPairs($response) as $collectedKey => $collectedValue) {
+                $results[$collectedKey] = $collectedValue;
+            }
         }
 
         if ($fallbackCalls !== []) {
@@ -143,7 +145,9 @@ final readonly class RawKvBatch
             );
 
             foreach ($regionResults as $collected) {
-                $results = array_replace($results, $collected);
+                foreach ($collected as $collectedKey => $collectedValue) {
+                    $results[$collectedKey] = $collectedValue;
+                }
             }
         }
 
@@ -757,11 +761,13 @@ final readonly class RawKvBatch
                         // Error check and value collection in one pass
                         // (issue #303): the merged result is the map itself,
                         // not a rebuilt RawBatchGetResponse the caller would
-                        // have to walk again.
-                        $collected = array_replace(
-                            $collected,
-                            RegionErrorHandler::checkAndCollectBatchGet($response),
-                        );
+                        // have to walk again. Merge with a plain assignment
+                        // (not array_replace) so the fold stays O(N) instead
+                        // of copying the accumulated map per sub-response.
+                        $partial = RegionErrorHandler::checkAndCollectBatchGet($response);
+                        foreach ($partial as $collectedKey => $collectedValue) {
+                            $collected[$collectedKey] = $collectedValue;
+                        }
                     }
                     $targetStoreId = 0;
                     return $collected;

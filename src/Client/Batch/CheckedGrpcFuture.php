@@ -16,7 +16,7 @@ use Google\Protobuf\Internal\Message;
  * Lazy region-error-checking wrapper for the dispatch phase of a batch
  * operation.
  *
- * Three construction modes are supported:
+ * Four construction modes are supported:
  *
  *   1. {@see self::fromGrpcFuture()}: wrap an un-waited {@see GrpcFuture}.
  *      `waitForExecutor()` performs the underlying wait + a region-error
@@ -25,28 +25,37 @@ use Google\Protobuf\Internal\Message;
  *      makes true client-side fan-out possible: the per-region callables
  *      can issue every send before any wait begins.
  *
- *   2. {@see self::fromCallable()}: wrap a callable that already has run
+ *   2. {@see self::fromBatchGetFuture()}: wrap an un-waited {@see GrpcFuture}
+ *      for a `RawBatchGetResponse`. `waitForExecutor()` waits, checks the
+ *      region error and resolves to the collected `array<array-key, ?string>`
+ *      key => value map, so the per-pair error check and the value
+ *      collection share one traversal (#303).
+ *
+ *   3. {@see self::fromCallable()}: wrap a callable that already has run
  *      (or will run) arbitrary work and returns a resolved protobuf
  *      message. This is used by the multi-region split/merge path inside
  *      {@see \CrazyGoat\TiKV\Client\RawKv\RawKvBatch}, which issues sends
  *      for every sub-region up-front and then merges their responses
  *      during the wait phase.
  *
- *   3. {@see self::fromRetryableDispatch()}: combine both — issue the first
+ *   4. {@see self::fromRetryableDispatch()}: combine both — issue the first
  *      attempt eagerly during dispatch, then run the whole dispatch+wait
  *      cycle under a {@see RetryExecutor} during the wait phase so a region
  *      error carried on the response is retried per region (#183).
  *
- * The executor never sees the raw protobuf response without first
- * running {@see RegionErrorHandler::check()} on it.
+ * The executor never sees a raw protobuf response without first
+ * running {@see RegionErrorHandler::check()} on it (a batch get resolves to
+ * the already-checked, collected map instead).
  */
 final readonly class CheckedGrpcFuture
 {
     /**
      * @param callable(): mixed $waiter         Resolves the future to its
      *                                          result (a protobuf message,
-     *                                          or an aggregated value for
-     *                                          the batchScan fan-out)
+     *                                          an aggregated value for the
+     *                                          batchScan fan-out, or the
+     *                                          collected key => value map
+     *                                          for a batch get)
      * @param bool               $hasInnerFuture True if there is a single
      *                                          underlying {@see GrpcFuture}
      *                                          that exposes cancel/isCompleted
