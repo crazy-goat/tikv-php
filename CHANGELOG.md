@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- The pessimistic-lock wait timeout is now capped by the request's gRPC deadline and configurable client-wide (issue #229, TXN-24). A positive `lockWaitTimeMs` was sent as `PessimisticLockRequest.wait_timeout` even when it exceeded the write timeout, so TiKV could answer only after the client had already cancelled the RPC and the caller saw a `GrpcException` (`DEADLINE_EXCEEDED`) instead of a lock error; the effective value is now `min(lockWaitTimeMs, remaining budget, RPC deadline - 100 ms)`, and it falls back to the protobuf's "do not wait" value when the deadline is shorter than the headroom. `lockWaitTimeMs` is also accepted by `TxnKvClient::create()` as the client-wide default, with `begin()` overriding it per transaction. `LockWaitTimeoutException` now reports both timeouts: `getTimeoutMs()` still reports the exhausted `maxBackoffMs` budget (now also available as `getBudgetMs()`), and the new `getConfiguredWaitTimeoutMs()` returns the configured per-request wait before the budget and deadline caps (the message renders `0` as "TiKV default"). Documented in `docs/configuration.md`, `docs/troubleshooting.md`, `docs/error-handling.md`, `docs/getting-started.md`, `docs/architecture.md`, `README.md` and `docs/helpers/faq.md`. (#229)
+
 ### Security
 
 - Every GitHub Actions reference in `.github/workflows/ci.yml`, `mutation.yml` and `release.yaml` is now pinned to a full 40-character commit SHA with a trailing version comment (issue #316, SEC-13), so a force-moved major tag or branch cannot run unreviewed code on the runner. `actions/checkout` is pinned at `v7.0.1`, `actions/cache` at `v6.1.0`, `actions/upload-artifact` at `v7.0.2` (and `v4.6.2` in the nightly mutation workflow), `shivammathur/setup-php` at `2.40.0`, and the two `crazy-goat/.github` reusable workflows at the `main` commit. The top-level `permissions: contents: read` block and the `github-actions` Dependabot configuration already existed; Dependabot now rewrites the SHA and its version comment together. No CI behaviour change.
