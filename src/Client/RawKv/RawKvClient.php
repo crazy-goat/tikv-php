@@ -1023,7 +1023,11 @@ final class RawKvClient
      */
     public function getKeyTTL(string $key): ?int
     {
-        return $this->getKeyTTLResult($key)->ttlSeconds;
+        $this->ensureOpen();
+        $this->validateKeyNotEmpty($key, 'getKeyTTL');
+        $this->validateKeySize($key, 'getKeyTTL');
+
+        return $this->lookupKeyTtl($key)->ttlSeconds;
     }
 
     /**
@@ -1052,6 +1056,11 @@ final class RawKvClient
         $this->validateKeyNotEmpty($key, 'getKeyTTLResult');
         $this->validateKeySize($key, 'getKeyTTLResult');
 
+        return $this->lookupKeyTtl($key);
+    }
+
+    private function lookupKeyTtl(string $key): KeyTtl
+    {
         return $this->crud->getKeyTTLResult($key, $this->createRetryExecutor(), $this->columnFamily);
     }
 

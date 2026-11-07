@@ -729,7 +729,7 @@ Notes:
   (#247)
 - The channel a transport failure closes is the one of the store the failed
   attempt actually targeted, not one re-derived from the region cache. Every
-  retrying RPC path — RawKV `get`/`getKeyTTL`/`put`/`delete`, `batchGet`/
+  retrying RPC path — RawKV `get`/`getKeyTTL`/`getKeyTTLResult`/`put`/`delete`, `batchGet`/
   `batchPut`/`batchDelete`, forward and reverse scans, `deleteRange` and
   `checksum`, and TxnKV `get`/`batchGet`/`scan`, prewrite, secondary commit,
   rollback, pessimistic rollback, heartbeat and lock resolution — reports its

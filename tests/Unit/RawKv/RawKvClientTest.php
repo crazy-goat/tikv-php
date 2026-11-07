@@ -3011,14 +3011,14 @@ class RawKvClientTest extends TestCase
     public function testGetKeyTTLThrowsOnEmptyKey(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Key must not be empty');
+        $this->expectExceptionMessage('Key must not be empty in getKeyTTL');
         $this->client->getKeyTTL('');
     }
 
     public function testGetKeyTTLResultThrowsOnEmptyKey(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Key must not be empty');
+        $this->expectExceptionMessage('Key must not be empty in getKeyTTLResult');
         $this->client->getKeyTTLResult('');
     }
 

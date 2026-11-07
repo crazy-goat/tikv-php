@@ -1164,7 +1164,7 @@ the client does not know or a value that is not an integer. Omitting the whole
 
 | Option key               | Default | Operations covered                                                                    |
 |--------------------------|---------|---------------------------------------------------------------------------------------|
-| `readThresholdMs`        | 100     | `get()`, `getKeyTTL()`                                                                 |
+| `readThresholdMs`        | 100     | `get()`, `getKeyTTL()`, `getKeyTTLResult()`                                            |
 | `writeThresholdMs`       | 200     | `put()`, `delete()`, `compareAndSwap()`, `putIfAbsent()`                              |
 | `batchReadThresholdMs`   | 500     | `batchGet()`                                                                           |
 | `batchWriteThresholdMs`  | 500     | `batchPut()`, `batchDelete()`                                                          |

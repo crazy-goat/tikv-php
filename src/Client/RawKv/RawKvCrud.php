@@ -210,11 +210,6 @@ final readonly class RawKvCrud
         });
     }
 
-    public function getKeyTTL(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): ?int
-    {
-        return $this->getKeyTTLResult($key, $retryExecutor, $columnFamily)->ttlSeconds;
-    }
-
     public function getKeyTTLResult(string $key, RetryExecutor $retryExecutor, string $columnFamily = ''): KeyTtl
     {
         $excludedStore = null;
