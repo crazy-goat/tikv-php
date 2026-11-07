@@ -625,6 +625,37 @@ dropped the entry before scheduling another attempt", while `check()` may run
 outside any retry executor. Do not collapse the two labels, and do not
 assume the executor owns every drop.
 
+## `RegionErrorHandler::check()` is a closed-set `instanceof` dispatch, not duck typing (PERF-16, issue #303)
+
+`check()` used to call `method_exists()` twice on every response. It now
+matches the response against the explicit set of types the client sends
+(`RawGetResponse`, `RawBatchGetResponse`, the transactional responses, …) and
+calls the getter only in the matching arm. The generated protobuf classes
+share no interface, so the set lives in the two `match (true)` blocks inside
+`check()` (region error first, then the top-level error); a new response type
+that can carry a `region_error` or a top-level `error` must be added there, or
+`check()` will silently treat it as clean. That is deliberate for an object
+the handler does not know (the `stdClass` test pins it): the handler only
+sees the client's own response types in production, and duck-typing a
+`getRegionError()` method was exactly the reflection cost the issue removed.
+The `regionErrorResponseProvider` / `topLevelErrorResponseProvider` data
+providers in `RegionErrorHandlerTest` enumerate the 24 region-error types and
+the 18 `getError()` types, so removing one from a match fails the suite
+instead of silently accepting that response.
+
+The batch-get path also walks its repeated `pairs` field once. The unary path
+resolves to the collected `array<array-key, ?string>` from
+`CheckedGrpcFuture::fromBatchGetFuture()` /
+`RegionErrorHandler::checkAndCollectBatchGet()`; the multiplexed path calls
+`check(..., checkPairErrors: false)` in `tryMultiplex()` and collects with
+`RegionErrorHandler::collectBatchGetPairs()` in `RawKvBatch::batchGet()`.
+Both loops throw the same `KeyErrorException` at the same point in the order
+(region error first, then the first bad pair), so the exception surface is
+unchanged: the unary path still wraps it in `BatchPartialFailureException`,
+the multiplexed path still lets it escape. Do not "simplify" by moving the
+pair check out of the per-region waiter on the unary path — that would change
+the wrapper the caller sees.
+
 ## PHPStan `ternary.alwaysFalse` fires for by-ref bool flags mutated in a sibling closure — sequence mocks instead
 
 When a test shares state between mocked-method callbacks through a
