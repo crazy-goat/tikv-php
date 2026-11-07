@@ -61,8 +61,13 @@ final class RawKvClientBatchGetArrayKeyTest extends TestCase
         $store->setAddress('127.0.0.1:20160');
         $this->pdClient->method('getStore')->willReturn($store);
 
-        // Two regions so the batch is really grouped and dispatched; the
-        // split point '1' keeps '12345' and 'user:1' in different regions.
+        // Two regions so the batch is really grouped and dispatched. Both
+        // regions report `leaderStoreId: 1`, so the multiplexer coalesces the
+        // two groups into one exchange with one request per region. Only
+        // `testNonCanonicalDecimalKeyStaysAStringArrayKey()` straddles the
+        // split: '01000' is bytewise below '1' (region 1) while '12345' is
+        // above it (region 2). The other tests' keys ('12345', 'user:1') all
+        // sit in region 2, so their assertions do not depend on grouping.
         $this->pdClient->method('scanRegions')->willReturn([
             $this->region(1, '', '1'),
             $this->region(2, '1', ''),
@@ -84,8 +89,10 @@ final class RawKvClientBatchGetArrayKeyTest extends TestCase
 
     private function client(): RawKvClient
     {
-        // The multiplexed path never touches the unary gRPC layer.
-        $this->grpc->expects($this->never())->method('getChannel');
+        // The multiplexed path never reaches the unary transport: a fallback
+        // would call callAsync(), so this guard actually fires on a regression
+        // (RawKvBatch never calls getChannel() on any path).
+        $this->grpc->expects($this->never())->method('callAsync');
 
         $batch = new RawKvBatch(
             $this->grpc,
