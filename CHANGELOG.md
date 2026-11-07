@@ -29,6 +29,7 @@ policy now classifies as internal.
 
 ### Tests
 
+- `RawKvClientRegionResolverReuseTest` pins PERF-14 (issue #301): `RawKvClient` builds one `RegionResolver` and hands the same instance to every collaborator (`RawKvCrud`, `RawKvAtomic`, `RawKvBatch`, `RawKvScanner`, `RawKvRangeOps`, `SstIngestor`) and to the per-operation `RetryExecutor`. The shared resolver shipped with the per-store health tracking work (#424); this test makes the reuse a contract, so a future per-operation `new RegionResolver()` cannot silently discard the health state a previous retry loop learned or defeat per-resolver caching. No production behaviour change. (#301)
 - `tests/Unit/Ci/WorkflowSupplyChainGuardTest.php` pins the SEC-13 hardening (issue #316): it fails when a workflow adds a `uses:` reference without a full 40-character commit SHA and a trailing version comment, when the CI workflow loses its top-level `permissions: contents: read` block, or when Dependabot stops watching the `github-actions` ecosystem. Local actions and `docker://` references are exempt, the check discovers every `.github/workflows/*.y*ml` so a new workflow cannot escape it, and a `uses:` line the parser cannot read fails instead of being skipped.
 
 ### Docs
