@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Added
+
+- `TxnKvClient::pdClient()` returns the `PdClientInterface` the client uses for region discovery and timestamps (issue #515). A consumer or test that also needs PD — service GC safe points, cluster inspection, region splits — reuses this connection instead of calling `ConnectionFactory::create()` again, which opened a second PD connection and a second TSO stream. The accessor returns the same instance the client owns, sends no RPC and throws nothing; the object is valid only until `TxnKvClient::close()`, which closes it. The GC safe-point E2E test now uses it instead of building a second factory instance (and no longer leaks the connection it used to leave open). Documented in `docs/operations.md` and `docs/error-handling.md`. (#515)
+
 ### Fixed
 
 - A test run that does not ask for coverage no longer requests a coverage driver or writes coverage artifacts. `phpunit.xml` configured a Clover and an HTML report, so every run that did not pass `--no-coverage` — including a plain `vendor/bin/phpunit` and any local runner without the flag — exited 1 with `XDEBUG_MODE=coverage ... has to be set` on the documented local setup (`xdebug.mode=debug`) although every test passed; with a driver in coverage mode the same run left `coverage.xml` and `coverage-html/` behind. The report block is removed and coverage is opt-in on the command line: `composer test:coverage` and the CI `grpc-unit-tests` job already pass `--coverage-clover=coverage.xml`, and the `<source>` set that scopes the metric to the hand-written client code is unchanged. A guard test in `TestSuiteSelectorGuardTest` pins the configuration and the non-coverage runners, and the `Makefile` and `scripts/test.sh` invocations now pass `--no-coverage` explicitly as well. (#556)

@@ -337,6 +337,7 @@ only the timing it produces differs.
 | `TxnKvClient::create()`, `TxnKvClient::close()` | Yes | Yes | `create()` validates the options and, with `apiVersion => 2`, reads PD to resolve the keyspace — on the default V1 path it does not contact PD at all. `close()` is idempotent; it rolls back the client's still-active transactions before releasing the resources they depend on, and a rollback failure is logged rather than thrown |
 | `TxnKvClient::getClusterId()`, `TxnKvClient::healthCheck()` | Yes | Yes | A local accessor and a read-only PD probe; no user data is touched |
 | `TxnKvClient::getMetrics()` | Yes | Yes | Pure accessor |
+| `TxnKvClient::pdClient()` | Yes | Yes | Pure accessor; returns the PD client the TxnKV client owns. It is closed by `TxnKvClient::close()`, so treat the reference as stale afterwards |
 | `TxnKvClient::reapIdleChannels()` | Yes | Yes | Local only: drops the cached gRPC channels that were idle past `idleTtlMs`, sends no RPC. A no-op after `close()` |
 | `TxnKvClient::refreshRegionCache()`, `TxnKvClient::preloadRegions()` | Yes | Yes | Cache warming only: re-reads region metadata from PD and stores it; no user data is touched. A PD failure is logged and the old cache entry is kept (nothing is thrown for it); both are no-ops after `close()` |
 | `Transaction::get()`, `Transaction::batchGet()`, `Transaction::scan()` | Yes | Yes | Read-only inside the transaction's snapshot at `startTs`, so a repeated read sees the same version of the data |
