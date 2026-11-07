@@ -1,4 +1,30 @@
 vendor/
 .git/
 .phpunit.cache/
+.phpunit.result.cache
+phpunit.result.cache
 proto/kvproto/.git/
+
+# Never bake local credentials, local environment files or test artifacts into
+# an image layer: `COPY . .` would otherwise include them, and a later layer
+# that deletes them would not remove them from the image.
+.env*
+*.pem
+*.crt
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.log
+coverage.xml
+coverage-clover.xml
+coverage-html/
+
+# Local tooling and scratch files that are not part of the build.
+.worktrees/
+.opencode/
+.pi-subagents/
+.tyci/
+findings.md
+review.md

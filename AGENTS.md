@@ -109,6 +109,15 @@ Because the project name is unique per worktree and the tests run in the compose
 of several worktrees do not collide. `bin/worktree-teardown.sh` stops the stacks of all three file
 combinations (and the `test` profile); `bin/worktree-done.sh` calls it.
 
+The `php-client` and `php-test` images run as an unprivileged `app` user, and Compose builds that
+user with the host owner's `HOST_UID`/`HOST_GID` (default `1000`). The IDs matter because `.:/app`
+is a bind mount: Composer and PHPUnit must be able to write `vendor/` and `.phpunit.cache/` in the
+checkout. The `Makefile` and the E2E runner scripts export both from `id -u`/`id -g`, so `make` and
+`composer test:e2e` need no setup; a direct `docker compose` call needs them in the environment
+(`HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ...`), and changing them needs `make build`
+because they are build args. The base image is pinned by digest, and `.dockerignore` keeps local
+credentials (`*.pem`, `*.crt`, `*.key`, `*.p12`, …) and `.env*` files out of every layer.
+
 ## CI
 
 `.github/workflows/ci.yml` runs on pull requests to `master` and on pushes to `master`. The

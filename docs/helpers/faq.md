@@ -145,6 +145,20 @@ The `E2E-RawKV` and `E2E-TxnKV` testsuites require real TiKV nodes. Start
 the cluster with `make up` (PD on 2379, tikv1/2/3 on 20160/20161/20162),
 stop with `make down`. If state gets corrupted: `make clean && make up`.
 
+## The Compose image runs as a non-root user; match `HOST_UID`/`HOST_GID`
+
+`Dockerfile` creates an unprivileged `app` user and runs Composer, PHPUnit and
+the default `CMD` as it. `docker-compose.yml` bind-mounts the checkout at
+`/app`, so the image user must be the checkout owner or Composer cannot write
+`vendor/` and PHPUnit cannot write `.phpunit.cache/`. Compose builds the user
+from `HOST_UID`/`HOST_GID`; the `Makefile` and the E2E runner scripts fill both
+from `id -u` / `id -g`. A direct `docker compose build`/`run` on a host whose
+owner is not `1000` needs them in the environment, and changing them requires a
+rebuild because they are build args. The symptom of a mismatch is
+`Permission denied` under `/app` during `composer install` or a test run. The
+base image digest is pinned in `Dockerfile`; bump it together with the
+`alpine:3.21` tag.
+
 ## Protobuf `RepeatedField` is not a PHP array — `iterator_to_array()` before `array_map()`
 
 Proto getters returning repeated fields (`PrewriteRequest::getMutations()`,

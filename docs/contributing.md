@@ -803,6 +803,17 @@ make clean && make up
 make shell
 ```
 
+The `php-client` and `php-test` containers run as an unprivileged `app` user
+that owns the bind-mounted checkout. `make` and the E2E scripts detect the
+host owner with `id -u` / `id -g`; when you call `docker compose` directly,
+pass the same IDs and rebuild after changing them:
+
+```bash
+export HOST_UID=$(id -u) HOST_GID=$(id -g)
+docker compose build
+docker compose run --rm php-client vendor/bin/phpunit --testsuite Unit
+```
+
 ## Recognition
 
 Contributors will be:

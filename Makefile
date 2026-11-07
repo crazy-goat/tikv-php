@@ -5,6 +5,12 @@
 # scripts/lib/compose.sh, which the runner scripts source).
 COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
+# The php-client/php-test images run as an unprivileged user and bind-mount
+# the checkout, so build them with the host owner's IDs (docker-compose.yml
+# reads HOST_UID/HOST_GID). An explicit environment value wins.
+export HOST_UID ?= $(shell id -u)
+export HOST_GID ?= $(shell id -g)
+
 # Default target
 help:
 	@echo "TiKV PHP Client - Available commands:"
