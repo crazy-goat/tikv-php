@@ -1663,7 +1663,7 @@ $txn = $client->begin([
 | `maxTxnEntryCount` | `0` (unlimited) | Maximum number of write-set entries. |
 | `maxTxnEntrySize` | `0` (unlimited) | Maximum bytes of one entry, measured as key length plus value length. A delete contributes the key length only. |
 | `maxTxnTotalSize` | `0` (unlimited) | Maximum bytes of the whole write set: the sum of every entry's key plus value length. |
-| `trackReadSet` | `false` | Opt in to the read set populated by `get()`/`batchGet()`. Disabled by default because nothing in the commit path consumes it. Must be a bool. |
+| `trackReadSet` | `false` | Opt in to the read set populated by `get()`/`batchGet()`/`getForUpdate()`. Disabled by default because nothing in the commit path consumes it. Must be a bool. |
 | `maxReadSetEntries` | `0` (unlimited) | Maximum number of tracked read-set entries. Has no effect unless `trackReadSet` is true. |
 | `maxReadSetTotalSize` | `0` (unlimited) | Maximum bytes of the whole tracked read set: key length plus value length per entry. A not-found read contributes the key length only. Has no effect unless `trackReadSet` is true. |
 | `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite, pessimistic-lock or commit request per region: key plus value length for a prewrite mutation, key length for a pessimistic-lock mutation or a commit key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
@@ -1675,9 +1675,9 @@ workloads. Exceeding one throws `TransactionTooLargeException`. A write is
 rejected from `set()`/`delete()` **before** it is buffered and before any RPC —
 in a pessimistic transaction that means before the eager lock request, so a
 rejected write leaves no server-side lock. A read is rejected from
-`get()`/`batchGet()` before the fetched value is retained in the read set; the
-RPC has already happened by then, because the value's size is only known after
-the response arrives. The bound applies to what the transaction **retains**,
+`get()`/`batchGet()`/`getForUpdate()` before the fetched value is retained in
+the read set; the RPC has already happened by then, because the value's size is
+only known after the response arrives. The bound applies to what the transaction **retains**,
 not to the peak of one call: a single `get()` response or a whole `KvBatchGet`
 response is received in full before the check runs, so the peak of one read can
 exceed `maxReadSetTotalSize` even though the value is not added to the map. The exception names the limit
@@ -1695,7 +1695,7 @@ Read-set tracking is **off by default**, so a transaction that only reads does
 not retain the read **values**. Memory can still grow slightly: a pessimistic
 transaction records one read timestamp per distinct key read
 (`readTsByKey`) until that key is written or the transaction ends.
-`get()` and `batchGet()` populate the read-set map only when
+`get()`, `batchGet()` and `getForUpdate()` populate the read-set map only when
 `trackReadSet` is true; `scan()` never populates it, so a scan-heavy
 transaction is not covered by the read-set limits at all (scans are bounded by
 `Transaction::MAX_SCAN_LIMIT` instead). For a long-lived worker that opts in and
@@ -2524,23 +2524,25 @@ change rather than only as an uptime check.
 
 The library exposes an opt-in `MetricsInterface` for capturing operational
 counters (RPC counts and latency, retry counts, region-cache hit/miss,
-region-cache invalidations). The default is a zero-cost no-op, so callers
-that do not opt in pay a single empty-method dispatch per call site.
+region-cache invalidations). The default is a no-op backend, so callers
+that do not opt in pay one empty-method dispatch per RPC; the optional
+detailed signals add an `instanceof` probe and a timestamp on the 2PC and
+lock-resolution paths.
+`PrometheusMetrics` is a dependency-free adapter that renders the Prometheus
+text exposition format; no extra Composer package is required.
 
 ```php
-use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
-use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
-
-class PrometheusMetrics implements MetricsInterface
-{
-    // ... your Prometheus / StatsD / OpenTelemetry adapter here ...
-}
+use CrazyGoat\TiKV\Client\Observability\PrometheusMetrics;
 
 $metrics = new PrometheusMetrics();   // or new InMemoryMetrics() for tests
 $client = RawKvClient::create(
     ['tikv.example.com:2379'],
     options: ['metrics' => $metrics],
 );
+
+// In the metrics endpoint:
+header('Content-Type: ' . PrometheusMetrics::CONTENT_TYPE);
+echo $metrics->render();
 ```
 
 The library emits the following counter tags:
@@ -2553,6 +2555,51 @@ The library emits the following counter tags:
 | `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache. `region_resolution` is the per-lookup label (point reads and `reverseScan()`'s top-down resolver); the scan labels are emitted once per cache-served run of regions |
 | `regionCacheMiss()`            | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was not in the cache, had to query PD. `region_resolution` is the per-lookup label; the scan labels are emitted once per `ScanRegions` call |
 | `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'`, `'refresh'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), post-resolve cleanup in `LockResolver`, or a `refreshRegionCache()` tick that found PD no longer maps the entry's start key to its cached range (a refresh that supersedes the entry with a newer answer is a `put()` and emits nothing). Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
+
+#### Extended metrics and tracing
+
+`MetricsInterface` is frozen: backends that can record more implement
+`DetailedMetricsInterface` **in addition** to it, so adding those signals
+never breaks an existing implementation. The client probes with
+`instanceof DetailedMetricsInterface` and records:
+
+- `backoffCompleted()` — one retry backoff, with its type, attempt and the
+  duration actually slept;
+- `storeAttemptCompleted()` — one RPC attempt against a store, with the
+  store ID, success flag and error kind;
+- `lockResolved()` — one lock-resolution attempt (`resolved`, `live` or
+  `error`) and its duration;
+- `twoPhasePhaseCompleted()` — one 2PC phase (`prewrite` or `commit`) with
+  its duration and success flag. 1PC and async commit emit only `prewrite`.
+
+`PrometheusMetrics` and `InMemoryMetrics` implement both interfaces.
+
+Tracing is configured separately through `options['tracer']`, which accepts
+a `TraceEventInterface` callback:
+
+```php
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
+
+final class MyTracer implements TraceEventInterface
+{
+    public function traceEvent(string $category, string $event, array $fields = []): void
+    {
+        // Bridge to OpenTelemetry, OpenTracing or your own spans.
+    }
+}
+
+$client = RawKvClient::create(
+    ['tikv.example.com:2379'],
+    options: ['tracer' => new MyTracer()],
+);
+```
+
+The client emits `kv_request` events from the transport (`rpc_started`,
+`rpc_completed`), `txn_2pc` events from commit (prewrite/commit/1PC/async) and
+`txn_lock_resolve` events from lock resolution; the category constants are in
+`TraceCategory`. A tracer that throws is logged and swallowed, so tracing
+never breaks the data path. See
+[Advanced → Tracing](advanced.md#tracing) for an OpenTelemetry bridge.
 
 For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
 
@@ -2576,7 +2623,11 @@ the async-commit finalization (`resolveAsyncCommitLocks()`, issue #568).
 
 `InMemoryMetrics` ships the same counters in-process, suitable for tests
 and benchmarks — see `getRpcStarted()`, `getRpcSucceeded()`, `getRetries()`,
-`getCacheHits()`, `getInvalidations()`, `getMeanLatencyMs()`, and `reset()`.
+`getCacheHits()`, `getInvalidations()`, `getMeanLatencyMs()`,
+`getBackoffCount()`, `getStoreSuccesses()`, `getStoreFailures()`,
+`getStoreErrorKinds()`, `getLockResolutions()`, `getTwoPhaseCount()`,
+`getTwoPhaseFailures()`, and `reset()`. `InMemoryTracer` records the trace
+events in order for the same purpose.
 
 Inspect live counters at any time:
 

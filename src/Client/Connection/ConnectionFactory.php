@@ -17,6 +17,8 @@ use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\NoOpTracer;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -112,6 +114,7 @@ final class ConnectionFactory
         $resolvedLogger = $logger ?? new NullLogger();
 
         $metrics = self::resolveMetrics($options);
+        $tracer = self::resolveTracer($options);
 
         $suppliedGrpc = self::resolveSuppliedGrpcClient($options);
 
@@ -136,6 +139,12 @@ final class ConnectionFactory
                     . 'gRPC transport keeps its own metrics backend',
                 );
             }
+            if (isset($options['tracer'])) {
+                $resolvedLogger->debug(
+                    "options['tracer'] backs the client-side trace events only: the injected "
+                    . 'gRPC transport keeps its own tracing callback',
+                );
+            }
         } else {
             $tlsConfig = self::buildTlsConfig($options);
 
@@ -158,6 +167,7 @@ final class ConnectionFactory
                 keepalivePermitWithoutCalls: $grpcArgs['keepalivePermitWithoutCalls'],
                 compression: $grpcArgs['compression'],
                 initialWindowSizeBytes: $grpcArgs['initialWindowSizeBytes'],
+                tracer: $tracer,
             );
             $ownsGrpcClient = true;
         }
@@ -227,6 +237,7 @@ final class ConnectionFactory
             allowedStorePorts: $storeHostValidation['allowedStorePorts'],
             codec: $resolvedCodec,
             ownsGrpcClient: $ownsGrpcClient,
+            tracer: $tracer,
         );
     }
 
@@ -518,6 +529,28 @@ final class ConnectionFactory
         }
 
         return $metrics;
+    }
+
+    /**
+     * Resolve options['tracer'] (issue #434, GAP-20).
+     *
+     * The default is the zero-cost {@see NoOpTracer}. A non-conforming value
+     * is a configuration error: silently ignoring it would leave a user
+     * believing their spans are emitted.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveTracer(array $options): TraceEventInterface
+    {
+        $tracer = $options['tracer'] ?? new NoOpTracer();
+        if (!$tracer instanceof TraceEventInterface) {
+            throw new InvalidArgumentException(
+                "options['tracer'] must be an instance of TraceEventInterface, "
+                . 'got ' . get_debug_type($tracer),
+            );
+        }
+
+        return $tracer;
     }
 
     /**

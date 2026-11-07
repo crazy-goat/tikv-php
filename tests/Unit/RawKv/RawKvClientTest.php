@@ -6,9 +6,12 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\Kvrpcpb\KeyRange;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawCASResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawChecksumRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawChecksumResponse;
@@ -1837,24 +1840,37 @@ class RawKvClientTest extends TestCase
         $pair1->setValue('v1');
 
         $pair2 = new KvPair();
-        $pair2->setKey('k2');
+        // k1 is in [a,m), m1 is in [m,z): the flat response is split by the
+        // clipped range bounds, so the fixture keys must respect them.
+        $pair2->setKey('m1');
         $pair2->setValue('v2');
 
-        $response = new RawScanResponse();
-        $response->setKvs([$pair1]);
+        $response = new RawBatchScanResponse();
+        $response->setKvs([$pair1, $pair2]);
 
-        $response2 = new RawScanResponse();
-        $response2->setKvs([$pair2]);
+        // Both ranges live in the same region: one RawBatchScan carries both
+        // clipped ranges, and the flat response is split back per range
+        // (issue #433).
+        $requests = [];
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                ) use (
+                    &$requests,
+                    $response,
+                ): GrpcFuture {
+                    $this->assertSame('RawBatchScan', $method);
+                    $this->assertInstanceOf(RawBatchScanRequest::class, $request);
+                    $requests[] = $request;
 
-        // batchScan fans out per-range sends via callAsync (issue #295);
-        // one future per range, resolved in dispatch order.
-        $responses = [$response, $response2];
-        $this->grpc->method('callAsync')
-            ->willReturnCallback(function () use (&$responses): GrpcFuture {
-                return $this->okFuture(
-                    array_shift($responses) ?? new RawScanResponse(),
-                );
-            });
+                    return $this->okFuture($response);
+                },
+            );
 
         $result = $this->client->batchScan([['a', 'm'], ['m', 'z']], 10);
 
@@ -1862,7 +1878,14 @@ class RawKvClientTest extends TestCase
         $this->assertCount(1, $result[0]);
         $this->assertSame('k1', $result[0][0]['key']);
         $this->assertCount(1, $result[1]);
-        $this->assertSame('k2', $result[1][0]['key']);
+        $this->assertSame('m1', $result[1][0]['key']);
+        $this->assertSame(
+            [['a', 'm'], ['m', 'z']],
+            array_map(
+                static fn(KeyRange $range): array => [$range->getStartKey(), $range->getEndKey()],
+                iterator_to_array($requests[0]->getRanges()),
+            ),
+        );
     }
 
     public function testBatchScanWithEmptyEndKeyScansToInfinity(): void
@@ -1903,12 +1926,13 @@ class RawKvClientTest extends TestCase
                     string $method,
                     Message $request,
                 ) use (&$requests): GrpcFuture {
-                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame('RawBatchScan', $method);
+                    $this->assertInstanceOf(RawBatchScanRequest::class, $request);
                     $requests[] = $request;
 
-                    $response = new RawScanResponse();
+                    $response = new RawBatchScanResponse();
                     $pair = new KvPair();
-                    $pair->setKey($request->getStartKey() === 'a' ? 'k1' : 'k2');
+                    $pair->setKey($request->getRanges()[0]->getStartKey() === 'a' ? 'k1' : 'm2');
                     $pair->setValue('v');
                     $response->setKvs([$pair]);
 
@@ -1919,9 +1943,9 @@ class RawKvClientTest extends TestCase
         $result = $this->client->batchScan([['a', '']], 10);
 
         $this->assertCount(1, $result);
-        $this->assertSame(['k1', 'k2'], array_column($result[0], 'key'));
-        $this->assertSame('m', $requests[1]->getStartKey());
-        $this->assertSame('', $requests[1]->getEndKey());
+        $this->assertSame(['k1', 'm2'], array_column($result[0], 'key'));
+        $this->assertSame('m', $requests[1]->getRanges()[0]->getStartKey());
+        $this->assertSame('', $requests[1]->getRanges()[0]->getEndKey());
     }
 
     public function testBatchScanWithBothBoundsEmptyScansToInfinity(): void
@@ -1946,13 +1970,14 @@ class RawKvClientTest extends TestCase
                     string $method,
                     Message $request,
                 ) use (&$requests): GrpcFuture {
-                    $this->assertInstanceOf(RawScanRequest::class, $request);
+                    $this->assertSame('RawBatchScan', $method);
+                    $this->assertInstanceOf(RawBatchScanRequest::class, $request);
                     $requests[] = $request;
 
                     $pair = new KvPair();
-                    $pair->setKey($request->getStartKey() === '' ? 'k1' : 'k2');
+                    $pair->setKey($request->getRanges()[0]->getStartKey() === '' ? 'k1' : 'm2');
                     $pair->setValue('v');
-                    $response = new RawScanResponse();
+                    $response = new RawBatchScanResponse();
                     $response->setKvs([$pair]);
 
                     return GrpcFuture::completed($response);
@@ -1961,11 +1986,11 @@ class RawKvClientTest extends TestCase
 
         $result = $this->client->batchScan([['', '']], 10);
 
-        $this->assertSame(['k1', 'k2'], array_column($result[0], 'key'));
-        $this->assertSame('', $requests[0]->getStartKey());
-        $this->assertSame('m', $requests[0]->getEndKey());
-        $this->assertSame('m', $requests[1]->getStartKey());
-        $this->assertSame('', $requests[1]->getEndKey());
+        $this->assertSame(['k1', 'm2'], array_column($result[0], 'key'));
+        $this->assertSame('', $requests[0]->getRanges()[0]->getStartKey());
+        $this->assertSame('m', $requests[0]->getRanges()[0]->getEndKey());
+        $this->assertSame('m', $requests[1]->getRanges()[0]->getStartKey());
+        $this->assertSame('', $requests[1]->getRanges()[0]->getEndKey());
     }
 
     // ========================================================================
@@ -2535,13 +2560,14 @@ class RawKvClientTest extends TestCase
         $this->assertSame('k1', $result[0][0]['key']);
     }
 
-    public function testBatchScanRerunsMiddleSubRangeWhenRegionShrankAfterEnumeration(): void
+    public function testBatchScanFallsBackWhenMiddleRegionShrankAfterEnumeration(): void
     {
         // The cached chain is stale: the middle region still claims [m, t)
-        // while getByKey() already sees it split into [m, q) + [q, t). The
-        // concurrent send for the stale [m, t) can therefore only cover
-        // [m, q), and the waiter must re-run that whole sub-range through the
-        // sequential path instead of dropping [q, t).
+        // while getByKey() already sees it split into [m, q) + [q, t). A
+        // RawBatchScan sent to the stale region returns a region error (its
+        // epoch changed), so the whole call falls back to the per-range
+        // RawScan path, which re-resolves the shrunken middle and covers
+        // [q, t) instead of dropping it.
         $region1 = new RegionInfo(
             regionId: 1,
             leaderPeerId: 1,
@@ -2604,56 +2630,90 @@ class RawKvClientTest extends TestCase
         $this->regionCache->method('put');
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        // One concurrent send per enumerated segment; each response carries a
-        // key inside its (stale) range. The middle send only reaches [m, q).
-        $asyncResponses = [
-            $this->scanResponseWithKeys('a1'),
-            $this->scanResponseWithKeys('m1'),
-            $this->scanResponseWithKeys('t1'),
-        ];
+        // One RawBatchScan per enumerated region. The middle send reaches the
+        // stale [m, t) region and is answered with a region error because its
+        // epoch changed; the other two regions answer normally. The fallback
+        // then re-runs the whole call through the per-range RawScan path,
+        // which must cover the shrunken middle in full.
+        $scanResponseFor = (fn(string $start): RawScanResponse => match ($start) {
+            'a' => $this->scanResponseWithKeys('a1'),
+            'm' => $this->scanResponseWithKeys('m1'),
+            'q' => $this->scanResponseWithKeys('q1', 's1'),
+            't' => $this->scanResponseWithKeys('t1'),
+            default => new RawScanResponse(),
+        });
+
+        /** @var list<RawScanRequest> $syncRequests */
+        $syncRequests = [];
         $this->grpc->method('callAsync')->willReturnCallback(
-            function () use (&$asyncResponses): GrpcFuture {
-                return $this->okFuture(array_shift($asyncResponses) ?? new RawScanResponse());
+            function (
+                string $address,
+                string $service,
+                string $method,
+                Message $request,
+            ) use (
+                &$syncRequests,
+                $scanResponseFor
+            ): GrpcFuture {
+                if ($method === 'RawScan') {
+                    /** @var RawScanRequest $request */
+                    $syncRequests[] = $request;
+
+                    return $this->okFuture($scanResponseFor($request->getStartKey()));
+                }
+
+                $this->assertSame('RawBatchScan', $method);
+                $this->assertInstanceOf(RawBatchScanRequest::class, $request);
+                $start = $request->getRanges()[0]->getStartKey();
+
+                $response = new RawBatchScanResponse();
+                if ($start === 'm') {
+                    $error = new Error();
+                    $error->setNotLeader(new NotLeader());
+                    $response->setRegionError($error);
+                } else {
+                    $pair = new KvPair();
+                    $pair->setKey($start === 'a' ? 'a1' : 't1');
+                    $pair->setValue('v');
+                    $response->setKvs([$pair]);
+                }
+
+                return $this->okFuture($response);
             },
         );
 
-        // The sequential retrying path (sync call) must cover the shrunken
-        // middle sub-range in full: [m, q) then [q, t).
-        /** @var list<RawScanRequest> $syncRequests */
-        $syncRequests = [];
+        // The shrunken middle's continuation goes through the sequential
+        // retrying path, which uses the synchronous call().
         $this->grpc->expects($this->atLeastOnce())->method('call')->willReturnCallback(
             function (
                 string $address,
                 string $service,
                 string $method,
                 Message $request,
-            ) use (&$syncRequests): Message {
+            ) use (
+                &$syncRequests,
+                $scanResponseFor
+            ): Message {
                 /** @var RawScanRequest $request */
                 $syncRequests[] = $request;
 
-                if ($request->getStartKey() === 'm') {
-                    return $this->scanResponseWithKeys('m1');
-                }
-                if ($request->getStartKey() === 'q') {
-                    return $this->scanResponseWithKeys('q1', 's1');
-                }
-
-                return new RawScanResponse();
+                return $scanResponseFor($request->getStartKey());
             },
         );
 
         $result = $this->client->batchScan([['a', 'z']], 10);
 
-        // q1/s1 prove [q, t) was not dropped; a single m1 proves the
-        // concurrent middle batch was discarded, not concatenated.
+        // q1/s1 prove [q, t) was not dropped by the stale middle region.
         $this->assertSame(
             ['a1', 'm1', 'q1', 's1', 't1'],
             array_column($result[0], 'key'),
         );
-        $this->assertSame(['m', 'q'], array_map(
+        $starts = array_map(
             static fn(RawScanRequest $request): string => $request->getStartKey(),
             $syncRequests,
-        ));
+        );
+        $this->assertContains('m', $starts);
+        $this->assertContains('q', $starts);
     }
 
     public function testUnboundedScanFallsBackToSequentialWhenMiddleRegionShrank(): void

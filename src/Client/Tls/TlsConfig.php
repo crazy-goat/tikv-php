@@ -80,15 +80,4 @@ final class TlsConfig
     {
         return $this->caCert !== null;
     }
-
-    /**
-     * Zero-out sensitive credential data.
-     * Call this after credentials have been consumed by gRPC channel creation.
-     */
-    public function close(): void
-    {
-        if ($this->clientKey !== null) {
-            $this->clientKey = str_repeat("\0", strlen($this->clientKey));
-        }
-    }
 }
