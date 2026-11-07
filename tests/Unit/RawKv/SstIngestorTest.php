@@ -344,6 +344,77 @@ class SstIngestorTest extends TestCase
     }
 
     // ========================================================================
+    // SST metadata checksum
+    // ========================================================================
+
+    public function testIngestSendsTheTrueCrc32OfThePayload(): void
+    {
+        $this->assertSame(
+            hexdec(hash('crc32b', 'key1' . 'value1')),
+            $this->capturedMeta(['key1' => 'value1'])->getCrc32() & 0xFFFFFFFF,
+        );
+    }
+
+    public function testIngestSendsNonZeroCrc32WhenTheHexDigestStartsWithALetter(): void
+    {
+        // hash('crc32b', 'key0value0') = "a3b5819c"; the old `(int)` cast of
+        // the hex string truncated it to 0 (issue #196).
+        self::assertSame('a3b5819c', hash('crc32b', 'key0' . 'value0'));
+
+        // The protobuf PHP runtime normalises a uint32 above 2^31-1 to its
+        // signed 32-bit representation, so compare the unsigned wire value.
+        $crc32 = $this->capturedMeta(['key0' => 'value0'])->getCrc32() & 0xFFFFFFFF;
+
+        self::assertSame(hexdec('a3b5819c'), $crc32);
+        self::assertNotSame(0, $crc32);
+    }
+
+    /**
+     * Ingest a single-region payload and return the metadata of the first
+     * `RawWrite` request.
+     *
+     * @param array<string, string> $pairs
+     */
+    private function capturedMeta(array $pairs): SSTMeta
+    {
+        $region = $this->defaultRegion();
+        $store = $this->defaultStore();
+        $this->setupStandardPdMocks($region, $store);
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+
+        $captured = null;
+        $this->grpc->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                iterable $requests,
+            ) use (
+                $writeResponse,
+                &$captured
+            ): Message {
+                $captured = $requests;
+                return $writeResponse;
+            });
+
+        $this->ingestor->ingest($pairs);
+
+        self::assertNotNull($captured, 'Expected callStreaming to be called');
+        $requests = iterator_to_array($captured, false);
+        $first = $requests[0];
+        self::assertInstanceOf(RawWriteRequest::class, $first);
+        $meta = $first->getMeta();
+        self::assertNotNull($meta);
+
+        return $meta;
+    }
+
+    // ========================================================================
     // Switch mode error handling
     // ========================================================================
 
