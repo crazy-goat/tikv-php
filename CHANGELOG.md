@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- `RawKvClientRegionResolverReuseTest` pins PERF-14 (issue #301): `RawKvClient` builds one `RegionResolver` and hands the same instance to every collaborator (`RawKvCrud`, `RawKvAtomic`, `RawKvBatch`, `RawKvScanner`, `RawKvRangeOps`, `SstIngestor`) and to the per-operation `RetryExecutor`. The shared resolver shipped with the per-store health tracking work (#424); this test makes the reuse a contract, so a future per-operation `new RegionResolver()` cannot silently discard the health state a previous retry loop learned or defeat per-resolver caching. No production behaviour change. (#301)
+
 ## [v0.13.0] - 2026-11-07
 
 ### Changed
