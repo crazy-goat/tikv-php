@@ -510,7 +510,14 @@ $current = $txn->getForUpdate('account:1'); // lock + read in one round trip
 latest committed value at the lock's `for_update_ts` (not the snapshot value),
 and a missing key returns `null`. Both methods are pessimistic-only; an
 optimistic transaction throws `InvalidStateException`. The locks are released
-by `commit()` or `rollback()`.
+by `commit()` or `rollback()`: a key that was locked but never written is
+committed as an `Op::Lock` mutation, so a lock-only transaction commits
+normally instead of being rolled back.
+
+The value is read from the legacy `values` / `not_founds` response fields or,
+on servers that use the newer wake-up mode, from the per-key `results` field.
+If a server populates neither, `getForUpdate()` falls back to a snapshot
+`get()`, which costs a second round trip and returns the `startTs` value.
 
 #### Isolation, timestamps and status
 

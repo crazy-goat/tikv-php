@@ -4,15 +4,22 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\CheckTxnStatusResponse;
+use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
+use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\Deadlock;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\Mutation;
+use CrazyGoat\Proto\Kvrpcpb\Op;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest\PessimisticAction;
+use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\WriteConflict;
 use CrazyGoat\Proto\Metapb\Store;
@@ -52,6 +59,15 @@ class ExplicitLockKeysTest extends TestCase
 
     /** @var list<PessimisticLockRequest> */
     private array $lockRequests = [];
+
+    /** @var list<PrewriteRequest> */
+    private array $prewriteRequests = [];
+
+    /** @var list<CommitRequest> */
+    private array $commitRequests = [];
+
+    /** @var list<BatchRollbackRequest> */
+    private array $batchRollbackRequests = [];
 
     /** @var list<string> */
     private array $methods = [];
@@ -144,9 +160,20 @@ class ExplicitLockKeysTest extends TestCase
                 if ($method === 'KvPessimisticLock' && $request instanceof PessimisticLockRequest) {
                     $this->lockRequests[] = $request;
                 }
+                if ($method === 'KvPrewrite' && $request instanceof PrewriteRequest) {
+                    $this->prewriteRequests[] = $request;
+                }
+                if ($method === 'KvCommit' && $request instanceof CommitRequest) {
+                    $this->commitRequests[] = $request;
+                }
+                if ($method === 'KvBatchRollback' && $request instanceof BatchRollbackRequest) {
+                    $this->batchRollbackRequests[] = $request;
+                }
 
                 return match ($method) {
                     'KvPessimisticLock' => $lockResponse,
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
                     'KvCheckTxnStatus' => new CheckTxnStatusResponse(),
                     'KvResolveLock' => new ResolveLockResponse(),
                     'KVPessimisticRollback' => new PessimisticRollbackResponse(),
@@ -183,7 +210,7 @@ class ExplicitLockKeysTest extends TestCase
         $this->assertSame(['a', 'b'], $this->lockedKeys($request));
         $this->assertSame('a', $request->getPrimaryLock());
         $this->assertTrue($request->getIsFirstLock());
-        $this->assertTrue($request->getReturnValues());
+        $this->assertFalse($request->getReturnValues());
         $this->assertSame(3000, $request->getForUpdateTs());
         $this->assertSame([], $txn->getWriteSet());
         $this->assertNotContains('KvPrewrite', $this->methods);
@@ -373,5 +400,177 @@ class ExplicitLockKeysTest extends TestCase
         $this->expectExceptionMessage('getForUpdate() is only available in a pessimistic transaction');
 
         $txn->getForUpdate('key');
+    }
+
+    public function testCommitAfterLockKeysAndPartialWriteCommitsTheLockOnlyKey(): void
+    {
+        $this->stubLockResponse(new PessimisticLockResponse());
+
+        $txn = $this->createTransaction();
+        $txn->lockKeys('a', 'b');
+        $txn->set('b', 'value');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $ops = $this->prewriteOps();
+        $this->assertSame(Op::Lock, $ops['a'] ?? null);
+        $this->assertSame(Op::Put, $ops['b'] ?? null);
+        $actions = $this->prewriteActions();
+        $this->assertSame(PessimisticAction::DO_PESSIMISTIC_CHECK, $actions['a'] ?? null);
+        $this->assertSame(PessimisticAction::DO_CONSTRAINT_CHECK, $actions['b'] ?? null);
+        $this->assertContains('a', $this->committedKeys());
+        $this->assertContains('b', $this->committedKeys());
+        $this->assertNotContains('KVPessimisticRollback', $this->methods);
+    }
+
+    public function testCommitAfterGetForUpdateAndPartialWriteCommitsTheLockOnlyKey(): void
+    {
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setValues(['a-value']);
+        $lockResponse->setNotFounds([false]);
+        $this->stubLockResponse($lockResponse);
+
+        $txn = $this->createTransaction();
+        $this->assertSame('a-value', $txn->getForUpdate('a'));
+        $txn->set('b', 'value');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $ops = $this->prewriteOps();
+        $this->assertSame(Op::Lock, $ops['a'] ?? null);
+        $this->assertSame(Op::Put, $ops['b'] ?? null);
+        $this->assertContains('a', $this->committedKeys());
+        $this->assertContains('b', $this->committedKeys());
+    }
+
+    public function testCommitAfterOnlyLockKeysCommitsAndReleasesTheLocks(): void
+    {
+        $this->stubLockResponse(new PessimisticLockResponse());
+
+        $txn = $this->createTransaction();
+        $txn->lockKeys('a', 'b');
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $ops = $this->prewriteOps();
+        $this->assertSame(Op::Lock, $ops['a'] ?? null);
+        $this->assertSame(Op::Lock, $ops['b'] ?? null);
+        $this->assertContains('a', $this->committedKeys());
+        $this->assertContains('b', $this->committedKeys());
+        $this->assertNotContains('KVPessimisticRollback', $this->methods);
+        $this->assertNotContains('KvBatchRollback', $this->methods);
+    }
+
+    public function testCommitAfterOnlyGetForUpdateCommitsAndReleasesTheLock(): void
+    {
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setValues(['a-value']);
+        $lockResponse->setNotFounds([false]);
+        $this->stubLockResponse($lockResponse);
+
+        $txn = $this->createTransaction();
+        $this->assertSame('a-value', $txn->getForUpdate('a'));
+        $txn->commit();
+
+        $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertSame(Op::Lock, $this->prewriteOps()['a'] ?? null);
+        $this->assertContains('a', $this->committedKeys());
+    }
+
+    public function testRollbackAfterOnlyLockKeysRollsBackTheLockOnlyKey(): void
+    {
+        $this->stubLockResponse(new PessimisticLockResponse());
+
+        $txn = $this->createTransaction();
+        $txn->lockKeys('a');
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        $this->assertContains('a', $this->batchRollbackKeys());
+    }
+
+    public function testGetForUpdateSkipsTheRpcWhenTheBufferedValueWins(): void
+    {
+        $this->stubLockResponse(new PessimisticLockResponse());
+
+        $txn = $this->createTransaction();
+        $txn->set('key', 'buffered');
+
+        $this->assertSame('buffered', $txn->getForUpdate('key'));
+        $this->assertCount(1, $this->lockRequests, 'the eager set() already locked the key');
+    }
+
+    public function testGetForUpdateReadsTheResultsFieldOfANewerServer(): void
+    {
+        $result = new \CrazyGoat\Proto\Kvrpcpb\PessimisticLockKeyResult();
+        $result->setValue('result-value');
+        $result->setExistence(true);
+        $lockResponse = new PessimisticLockResponse();
+        $lockResponse->setResults([$result]);
+        $this->stubLockResponse($lockResponse);
+
+        $txn = $this->createTransaction();
+
+        $this->assertSame('result-value', $txn->getForUpdate('key'));
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function prewriteOps(): array
+    {
+        $ops = [];
+        foreach ($this->prewriteRequests as $request) {
+            foreach ($request->getMutations() as $mutation) {
+                $ops[$mutation->getKey()] = $mutation->getOp();
+            }
+        }
+
+        return $ops;
+    }
+
+    /**
+     * @return array<string, int|null>
+     */
+    private function prewriteActions(): array
+    {
+        $actions = [];
+        foreach ($this->prewriteRequests as $request) {
+            foreach ($request->getMutations() as $index => $mutation) {
+                $actions[$mutation->getKey()] = $request->getPessimisticActions()[$index] ?? null;
+            }
+        }
+
+        return $actions;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function committedKeys(): array
+    {
+        $keys = [];
+        foreach ($this->commitRequests as $request) {
+            foreach ($request->getKeys() as $key) {
+                $keys[] = $key;
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function batchRollbackKeys(): array
+    {
+        $keys = [];
+        foreach ($this->batchRollbackRequests as $request) {
+            foreach ($request->getKeys() as $key) {
+                $keys[] = $key;
+            }
+        }
+
+        return $keys;
     }
 }

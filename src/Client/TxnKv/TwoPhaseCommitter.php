@@ -13,6 +13,7 @@ use CrazyGoat\Proto\Kvrpcpb\Deadlock;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\Mutation;
 use CrazyGoat\Proto\Kvrpcpb\Op;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockKeyResult;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
 use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest;
@@ -390,7 +391,10 @@ final readonly class TwoPhaseCommitter
                 'Not all transaction mutations were assigned to a region; refusing to report commit success',
             );
         }
-        $allKeys = $state->getWriteKeys();
+        $allKeys = array_map(
+            static fn (Mutation $mutation): string => $mutation->getKey(),
+            $mutations,
+        );
 
         // One-phase commit (issue #419): a single-region, small transaction
         // can commit in one round trip — TiKV derives the commit timestamp
@@ -727,7 +731,8 @@ final readonly class TwoPhaseCommitter
      * Rollback the transaction.
      *
      * If pessimistic mode, first pessimistically rolls back all locked
-     * keys, then performs a batch rollback of the write set.
+     * keys, then performs a batch rollback of the write set plus any
+     * acknowledged pessimistic lock that was never written (issue #436).
      *
      * @throws TiKvException
      */
@@ -756,7 +761,15 @@ final readonly class TwoPhaseCommitter
             $this->pessimisticRollbackAll($state, $retryExecutor, $classifier);
         }
 
-        $this->batchRollback($state->getWriteKeys(), $retryExecutor, $classifier);
+        // Roll back the same key set commit would prewrite: write keys plus
+        // acknowledged pessimistic locks that were never written. A prewritten
+        // Op::Lock lock is not a pessimistic lock, so the pessimistic rollback
+        // above does not remove it (issue #436).
+        $rollbackKeys = array_map(
+            static fn (Mutation $mutation): string => $mutation->getKey(),
+            $this->buildMutations($state),
+        );
+        $this->batchRollback($rollbackKeys, $retryExecutor, $classifier);
 
         $state->clearWriteSet();
         $state->clearReadSet();
@@ -962,7 +975,13 @@ final readonly class TwoPhaseCommitter
             // physical lock/prewrite (issue #209).
             $actions = [];
             foreach ($mutations as $mutation) {
-                $actions[] = PessimisticAction::DO_CONSTRAINT_CHECK;
+                // A lock-only mutation has no value to constrain-check; TiKV
+                // only has to confirm this transaction still owns its
+                // pessimistic lock (client-go emits DO_PESSIMISTIC_CHECK for
+                // locked keys). Written keys keep the #209 safety net.
+                $actions[] = $mutation->getOp() === Op::Lock
+                    ? PessimisticAction::DO_PESSIMISTIC_CHECK
+                    : PessimisticAction::DO_CONSTRAINT_CHECK;
             }
             $request->setPessimisticActions($actions);
         }
@@ -2072,6 +2091,7 @@ final readonly class TwoPhaseCommitter
         bool $isFirstLock,
         int $waitTimeoutMs,
         int $lockTtlMs,
+        bool $returnValues,
     ): PessimisticLockRequest {
         $request = new PessimisticLockRequest();
         $request->setContext($this->buildContext($region));
@@ -2082,7 +2102,7 @@ final readonly class TwoPhaseCommitter
         $request->setForUpdateTs($forUpdateTs);
         $request->setIsFirstLock($isFirstLock);
         $request->setWaitTimeout($waitTimeoutMs);
-        $request->setReturnValues(true);
+        $request->setReturnValues($returnValues);
 
         return $request;
     }
@@ -2144,6 +2164,7 @@ final readonly class TwoPhaseCommitter
         bool $isFirstLock,
         int $waitTimeoutMs,
         int $lockTtlMs,
+        bool $returnValues,
     ): array {
         $firstAttempts = [];
         $mutationsByGroup = [];
@@ -2169,6 +2190,7 @@ final readonly class TwoPhaseCommitter
                 $isFirstLock && in_array($primary, $groupKeys, true),
                 $waitTimeoutMs,
                 $lockTtlMs,
+                $returnValues,
             );
 
             $this->logger->debug('PessimisticLock', [
@@ -2211,6 +2233,7 @@ final readonly class TwoPhaseCommitter
         TransactionState $state,
         int $forUpdateTs,
         string $primary,
+        bool $returnValues = false,
     ): array {
         $keys = array_values(array_unique($keys));
         if ($keys === []) {
@@ -2221,7 +2244,7 @@ final readonly class TwoPhaseCommitter
         $state->setPessimisticPrimaryKey($primary);
         $state->updateMaxForUpdateTs($forUpdateTs);
         try {
-            return $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs);
+            return $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs, $returnValues);
         } catch (\Throwable $failure) {
             $state->markPessimisticWriteFailed();
             throw $failure;
@@ -2251,7 +2274,7 @@ final readonly class TwoPhaseCommitter
         try {
             $forUpdateTs = $state->getMaxForUpdateTs() ?? $this->pdClient->getTimestamp();
             $state->updateMaxForUpdateTs($forUpdateTs);
-            $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs);
+            $this->lockKeysInternal($keys, $state, $primary, $forUpdateTs, false);
         } catch (\Throwable $failure) {
             $state->markPessimisticWriteFailed();
             throw $failure;
@@ -2267,6 +2290,7 @@ final readonly class TwoPhaseCommitter
         TransactionState $state,
         string $primary,
         int $forUpdateTs,
+        bool $returnValues,
     ): array {
         $valuesByKey = [];
         foreach ($keys as $key) {
@@ -2319,6 +2343,7 @@ final readonly class TwoPhaseCommitter
                 $isFirstLock,
                 $this->effectiveLockWaitTimeoutMs(0),
                 $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
+                $returnValues,
             );
 
             try {
@@ -2386,6 +2411,7 @@ final readonly class TwoPhaseCommitter
                                     $isFirstLock && in_array($primary, $regionKeys, true),
                                     $this->effectiveLockWaitTimeoutMs($elapsedMs),
                                     $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
+                                    $returnValues,
                                 );
 
                                 $this->logger->debug('PessimisticLock', [
@@ -2596,11 +2622,22 @@ final readonly class TwoPhaseCommitter
                     if ($response instanceof PessimisticLockResponse) {
                         $values = $response->getValues();
                         $notFounds = $response->getNotFounds();
+                        $results = $response->getResults();
                         foreach ($regionKeys as $index => $key) {
                             if (isset($values[$index])) {
                                 $valuesByKey[$key] = isset($notFounds[$index]) && $notFounds[$index]
                                     ? null
                                     : $values[$index];
+                            } else {
+                                // WakeUpModeForceLock (and future servers) report
+                                // per-key results instead of the legacy parallel
+                                // `values`/`not_founds` arrays (issue #436).
+                                $result = $results[$index] ?? null;
+                                if ($result instanceof PessimisticLockKeyResult) {
+                                    $valuesByKey[$key] = $result->getExistence()
+                                        ? $result->getValue()
+                                        : null;
+                                }
                             }
                         }
                     }
@@ -2858,7 +2895,8 @@ final readonly class TwoPhaseCommitter
     private function buildMutations(TransactionState $state): array
     {
         $mutations = [];
-        foreach ($state->getWriteSet() as $key => $value) {
+        $writeSet = $state->getWriteSet();
+        foreach ($writeSet as $key => $value) {
             $mutation = new Mutation();
             // PHP coerces integer-like string keys to int array keys, so
             // string-cast before passing to the proto setter (issue #322).
@@ -2874,6 +2912,23 @@ final readonly class TwoPhaseCommitter
 
             $mutations[] = $mutation;
         }
+
+        // A pessimistic lock that was acquired but never written must still be
+        // prewritten and committed: TiKV represents it as an `Op::Lock`
+        // mutation, which writes a lock (and a `WriteType::Lock` record on
+        // commit) without a value (issue #436, client-go parity). Without it
+        // the primary key may not appear in the mutation set at all, so
+        // prewrite cannot find it and commit would leave the lock behind.
+        foreach ($state->getAcknowledgedPessimisticLockKeys() as $key) {
+            if (!array_key_exists($key, $writeSet)) {
+                $mutation = new Mutation();
+                $mutation->setKey($key);
+                $mutation->setOp(Op::Lock);
+                $mutation->setValue('');
+                $mutations[] = $mutation;
+            }
+        }
+
         return $mutations;
     }
 

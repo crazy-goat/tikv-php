@@ -683,6 +683,10 @@ final class Transaction
      * defers the implicit locks of `set()` / `delete()`, not an explicit
      * request.
      *
+     * A locked key that is never written is still committed: the committer
+     * emits it as an `Op::Lock` mutation, so `commit()` releases the lock and
+     * a transaction that only locks keys ends `Committed`, not `RolledBack`.
+     *
      * @throws InvalidStateException when the transaction is optimistic, not
      *         active, or already unusable after a failed lock statement
      * @throws TransactionConflictException
@@ -696,6 +700,7 @@ final class Transaction
     {
         $this->state->ensureWritable();
         $this->assertPessimistic('lockKeys');
+        $this->keepPrimaryLockAlive();
 
         $keys = array_values(array_filter(
             array_values(array_unique($keys)),
@@ -705,7 +710,6 @@ final class Transaction
             return;
         }
 
-        $this->keepPrimaryLockAlive();
         $primary = $this->state->getPessimisticPrimaryKey() ?? $keys[0];
         $this->state->setPessimisticPrimaryKey($primary);
         // Measure the TTL before the RPC, exactly like the implicit eager
@@ -732,10 +736,12 @@ final class Transaction
      * buffered `set()` / `delete()` returns the buffered value
      * (read-your-writes).
      *
-     * The value comes from the response's `values` / `not_founds` fields
-     * (`return_values` is set on every lock request). A server that does not
-     * populate them makes this method fall back to a snapshot `get()`, which
-     * costs a second round trip and returns the `startTs` value.
+     * The value comes from the response's legacy `values` / `not_founds`
+     * fields or, on a server that uses the newer wake-up mode, its per-key
+     * `results` field; only this method asks for values (`return_values`).
+     * A server that populates neither makes this method fall back to a
+     * snapshot `get()`, which costs a second round trip and returns the
+     * `startTs` value.
      *
      * @throws InvalidStateException when the transaction is optimistic, not
      *         active, or already unusable after a failed lock statement
@@ -752,6 +758,13 @@ final class Transaction
         $this->assertPessimistic('getForUpdate');
         $this->keepPrimaryLockAlive();
 
+        // The key already holds a pessimistic lock and its value is buffered:
+        // the RPC would only re-lock a key this transaction owns and the
+        // buffered value wins anyway (read-your-writes), so skip it.
+        if ($this->state->hasPessimisticLock($key) && $this->state->hasWriteSetKey($key)) {
+            return $this->state->getWriteSetValue($key);
+        }
+
         $primary = $this->state->getPessimisticPrimaryKey() ?? $key;
         $this->state->setPessimisticPrimaryKey($primary);
         $lockTtlMs = $this->committer->ttlWithUptimeMs($this->state, $this->pessimisticLockTtlMs);
@@ -761,6 +774,7 @@ final class Transaction
                 $this->state,
                 $this->pdClient->getTimestamp(),
                 $primary,
+                true,
             );
         } catch (\Throwable $failure) {
             $this->failPessimisticStatement($failure);
@@ -804,7 +818,7 @@ final class Transaction
         $this->keepPrimaryLockAlive();
         $this->state->markCommitStarted();
 
-        if ($this->state->isEmptyWriteSet()) {
+        if ($this->state->isEmptyWriteSet() && !$this->state->hasAcknowledgedPessimisticLocks()) {
             if ($this->state->hasPessimisticLockActivity()) {
                 // A failed eager set/delete may have acquired a server-side
                 // lock before its response was lost. Do not report an empty
@@ -822,6 +836,10 @@ final class Transaction
             return;
         }
 
+        // A lock-only transaction commits too: the committer turns every
+        // acknowledged pessimistic lock that was never written into an
+        // `Op::Lock` mutation, so commit releases the locks instead of
+        // rolling the transaction back (issue #436).
         $this->committer->commit(
             $this->state,
             $this->retryExecutor(),
