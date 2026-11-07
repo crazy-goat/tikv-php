@@ -1400,7 +1400,8 @@ The RetryExecutor's classifier chain is `handleNotLeader → classifier → Erro
 ## A rebase can leave stray conflict markers in docs — grep before finishing
 
 All three of fix/216, fix/237 and fix/238 carried a leftover
-`their rebase (and #238 also in `docs/helpers/faq.md`), silently committed
+`>>>>>>> <sha> (...)` line right after the new CHANGELOG.md bullet after
+their rebase (and #238 also in `docs/helpers/faq.md`), silently committed
 by the follow-up fix. A squash/fixup during a rebase can resurrect markers
 from an earlier conflict that was "resolved" by keeping both sides. Before
 every push, grep the whole diff for conflict markers:
@@ -1466,18 +1467,6 @@ shifts the counts and must be added to the tree — issue #216 added
 `UndeterminedCommitException` and initially left the counts stale. This is the
 proactive corollary of the #394 lesson (counts derived from source, not issue
 text): when *writing* a subclass, update the enumeration in the same commit.
-
-## A rebase can leave stray conflict markers in docs — grep before finishing
-
-All three of fix/216, fix/237 and fix/238 carried a leftover
-`their rebase (and #238 also in `docs/helpers/faq.md`), silently committed
-by the follow-up fix. A squash/fixup during a rebase can resurrect markers
-from an earlier conflict that was "resolved" by keeping both sides. Before
-every push, grep the whole diff for conflict markers:
-`git diff master...HEAD | grep -n ">>>>>>>\|<<<<<<<"`. PHPCS/PHPStan do
-not catch these in Markdown files.
-
-
 
 ## gRPC status codes, not exception type, decide GrpcException retries — and detail text must not leak into classification
 
