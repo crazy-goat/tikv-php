@@ -1339,6 +1339,15 @@ two retries; 6+8=14 > 6 aborts the third), and an operation that "fails twice
 then succeeds" needs a per-call failure counter (a shared `$calls % 3`
 pattern silently gives the second execute() zero retries).
 
+The same premise expiry closed issue #296 (audit PERF-09, jitter for
+`NotLeader` / `RegionMiss` / `StaleCmd`): 54036f8 (issue #242) had already
+made `BackoffType::equalJitter()` return `true` for every type, so the
+deterministic 2, 4, 8, ... ms schedule the audit describes no longer existed,
+and `BackoffTest` already asserted both the `[expo/2, expo]` range and
+non-constant values for all types. The #296 change adds only a
+NotLeader-specific pin and this note; no production code changed. Close such
+an audit import as a duplicate instead of re-implementing the jitter.
+
 ## Equal-jitter randomness can collapse the separating boundary in budget assertions — assert `<=` over more iterations, never strict `<`
 
 `Backoff::exponential()` with equal jitter returns `half + random_int(0, half)`
