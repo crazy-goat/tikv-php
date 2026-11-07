@@ -96,6 +96,12 @@ ports. TiKV and PD advertise their compose service names (`tikv1:20160`, `pd:237
 resolve inside the network, so the published host ports are for manual use of PD only (HTTP API,
 `curl`, gRPC to PD).
 
+Every published port is bound to `127.0.0.1`, never to `0.0.0.0`: the development cluster has no
+authentication and no transport security, so it must not be reachable from other hosts. A workflow
+that dials it from another machine needs an SSH tunnel or an explicit local override — do not drop
+the loopback prefix. `tests/Unit/Ci/DockerComposePortBindingTest.php` fails the build if a
+`docker-compose*.yml` publishes a port without it (issue #318, SEC-15).
+
 Host ports are variables: `PD_PORT` (2379), `TIKV1_PORT` (20160), `TIKV2_PORT` (20161),
 `TIKV3_PORT` (20162). `bin/worktree.sh` writes free ports and a unique `COMPOSE_PROJECT_NAME` to
 `.env.worktree` in each worktree. Load it before running compose or the E2E scripts:
@@ -108,6 +114,20 @@ make test-e2e
 Because the project name is unique per worktree and the tests run in the compose network, E2E runs
 of several worktrees do not collide. `bin/worktree-teardown.sh` stops the stacks of all three file
 combinations (and the `test` profile); `bin/worktree-done.sh` calls it.
+
+The `php-client` and `php-test` images run as an unprivileged `app` user, and Compose builds that
+user with the host owner's `HOST_UID`/`HOST_GID` (default `1000`). The IDs matter because `.:/app`
+is a bind mount: Composer and PHPUnit must be able to write `vendor/` and `.phpunit.cache/` in the
+checkout. The `Makefile` and the E2E runner scripts export both from `id -u`/`id -g`, so `make` and
+`composer test:e2e` need no setup; a direct `docker compose` call needs them in the environment
+(`HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ...`), and changing them needs `make build`
+because they are build args. A host GID that collides with an Alpine system group falls back to a
+free GID for `app` (the bind mount is governed by the owner UID), a host UID that already exists is
+reused numerically, and `APP_UID=0` is refused. The base image is pinned by digest, and
+`.dockerignore` keeps local credentials (`**/*.pem`, `**/*.crt`, `**/*.key`, `**/*.p12`, …) and
+`**/.env*` files out of every layer. Existing checkouts whose `vendor/` and `.phpunit.cache/` were
+created by the old root container need a one-time `sudo chown -R "$(id -u):$(id -g)" vendor
+.phpunit.cache` (see `docs/helpers/faq.md`).
 
 ## CI
 

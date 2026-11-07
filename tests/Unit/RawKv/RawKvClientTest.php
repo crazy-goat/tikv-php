@@ -53,6 +53,7 @@ use CrazyGoat\TiKV\Client\RawKv\SstIngestor;
 use CrazyGoat\TiKV\Client\Region\Dto\PeerInfo;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Tests\Unit\Grpc\GrpcExtensionGate;
 use CrazyGoat\TiKV\Tests\Unit\Support\DeadEndpointGrpcFuture;
@@ -3611,7 +3612,7 @@ class RawKvClientTest extends TestCase
         $this->assertSame('ok', $result);
     }
 
-    public function testNotLeaderStringFallbackInClassifyError(): void
+    public function testTypedNotLeaderRegionExceptionIsRetried(): void
     {
         $this->regionCache->method('getByKey')->willReturn(null);
         $this->regionCache->method('put');
@@ -3626,7 +3627,12 @@ class RawKvClientTest extends TestCase
         $this->grpc->expects($this->exactly(2))
             ->method('call')
             ->willReturnOnConsecutiveCalls(
-                $this->throwException(new RegionException('test', 'NotLeader')),
+                $this->throwException(new RegionException(
+                    'test',
+                    'NotLeader',
+                    notLeader: new NotLeader(),
+                    errorKind: ErrorKind::NotLeader,
+                )),
                 $response,
             );
 
