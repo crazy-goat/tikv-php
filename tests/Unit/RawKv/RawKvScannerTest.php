@@ -1090,6 +1090,26 @@ class RawKvScannerTest extends TestCase
         $this->scanner->reverseScan('', 'a', 100, false);
     }
 
+    public function testReverseScanRejectsAnEmptyStartKeyAcrossTwoRegionsBeforeRpc(): void
+    {
+        // REG-23 (#254): the empty upper bound is rejected before the clipper
+        // or any region lookup, so the two-region layout below is configured
+        // only to make the acceptance scenario explicit — it is deliberately
+        // never consulted. Without this entry guard the range would reach the
+        // clipper, which yields no sub-range at all (every region is skipped),
+        // and the caller would silently get no rows.
+        $this->stubRegionLookup([
+            $this->defaultRegion('a', 'm', regionId: 1),
+            $this->defaultRegion('m', 'z', regionId: 2),
+        ]);
+
+        $this->expectNoRpc();
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('an empty start key is not a valid upper bound');
+
+        $this->scanner->reverseScan('', 'a', 100, false);
+    }
+
     // ========================================================================
     // scan() – limit spanning three regions
     // ========================================================================
