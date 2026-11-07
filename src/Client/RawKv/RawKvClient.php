@@ -1549,9 +1549,10 @@ final class RawKvClient
      * changing the total work. See
      * {@see RawKvScanner::batchScan()} for the full cost model.
      *
-     * Returns one entry per input range, in input order, each a list of
+     * Returns one entry per range, each a list of
      * `['key' => string, 'value' => ?string]` rows (`value` is `null` when
-     * `$keyOnly` is true).
+     * `$keyOnly` is true). A list input keeps its order; non-sequential keys
+     * are re-indexed in ascending key order.
      *
      * @param array<array{0: string, 1: string}> $ranges
      * @return array<array<array{key: string, value: ?string}>>

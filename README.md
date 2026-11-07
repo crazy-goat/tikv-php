@@ -260,7 +260,8 @@ $results = $client->reverseScan('log;', 'log:', limit: 100);
 // linear in the number of ranges and the regions they cover (each range
 // resolves its own regions), although the per-range sends are fanned out
 // concurrently up to options['maxConcurrency']. eachLimit is required and
-// must be > 0. Returns one list per range, in input order.
+// must be > 0. Returns one list per range: a list input keeps its order,
+// while non-sequential keys are re-indexed in ascending key order.
 $results = $client->batchScan([['a:', 'a;'], ['b:', 'b;']], eachLimit: 50);
 ```
 

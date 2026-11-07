@@ -974,15 +974,19 @@ final readonly class RawKvScanner
      *
      * `eachLimit` is required and must be in `1..MAX_SCAN_LIMIT`. Unlike
      * {@see self::scan()}, `0` is rejected instead of meaning "the whole
-     * range", so one `batchScan()` call cannot read an unbounded range. Each
-     * range returns at most `eachLimit` rows; a returned count equal to the
-     * limit may mean the range holds more rows (issue #440).
+     * range", so one `batchScan()` call cannot omit the per-range cap or
+     * request an unbounded result set. Empty bounds are still allowed:
+     * `batchScan([['', '']], eachLimit: 100)` scans the whole keyspace and
+     * returns at most 100 rows. Each range returns at most `eachLimit` rows;
+     * a returned count equal to the limit may mean the range holds more rows
+     * (issue #440).
      *
      * Every range is validated before the first send: a reversed range
      * rejects the whole call with {@see InvalidArgumentException}.
      *
-     * The result is one entry per input range, in input order (the outer
-     * array is a list, even when `$ranges` had non-sequential keys):
+     * The result is one entry per range, in input order for a list; with
+     * non-sequential input keys the outer array is re-indexed in ascending
+     * key order. The shape is
      * `[[['key' => ..., 'value' => ...], ...], ...]`. Each inner list holds
      * at most `eachLimit` rows in ascending key order, and `value` is `null`
      * when `$keyOnly` is true. An empty `$ranges` list returns `[]`; a range

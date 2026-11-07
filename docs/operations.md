@@ -617,10 +617,11 @@ $results = $client->batchScan($ranges, eachLimit: 50, keyOnly: false);
 - `keyOnly` (bool, optional): Return only keys
 
 **Returns:** `array<array<array{key: string, value: ?string}>>` — one inner
-list per input range, in input order; each inner list holds at most
-`eachLimit` rows in ascending key order and carries `null` values when
-`keyOnly` is true. An empty `ranges` list returns `[]`, and a range that
-matches no rows contributes an empty inner list.
+list per range; a list input keeps its order, while non-sequential keys are
+re-indexed in ascending key order. Each inner list holds at most `eachLimit`
+rows in ascending key order and carries `null` values when `keyOnly` is true.
+An empty `ranges` list returns `[]`, and a range that matches no rows
+contributes an empty inner list.
 
 > **Not the `RawBatchScan` RPC.** `batchScan` is a client-side loop: it
 > sends one `RawScan` per range (and one per region inside each range) and
@@ -628,8 +629,10 @@ matches no rows contributes an empty inner list.
 > in the regions they cover, and every range independently resolves its own
 > regions — fifty ranges cost roughly fifty scans, not one round trip per
 > region for the whole call. `eachLimit` is required and must be greater
-> than zero; unlike `scan()`, `batchScan()` cannot request an unbounded
-> range.
+> than zero; unlike `scan()`, `batchScan()` cannot omit the per-range cap or
+> request an unbounded result set. Empty bounds are still allowed:
+> `batchScan([['', '']], eachLimit: 100)` scans the whole keyspace and
+> returns at most 100 rows.
 >
 > **Performance Note:** the per-range sends are fanned out **concurrently**
 > — at most `options['maxConcurrency']` ranges (default **16**; must be
