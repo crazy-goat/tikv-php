@@ -10,13 +10,11 @@ use Psr\Log\NullLogger;
 
 class StoreCache implements StoreCacheInterface
 {
-    /** @var StoreEntry[] */
+    /** @var array<int, StoreEntry> */
     private array $entries = [];
 
-    /** @var array<int, int> storeId => position in LRU order (higher = more recent) */
+    /** @var array<int, true> least recently used store first */
     private array $lruOrder = [];
-
-    private int $lruCounter = 0;
 
     public function __construct(
         private readonly int $ttlSeconds = 600,
@@ -41,7 +39,7 @@ class StoreCache implements StoreCacheInterface
         }
 
         // Mark as recently used
-        $this->lruOrder[$storeId] = ++$this->lruCounter;
+        $this->touch($storeId);
 
         $this->logger->debug('Store cache hit', ['storeId' => $storeId]);
         return $entry->store;
@@ -62,7 +60,7 @@ class StoreCache implements StoreCacheInterface
             $store,
             $this->now() + $this->ttlSeconds + $jitter,
         );
-        $this->lruOrder[$storeId] = ++$this->lruCounter;
+        $this->touch($storeId);
 
         $this->logger->debug('Store cached', [
             'storeId' => $storeId,
@@ -80,7 +78,6 @@ class StoreCache implements StoreCacheInterface
     {
         $this->entries = [];
         $this->lruOrder = [];
-        $this->lruCounter = 0;
     }
 
     protected function now(): int
@@ -103,26 +100,30 @@ class StoreCache implements StoreCacheInterface
     }
 
     /**
+     * Mark a store as the most recently used one.
+     *
+     * The recency order is the insertion order of `$lruOrder`, so the key
+     * must be removed before it is appended; a plain assignment to an
+     * existing key would leave it at its old position and turn eviction into
+     * a scan for the smallest counter value (issue #255, REG-24).
+     */
+    private function touch(int $storeId): void
+    {
+        unset($this->lruOrder[$storeId]);
+        $this->lruOrder[$storeId] = true;
+    }
+
+    /**
      * Evict the least recently used entry from the cache.
+     *
+     * O(1): `touch()` keeps `$lruOrder` in recency order, so the first key is
+     * the least recently used one and no scan of the cache is needed.
      */
     private function evictLru(): void
     {
-        if ($this->entries === []) {
-            return;
-        }
-
-        // Find the store ID with the smallest LRU order (least recently used).
-        $lruId = array_key_first($this->lruOrder);
+        $lruId = array_key_first($this->lruOrder) ?? array_key_first($this->entries);
         if ($lruId === null) {
-            $lruId = (int) array_key_first($this->entries);
-        } else {
-            $lruOrder = $this->lruOrder[$lruId];
-            foreach ($this->lruOrder as $storeId => $order) {
-                if ($order < $lruOrder) {
-                    $lruOrder = $order;
-                    $lruId = $storeId;
-                }
-            }
+            return;
         }
 
         $this->logger->debug('Evicting LRU store from cache', ['storeId' => $lruId]);

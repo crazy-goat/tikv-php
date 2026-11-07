@@ -1003,10 +1003,15 @@ RegionCache benchmark exercises the ID-map/treap write path directly:
 php benchmarks/RegionCacheBenchmark.php
 ```
 
-It reports cold sequential inserts, warm replacements, and the resulting
-entry count. For new cache data structures, extend this standalone benchmark
-with the relevant random, overlap, eviction, and range-enumeration scenarios;
-do not turn machine-dependent timings into flaky unit-test failures.
+It reports cold sequential inserts, warm replacements, the resulting entry
+count, and the cost of a `put()` that has to evict the LRU entry, swept over
+capacities 1 000 / 10 000 / 50 000 (issue #255). That last curve must stay
+logarithmic in the capacity — the treap walk is O(log n) and the LRU victim is
+the first key of a recency-ordered hash — rather than grow with the number of
+cached entries, which is what a reintroduced linear scan would do. For new
+cache data structures, extend this standalone benchmark with the relevant
+random, overlap, eviction, and range-enumeration scenarios; do not turn
+machine-dependent timings into flaky unit-test failures.
 
 The batch region-resolution benchmark measures one
 `RegionResolver::batchResolveRegions()` call for a 100-region batch against a
