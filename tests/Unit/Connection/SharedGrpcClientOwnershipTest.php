@@ -25,8 +25,8 @@ use PHPUnit\Framework\TestCase;
  * - a transport the application supplies (options['grpcClient']) belongs to
  *   the application, which closes it — the client never does, or closing one
  *   client would break every other client sharing the transport;
- * - a client assembled by hand owns the transport it is given and closes it
- *   too, unless it is told otherwise with `ownsGrpcClient: false`.
+ * - a client assembled by hand does not own the transport it is given, so it
+ *   never closes it; ownership can be transferred with `ownsGrpcClient: true`.
  *
  * The tests below pin that rule on the observable behaviour (does the
  * transport get closed?) rather than on the flag that carries it, so a
@@ -115,9 +115,9 @@ class SharedGrpcClientOwnershipTest extends TestCase
     }
 
     /**
-     * The documented escape hatch of the hand-assembled path: a client that
-     * does not own the transport never closes it, so the application stays
-     * its owner (issue #407, issue #204 will flip the default).
+     * The hand-assembled path defaults to "the caller owns the transport";
+     * the explicit flag pins the documented escape hatch (issue #407,
+     * issue #204 flipped the default).
      */
     public function testHandAssembledClientDoesNotCloseATransportItDoesNotOwn(): void
     {

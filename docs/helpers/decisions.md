@@ -1172,13 +1172,13 @@ to be unambiguous, and the answer is not "whoever calls `close()`":
    `maxChannels`, `idleTtlMs`, `grpc`) are rejected next to it instead of
    ignored — an ignored `allowInsecure: false` would leave the caller
    believing TLS is enforced while the transport is used without it.
-3. **A client assembled by hand closes the transport it was given.** The public
-   constructors of `RawKvClient` / `TxnKvClient` default `ownsGrpcClient` to
-   `true`, so `new RawKvClient($pdClient, $grpc)` closes `$grpc` in `close()`
-   and in the destructor. `ownsGrpcClient: false` is the documented escape
-   hatch for an application that keeps the transport. Issue #204 tracks the
-   change (a client should close only what it owns); until it lands the flag is
-   the only way to say so.
+3. **A client assembled by hand does not own the connections it is given.** The
+   `RawKvClient` constructor defaults `ownsGrpcClient` and `ownsPdClient` to
+   `false`, so `new RawKvClient($pdClient, $grpc)` leaves both open in
+   `close()` and in the destructor. `ownsGrpcClient: true` / `ownsPdClient:
+   true` transfers ownership (issue #204). `TxnKvClient` still defaults
+   `ownsGrpcClient` to `true` and closes its PD client unconditionally, pending
+   a follow-up issue.
 
 The rule is published in three places, and a reader of any one of them has to
 find the same answer: `GrpcClientInterface::close()` (the API contract), the
@@ -1804,3 +1804,22 @@ public-API break. If credential lifetime ever becomes a real requirement, it has
 to be solved outside PHP string properties (for example by loading material into
 the gRPC core and dropping the PHP copy immediately), not by a scrubbing method
 that cannot deliver.
+
+## Workflows pin actions by commit SHA (issue #316, SEC-13)
+
+Every `uses:` reference in `.github/workflows/` names a full 40-character commit SHA and a
+trailing version comment (`actions/checkout@3d3c… # v7.0.1`). A major tag such as `@v7` is a
+mutable ref: whoever controls the action repository can force-move it and execute unreviewed
+code on the runner. The comment is not decoration — Dependabot's `github-actions` ecosystem
+uses it to rewrite the SHA and the comment together when a release is published.
+
+The two `crazy-goat/.github` reusable workflows are pinned the same way, but that repository
+has no release tags, so their `# main` pins are bumped by hand when the shared workflow changes;
+Dependabot cannot refresh them. Do not "simplify" any of these back to `@vN` or `@main`.
+
+The workflow keeps `permissions: contents: read` at the top level. Add a job-level scope only
+when that job genuinely needs it (the release workflow needs `contents: write` to create a
+release; the reusable `changes` workflow classifies files with `git diff` and needs no API
+scope). `tests/Unit/Ci/WorkflowSupplyChainGuardTest.php` fails the Unit suite on an unpinned
+reference, a missing version comment, a missing top-level read-only block, or a Dependabot
+configuration without the `github-actions` ecosystem.

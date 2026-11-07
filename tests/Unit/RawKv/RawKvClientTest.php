@@ -98,7 +98,16 @@ class RawKvClientTest extends TestCase
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
-        $this->client = new RawKvClient($this->pdClient, $this->grpc, $this->regionCache);
+        $this->client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            // The lifecycle tests below pin the close() contract on a client
+            // that owns its connections; ownership of hand-assembled clients
+            // is covered by RawKvClientOwnershipTest (issue #204).
+            ownsGrpcClient: true,
+            ownsPdClient: true,
+        );
     }
 
     /**
@@ -512,6 +521,7 @@ class RawKvClientTest extends TestCase
         yield 'scanIterator' => ['scanIterator', ['start', 'end']];
         yield 'scanPrefixIterator' => ['scanPrefixIterator', ['prefix']];
         yield 'ingest' => ['ingest', [['key' => 'value']]];
+        yield 'getClusterId' => ['getClusterId', []];
     }
 
     // ========================================================================
@@ -1522,6 +1532,36 @@ class RawKvClientTest extends TestCase
         $iterator = $this->client->scanPrefixIterator('prefix_');
 
         $this->assertInstanceOf(ScanIterator::class, $iterator);
+    }
+
+    public function testScanIteratorObtainedBeforeCloseThrowsWhenIteratedAfterClose(): void
+    {
+        $iterator = $this->client->scanIterator('a', 'z');
+
+        $this->client->close();
+
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+
+        $this->expectException(ClientClosedException::class);
+        $this->expectExceptionMessage('Client is closed');
+
+        $iterator->valid();
+    }
+
+    public function testScanPrefixIteratorObtainedBeforeCloseThrowsWhenIteratedAfterClose(): void
+    {
+        $iterator = $this->client->scanPrefixIterator('prefix_');
+
+        $this->client->close();
+
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+
+        $this->expectException(ClientClosedException::class);
+        $this->expectExceptionMessage('Client is closed');
+
+        $iterator->valid();
     }
 
     public function testScanIteratorThrowsClientClosedExceptionWhenClosedMidIteration(): void

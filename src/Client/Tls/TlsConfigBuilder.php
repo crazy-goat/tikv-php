@@ -165,8 +165,14 @@ final class TlsConfigBuilder
             if ($resolvedBase === false) {
                 throw new InvalidArgumentException('Invalid TLS base directory: directory does not exist');
             }
-            // Ensure the resolved path starts with the resolved base directory
-            if (!str_starts_with($resolved, $resolvedBase)) {
+            // Compare against the directory boundary, not a string prefix: with
+            // a base of /etc/tikv, the sibling path /etc/tikv-attacker/ca.pem
+            // also starts with the base string and would pass a prefix test.
+            $resolvedBase = rtrim($resolvedBase, DIRECTORY_SEPARATOR);
+            if (
+                $resolved !== $resolvedBase
+                && !str_starts_with($resolved, $resolvedBase . DIRECTORY_SEPARATOR)
+            ) {
                 throw new InvalidArgumentException('TLS file path is outside the allowed base directory');
             }
         }

@@ -8,6 +8,11 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Region;
 use CrazyGoat\Proto\Metapb\RegionEpoch;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\Proto\Metapb\StoreState;
+use CrazyGoat\Proto\Pdpb\Error;
+use CrazyGoat\Proto\Pdpb\ErrorType;
+use CrazyGoat\Proto\Pdpb\GetAllStoresRequest;
+use CrazyGoat\Proto\Pdpb\GetAllStoresResponse;
 use CrazyGoat\Proto\Pdpb\GetRegionRequest;
 use CrazyGoat\Proto\Pdpb\GetRegionResponse;
 use CrazyGoat\Proto\Pdpb\GetStoreResponse;
@@ -18,6 +23,7 @@ use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\PdException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
@@ -1130,6 +1136,161 @@ class PdClientTest extends TestCase
         $result = $client->getStore(1);
 
         $this->assertNull($result);
+    }
+
+    // ========================================================================
+    //  getAllStores tests
+    // ========================================================================
+
+    public function testGetAllStoresReturnsEveryStoreFromPd(): void
+    {
+        $stores = [
+            $this->makeStore(1, 'tikv1:20160'),
+            $this->makeStore(2, 'tikv2:20160'),
+            $this->makeStore(3, 'tikv3:20160'),
+        ];
+
+        $response = new GetAllStoresResponse();
+        $response->setHeader($this->makeResponseHeader());
+        $response->setStores($stores);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())
+            ->method('call')
+            ->with(
+                'pd:2379',
+                'pdpb.PD',
+                'GetAllStores',
+                $this->callback(function (GetAllStoresRequest $request): bool {
+                    // Tombstones are excluded by PD, not by the client, so the
+                    // request must ask for that exclusion (issue #347).
+                    $this->assertTrue($request->getExcludeTombstoneStores());
+                    return true;
+                }),
+                GetAllStoresResponse::class,
+            )
+            ->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $result = $client->getAllStores();
+
+        $this->assertCount(3, $result);
+        $this->assertSame([1, 2, 3], array_map(
+            static fn (Store $store): int => (int) $store->getId(),
+            $result,
+        ));
+        $this->assertSame(
+            ['tikv1:20160', 'tikv2:20160', 'tikv3:20160'],
+            array_map(static fn (Store $store): string => $store->getAddress(), $result),
+        );
+    }
+
+    public function testGetAllStoresReturnsEmptyArrayWhenPdHasNoStores(): void
+    {
+        $response = new GetAllStoresResponse();
+        $response->setHeader($this->makeResponseHeader());
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+
+        $this->assertSame([], $client->getAllStores());
+    }
+
+    public function testGetAllStoresIncludesTombstoneStores(): void
+    {
+        // The client asks PD to exclude tombstone stores and returns whatever
+        // PD sends. A tombstone that still arrives is passed through rather
+        // than filtered here, so the exclusion is PD-side only and a caller
+        // that acts on the list (SstIngestor switches every returned store
+        // into import mode) must not assume a second client-side filter.
+        $tombstone = $this->makeStore(3, 'tikv3:20160', StoreState::Tombstone);
+
+        $response = new GetAllStoresResponse();
+        $response->setHeader($this->makeResponseHeader());
+        $response->setStores([$this->makeStore(1, 'tikv1:20160'), $tombstone]);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $result = $client->getAllStores();
+
+        $this->assertCount(2, $result);
+        $this->assertSame($tombstone, $result[1]);
+        $this->assertSame(StoreState::Tombstone, $result[1]->getState());
+    }
+
+    public function testGetAllStoresIncludesOfflineStores(): void
+    {
+        // exclude_tombstone_stores covers tombstone stores only: an offline
+        // store is still returned, and pinning it keeps the request flag from
+        // being widened into "only Up stores" unnoticed.
+        $offline = $this->makeStore(2, 'tikv2:20160', StoreState::Offline);
+
+        $response = new GetAllStoresResponse();
+        $response->setHeader($this->makeResponseHeader());
+        $response->setStores([$this->makeStore(1, 'tikv1:20160'), $offline]);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+        $result = $client->getAllStores();
+
+        $this->assertCount(2, $result);
+        $this->assertSame($offline, $result[1]);
+        $this->assertSame(StoreState::Offline, $result[1]->getState());
+    }
+
+    public function testGetAllStoresPropagatesPdHeaderError(): void
+    {
+        // A header error arrives with a gRPC OK status and an empty payload.
+        // Returning that payload as an empty list would let SstIngestor report
+        // a successful ingest that touched no store, so the error must surface
+        // instead of being read as "no stores" (issue #347).
+        $error = new Error();
+        $error->setType(ErrorType::NOT_BOOTSTRAPPED);
+        $error->setMessage('cluster is not bootstrapped');
+
+        $header = $this->makeResponseHeader();
+        $header->setError($error);
+
+        $response = new GetAllStoresResponse();
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379');
+
+        try {
+            $client->getAllStores();
+            self::fail('expected a PdException instead of an empty store list');
+        } catch (PdException $e) {
+            $this->assertSame('GetAllStores', $e->method);
+            $this->assertSame(ErrorType::NOT_BOOTSTRAPPED, $e->errorType);
+            $this->assertStringContainsString('cluster is not bootstrapped', $e->getMessage());
+        }
+    }
+
+    private function makeStore(int $id, string $address, int $state = StoreState::Up): Store
+    {
+        $store = new Store();
+        $store->setId($id);
+        $store->setAddress($address);
+        $store->setState($state);
+
+        return $store;
+    }
+
+    private function makeResponseHeader(): ResponseHeader
+    {
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+
+        return $header;
     }
 
     // ========================================================================
