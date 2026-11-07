@@ -13,6 +13,7 @@ use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\ScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
+use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
@@ -454,15 +455,19 @@ final readonly class TxnReader
         // first failing region throws the same exception the sequential loop
         // aborted with.
         $regionCalls = [];
-        foreach ($grouped as $regionData) {
+        /** @var array<int, BatchCallId> $labels */
+        $labels = [];
+        foreach ($grouped as $regionId => $regionData) {
             $region = $regionData['region'];
             $regionKeys = $regionData['keys'];
 
+            $slot = count($regionCalls);
             $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchGetForRegionWithRetry(
                 $regionKeys,
                 $retryExecutor,
                 $classifier,
             );
+            $labels[$slot] = new BatchCallId($regionId);
         }
 
         $batchExecutor = new BatchAsyncExecutor();
@@ -470,6 +475,7 @@ final readonly class TxnReader
             $regionResults = $batchExecutor->executeParallel(
                 $regionCalls,
                 $this->timeoutConfig->batchDeadlineMs,
+                $labels,
             );
         } catch (BatchPartialFailureException $e) {
             // The future-level RetryExecutor has already applied each
