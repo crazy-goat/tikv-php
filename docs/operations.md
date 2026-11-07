@@ -1362,8 +1362,11 @@ After `close()`, the client's own operations that talk to the cluster throw
 setters remain callable: `close()`, `reapIdleChannels()`,
 `refreshRegionCache()` / `preloadRegions()` (both no-ops after close),
 `getMetrics()`, `setAtomicForCAS()` / `isAtomicForCAS()`, `setColumnFamily()` /
-`getColumnFamily()` and `getClusterId()` (which returns `null` after close
-because the PD client resets the cached cluster ID). A `Transaction` obtained
+`getColumnFamily()`. On `RawKvClient`, `getClusterId()` is no longer a lifecycle
+getter: like its cluster operations it throws `ClientClosedException` after
+`close()` instead of returning the cache the closed PD client has reset.
+`TxnKvClient::getClusterId()` remains callable after close and returns the cached
+value (`null`). A `Transaction` obtained
 before `close()` holds the transport and the PD client directly and does not
 check the client's closed flag. Outside PHP's shutdown sequence,
 `TxnKvClient::close()` rolls back the transactions it began while they are
@@ -1402,8 +1405,10 @@ That is still not the contract:
 
 These methods report on the cluster the client is connected to and configure the
 client instance. None of them touches user data. `healthCheck()` is the only one
-that sends an RPC and the only one that can throw a library exception; the rest
-are local accessors and setters that throw nothing. `TxnKvClient` has
+that sends an RPC, and it throws `ClientClosedException` after `close()` on both
+clients. `RawKvClient::getClusterId()` does too; `TxnKvClient::getClusterId()`
+remains callable after close and returns the cached value. The remaining local
+accessors and setters throw nothing. `TxnKvClient` has
 the same cluster-level methods (`healthCheck()`, `getClusterId()` and
 `getMetrics()`) plus `pdClient()`, which exposes the PD connection it owns; the
 column-family and atomic-mode settings are RawKV-only.
@@ -1477,11 +1482,14 @@ individual store health; the state changes are visible through
 
 **`getClusterId()`** returns the cluster ID the client has already learned, or
 `null` when it has not learned one yet. It is a cached accessor: it sends no RPC
-and throws nothing. The ID is learned from the first PD response whose header
-carries a non-zero cluster ID, and every later response header must report the
-same ID (a different one throws `TiKvException` before the response is used), or
-explicitly by `healthCheck()`. After `close()` it returns `null` because
-closing the PD client resets the cache.
+and, while the client is open, throws nothing. The ID is learned from the first
+PD response whose header carries a non-zero cluster ID, and every later response
+header must report the same ID (a different one throws `TiKvException` before
+the response is used), or explicitly by `healthCheck()`.
+`RawKvClient::getClusterId()` throws `ClientClosedException` after `close()`,
+like the other cluster operations, instead of returning the cache the closed PD
+client has reset. `TxnKvClient::getClusterId()` has no open check: it remains
+callable and returns the cached value (`null` after `close()`).
 
 **`getMetrics()`** returns the metrics backend in use: the instance passed via
 `options['metrics']`, or the no-op default (`NoOpMetrics`) when none was
