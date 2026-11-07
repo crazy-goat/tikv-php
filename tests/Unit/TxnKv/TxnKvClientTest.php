@@ -893,6 +893,53 @@ class TxnKvClientTest extends TestCase
         $client->begin(['lockWaitTimeMs' => -1]);
     }
 
+    public function testClientWideLockWaitTimeIsInheritedByBegin(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc, lockWaitTimeMs: 250);
+        $txn = $client->begin();
+        $property = new \ReflectionProperty(Transaction::class, 'lockWaitTimeMs');
+
+        $this->assertSame(250, $property->getValue($txn));
+    }
+
+    public function testBeginLockWaitTimeOverridesTheClientWideDefault(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc, lockWaitTimeMs: 250);
+        $txn = $client->begin(['lockWaitTimeMs' => 750]);
+        $property = new \ReflectionProperty(Transaction::class, 'lockWaitTimeMs');
+
+        $this->assertSame(750, $property->getValue($txn));
+    }
+
+    public function testConstructorRejectsANegativeClientWideLockWaitTime(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('lockWaitTimeMs must be >= 0');
+
+        new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+            lockWaitTimeMs: -1,
+        );
+    }
+
+    public function testCreateForwardsTheClientWideLockWaitTime(): void
+    {
+        $client = TxnKvClient::create(['pd:2379'], options: ['lockWaitTimeMs' => 250]);
+        $property = new \ReflectionProperty(TxnKvClient::class, 'lockWaitTimeMs');
+
+        $this->assertSame(250, $property->getValue($client));
+        $client->close();
+    }
+
     private function countAndReturn(int &$counter, object $response): object
     {
         $counter++;

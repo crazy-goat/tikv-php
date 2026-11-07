@@ -755,8 +755,11 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 `caCertBaseDir` and `clientCertBaseDir` are optional and restrict **where the
 certificate files may live**. The path is canonicalized with `realpath()`
 before the comparison, so `..` segments and symlinks are resolved first, and
-the canonicalized path has to start with the canonicalized base directory — a
-path that does not is rejected with `InvalidArgumentException` ("TLS file path
+the canonicalized path must be the canonicalized base directory itself or lie
+beneath it — the check compares whole path components, not a string prefix, so
+a sibling directory whose name merely starts with the base name (for example
+`/etc/tikv-attacker` against a base of `/etc/tikv`) is rejected. A path outside
+the base directory is rejected with `InvalidArgumentException` ("TLS file path
 is outside the allowed base directory"). That is what stops a certificate path
 — or a symlink planted in the certificate directory — from loading a file you
 did not intend.
@@ -840,8 +843,9 @@ $grpc = new GrpcClient($logger, $tlsConfig);
 // request re-resolves the address through PD (issue #247).
 $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
-// The client closes the transport it was given in close() — pass
-// ownsGrpcClient: false to keep the ownership with the application.
+// The client does not own the transport or the PD client it is given:
+// close() and the destructor leave both open. Pass ownsGrpcClient: true
+// and/or ownsPdClient: true to transfer ownership.
 // Pass the same storeCache, or a StoreNotMatch / transport failure cannot
 // drop the stale address: the client's resolver has no cache to invalidate
 // while PdClient keeps serving that entry. Omitting storeCache disables
@@ -855,24 +859,30 @@ $client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 > client for you, and accept the same TLS options through
 > `options['tls']` — see [Basic Configuration](#basic-configuration).
 
-**Who closes the transport on the manual path.** The rule of
+**Who closes the connections on the manual path.** The rule of
 [Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
-is "the transport belongs to whoever created it", and it holds for the factory
-path. A client assembled by hand is *given* a transport it did not create and
-still closes it: `close()` (and the destructor) closes `$grpc`, exactly like a
-client built by `create()` closes the transport it built. If the application
-keeps the transport — to share it with a second client, or to close it later —
-say so explicitly:
+is "the connections belong to whoever created them", and it holds for the
+factory path. A client assembled by hand is *given* a transport and a PD
+client it did not create, so it does not own them: `close()` and the
+destructor leave both open (issue #204). That makes sharing safe — destroying
+one client cannot close the channels another one still uses. The client still
+clears its own region cache.
+
+If the application wants to hand ownership over instead, say so explicitly:
 
 ```php
-$client = new RawKvClient($pdClient, $grpc, ownsGrpcClient: false);
+$client = new RawKvClient(
+    $pdClient,
+    $grpc,
+    ownsGrpcClient: true,
+    ownsPdClient: true,
+);
 ```
 
-With `ownsGrpcClient: false` the client never closes the transport and the
-application stays its owner. The flag defaults to `true` today; issue #204
-tracks the change (a client should close only what it owns), so pass the flag
-explicitly whenever the ownership matters. `TxnKvClient` takes the same
-parameter.
+With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
+matching dependency in `close()`; the defaults are `false` for a
+hand-assembled `RawKvClient`. `TxnKvClient` has the same `ownsGrpcClient`
+parameter but still defaults to `true`.
 
 ### Security: Fail-Closed TLS
 
@@ -1585,23 +1595,36 @@ so the per-RPC timeout guidance above applies to them too.
 
 A pessimistic-lock request tells TiKV how long it may block on a contended
 key before it answers with a "locked" error, which the client then retries
-inside its lock-wait budget (`maxBackoffMs`). The wait is configured per
-transaction, on `begin()` (issue #443, DIV-07):
+inside its lock-wait budget (`maxBackoffMs`). The wait is configured
+client-wide on `create()` and overridable per transaction on `begin()`
+(issue #443, DIV-07; client-wide default from issue #229, TXN-24):
 
 ```php
-$txn = $client->begin([
+// Client-wide default for every transaction this client begins
+$client = TxnKvClient::create(['127.0.0.1:2379'], options: [
     'lockWaitTimeMs' => 1000, // default; 0 = "let TiKV use its own default"
+]);
+
+// Per-transaction override
+$txn = $client->begin([
+    'lockWaitTimeMs' => 500,
 ]);
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
-| `lockWaitTimeMs` | `1000` (the same timeout TiKV applies by default, `pessimistic-txn.wait-for-lock-timeout`) | How long TiKV may wait for a contended key, in milliseconds. `0` means "use TiKV's own default timeout" — the only value that is not shrunk as the budget is consumed. Must be `>= 0`; anything else throws `InvalidArgumentException`. |
+| `lockWaitTimeMs` | `1000` (the same timeout TiKV applies by default, `pessimistic-txn.wait-for-lock-timeout`) | How long TiKV may wait for a contended key, in milliseconds. Accepted by `create()` (client-wide) and `begin()` (per transaction; the `begin()` value wins). `0` means "use TiKV's own default timeout" — the only value that is not shrunk or capped as the budget is consumed. Must be `>= 0`; anything else throws `InvalidArgumentException`. |
 
 The value is sent as `PessimisticLockRequest.wait_timeout` and is
-`min(lockWaitTimeMs, remaining lock-wait budget)`: it never exceeds the
-budget and shrinks as the budget is consumed (client-go's
-`calculateEffectiveWaitTime`). TiKV caps the wait at its own
+`min(lockWaitTimeMs, remaining lock-wait budget, RPC deadline - 100 ms)`: it
+never exceeds the budget and shrinks as the budget is consumed (client-go's
+`calculateEffectiveWaitTime`). The deadline cap keeps the server's wait
+shorter than the gRPC deadline of the same request, so TiKV can answer with
+`KeyIsLocked` before the client cancels the call; without it a
+`lockWaitTimeMs` at or above the write timeout would surface as a
+`GrpcException` (`DEADLINE_EXCEEDED`) instead of a lock error. When the RPC
+deadline is shorter than the 100 ms headroom the request carries the
+protobuf's "do not wait" value (`-1`) instead. TiKV caps the wait at its own
 `pessimistic-txn.wait-for-lock-timeout` (1000 ms by default), so a larger
 `lockWaitTimeMs` does not make the server wait longer. When the budget runs
 out, the transaction fails with `LockWaitTimeoutException` — it never

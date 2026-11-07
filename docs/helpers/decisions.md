@@ -1172,13 +1172,13 @@ to be unambiguous, and the answer is not "whoever calls `close()`":
    `maxChannels`, `idleTtlMs`, `grpc`) are rejected next to it instead of
    ignored — an ignored `allowInsecure: false` would leave the caller
    believing TLS is enforced while the transport is used without it.
-3. **A client assembled by hand closes the transport it was given.** The public
-   constructors of `RawKvClient` / `TxnKvClient` default `ownsGrpcClient` to
-   `true`, so `new RawKvClient($pdClient, $grpc)` closes `$grpc` in `close()`
-   and in the destructor. `ownsGrpcClient: false` is the documented escape
-   hatch for an application that keeps the transport. Issue #204 tracks the
-   change (a client should close only what it owns); until it lands the flag is
-   the only way to say so.
+3. **A client assembled by hand does not own the connections it is given.** The
+   `RawKvClient` constructor defaults `ownsGrpcClient` and `ownsPdClient` to
+   `false`, so `new RawKvClient($pdClient, $grpc)` leaves both open in
+   `close()` and in the destructor. `ownsGrpcClient: true` / `ownsPdClient:
+   true` transfers ownership (issue #204). `TxnKvClient` still defaults
+   `ownsGrpcClient` to `true` and closes its PD client unconditionally, pending
+   a follow-up issue.
 
 The rule is published in three places, and a reader of any one of them has to
 find the same answer: `GrpcClientInterface::close()` (the API contract), the
