@@ -450,6 +450,7 @@ an idempotent operation once PD is healthy is safe.
 TiKvException: PD GetRegion returned no region for key
 TiKvException: TSO request failed: gRPC error: ...
 TiKvException: TSO response missing timestamp
+TiKvException: TSO response contained an invalid physical timestamp
 TransactionConflictException: Heartbeat failed: retryable: ...
 TxnRetryableException: Heartbeat failed: locked key #a3f5c8e1d4b79026 (4 bytes)
 TiKvException: Heartbeat failed: TxnNotFound

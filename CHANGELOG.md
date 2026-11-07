@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- `TimestampOracle` now rejects a TSO response whose timestamp is present but has a non-positive physical component (issue #230, TXN-25). A `Timestamp` with `physical = 0` composed to timestamp 0, which TiKV reads as "no version": a transaction started with `startTs = 0` would read nothing and write locks that no correct resolver can reason about, and the failure surfaced far from its cause. `getTimestamp()`, `getTimestampBatch()` and `getLowResolutionTimestamp()` now throw `TiKvException('TSO response contained an invalid physical timestamp')` instead, consistent with the documented fail-closed contract. A zero logical counter with a valid physical part is still accepted. (#230)
+
 ## [v0.13.0] - 2026-11-07
 
 ### Changed
