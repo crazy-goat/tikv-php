@@ -18,11 +18,13 @@ class ScanIteratorTest extends TestCase
 
     public function testIteratesOverSingleBatch(): void
     {
-        $scanFn = fn(string $startKey, string $endKey, int $limit): array => [
-            ['key' => 'k1', 'value' => 'v1'],
-            ['key' => 'k2', 'value' => 'v2'],
-            ['key' => 'k3', 'value' => 'v3'],
-        ];
+        $scanFn = fn(string $startKey): array => $startKey === 'a'
+            ? [
+                ['key' => 'k1', 'value' => 'v1'],
+                ['key' => 'k2', 'value' => 'v2'],
+                ['key' => 'k3', 'value' => 'v3'],
+            ]
+            : [];
 
         $iterator = new ScanIterator($scanFn, 'a', 'z', 10);
         $results = iterator_to_array($iterator);
@@ -52,6 +54,43 @@ class ScanIteratorTest extends TestCase
         };
 
         $iterator = new ScanIterator($scanFn, 'a', 'z', 2);
+        $results = iterator_to_array($iterator);
+
+        $this->assertSame([
+            'k1' => 'v1',
+            'k2' => 'v2',
+            'k3' => 'v3',
+            'k4' => 'v4',
+            'k5' => 'v5',
+        ], $results);
+        // The short last page does not end the iteration; the empty page that
+        // follows it does (RAW-10).
+        $this->assertSame(4, $callCount);
+    }
+
+    public function testShortBatchFollowedByFullBatchYieldsAllRows(): void
+    {
+        // RAW-10: a short page is not proof of exhaustion. The old heuristic
+        // stopped after the first two rows and silently dropped k3..k5.
+        $callCount = 0;
+        $scanFn = function (string $startKey) use (&$callCount): array {
+            $callCount++;
+
+            return match ($startKey) {
+                'a' => [
+                    ['key' => 'k1', 'value' => 'v1'],
+                    ['key' => 'k2', 'value' => 'v2'],
+                ],
+                "k2\x00" => [
+                    ['key' => 'k3', 'value' => 'v3'],
+                    ['key' => 'k4', 'value' => 'v4'],
+                    ['key' => 'k5', 'value' => 'v5'],
+                ],
+                default => [],
+            };
+        };
+
+        $iterator = new ScanIterator($scanFn, 'a', 'z', 3);
         $results = iterator_to_array($iterator);
 
         $this->assertSame([
@@ -102,10 +141,12 @@ class ScanIteratorTest extends TestCase
 
     public function testKeyOnlyReturnsNullValues(): void
     {
-        $scanFn = fn(string $startKey, string $endKey, int $limit, bool $keyOnly): array => [
-            ['key' => 'k1', 'value' => null],
-            ['key' => 'k2', 'value' => null],
-        ];
+        $scanFn = fn(string $startKey): array => $startKey === 'a'
+            ? [
+                ['key' => 'k1', 'value' => null],
+                ['key' => 'k2', 'value' => null],
+            ]
+            : [];
 
         $iterator = new ScanIterator($scanFn, 'a', 'z', 10, true);
         $results = iterator_to_array($iterator);
@@ -138,8 +179,12 @@ class ScanIteratorTest extends TestCase
     public function testRewindResetsToBeginning(): void
     {
         $callCount = 0;
-        $scanFn = function () use (&$callCount): array {
+        $scanFn = function (string $startKey) use (&$callCount): array {
             $callCount++;
+            if ($startKey !== 'a') {
+                return [];
+            }
+
             return [
                 ['key' => 'k1', 'value' => 'v1'],
                 ['key' => 'k2', 'value' => 'v2'],
@@ -150,12 +195,13 @@ class ScanIteratorTest extends TestCase
 
         $first = iterator_to_array($iterator);
         $this->assertSame(['k1' => 'v1', 'k2' => 'v2'], $first);
-        $this->assertSame(1, $callCount);
+        // One page of rows plus the empty page that confirms exhaustion.
+        $this->assertSame(2, $callCount);
 
         $iterator->rewind();
         $second = iterator_to_array($iterator);
         $this->assertSame(['k1' => 'v1', 'k2' => 'v2'], $second);
-        $this->assertSame(2, $callCount);
+        $this->assertSame(4, $callCount);
     }
 
     public function testIterationWithNoUpperBound(): void
@@ -206,10 +252,12 @@ class ScanIteratorTest extends TestCase
         // that PHP reads as 20 >= 3, i.e. empty. A numeric termination check
         // exhausts the iterator before the first page is requested, so a scan
         // over this range returns nothing at all (silent data loss).
-        $scanFn = fn(): array => [
-            ['key' => '20', 'value' => 'v20'],
-            ['key' => '25', 'value' => 'v25'],
-        ];
+        $scanFn = fn(string $startKey): array => $startKey === '20'
+            ? [
+                ['key' => '20', 'value' => 'v20'],
+                ['key' => '25', 'value' => 'v25'],
+            ]
+            : [];
 
         $iterator = new ScanIterator($scanFn, '20', '3', 10);
 
@@ -235,10 +283,11 @@ class ScanIteratorTest extends TestCase
 
     public function testNumericPaginationStopsAtTheByteOrderEndKey(): void
     {
-        // Two pages over ['20', '3'). This case is NOT redundant with the two
-        // above: it discriminates on the *initial* termination check, which the
-        // first case also exercises, and it additionally pins the two-page
-        // pagination shape (2 calls, 3 rows, short final page).
+        // Two data pages over ['20', '3'). This case is NOT redundant with the
+        // two above: it discriminates on the *initial* termination check, which
+        // the first case also exercises, and it additionally pins the
+        // pagination shape (3 calls, 3 rows, a short final data page followed
+        // by the empty page that ends the iteration).
         //
         // Measured, both halves: a numeric termination check makes this test
         // fail with `[]` instead of the three rows, because
@@ -248,8 +297,9 @@ class ScanIteratorTest extends TestCase
         // appends the NUL byte, so the cursor is "25\x00" / "2z\x00" and PHP's
         // `>=` falls back to a byte comparison (a non-numeric string is never
         // compared numerically), agreeing with strcmp() on both. The second
-        // page is therefore requested because the cursor sorts before '3', and
-        // the short final page is what ends the iteration here.
+        // page is therefore requested because the cursor sorts before '3'; the
+        // short page no longer ends the iteration (RAW-10), the empty third
+        // response does.
         $calls = 0;
         $scanFn = function (string $startKey) use (&$calls): array {
             ++$calls;
@@ -272,7 +322,7 @@ class ScanIteratorTest extends TestCase
             ['20' => 'v20', '25' => 'v25', '2z' => 'v2z'],
             iterator_to_array($iterator),
         );
-        $this->assertSame(2, $calls);
+        $this->assertSame(3, $calls);
     }
 
     // ========================================================================
@@ -384,7 +434,9 @@ class ScanIteratorTest extends TestCase
     public function testNumericCursorBelowPageEndIsByteOrdered(): void
     {
         // Bytewise "99" > "100", so a page ending on "99" advances a "100" cursor.
-        $scanFn = fn(): array => [['key' => '99', 'value' => 'v']];
+        $scanFn = fn(string $startKey): array => $startKey === '100'
+            ? [['key' => '99', 'value' => 'v']]
+            : [];
 
         $iterator = new ScanIterator($scanFn, '100', '', 5);
 
@@ -552,12 +604,16 @@ class ScanIteratorTest extends TestCase
         // ('20' < '100' numerically, '100' < '20' bytewise), and the test would
         // then compare the iterator against a wrong expectation (issue #180).
         $scanFn = function (string $startKey) use ($allResults): array {
-            $startIdx = 0;
+            $startIdx = null;
             foreach ($allResults as $idx => $r) {
                 if (strcmp($r['key'], $startKey) >= 0) {
                     $startIdx = $idx;
                     break;
                 }
+            }
+
+            if ($startIdx === null) {
+                return [];
             }
 
             return array_slice($allResults, $startIdx, 30);

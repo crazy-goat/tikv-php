@@ -13,8 +13,9 @@
  * Usage:
  *   php bin/check-coverage.php [report.xml] [--floor=<percent>]
  *
- * The report path defaults to "coverage.xml" (the file PHPUnit writes, see the
- * <coverage> section of phpunit.xml) and the floor to DEFAULT_COVERAGE_FLOOR.
+ * The report path defaults to "coverage.xml" (the file PHPUnit writes when
+ * `--coverage-clover=coverage.xml` is passed, as `composer test:coverage` and
+ * the CI coverage job do) and the floor to DEFAULT_COVERAGE_FLOOR.
  *
  * Exit codes:
  *   0 — the coverage is at or above the floor
