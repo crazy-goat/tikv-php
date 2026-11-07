@@ -27,6 +27,12 @@ use PHPUnit\Framework\TestCase;
  * The guard is a test rather than a Markdown linter because the repository
  * has no Markdown linter and every other documentation invariant is already
  * pinned by a `tests/Unit/Docs` guard that runs in the unit matrix.
+ *
+ * A fresh `[Unreleased]` section is deliberately empty: the release pull
+ * request renames the old one to `## [vX.Y.Z]` and adds a new, empty
+ * `## [Unreleased]` above it. The guard therefore requires the section to
+ * exist but does not require it to have a heading — the first contributor
+ * after a release adds the heading together with the entry.
  */
 final class ChangelogStructureGuardTest extends TestCase
 {
@@ -81,12 +87,10 @@ final class ChangelogStructureGuardTest extends TestCase
             $sections,
             'CHANGELOG.md has no "## [Unreleased]" section.',
         );
-        self::assertNotSame(
-            [],
-            $sections['[Unreleased]'],
-            'The "## [Unreleased]" section of CHANGELOG.md has no "###" headings.',
-        );
 
+        // A fresh `[Unreleased]` is empty until the first change after a
+        // release adds its heading, so only its existence is required here;
+        // the loop below checks the order of whatever headings it has.
         foreach ($sections as $section => $headings) {
             $previousPosition = -1;
             $previousHeading = null;
