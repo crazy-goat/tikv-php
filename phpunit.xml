@@ -17,6 +17,7 @@
             <exclude>tests/Unit/Grpc/GrpcClientChannelCapTest.php</exclude>
             <exclude>tests/Unit/Grpc/RawKvBatchMetricsTest.php</exclude>
             <exclude>tests/Unit/Grpc/GrpcClientRpcCompletionTest.php</exclude>
+            <exclude>tests/Unit/Grpc/GrpcClientStreamingTest.php</exclude>
             <exclude>tests/Unit/Grpc/BatchCommandsConnectionDeadlineTest.php</exclude>
             <exclude>tests/Unit/Batch/GrpcFutureTest.php</exclude>
             <exclude>tests/Unit/RawKv/RawKvBatchTest.php</exclude>
@@ -44,6 +45,7 @@
             <file>tests/Unit/Grpc/GrpcClientChannelCapTest.php</file>
             <file>tests/Unit/Grpc/RawKvBatchMetricsTest.php</file>
             <file>tests/Unit/Grpc/GrpcClientRpcCompletionTest.php</file>
+            <file>tests/Unit/Grpc/GrpcClientStreamingTest.php</file>
             <file>tests/Unit/Grpc/BatchCommandsConnectionDeadlineTest.php</file>
             <file>tests/Unit/Batch/GrpcFutureTest.php</file>
             <file>tests/Unit/RawKv/RawKvBatchTest.php</file>

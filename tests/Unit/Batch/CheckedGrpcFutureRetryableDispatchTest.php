@@ -17,6 +17,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -187,7 +188,7 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
     {
         $ok = new RawBatchGetResponse();
         $attempts = 0;
-        $dispatchError = new RegionException('dispatch', 'StaleCommand');
+        $dispatchError = new RegionException('dispatch', 'RegionNotFound', errorKind: ErrorKind::RegionNotFound);
 
         $dispatch = function () use (&$attempts, $ok, $dispatchError): CheckedGrpcFuture {
             $attempts++;
@@ -215,7 +216,11 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
     public function testNonRetryableErrorPropagatesWithoutRetry(): void
     {
         $attempts = 0;
-        $terminal = new RegionException('RegionError', 'RaftEntryTooLarge');
+        $terminal = new RegionException(
+            'RegionError',
+            'RaftEntryTooLarge',
+            errorKind: ErrorKind::RaftEntryTooLarge,
+        );
 
         $dispatch = function () use (&$attempts, $terminal): CheckedGrpcFuture {
             $attempts++;
@@ -282,10 +287,12 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
     /**
      * A bare `RegionException('BatchRequest', $serverError)` raised for a
      * top-level non-region `error` string on RawBatchPut/RawBatchDelete
-     * responses carries no `errorKind`, and `ErrorClassifier` now treats any
-     * kind-less `RegionException` as fatal (issue #251, REG-20). A
-     * permanent server string such as "ttl is not enabled …" therefore fails
-     * after a single attempt instead of being retried up to the budget.
+     * responses carries no `errorKind` and is not an errorpb.Error, so
+     * `ErrorClassifier` treats it as fatal (issue #251, REG-20; the bounded
+     * retry for an unknown variant applies only to errorpb errors, issue
+     * #444). A permanent server string such as "ttl is not enabled …"
+     * therefore fails after a single attempt instead of being retried up to
+     * the budget.
      */
     public function testBareBatchErrorStringRegionExceptionIsFatal(): void
     {
@@ -336,7 +343,9 @@ final class CheckedGrpcFutureRetryableDispatchTest extends TestCase
         $dispatch = function () use (&$attempts): CheckedGrpcFuture {
             $attempts++;
             if ($attempts === 1) {
-                return $this->throwingFuture(new RegionException('RegionError', 'StaleCommand'));
+                return $this->throwingFuture(
+                    new RegionException('RegionError', 'RegionNotFound', errorKind: ErrorKind::RegionNotFound),
+                );
             }
 
             throw new \RuntimeException('redispatch boom');

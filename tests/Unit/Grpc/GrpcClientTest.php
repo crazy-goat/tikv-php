@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Tests\Unit\Region\TestLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\ThrowingLogger;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LogLevel;
@@ -321,6 +322,36 @@ class GrpcClientTest extends TestCase
         $this->assertSame(2, $client->getChannelCount());
 
         $client->__destruct();
+        $this->assertSame(0, $client->getChannelCount());
+    }
+
+    /**
+     * Issue #287 (GRPC-28): a channel whose close() throws is logged, and a
+     * logger that is unusable during shutdown must not turn that into a
+     * fatal error from the destructor.
+     */
+    public function testDestructorSwallowsAThrowingLoggerWhenAChannelCloseFails(): void
+    {
+        $client = new GrpcClient(new ThrowingLogger());
+
+        $channel = $this->createMock(\Grpc\Channel::class);
+        $channel->expects($this->once())
+            ->method('close')
+            ->willThrowException(new \RuntimeException('channel already released'));
+
+        $now = microtime(true);
+        $prop = new \ReflectionProperty(GrpcClient::class, 'channels');
+        $prop->setValue($client, [
+            '127.0.0.1:20160' => [
+                'channel' => $channel,
+                'lastUsed' => $now,
+                'createdAt' => $now,
+                'inFlight' => 0,
+            ],
+        ]);
+
+        $client->__destruct();
+
         $this->assertSame(0, $client->getChannelCount());
     }
 
