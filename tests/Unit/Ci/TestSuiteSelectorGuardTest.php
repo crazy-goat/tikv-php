@@ -294,35 +294,52 @@ class TestSuiteSelectorGuardTest extends TestCase
             . '--coverage-clover=coverage.xml from the coverage runner instead (issue #556).',
         );
 
-        self::assertStringContainsString(
-            '<source>',
+        self::assertMatchesRegularExpression(
+            '/<source>.*?<exclude>\s*<directory>src\/Proto<\/directory>\s*<\/exclude>.*?<\/source>/s',
             $xml,
-            'phpunit.xml must keep the <source> set: it scopes the coverage metric to the '
-            . 'hand-written client code and excludes the generated src/Proto classes (issue #556).',
+            'phpunit.xml must keep the <source> set with the <exclude> of src/Proto: the set '
+            . 'scopes the coverage metric to the hand-written client code, and without the '
+            . 'exclusion the generated classes drag the same run from ~87 % to ~42 % '
+            . '(issues #362, #556).',
         );
 
-        foreach ($this->composerScripts() as $name => $commands) {
-            if (!str_starts_with($name, 'test')) {
-                continue;
-            }
+        $checked = 0;
+        $violations = [];
 
-            foreach ($commands as $command) {
+        foreach ($this->runnerCommands() as $where => $commands) {
+            foreach ($commands as $line => $command) {
                 if (!$this->runsPhpunit($command) || str_contains($command, '--coverage-')) {
                     continue;
                 }
 
-                self::assertStringContainsString(
-                    '--no-coverage',
-                    $command,
-                    sprintf(
-                        'composer script "%s" runs PHPUnit without --no-coverage and without a '
-                        . 'coverage report option, so it asks for a driver it does not use '
-                        . '(issue #556).',
-                        $name,
-                    ),
-                );
+                $checked++;
+
+                if (!str_contains($command, '--no-coverage')) {
+                    $violations[] = sprintf(
+                        '%s:%d runs PHPUnit without --no-coverage and without a coverage report '
+                        . 'option, so it asks for a driver it does not use (issue #556).',
+                        $where,
+                        $line,
+                    );
+                }
             }
         }
+
+        // Without this witness the rule would pass vacuously if no runner
+        // invoked PHPUnit at all.
+        self::assertGreaterThan(
+            0,
+            $checked,
+            'No non-coverage PHPUnit invocation was found in composer.json, the scripts, the '
+            . 'Makefile, the compose files or the CI workflow, so this guard no longer guards anything.',
+        );
+
+        self::assertSame(
+            [],
+            $violations,
+            "PHPUnit invocations that ask for a coverage driver they do not use:\n"
+            . implode("\n", $violations),
+        );
     }
 
     /**

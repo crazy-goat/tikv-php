@@ -602,9 +602,9 @@ the script passes that mode itself). It writes the Clover report to `coverage.xm
 job and uploads the Clover report as the `coverage-clover` artifact.
 
 Coverage is opt-in on the command line: `phpunit.xml` configures no coverage report, so an
-ordinary `vendor/bin/phpunit` run — and every composer test script — neither asks for a coverage
-driver nor writes `coverage.xml` / `coverage-html/`. The report is requested only by the commands
-above (issue #556).
+ordinary `vendor/bin/phpunit` run — and every composer test script that does not request a
+report — neither asks for a coverage driver nor writes `coverage.xml` / `coverage-html/`. The
+report is requested only by the commands above (issue #556).
 
 The floor is a ratchet: it is set below the measured coverage and only moves up. The generated
 protobuf classes in `src/Proto/` are excluded from the coverage source set (see `phpunit.xml`),
