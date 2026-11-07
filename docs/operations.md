@@ -1369,8 +1369,8 @@ public function getMetrics(): MetricsInterface;
 user data and cannot fail with a "no region" error.
 
 - **Returns:** the cluster ID, or `null` when PD answered but the response
-  carried no cluster-ID header ("reachable, identity unknown"). Both are a
-  successful probe.
+  carried no cluster-ID header or reported `0` ("reachable, identity
+  unknown"). Both are a successful probe.
 - **Throws:** `ClientClosedException` when the client has been closed, and
   `HealthCheckException` for every other failure (PD unreachable, a gRPC
   transport error, or a PD-level error in the response header). The underlying
@@ -1412,8 +1412,10 @@ write path through your application's own traffic and the counters exposed by
 **`getClusterId()`** returns the cluster ID the client has already learned, or
 `null` when it has not learned one yet. It is a cached accessor: it sends no RPC
 and throws nothing. The ID is learned from the first PD response whose header
-carries it, or explicitly by `healthCheck()`. After `close()` it returns `null`
-because closing the PD client resets the cache.
+carries a non-zero cluster ID, and every later response header must report the
+same ID (a different one throws `TiKvException` before the response is used), or
+explicitly by `healthCheck()`. After `close()` it returns `null` because
+closing the PD client resets the cache.
 
 **`getMetrics()`** returns the metrics backend in use: the instance passed via
 `options['metrics']`, or the no-op default (`NoOpMetrics`) when none was
