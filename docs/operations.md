@@ -616,13 +616,26 @@ $results = $client->batchScan($ranges, eachLimit: 50, keyOnly: false);
 - `eachLimit` (int): Maximum results per range (required)
 - `keyOnly` (bool, optional): Return only keys
 
-**Returns:** `array<array<array{key: string, value: ?string}>>`
+**Returns:** `array<array<array{key: string, value: ?string}>>` — one inner
+list per input range, in input order; each inner list holds at most
+`eachLimit` rows in ascending key order and carries `null` values when
+`keyOnly` is true. An empty `ranges` list returns `[]`, and a range that
+matches no rows contributes an empty inner list.
 
-> **Performance Note:** `batchScan` fans out the ranges **concurrently** —
-> at most `options['maxConcurrency']` ranges (default **16**; must be `>= 1`)
-> are in flight at once, and each range's per-region scan RPCs are all
-> dispatched before any response is awaited, so server-side latencies
-> overlap. Results are returned in input range order.
+> **Not the `RawBatchScan` RPC.** `batchScan` is a client-side loop: it
+> sends one `RawScan` per range (and one per region inside each range) and
+> assembles the answers. The RPC count is linear in the number of ranges and
+> in the regions they cover, and every range independently resolves its own
+> regions — fifty ranges cost roughly fifty scans, not one round trip per
+> region for the whole call. `eachLimit` is required and must be greater
+> than zero; unlike `scan()`, `batchScan()` cannot request an unbounded
+> range.
+>
+> **Performance Note:** the per-range sends are fanned out **concurrently**
+> — at most `options['maxConcurrency']` ranges (default **16**; must be
+> `>= 1`) are in flight at once, and each range's per-region scan RPCs are
+> all dispatched before any response is awaited, so server-side latencies
+> overlap. Concurrency bounds the wall-clock overlap, not the total work.
 
 **Example:**
 
