@@ -957,7 +957,8 @@ length** — a key of 8 bytes or fewer is no longer hex-encoded in full — whil
 the same key keeps the same token within a process, so log lines can still be
 correlated. The salt is 32 random bytes generated on first use, so the example
 shows the shape only and the exact token differs per process; pin a high-entropy
-salt with `KeyRedactor::setSalt()` before the first redaction when tokens must
+salt (at least 16 bytes, 32 recommended; `KeyRedactor::generateSalt()` returns
+one) with `KeyRedactor::setSalt()` before the first redaction when tokens must
 be comparable across processes or restarts. `KeyRedactor::setRedactor()`
 replaces the default entirely: it is an explicit opt-out, and a reversible
 scheme installed there re-exposes the key material. This guarantee covers keys
