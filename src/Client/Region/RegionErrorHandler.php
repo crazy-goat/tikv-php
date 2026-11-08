@@ -64,11 +64,15 @@ final class RegionErrorHandler
      * non-routing error (ServerIsBusy, DiskFull, IsWitness,
      * RecoveryInProgress, …) reached the region that owns the key, so the
      * cached entry stays — the same routing table RetryExecutor uses
-     * (issue #245). For EpochNotMatch the stale entry is also captured on the
-     * exception before the drop, so RetryExecutor can seed the new regions'
-     * leader from the stale cached entry's leader store and refresh the cache
-     * without PD (issue #246). This is the consistent behaviour expected by
-     * Transaction and LockResolver callers.
+     * (issue #245). NotLeader is the exception to the routing rule: with the
+     * default $notLeaderOwnedByRetryExecutor = true it stays cached, because
+     * RetryExecutor::handleNotLeader() owns that drop; only a site with no
+     * retry executor invalidates it here (see below). For EpochNotMatch the
+     * stale entry is also captured on the exception before the drop, so
+     * RetryExecutor can seed the new regions' leader from the stale cached
+     * entry's leader store and refresh the cache without PD (issue #246).
+     * This is the consistent behaviour expected by Transaction and
+     * LockResolver callers.
      *
      * NotLeader ownership depends on where check() runs:
      *
@@ -142,21 +146,20 @@ final class RegionErrorHandler
             // payload does not name the requested store (issue #247).
             $cachedRegion = null;
             if (
-                $cache instanceof RegionCacheInterface
-                && $regionId !== null
+                $regionId !== null
                 && ($regionError->hasEpochNotMatch() || $regionError->hasStoreNotMatch())
             ) {
-                $cachedRegion = $cache->getById($regionId);
+                $cachedRegion = $cache?->getById($regionId);
             }
             $exception = RegionException::fromRegionError($regionError, $cachedRegion);
             $isNotLeader = $exception->notLeader instanceof NotLeader;
 
-            if ($cache instanceof RegionCacheInterface && $regionId !== null) {
+            if ($regionId !== null) {
                 if ($isNotLeader) {
                     // A valid-hint switch belongs to RetryExecutor's
                     // handleNotLeader(); only a non-executor site drops.
                     if (!$notLeaderOwnedByRetryExecutor) {
-                        $cache->invalidate($regionId, 'not_leader');
+                        $cache?->invalidate($regionId, 'not_leader');
                     }
                 } else {
                     $kind = $exception->errorKind;
@@ -165,7 +168,7 @@ final class RegionErrorHandler
                     // non-routing kind means the request reached the
                     // region that owns the key, so keep the entry.
                     if (!$kind instanceof ErrorKind || RetryExecutor::invalidatesRoutingKind($kind)) {
-                        $cache->invalidate($regionId, self::regionInvalidationReason($exception));
+                        $cache?->invalidate($regionId, self::regionInvalidationReason($exception));
                     }
                 }
             }
