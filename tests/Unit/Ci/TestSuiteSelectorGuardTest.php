@@ -18,7 +18,7 @@ use PHPUnit\Framework\TestCase;
  * suite: the shell scripts, the Makefile, the compose files and the CI
  * workflow.
  *
- * Seven rules are pinned here, all of them cheap and cluster-free:
+ * Eight rules are pinned here, all of them cheap and cluster-free:
  *
  *  1. every `--testsuite` selector used in the repository names a suite
  *     that `phpunit.xml` declares;
@@ -46,11 +46,16 @@ use PHPUnit\Framework\TestCase;
  *     (PHPUnit's default is `false`), and no runner opts out with
  *     `--do-not-fail-on-risky`. Without the attribute a test that performs
  *     no assertion is only *reported* as risky and the suite stays green
- *     (issue #665).
+ *     (issue #665);
+ *  8. every `<file>` entry of every suite points at a file that exists and
+ *     every `<directory>` entry holds at least one `*Test.php` that the
+ *     suite does not exclude. `--fail-on-empty-test-suite` only fires when
+ *     the *whole* run selects nothing, so a renamed or moved entry empties
+ *     one suite while the others keep the run green (issue #728).
  *
- * The selectors and the suite names are read out of the files themselves
- * rather than restated here: a copy in this file could agree with a
- * renamed suite while the runner kept the old name.
+ * The selectors, the suite names and the suite entries are read out of the
+ * files themselves rather than restated here: a copy in this file could
+ * agree with a renamed suite while the runner kept the old name.
  *
  * `phpunit.xml` is read with a regular expression instead of an XML parser
  * because the Unit suite has to run in an environment without the project's
@@ -408,6 +413,236 @@ class TestSuiteSelectorGuardTest extends TestCase
             $violations,
             "PHPUnit invocations that opt out of failing on risky tests:\n" . implode("\n", $violations),
         );
+    }
+
+    /**
+     * Every suite entry must still select a test file (issue #728).
+     *
+     * `--fail-on-empty-test-suite` only fails when the *whole* run selects
+     * nothing. A `<file>` entry that names a renamed or moved file makes
+     * PHPUnit warn and contribute no tests, while another suite keeps the run
+     * green: `E2E-TxnKV` could lose all 38 of its tests behind a green
+     * `E2E-RawKV`. A `<directory>` entry with no `*Test.php` (or whose every
+     * test is excluded) has the same effect. `phpunit.xml` has 17 `<file>` and
+     * 3 `<directory>` entries, so one rename is enough to empty a suite.
+     */
+    public function testEverySuiteEntrySelectsAtLeastOneTestFile(): void
+    {
+        $root = $this->repoRoot();
+
+        [$violations, $fileEntries, $directoryEntries] = $this->suiteEntryViolations(
+            $this->readFile($root . '/phpunit.xml'),
+            $root,
+        );
+
+        // Without these witnesses the test would pass vacuously if the scan
+        // stopped finding entries at all.
+        self::assertGreaterThan(
+            0,
+            $fileEntries,
+            'phpunit.xml declares no <file> entry, so this guard no longer guards anything.',
+        );
+        self::assertGreaterThan(
+            0,
+            $directoryEntries,
+            'phpunit.xml declares no <directory> entry, so this guard no longer guards anything.',
+        );
+
+        self::assertSame(
+            [],
+            $violations,
+            "Test suite entries that select no test file:\n" . implode("\n", $violations),
+        );
+    }
+
+    /**
+     * A scratch copy of `phpunit.xml` with a renamed `<file>` entry must make
+     * the guard fail, so it is known to catch the failure it exists for and
+     * not merely to pass on the current file.
+     */
+    public function testTheSuiteEntryGuardDetectsARenamedFileEntry(): void
+    {
+        $root = $this->repoRoot();
+        $xml = $this->readFile($root . '/phpunit.xml');
+
+        $scratch = str_replace(
+            '<file>tests/Unit/Grpc/GrpcClientTest.php</file>',
+            '<file>tests/Unit/Grpc/GrpcClientRenamedTest.php</file>',
+            $xml,
+            $replaced,
+        );
+        self::assertSame(1, $replaced, 'The fixture <file> entry was not found in phpunit.xml');
+
+        [$violations] = $this->suiteEntryViolations($scratch, $root);
+
+        self::assertNotSame([], $violations, 'A renamed <file> entry did not produce a violation');
+        self::assertStringContainsString(
+            'tests/Unit/Grpc/GrpcClientRenamedTest.php',
+            implode("\n", $violations),
+            'The violation does not name the renamed file',
+        );
+    }
+
+    /**
+     * Every entry of every suite in the given `phpunit.xml` text, checked
+     * against the files it names.
+     *
+     * @return array{0: list<string>, 1: int, 2: int}
+     *     the violations, the number of `<file>` entries and the number of
+     *     `<directory>` entries
+     */
+    private function suiteEntryViolations(string $xml, string $root): array
+    {
+        $matches = [];
+        $found = preg_match_all(
+            '/<testsuite\s+name="([^"]+)"[^>]*>(.*?)<\/testsuite>/s',
+            $xml,
+            $matches,
+            PREG_SET_ORDER,
+        );
+        self::assertNotFalse($found, 'Unable to scan phpunit.xml for test suites');
+
+        $violations = [];
+        $fileEntries = 0;
+        $directoryEntries = 0;
+
+        foreach ($matches as $suite) {
+            $name = $suite[1];
+            $body = $suite[2];
+
+            $files = $this->entriesIn($body, 'file');
+            $directories = $this->entriesIn($body, 'directory');
+            $excludes = $this->entriesIn($body, 'exclude');
+
+            $fileEntries += count($files);
+            $directoryEntries += count($directories);
+
+            if ($files === [] && $directories === []) {
+                $violations[] = sprintf(
+                    'suite "%s" declares no <file> or <directory> entry, so it selects no test (issue #728)',
+                    $name,
+                );
+
+                continue;
+            }
+
+            foreach ($files as $file) {
+                if (!is_file($root . '/' . $file)) {
+                    $violations[] = sprintf(
+                        'suite "%s" lists the <file> entry "%s", which does not exist, so the suite '
+                        . 'selects no test from it (issue #728)',
+                        $name,
+                        $file,
+                    );
+                }
+            }
+
+            foreach ($directories as $directory) {
+                $path = $root . '/' . $directory;
+
+                if (!is_dir($path)) {
+                    $violations[] = sprintf(
+                        'suite "%s" lists the <directory> entry "%s", which does not exist (issue #728)',
+                        $name,
+                        $directory,
+                    );
+
+                    continue;
+                }
+
+                if ($this->testFileCount($path, $excludes, $root) === 0) {
+                    $violations[] = sprintf(
+                        'suite "%s" lists the <directory> entry "%s", which contains no *Test.php '
+                        . 'file that the suite does not exclude, so the suite selects nothing from it '
+                        . '(issue #728)',
+                        $name,
+                        $directory,
+                    );
+                }
+            }
+        }
+
+        return [$violations, $fileEntries, $directoryEntries];
+    }
+
+    /**
+     * The trimmed text of every entry element of one kind in a suite body.
+     *
+     * @return list<string>
+     */
+    private function entriesIn(string $body, string $element): array
+    {
+        $pattern = sprintf('#<%1$s>\s*([^<]+?)\s*</%1$s>#s', preg_quote($element, '#'));
+
+        $matches = [];
+        $found = preg_match_all($pattern, $body, $matches);
+        self::assertNotFalse($found, sprintf('Unable to scan a test suite for <%s> entries', $element));
+
+        return array_map($this->normaliseEntryPath(...), $matches[1]);
+    }
+
+    /**
+     * The number of `*Test.php` files under the directory that none of the
+     * suite's `<exclude>` entries removes.
+     *
+     * PHPUnit discovers tests recursively, so a nested test counts. An
+     * excluded path matches the file itself or a directory containing it, the
+     * same way PHPUnit drops files from a suite.
+     *
+     * @param list<string> $excludes
+     * @param string $root the directory the exclude paths are relative to
+     */
+    private function testFileCount(string $directory, array $excludes, string $root): int
+    {
+        $excluded = array_map(
+            fn (string $exclude): string => rtrim($exclude, '/'),
+            $excludes,
+        );
+        $prefix = rtrim($root, '/') . '/';
+
+        $files = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS),
+        );
+
+        $count = 0;
+
+        foreach ($files as $file) {
+            if (!$file instanceof \SplFileInfo || !$file->isFile()) {
+                continue;
+            }
+
+            $path = $file->getPathname();
+
+            if (!str_ends_with($path, 'Test.php')) {
+                continue;
+            }
+
+            $relative = str_starts_with($path, $prefix) ? substr($path, strlen($prefix)) : $path;
+
+            foreach ($excluded as $exclude) {
+                if ($relative === $exclude || str_starts_with($relative, $exclude . '/')) {
+                    continue 2;
+                }
+            }
+
+            $count++;
+        }
+
+        return $count;
+    }
+
+    /**
+     * A phpunit.xml entry path with `./` prefixes and backslashes removed.
+     */
+    private function normaliseEntryPath(string $path): string
+    {
+        $path = str_replace('\\', '/', trim($path));
+
+        while (str_starts_with($path, './')) {
+            $path = substr($path, 2);
+        }
+
+        return $path;
     }
 
     /**
