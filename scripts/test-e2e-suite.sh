@@ -16,6 +16,10 @@
 # nothing: a selection that matches no test is a non-zero exit code
 # (--fail-on-empty-test-suite), and the API V2 lane cannot skip its whole
 # suite, because the environment it needs is set here.
+#
+# It also checks the cluster's storage mode before the run (issue #730): each
+# suite needs a mode of its own, and a suite pointed at the wrong one used to
+# fail with a confusing TTL or API-version error from deep inside the client.
 set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -33,9 +37,11 @@ usage() {
 case "$suite" in
     E2E-RawKV)
         phpunit_args=(--testsuite E2E-RawKV)
+        expected_mode=v1ttl
         ;;
     E2E-TxnKV)
         phpunit_args=(--testsuite E2E-TxnKV)
+        expected_mode=v1
         ;;
     E2E-ApiV2)
         # The API V2 suite skips every one of its tests unless
@@ -45,6 +51,7 @@ case "$suite" in
         # --fail-on-skipped turns a leftover skip into a failure.
         export TIKV_API_VERSION="${TIKV_API_VERSION:-2}"
         phpunit_args=(--testsuite E2E-ApiV2 --fail-on-skipped)
+        expected_mode=apiv2
 
         if [ -z "${TIKV_ALT_KEYSPACE:-}" ]; then
             echo "TIKV_ALT_KEYSPACE is not set, but the API V2 suite needs a second" >&2
@@ -72,6 +79,21 @@ if [ -z "${PD_ENDPOINTS:-}" ]; then
     echo "compose network. On the host, point PD_ENDPOINTS at the published PD" >&2
     echo "port, for example \"PD_ENDPOINTS=localhost:${PD_PORT:-2379}\"." >&2
     echo "" >&2
+fi
+
+# Every end-to-end suite needs a cluster mode of its own: V1TTL for RawKV, V1
+# for TxnKV, API V2 for ApiV2. A run against the wrong mode used to fail deep
+# inside the client with a TTL or API-version error that reads like a client
+# bug; the check turns it into "wrong cluster mode" before PHPUnit starts
+# (issue #730). A mode that cannot be determined warns and continues — the
+# cluster probe reports an unreachable cluster better.
+echo "Expected cluster mode: $expected_mode"
+if ! php bin/cluster-mode.php "$expected_mode"; then
+    echo "" >&2
+    echo "Refusing to run $suite: the cluster is not in the mode the suite needs." >&2
+    echo "Start the right cluster (see docs/contributing.md) or point" >&2
+    echo "PD_ENDPOINTS at a cluster in the expected mode." >&2
+    exit 2
 fi
 
 phpunit_command=(vendor/bin/phpunit "${phpunit_args[@]}" --fail-on-empty-test-suite --no-coverage)
