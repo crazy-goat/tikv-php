@@ -1251,21 +1251,32 @@ $sensitiveData = decrypt($encrypted, $key);
 
 ## Future Architecture Improvements
 
-### Planned Enhancements
+The roadmap lives in [`README.md`](../README.md#roadmap): its **Completed**
+list records what shipped, and its **Planned** list holds only open feature-gap
+issues, because every planned item has an issue behind it.
 
-1. **Connection Pooling**: Explicit pool with size limits
-2. **Circuit Breaker**: Fail fast on persistent errors
-3. **Metrics**: Built-in Prometheus/OpenTelemetry metrics
-4. **Async API**: Optional async/await support (PHP 8.1+)
-5. **Streaming**: Streaming scan for very large datasets
-6. **TxnHeartBeat**: Automatic heartbeat for long-running transactions
+The delivered items this section used to advertise have shipped and are
+recorded there:
 
-### Research Areas
+- ✅ **Connection Pooling** — persistent, shared gRPC channels per address (see
+  [Connection Pooling](#1-connection-pooling))
+- ✅ **Circuit Breaker** — per-store health tracking with cooldown, half-open
+  probing and `StoreUnavailableException` (issue #424)
+- ✅ **Metrics** — `MetricsInterface`, `InMemoryMetrics`, the dependency-free
+  `PrometheusMetrics` exporter and the `TraceEventInterface` tracing hook
+  (issue #434)
+- ✅ **TxnHeartBeat** — the automatic primary-lock keepalive, with
+  `Transaction::heartbeat()` for a transaction that waits without touching TiKV
+  (issue #429)
+- ✅ **Read Replicas** — `ReplicaReadPolicy` and the replica-read modes read
+  from followers for load distribution (issue #421)
+- ✅ **Compression** — the `compression` gRPC channel option compresses requests
+  (issue #423)
+- ✅ **Batching** — batch operations and batch scans split and fan out across
+  regions automatically (issue #433 for `RawBatchScan`)
 
-1. **Smart Routing**: Route based on node load
-2. **Read Replicas**: Read from followers for load distribution
-3. **Compression**: Compress large values
-4. **Batching**: Automatic request batching
+**Async API** and **Streaming** have no tracking issue, so they are not on the
+roadmap and are not planned. Smart routing by node load is not planned either.
 
 ## See Also
 
