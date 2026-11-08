@@ -6069,12 +6069,28 @@ class TransactionTest extends TestCase
         $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
         $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
 
+        $lockRequests = [];
         $this->grpc->method('call')
-            ->willReturnCallback(fn(string $addr, string $svc, string $method): object => match ($method) {
-                'KvPessimisticLock' => $lockResponse,
-                'KvPrewrite' => $prewriteResponse,
-                'KvCommit' => $commitResponse,
-                default => throw new \RuntimeException("Unexpected method: $method"),
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                $lockResponse,
+                $prewriteResponse,
+                $commitResponse,
+                &$lockRequests,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $lockRequests[] = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => true]);
@@ -6084,6 +6100,13 @@ class TransactionTest extends TestCase
         $txn->commit();
 
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertCount(1, $lockRequests);
+        $this->assertInstanceOf(PessimisticLockRequest::class, $lockRequests[0]);
+        $keys = [];
+        foreach ($lockRequests[0]->getMutations() as $mutation) {
+            $keys[] = $mutation->getKey();
+        }
+        $this->assertSame(['k1', 'k2', 'k3'], $keys);
     }
 
     public function testPessimisticLockSendsSingleRpcPerRegion(): void
@@ -6106,12 +6129,28 @@ class TransactionTest extends TestCase
         $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
         $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
 
+        $lockRequests = [];
         $this->grpc->method('call')
-            ->willReturnCallback(fn(string $addr, string $svc, string $method): object => match ($method) {
-                'KvPessimisticLock' => $lockResponse,
-                'KvPrewrite' => $prewriteResponse,
-                'KvCommit' => $commitResponse,
-                default => throw new \RuntimeException("Unexpected method: $method"),
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                $lockResponse,
+                $prewriteResponse,
+                $commitResponse,
+                &$lockRequests,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $lockRequests[] = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => true]);
@@ -6121,6 +6160,24 @@ class TransactionTest extends TestCase
         $txn->commit();
 
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+
+        // One lock RPC per region, each carrying only its own region's keys:
+        // k1/k2 sit in region 1 and k4 in region 2.
+        $this->assertCount(2, $lockRequests);
+        $keysByRegion = [];
+        foreach ($lockRequests as $lockRequest) {
+            $this->assertInstanceOf(PessimisticLockRequest::class, $lockRequest);
+            $context = $lockRequest->getContext();
+            $this->assertNotNull($context);
+            $keys = [];
+            foreach ($lockRequest->getMutations() as $mutation) {
+                $keys[] = $mutation->getKey();
+            }
+            sort($keys);
+            $keysByRegion[$context->getRegionId()] = $keys;
+        }
+        ksort($keysByRegion);
+        $this->assertSame([1 => ['k1', 'k2'], 2 => ['k4']], $keysByRegion);
     }
 
     public function testPessimisticLockSetsIsFirstLockTrueOnFirstBatchOnly(): void
