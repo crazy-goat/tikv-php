@@ -1077,7 +1077,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 ### Transaction Capabilities
 - ✅ **TxnKvClient / Transaction** — ACID transactions with snapshot reads and two-phase commit
 - ✅ **Pessimistic & Optimistic** — pessimistic locks by default; the primary lock of a pessimistic transaction is kept alive automatically, and `heartbeat()` remains for a transaction that waits without touching TiKV
-- ✅ **Transaction size limits and request batching** — `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` bound the write set and throw `TransactionTooLargeException` before any RPC; `trackReadSet` (default `false`) opts in to the read set populated by `get()`, `batchGet()`, `getForUpdate()` and `scan()`, and `maxReadSetEntries` / `maxReadSetTotalSize` bound it; `getWriteSetSize()` / `getWriteSetCount()` and `getReadSetSize()` / `getReadSetCount()` expose their sizes; `maxTxnBatchSize` / `maxTxnBatchCount` split prewrite and commit requests per region
+- ✅ **Transaction size limits and request batching** — `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` bound the write set and throw `TransactionTooLargeException` before any RPC; `trackReadSet` (default `false`) opts in to the read set populated by `get()`, `batchGet()`, `getForUpdate()` and `scan()`, and `maxReadSetEntries` / `maxReadSetTotalSize` bound it; `getWriteSetSize()` / `getWriteSetCount()` and `getReadSetSize()` / `getReadSetCount()` expose their sizes; `maxTxnBatchSize` / `maxTxnBatchCount` split prewrite, pessimistic-lock, commit and rollback requests per region
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` is sent automatically when less than half of the lock TTL remains; `optimisticLockTtlMs` / `pessimisticLockTtlMs` set the lock TTLs
 - ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` of final transaction outcomes, and a per-transaction `ResolvedLockTracker` that classifies each resolution against the snapshot start ts and sends the disjoint `Context.resolved_locks` / `Context.committed_locks` sets
 - ✅ **Conflict retry** — typed `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`
@@ -1152,8 +1152,8 @@ locking at write time — the default — or at commit time), `lockWaitTimeMs`
 (pessimistic lock TTL, default 30000 ms), `maxTxnEntryCount` /
 `maxTxnEntrySize` / `maxTxnTotalSize` (write-set bounds, each 0 = unlimited),
 `trackReadSet` (read-set tracking, default false), `maxReadSetEntries` /
-`maxReadSetTotalSize` (read-set bounds, each 0 = unlimited), `maxTxnBatchSize` (bytes per prewrite/commit request per region, default
-16384) and `maxTxnBatchCount` (mutations/keys per prewrite/commit request per
+`maxReadSetTotalSize` (read-set bounds, each 0 = unlimited), `maxTxnBatchSize` (bytes per prewrite/pessimistic-lock/commit/rollback request per region, default
+16384) and `maxTxnBatchCount` (mutations/keys per prewrite/pessimistic-lock/commit/rollback request per
 region, default 512). `requestContext` is a `RequestContextOptions`
 object that replaces the client-level `options['requestContext']` for this
 transaction only; pass `null` to disable the client-level controls.
@@ -1368,7 +1368,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Batch auto-splitting by size/count**
 - ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` and a bounded per-transaction `ResolvedLockTracker` that feeds the disjoint `Context.resolved_locks` / `Context.committed_locks` sets
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` when less than half of the lock TTL remains, with `optimisticLockTtlMs` / `pessimisticLockTtlMs`
-- ✅ **Transaction size limits and request batching** — write-set limits with `TransactionTooLargeException`, `getWriteSetSize()` / `getWriteSetCount()`, and prewrite/commit splitting by `maxTxnBatchSize` / `maxTxnBatchCount`
+- ✅ **Transaction size limits and request batching** — write-set limits with `TransactionTooLargeException`, `getWriteSetSize()` / `getWriteSetCount()`, and prewrite/pessimistic-lock/commit/rollback splitting by `maxTxnBatchSize` / `maxTxnBatchCount`
 - ✅ **Read-set limits and streaming SST ingest** — opt-in `trackReadSet` with `maxReadSetEntries` / `maxReadSetTotalSize`, `maxIngestSize`, and a generator-based `RawWrite` stream that no longer triple-buffers the payload
 - ✅ **Region-cache refresh, preload and cache-first scans** — `refreshRegionCache()`, `preloadRegions()` and `regionCacheRefreshMs`, with scan paths that serve cached regions and query PD only for the gaps
 - ✅ **The remaining `kvrpcpb.Context` control fields** — `RequestContextOptions` (isolation level, not-fill-cache, max execution duration, request source, resource group tag/name, busy threshold)
