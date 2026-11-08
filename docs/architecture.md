@@ -258,9 +258,9 @@ throws `TransactionTooLargeException` before the write is buffered. The
 prewrite and commit requests are independently split per region by
 `maxTxnBatchSize` and `maxTxnBatchCount` (issue #430).
 
-Read-set tracking is **off by default** (`trackReadSet`): only `get()`,
-`batchGet()` and `getForUpdate()` would populate it, `scan()` never does, and
-nothing in the commit path consumes it. Opting in enables the public `getReadSet()` map and
+Read-set tracking is **off by default** (`trackReadSet`): `get()`, `batchGet()`,
+`getForUpdate()` and `scan()`/`reverseScan()` populate it, and nothing in the
+commit path consumes it. Opting in enables the public `getReadSet()` map and
 the `maxReadSetEntries` / `maxReadSetTotalSize` bounds; an oversized read is
 rejected before the fetched value is retained, but the RPC has already
 returned, and a whole `KvBatchGet` response is materialised before the check.

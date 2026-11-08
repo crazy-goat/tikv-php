@@ -86,6 +86,11 @@ In `CHANGELOG.md`:
   section names another one — so the check follows the release instead of
   surfacing months later. Touching `README.md` also makes this pull request a
   code change, so the unit tests run on it.
+- The same guard checks the versions outside the section: a stale release in
+  the rest of `README.md` fails as well, so update it in this pull request
+  too. At `1.0.0`, drop the "pre-1.0" wording and the "before `1.0.0`" rule
+  from the intro of the section — the guard fails while the intro calls the
+  library pre-1.0 after the changelog names a `1.x` release.
 Open a PR titled `chore: release vX.Y.Z`, wait for `ci-ok`, squash merge
 (`gh pr merge --squash --delete-branch`). Push the branch with an explicit ref:
 
@@ -136,7 +141,10 @@ Make sure the next milestone exists. Milestones in this repository are minor ver
 
 ## 7. After the release
 
-- Check that install instructions work with the new version (Packagist: `crazy-goat/tikv-client`).
+- Check that the install instructions work with the new version. The package is
+  not on Packagist yet: the three documents add the
+  `https://github.com/crazy-goat/tikv-php` VCS repository and require
+  `crazy-goat/tikv-client:~X.Y.Z`.
 - If something is wrong, do not move the tag. Fix forward with a patch release.
 
 ## Checklist
@@ -156,6 +164,9 @@ Make sure the next milestone exists. Milestones in this repository are minor ver
       below the JSON block and in the intro of the section), and the
       two-segment form `~0.9` of the avoid-list paragraph, which becomes
       `~0.10`
+- [ ] README "Installation" command and the install sections of `docs/README.md`
+      and `docs/getting-started.md` name the new `~X.Y.Z` constraint
+      (`InstallInstructionsGuardTest`)
 - [ ] Release PR merged
 - [ ] Annotated tag `vX.Y.Z` pushed
 - [ ] GitHub Release exists with the CHANGELOG notes
