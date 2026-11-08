@@ -2497,11 +2497,12 @@ authorised by the **write permission of the directory that contains it**, not by
 the permissions of the file itself. `unlink()` on a `chmod 0000` file inside a
 writable directory succeeds. The real cause of the leak was a non-recursive
 `glob($dir . '/*')` in `tearDown()`: a nested directory was passed to `unlink()`
-(which fails with "Operation not permitted") and the following `rmdir()` then
-failed with "Directory not empty". Restoring the file mode alone would have
-silenced nothing. When a cleanup leaks a directory, look at the **shape** of the
-tree (nested directories, symlinks) before you look at file modes — and remove
-the tree recursively.
+(which fails with `EISDIR` / "Is a directory" on Linux and `EPERM` / "Operation
+not permitted" on macOS and the BSDs — the wording is platform-specific) and the
+following `rmdir()` then failed with "Directory not empty" (`ENOTEMPTY`).
+Restoring the file mode alone would have silenced nothing. When a cleanup leaks a
+directory, look at the **shape** of the tree (nested directories, symlinks)
+before you look at file modes — and remove the tree recursively.
 
 ## PHPUnit counts a verified mock as one assertion — `expectNotToPerformAssertions()` asserts nothing and back-fires
 
