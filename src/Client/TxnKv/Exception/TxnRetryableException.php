@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\TxnKv\Exception;
 
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Util\ServerText;
 
 /**
  * Exception thrown for transactional operations that should be retried
@@ -20,6 +21,6 @@ final class TxnRetryableException extends TiKvException
         string $message,
         public readonly BackoffType $backoffType,
     ) {
-        parent::__construct($message);
+        parent::__construct(ServerText::sanitise($message));
     }
 }

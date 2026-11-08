@@ -1130,12 +1130,15 @@ aggregated prewrite-failure warning
 (`TwoPhaseCommitter::logPrewritePartialFailure()`) and the pessimistic-lock
 retry warning — and that message can be TiKV's own text:
 `RegionException::fromRegionError()` copies `errorpb.Error::getMessage()`
-verbatim. TiKV can name a key in such a message, and the client cannot
-redact a key it never saw. Every key the client itself holds is redacted; a
-key only the server ever saw is not. The structured `errorpb` fields that do
-carry keys are never serialized into a message: `SstIngestor` appends only
-the store error's `message` to a `RawWrite` failure, not the protobuf
-(issue #307).
+into the exception message. That text is sanitised by
+[`ServerText::sanitise()`](../src/Client/Util/ServerText.php) — control
+characters and ANSI escapes are removed, and the text is truncated to 512
+bytes and marked with `...` — but it is **not redacted**. TiKV can name a key
+in such a message, and the client cannot redact a key it never saw. Every key
+the client itself holds is redacted; a key only the server ever saw is not.
+The structured `errorpb` fields that do carry keys are never serialized into a
+message: `SstIngestor` appends only the store error's `message` to a `RawWrite`
+failure, not the protobuf (issue #307).
 
 The redactor is applied wherever a key can reach a log line:
 

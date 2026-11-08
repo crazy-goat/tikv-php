@@ -10,6 +10,7 @@ use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Errorpb\StoreNotMatch;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Util\ServerText;
 
 final class RegionException extends TiKvException
 {
@@ -46,7 +47,10 @@ final class RegionException extends TiKvException
         public readonly ?StoreNotMatch $storeNotMatch = null,
         public readonly bool $fromErrorpb = false,
     ) {
-        parent::__construct("{$operation} failed: {$message}");
+        // $message is server-supplied at the fromRegionError() and
+        // RegionErrorHandler call sites; sanitise it before it reaches a log
+        // sink (SEC-11, issue #314).
+        parent::__construct(sprintf('%s failed: %s', $operation, ServerText::sanitise($message)));
     }
 
     /**
