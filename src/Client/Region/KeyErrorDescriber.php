@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Region;
 
+use CrazyGoat\TiKV\Client\Util\ServerText;
+
 /**
  * Formats a KeyError variant field into a human-readable detail string.
  *
@@ -27,7 +29,7 @@ final class KeyErrorDescriber
             if (method_exists($keyError, $method)) {
                 $v = $keyError->$method();
                 if ($v !== '' && $v !== null) {
-                    $parts[] = "{$name}: {$v}";
+                    $parts[] = "{$name}: " . ServerText::sanitise((string) $v);
                 }
             }
         }
