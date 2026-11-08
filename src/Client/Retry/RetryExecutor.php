@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Retry;
 
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
-use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\NotLeaderHint;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\StoreUnavailableException;
@@ -1071,15 +1071,14 @@ final readonly class RetryExecutor
 
     private function handleNotLeader(TiKvException $e, string $key): ?BackoffType
     {
-        if (!$e instanceof RegionException || !$e->notLeader instanceof NotLeader) {
+        if (!$e instanceof RegionException || !$e->notLeader instanceof NotLeaderHint) {
             return null;
         }
 
-        $regionId = (int) $e->notLeader->getRegionId();
-        $leader = $e->notLeader->getLeader();
+        $regionId = $e->notLeader->regionId;
+        $leaderStoreId = $e->notLeader->leaderStoreId;
 
-        if ($leader !== null) {
-            $leaderStoreId = (int) $leader->getStoreId();
+        if ($leaderStoreId !== null) {
             $switched = $this->regionCache->switchLeader($regionId, $leaderStoreId);
             if (!$switched) {
                 // The cache emits regionInvalidated('not_leader') itself.

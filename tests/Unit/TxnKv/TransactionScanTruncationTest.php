@@ -208,6 +208,26 @@ final class TransactionScanTruncationTest extends TestCase
         }
     }
 
+    /**
+     * The last returned row's successor is the range end, so nothing can
+     * follow it inside the range: the truncation probe must not be sent
+     * (issue #780).
+     */
+    public function testWholeRangeScanSkipsTheProbeWhenTheRangeEndsAtTheLastRow(): void
+    {
+        $this->stubSingleRegion();
+
+        /** @var list<ScanRequest> $capturedRequests */
+        $capturedRequests = [];
+        $this->stubScan(['a', 'b'], $capturedRequests);
+
+        // The successor of "b" is "b\0", which is exactly the range end.
+        $result = $this->createTransaction(2)->scan('', "b\0", 0);
+
+        $this->assertSame(['a', 'b'], array_column($result, 'key'));
+        $this->assertCount(1, $capturedRequests);
+    }
+
     public function testScanWithAnExplicitLimitReturnsAtMostThatManyRows(): void
     {
         $this->stubSingleRegion();
