@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- TLS configuration errors now name the supported option keys instead of the deprecated ones (issue #688). `TlsConfig` reports the properties with a leading `$` (`$caCert`, `$clientCert`, `$clientKey`), so they cannot be mistaken for the deprecated `options['tls']` keys of the same bare name, and the partial-configuration message points at `caCertFile` (or `caCertPem`) for the missing CA. A mixed client certificate/key pair passed to the deprecated `withClientCert()` now raises one message, `TLS client certificate and key must be given in the same form, both file paths or both inline PEM`, instead of `TLS file has disallowed extension ""` when the path half exists and the generic missing-path message when it does not. `docs/configuration.md` and the FAQ now quote the messages that are actually raised. (#688)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
