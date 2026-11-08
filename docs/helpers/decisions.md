@@ -1697,10 +1697,10 @@ Two different failure modes share one issue, and they get two different defaults
    primary batch carries `use_async_commit` and the secondaries list, and it is prewritten last.
 5. **Size function:** a prewrite mutation is key length + value length, a commit key is key
    length. Request framing, `Context`, `primary_lock` and the async `secondaries` list are
-   deliberately excluded, matching the payload TiKV's `RaftEntryTooLarge` guard measures; an
-   async primary prewrite can therefore exceed the budget, and a single item larger than the
-   limit still forms its own batch so the server rejects it instead of the client silently
-   dropping it.
+   deliberately excluded: the bound covers only the key/value payload, not the full raft entry
+   that TiKV's `RaftEntryTooLarge` guard measures. An async primary prewrite can therefore
+   exceed the budget, and a single item larger than the limit still forms its own batch so the
+   server rejects it instead of the client silently dropping it.
 
 ## `is_first_lock` belongs to the batch that holds the primary lock (#225)
 
