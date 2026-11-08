@@ -23,9 +23,20 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- `RegionErrorHandler::check()` no longer tests the region cache with `$cache instanceof RegionCacheInterface` before using it: the parameter is already typed `?RegionCacheInterface`, so the cache is now used through `?->` and `$regionId !== null` is the only guard. The behaviour is unchanged — a `null` cache with a region id still skips the capture and the invalidation. The docblock now names `NotLeader` as the exception to the routing-error invalidation rule, matching the ownership paragraph below it. (#680)
+
+### Tests
+
+- Removed the dead "fail-closed contract not implemented yet" probes from `RawKvBatchUnresolvedKeyTest` and `CommitPrewriteKeyCoverageTest`. Both now assert the `TiKvException` fail-closed contract of #244 directly, and the placeholder `E_USER_WARNING` branches are gone. (#682)
+- `RegionErrorHandlerTest` moved from `tests/Unit/RawKv/` to `tests/Unit/Region/` and its namespace from `CrazyGoat\TiKV\Tests\Unit\RawKv` to `CrazyGoat\TiKV\Tests\Unit\Region`, so the test mirrors the location of `src/Client/Region/RegionErrorHandler.php` (the class moved in #153). No test behaviour change. (#681)
+- `TxnKvFanoutTest::testBatchGetDispatchesAllRegionsBeforeAwaitingAny()` now proves the batchGet fan-out with a relative timing comparison instead of an absolute millisecond bound (issue #676). The test measures a sequential control on the same fake with the same latency in the same run and requires the batched path to stay below two thirds of it, so scheduling noise on a loaded machine inflates both measurements and no longer flakes the suite; the structural assertion that every send is issued before the first wait is unchanged. (#676)
+
 ### Docs
 
 - `docs/workflow.md` now requires post-rebase and post-amend verification (issue #678). After every rebase or amend, the coder reads `git log -1 --format=%B` end to end, checks `git diff origin/master...HEAD` for the `\ No newline at end of file` marker and runs `git diff --check origin/master...HEAD`, greps for conflict markers with `git grep -n '^<<<<<<<'`, and confirms `git diff --stat origin/master...HEAD` lists only the intended files. A rebase had silently dropped a sentence from a commit message and a conflict resolution had dropped a FAQ file's final newline, and nothing in the workflow asked for either to be re-read; the new step is referenced from the push and conflict-resolution steps and added to the checklist. `tests/Unit/Docs/PostRebaseVerificationGuardTest.php` pins the commands and the checklist item.
+- The `docs/helpers/faq.md` entry on `unlink()` and directory permissions now quotes the errno and both platform messages: `unlink()` on a directory fails with `EISDIR` / "Is a directory" on Linux (where CI runs) and with `EPERM` / "Operation not permitted" on macOS and the BSDs, and the following `rmdir()` fails with `ENOTEMPTY` / "Directory not empty". The entry previously quoted only the macOS wording. (#666)
 
 ## [v0.14.0] - 2026-11-08
 
