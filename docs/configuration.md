@@ -39,6 +39,11 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 
 ### Full Configuration Options
 
+> **Monolog is optional.** This snippet uses Monolog for illustration, but it
+> is a **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
+
 ```php
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Region\ReplicaReadMode;
@@ -1087,6 +1092,11 @@ Recognised `options['tls']` keys:
   [Deprecated TLS Option Keys](#deprecated-tls-option-keys).
 
 ## Logging
+
+> **Monolog is optional.** The snippets in this section use Monolog for
+> illustration, but it is a **dev-only** dependency of this library. Install it
+> with `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ### PSR-3 Logger Integration
 
@@ -2589,6 +2599,11 @@ Batch methods already send their sub-batches in parallel (default concurrency 16
 ## Production Configuration
 
 ### Recommended Production Setup
+
+> **Monolog is optional.** This snippet uses Monolog for illustration, but it
+> is a **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ```php
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;

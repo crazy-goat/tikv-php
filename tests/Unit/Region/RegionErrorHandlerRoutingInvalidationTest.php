@@ -182,7 +182,7 @@ class RegionErrorHandlerRoutingInvalidationTest extends TestCase
         });
 
         $this->assertNotNull($exception->notLeader);
-        $this->assertSame(3, (int) $exception->notLeader->getLeader()?->getStoreId());
+        $this->assertSame(3, $exception->notLeader->leaderStoreId);
     }
 
     public function testNotLeaderWithHintNotOwnedByRetryExecutorInvalidatesWithNotLeaderReason(): void
