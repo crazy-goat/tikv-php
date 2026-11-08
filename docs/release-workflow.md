@@ -60,6 +60,17 @@ In `CHANGELOG.md`:
   whose work is still to be done. The list is curated, not a mirror of the
   open issues — it holds the open feature-gap issues, and an issue whose
   work already shipped stays out of it even while the issue is still open.
+- Check the README **Configuration Options** table against the `create()`
+  entry points: every `OPT_*` constant and `options['...']` key read by
+  `RawKvClient::create()`, `TxnKvClient::create()` or
+  `ConnectionFactory::create()` must have a row, and no row may name an
+  option the code no longer reads. `tests/Unit/Docs/ClientOptionsTableGuardTest.php`
+  fails the unit suite on either drift.
+- Resolve the markdown links before merging:
+  `tests/Unit/Docs/MarkdownLinksGuardTest.php` checks every relative target
+  and every `#anchor` of the markdown files in the checkout against the
+  filesystem and the target headings, so a renamed file or heading fails the
+  suite.
 
 - Update `README.md` ("Stability and versioning"): **every** version of the
   whole "Stability and versioning" section has to follow the release — the
@@ -124,7 +135,10 @@ Make sure the next milestone exists. Milestones in this repository are minor ver
 
 ## 7. After the release
 
-- Check that install instructions work with the new version (Packagist: `crazy-goat/tikv-client`).
+- Check that the install instructions work with the new version. The package is
+  not on Packagist yet: the three documents add the
+  `https://github.com/crazy-goat/tikv-php` VCS repository and require
+  `crazy-goat/tikv-client:~X.Y.Z`.
 - If something is wrong, do not move the tag. Fix forward with a patch release.
 
 ## Checklist
@@ -132,13 +146,18 @@ Make sure the next milestone exists. Milestones in this repository are minor ver
 - [ ] Milestone has no open issues, CI is green
 - [ ] CHANGELOG section `[X.Y.Z] - date` written, `[Unreleased]` is empty
 - [ ] README "Implemented Operations" and "Roadmap" cross-checked against the new CHANGELOG section
+- [ ] README "Configuration Options" table and markdown links/anchors pass their guard tests
 
 - [ ] README.md "Stability and versioning" updated: **every** version of the
       whole section follows the release — the current release `vX.Y.Z` (also in
       the intro of the section, next to the previous one), the recommended
       constraint `~X.Y.Z`, the exact version `"X.Y.Z"` recommended for a
       reproducible build, the range `>=X.Y.Z <X.(Y+1).0` that constraint
-      resolves to, and the next minor `X.(Y+1).0`- [ ] Release PR merged
+      resolves to, and the next minor `X.(Y+1).0`
+- [ ] README "Installation" command and the install sections of `docs/README.md`
+      and `docs/getting-started.md` name the new `~X.Y.Z` constraint
+      (`InstallInstructionsGuardTest`)
+- [ ] Release PR merged
 - [ ] Annotated tag `vX.Y.Z` pushed
 - [ ] GitHub Release exists with the CHANGELOG notes
 - [ ] Milestone closed, next milestone exists

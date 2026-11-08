@@ -182,6 +182,19 @@ final class RawKvClient
     public const OPT_RETRY_DEADLINE = 'retryDeadlineMs';
 
     /**
+     * options[] key for a custom error classifier (issue #719): a callable
+     * `TiKvException -> RetryVerdict` consulted by every retry loop this
+     * client runs, after any internal per-call classifier and before the
+     * built-in {@see \CrazyGoat\TiKV\Client\Retry\ErrorClassifier}. Return
+     * {@see \CrazyGoat\TiKV\Client\Retry\RetryVerdict::retry()} to retry with
+     * a chosen backoff, {@see \CrazyGoat\TiKV\Client\Retry\RetryVerdict::fatal()}
+     * to stop, or {@see \CrazyGoat\TiKV\Client\Retry\RetryVerdict::pass()} to
+     * fall through to the built-in classification. Omitted or null (the
+     * default) keeps the built-in behaviour unchanged.
+     */
+    public const OPT_RETRY_CLASSIFIER = 'retryClassifier';
+
+    /**
      * options[] key for the maximum number of simultaneously in-flight
      * requests used by the fanned-out batch and range operations (batchGet,
      * batchPut, batchDelete, deleteRange, checksum, batchScan, SST ingest
@@ -300,6 +313,16 @@ final class RawKvClient
     private readonly SstIngestor $ingestor;
         /** Wall-clock deadline (ms) applied to every RetryExecutor this client builds. */
     private readonly int $retryDeadlineMs;
+
+    /**
+     * Custom classifier (issue #719) applied by every RetryExecutor this
+     * client builds, or null for the built-in classification only. Normalised
+     * to a Closure because `callable` is not a legal property type.
+     *
+     * @var (\Closure(TiKvException): \CrazyGoat\TiKV\Client\Retry\RetryVerdict)|null
+     */
+    private readonly ?Closure $retryClassifier;
+
     /** Max in-flight requests for fanned-out batch and range operations (#295, #264). */
     private readonly int $maxConcurrency;
 
@@ -322,9 +345,24 @@ final class RawKvClient
      *        'grpc' (gRPC channel arguments) and 'grpcClient' (a transport
      *        built by the application — the client uses it and never closes
      *        it, so one transport can be shared with other clients).
+     *        'retryClassifier' (a callable `TiKvException -> RetryVerdict`,
+     *        issue #719) extends or overrides the built-in error
+     *        classification for every retry loop the client builds; a
+     *        `RetryVerdict::pass()` falls through to it. See
+     *        {@see self::OPT_RETRY_CLASSIFIER}.
+     *        'grpcClient' is mutually exclusive with the five options that
+     *        configure the transport the factory would otherwise build
+     *        ('tls', 'allowInsecure', 'maxChannels', 'idleTtlMs', 'grpc'):
+     *        when `grpcClient` is a `GrpcClientInterface`, combining it with
+     *        any of them throws `InvalidArgumentException`, because those
+     *        options configure a transport `create()` does not build, and
+     *        silently ignoring them would misrepresent the connection (for
+     *        example, a caller could believe TLS is enforced). Configure them
+     *        on the transport passed in.
      *
      * @throws InvalidArgumentException if PD endpoints array is empty or an
-     *         option value is invalid
+     *         option value is invalid, or if 'grpcClient' is combined with one
+     *         of the transport options listed above
      * @throws PdException When the API V2 keyspace lookup gets a PD
      *         application-level error
      * @throws GrpcException When the API V2 keyspace lookup fails at the
@@ -376,6 +414,7 @@ final class RawKvClient
             // injected PD client, this flag must follow the bundle the way
             // ownsGrpcClient does (issue #204).
             ownsPdClient: true,
+            retryClassifier: self::resolveRetryClassifier($options),
         );
     }
 
@@ -495,6 +534,16 @@ final class RawKvClient
          * itself (or when the caller explicitly transfers ownership).
          */
         private readonly bool $ownsPdClient = false,
+        /**
+         * Custom error classifier (issue #719): a callable
+         * `TiKvException -> RetryVerdict` consulted by every retry loop this
+         * client builds (point operations, batch fan-outs, scans, range
+         * operations and SST ingest), after any internal per-call classifier
+         * and before the built-in classifier. Null (the default) keeps the
+         * built-in classification. {@see self::OPT_RETRY_CLASSIFIER} exposes
+         * the same seam through `create()`.
+         */
+        ?callable $retryClassifier = null,
     ) {
         if ($regionCacheRefreshMs < 0) {
             throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
@@ -512,6 +561,7 @@ final class RawKvClient
             throw new InvalidArgumentException('maxIngestSize must be >= 0');
         }
         $this->retryDeadlineMs = $retryDeadlineMs;
+        $this->retryClassifier = $retryClassifier !== null ? Closure::fromCallable($retryClassifier) : null;
         $this->maxConcurrency = $maxConcurrency;
         if ($regionCache instanceof RegionCache) {
             // Issue #474: regionInvalidated() is emitted from inside
@@ -590,6 +640,7 @@ final class RawKvClient
             metrics: $metrics,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            retryClassifier: $this->retryClassifier,
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -606,6 +657,7 @@ final class RawKvClient
             metrics: $metrics,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            retryClassifier: $this->retryClassifier,
         );
         $this->ingestor = new SstIngestor(
             $grpc,
@@ -622,6 +674,7 @@ final class RawKvClient
             serverBusyBudgetMs: $serverBusyBudgetMs,
             retryDeadlineMs: $this->retryDeadlineMs,
             metrics: $metrics,
+            retryClassifier: $this->retryClassifier,
         );
     }
 
@@ -756,6 +809,35 @@ final class RawKvClient
         }
 
         return $deadlineMs;
+    }
+
+    /**
+     * Resolve options['retryClassifier'] (see OPT_RETRY_CLASSIFIER) for
+     * create(): a custom `TiKvException -> RetryVerdict` classifier applied
+     * to every retry loop this client builds (issue #719). Omitted or null
+     * keeps the built-in classification.
+     *
+     * @param array<string, mixed> $options
+     * @return (\Closure(TiKvException): \CrazyGoat\TiKV\Client\Retry\RetryVerdict)|null
+     */
+    private static function resolveRetryClassifier(array $options): ?Closure
+    {
+        if (
+            !array_key_exists(self::OPT_RETRY_CLASSIFIER, $options)
+            || $options[self::OPT_RETRY_CLASSIFIER] === null
+        ) {
+            return null;
+        }
+
+        $classifier = $options[self::OPT_RETRY_CLASSIFIER];
+        if (!is_callable($classifier)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['retryClassifier'] must be callable, %s given",
+                get_debug_type($classifier),
+            ));
+        }
+
+        return Closure::fromCallable($classifier);
     }
 
     /**
@@ -980,6 +1062,7 @@ final class RawKvClient
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
+            classifier: $this->retryClassifier,
         );
     }
 
@@ -1593,6 +1676,12 @@ final class RawKvClient
      * during region enumeration is reported as a
      * `BatchPartialFailureException`, like the pre-#433 per-range path.
      * See {@see RawKvScanner::batchScan()} for the full cost model.
+     *
+     * Every range is capped at `$eachLimit` rows, so a returned list whose
+     * count equals `$eachLimit` may be truncated: the range may hold more
+     * rows (issue #440). `$eachLimit` is required and must be in
+     * `1..MAX_SCAN_LIMIT`; unlike `scan()`, `0` does not mean "the whole
+     * range" and is rejected.
      *
      * Returns one entry per range, each a list of
      * `['key' => string, 'value' => ?string]` rows (`value` is `null` when
