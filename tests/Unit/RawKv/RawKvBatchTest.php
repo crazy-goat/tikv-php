@@ -24,6 +24,7 @@ use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
+use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException;
@@ -89,10 +90,32 @@ class RawKvBatchTest extends TestCase
     public function testBatchPutThrowsOnTtlCountMismatch(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('TTL array count (1) must match key-value pairs count (2)');
+        $this->expectExceptionMessage('TTL array count (1) must match pair count (2)');
 
         $retryExecutor = $this->createRetryExecutor();
         $this->batch->batchPut(['k1' => 'v1', 'k2' => 'v2'], [60], $retryExecutor);
+    }
+
+    public function testBatchPutAndSplitterShareTheTtlCountMismatchMessage(): void
+    {
+        // Issue #683: batchPut() validates the count before the splitter sees
+        // the batch, so the same invariant can be reported from two places.
+        // Pin one wording instead of letting the two paths drift apart.
+        $batchMessage = $this->exceptionMessage(fn() => $this->batch->batchPut(
+            ['k1' => 'v1', 'k2' => 'v2'],
+            [60],
+            $this->createRetryExecutor(),
+        ));
+
+        $splitterMessage = $this->exceptionMessage(fn(): array => RawKvSplitter::splitPairsIntoBatches(
+            [$this->kvPair('k1', 'v1'), $this->kvPair('k2', 'v2')],
+            10,
+            100,
+            [60],
+        ));
+
+        $this->assertSame('TTL array count (1) must match pair count (2)', $batchMessage);
+        $this->assertSame($splitterMessage, $batchMessage);
     }
 
     public function testBatchPutThrowsWhenAssociativeTtlKeysDoNotMatchPairs(): void
@@ -766,6 +789,23 @@ class RawKvBatchTest extends TestCase
         return static function () use (&$cancels, $name): void {
             $cancels[$name] = ($cancels[$name] ?? 0) + 1;
         };
+    }
+
+    /**
+     * Run an operation that is expected to fail and return its exception
+     * message, so two paths of the same invariant can be compared.
+     *
+     * @param callable(): mixed $operation
+     */
+    private function exceptionMessage(callable $operation): string
+    {
+        try {
+            $operation();
+        } catch (InvalidArgumentException $e) {
+            return $e->getMessage();
+        }
+
+        $this->fail('The operation did not throw InvalidArgumentException.');
     }
 
     private function kvPair(string $key, string $value): KvPair

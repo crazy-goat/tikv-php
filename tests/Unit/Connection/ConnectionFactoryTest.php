@@ -1526,6 +1526,23 @@ class ConnectionFactoryTest extends TestCase
         $this->assertSame(self::CLIENT_KEY_PEM, $bundle->tlsConfig->clientKey);
     }
 
+    public function testLegacyMixedClientPairThrowsOneMessage(): void
+    {
+        $certPath = $this->writeTlsFile('client.crt', self::CLIENT_CERT_PEM);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('TLS client certificate and key must be given in the same form');
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => [
+                'caCert' => self::CA_PEM,
+                'clientCert' => $certPath,
+                'clientKey' => self::CLIENT_KEY_PEM,
+            ]],
+        );
+    }
+
     private function writeTlsFile(string $name, string $content): string
     {
         $path = $this->tempDir . '/' . $name;
