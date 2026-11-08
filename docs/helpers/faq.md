@@ -1766,17 +1766,25 @@ capture by value. Return `[$txn, static function () use (&$requests): array {
 return $requests; }]` and call the getter after the operation
 (used in `CommitPrewriteKeyCoverageTest`, issue #329).
 
-## Tests pinning a not-yet-merged fail-closed contract — guard with a behavior probe, not an env flag
+## Tests pinning a not-yet-merged contract — a temporary guard, now removed
 
-When an audit issue's tests assert behavior another (open) PR implements
-(e.g. #329's tests assert the fail-closed contract of unmerged #244/PR #531),
-CI must stay green without weakening the pin: probe the contract at runtime
-(call the resolver with an unresolvable key; if it doesn't throw, the fix is
-absent) and `trigger_error(..., E_USER_WARNING)` with a message naming the blocking PR (NOT `markTestSkipped()`: the `unit-tests` CI job runs with `--fail-on-skipped`, so a skip breaks the build; PHPUnit 11 has no add-warning API, and an `E_USER_WARNING` during a test is recorded as a non-failing warning that still names the pending contract). The
-tests then fail against master if the guard is removed (verify once by
-temporarily replacing the warning-early-return with `self::fail()`) and activate
-automatically when the fix merges — no env var to clean up later, and no
-duplicate tests alongside the fix PR's own coverage.
+When an audit issue's tests assert behavior another (open) PR implements, CI
+must stay green without weakening the pin: probe the contract at runtime (call
+the resolver with an unresolvable key; if it doesn't throw, the fix is absent)
+and `trigger_error(..., E_USER_WARNING)` with a message naming the blocking PR
+(NOT `markTestSkipped()`: the `unit-tests` CI job runs with
+`--fail-on-skipped`, so a skip breaks the build; PHPUnit 11 has no add-warning
+API, and an `E_USER_WARNING` during a test is recorded as a non-failing warning
+that still names the pending contract). Verify once by temporarily replacing the
+warning-early-return with `self::fail()`: the tests then fail against master if
+the guard is removed.
+
+This pattern was used by #329 to pin the fail-closed contract of then-unmerged
+#244/PR #531. That contract has since merged and #682 replaced both probes with
+a direct `expectException(TiKvException::class)` assertion, so no such guard
+remains in the suite. The technique is still the fallback for a future
+cross-PR pin, but delete it once the dependency merges rather than leaving a
+dead branch behind.
 
 ## RawKvBatch dispatches through `callAsync()` — tests use a dead endpoint, not a dead channel (issue #273)
 
