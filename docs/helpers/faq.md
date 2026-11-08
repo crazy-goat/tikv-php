@@ -138,7 +138,7 @@ of the file.
 - [Documenting a deprecated option key: guard the quoted form, check the premise, and describe the code as it is](#documenting-a-deprecated-option-key-guard-the-quoted-form-check-the-premise-and-describe-the-code-as-it-is)
 - [An audit issue's "this loop is sequential" premise expires — read the tree before re-implementing](#an-audit-issues-this-loop-is-sequential-premise-expires--read-the-tree-before-re-implementing)
 - [A region layout built from variable-width keys ("k1", "k10") makes the regions overlap — the cache then drops one of them](#a-region-layout-built-from-variable-width-keys-k1-k10-makes-the-regions-overlap--the-cache-then-drops-one-of-them)
-- [The `slowLog` option is RawKV-only, and its warning is written out five times](#the-slowlog-option-is-rawkv-only-and-its-warning-is-written-out-five-times)
+- [The `slowLog` option is RawKV-only](#the-slowlog-option-is-rawkv-only)
 - [Infection forces `stopOnDefect="true"` — one PHP warning truncates the whole mutation score](#infection-forces-stopondefecttrue--one-php-warning-truncates-the-whole-mutation-score)
 - [A relative timing control in a unit test needs a warmup, or protobuf autoload lands in the first measured phase](#a-relative-timing-control-in-a-unit-test-needs-a-warmup-or-protobuf-autoload-lands-in-the-first-measured-phase)
 - [A token-scanning guard test must recognise how `token_get_all()` spells a property, an operator and a keyword](#a-token-scanning-guard-test-must-recognise-how-token_get_all-spells-a-property-an-operator-and-a-keyword)
@@ -407,8 +407,8 @@ extension-free (see the section above). Two consequences:
   `extensions: grpc` to that job**: the obvious "fix" for a red unit job
   would silently delete the guarantee that the Unit suite runs without the
   extension. Every other job (lint, `grpc-unit-tests`, `integration-tests`,
-  the two E2E jobs) installs the extension and therefore enforces the
-  requirement.
+  the two E2E jobs, and the mutation job) installs the extension and
+  therefore enforces the requirement.
 - The flag has a second effect: Composer drops the ignored requirement from
   the generated `vendor/composer/platform_check.php`, so the autoloader still
   boots on a machine without the extension. Without the flag the generated
@@ -1230,8 +1230,11 @@ Facts verified empirically (PHPUnit 11.5.55, PR #484 for #323/#358/#359):
    though every test passed. `ParallelRangeOpsCapTest` and
    `CheckedGrpcFutureRetryableDispatchTest` were listed in both suites until
    issue #362; they now live in `Unit` only, which the coverage job runs too.
-5. `php -n vendor/bin/phpunit --testsuite Unit --fail-on-skipped` is the
-   faithful local simulation of CI's unit job (php -n = no extensions).
+5. `php -n vendor/bin/phpunit --testsuite Unit --fail-on-skipped` is a
+   **stricter** local simulation than CI's unit job: `php -n` ignores
+   `php.ini`, so none of the extensions configured there are loaded, while
+   CI runs `shivammathur/setup-php` with its default extension set and lacks
+   only `ext-grpc`.
 6. XML comment gotcha hit while documenting this: XML comments cannot
    contain `--` — the phrase `--testsuite` inside an XML comment breaks
    parsing with "Double hyphen within comment". Use "testsuite selector".
@@ -3047,33 +3050,41 @@ builds such a layout — it is the cheapest possible check that the layout is a
 layout. This bit `benchmarks/TxnCommitLatencyBenchmark.php` while it was being
 written (issue #431).
 
-## The `slowLog` option is RawKV-only, and its warning is written out five times
+## The `slowLog` option is RawKV-only
 
 `options['slowLog']` (shipped in #31, documented in #396) is parsed by
 `ConnectionFactory::buildSlowLogConfig()` for **both** clients, but only the
 RawKV path is instrumented: nothing under `src/Client/TxnKv/` takes a
 `SlowLogConfig`, so `TxnKvClient::create(['slowLog' => …])` accepts the option
-and never emits a warning. There is also no threshold for SST ingest —
-`SlowLogConfig::getThreshold('ingest')` falls into the `default => 0` arm, and
-`RawKvClient::OP_INGEST` is not wired to any measurement.
+and never emits a warning. There is also no threshold for SST ingest:
+`ingest()` is not measured and has no `SlowLogOperation` case.
 
 The warning itself (`Slow TiKV operation`, context `operation`, `key`,
-`duration_ms`, `threshold_ms`) is written out **five times**: four identical
-`measure()` copies (`RawKvCrud`, `RawKvAtomic`, `RawKvScanner`,
-`RawKvRangeOps`) plus one `wrapWithLogging()` (`RawKvBatch`). Rewording the
-message or the context keys therefore means editing five places — and the
-documentation quotes the message verbatim. The `key` in the context is the
-operation's anchor key: the key itself for a single-key read or write, the
-**first key of the batch** for a batch operation, and the range anchor
-otherwise (the scan cursor, the exclusive upper bound of a reverse scan, the
-per-region sub-range start of a range operation).
+`duration_ms`, `threshold_ms`) used to be written out **five times** — four
+identical `measure()` copies (`RawKvCrud`, `RawKvAtomic`, `RawKvScanner`,
+`RawKvRangeOps`) plus one `wrapWithLogging()` (`RawKvBatch`). Issue #701
+consolidated it into `Grpc\SlowLog`: `measure()` owns the `hrtime()` pair and
+the threshold check, `threshold()` and `warning()` serve the batch wait path,
+and `SlowLog::MESSAGE` is the one copy of the documented message. The
+operation vocabulary is the `Grpc\SlowLogOperation` enum, and
+`SlowLogConfig::getThreshold()` matches over its cases with **no `default`
+arm**, so a new case fails PHPStan until it is classified. The unreferenced
+`RawKvClient::OP_*` constants were removed with it; `OP_INGEST` went too
+because ingest is not measured.
+
+The `key` in the context is the operation's anchor key: the key itself for a
+single-key read or write, the **first key of the batch** for a batch
+operation, and the range anchor otherwise (the scan cursor, the exclusive
+upper bound of a reverse scan, the per-region sub-range start of a range
+operation).
 
 A threshold of `0` disables that operation type. A *negative* threshold is a
 configuration error (`InvalidArgumentException`), and so is an unknown key or
 a non-int value inside `options['slowLog']` (issue #272) — a non-array
 `slowLog` value fails closed too, like `options['tls']`. The guard itself is
-`if ($threshold <= 0)`, so the negative case would have disabled the warning
-silently; the constructor now rejects it first.
+`SlowLog::threshold()`, which returns `null` for anything `<= 0`, so the
+negative case would have disabled the warning silently; the constructor now
+rejects it first.
 
 ## Infection forces `stopOnDefect="true"` — one PHP warning truncates the whole mutation score
 
