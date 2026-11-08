@@ -1174,11 +1174,14 @@ puts no value into any log context or exception message, so there is nothing
 to redact on that side: only keys cross the log boundary, and only in their
 redacted form.
 
-**The channel the redactor does not cover: TiKV's own error text.** Two log
-lines copy the message of a `RegionException` into the log context — the
-aggregated prewrite-failure warning
-(`TwoPhaseCommitter::logPrewritePartialFailure()`) and the pessimistic-lock
-retry warning — and that message can be TiKV's own text:
+**The channel the redactor does not cover: TiKV's own error text.** Several
+log lines copy the message of a `RegionException` or another TiKV/gRPC
+exception into the log context — the fan-out aggregate warnings (prewrite,
+rollback, pessimistic rollback and secondary commit; the first three come
+from `TwoPhaseCommitter::logFanOutPartialFailure()`, the last from the
+secondary-commit summary), the per-region secondary-commit failure warning
+and the pessimistic-lock retry warning — and that message can be TiKV's own
+text:
 `RegionException::fromRegionError()` copies `errorpb.Error::getMessage()`
 into the exception message. That text is sanitised by
 [`ServerText::sanitise()`](../src/Client/Util/ServerText.php) — control
