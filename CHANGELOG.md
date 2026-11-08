@@ -23,9 +23,29 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- `RawKvBatch::batchPut()` and `RawKvSplitter::splitPairsIntoBatches()` now reject a TTL array whose length differs from the pair count with one wording, `TTL array count (N) must match pair count (M)`; the `batchPut()` path used to say "key-value pairs count". The contract is documented for the public entry point in `docs/operations.md` (whose parameter list omitted the array form of `$ttl`) and for the internal helper in `docs/development.md` and its class docblock, and the batch-splitting methods of `RawKvSplitter` are now marked `@internal`; the class stays internal, as the stability policy in `README.md` already classifies it. (#683)
+- `RegionErrorHandler::check()` no longer tests the region cache with `$cache instanceof RegionCacheInterface` before using it: the parameter is already typed `?RegionCacheInterface`, so the cache is now used through `?->` and `$regionId !== null` is the only guard. The behaviour is unchanged — a `null` cache with a region id still skips the capture and the invalidation. The docblock now names `NotLeader` as the exception to the routing-error invalidation rule, matching the ownership paragraph below it. (#680)
+
+### Removed
+
+- **Breaking change:** `TwoPhaseCommitter::getPriority()` has been removed (issue #685). The accessor had no caller anywhere in `src/`, `tests/`, `examples/` or `benchmarks/`: `Transaction::getPriority()` is the accessor callers use, and the committer reads its own readonly `$priority` property directly when it builds the `Context` of every request, so the method was dead public surface. **Migration:** call `Transaction::getPriority()` instead; `TwoPhaseCommitter` is an internal collaborator behind the entry points (see the stability policy in `README.md`), so the removal needs no version bump. The priority carried on the `Context` of every transaction RPC is unchanged.
+
+### Fixed
+
+- TLS configuration errors now name the supported option keys instead of the deprecated ones (issue #688). `TlsConfig` reports the properties with a leading `$` (`$caCert`, `$clientCert`, `$clientKey`), so they cannot be mistaken for the deprecated `options['tls']` keys of the same bare name, and the partial-configuration message points at `caCertFile` (or `caCertPem`) for the missing CA. A mixed client certificate/key pair passed to the deprecated `withClientCert()` now raises one message, `TLS client certificate and key must be given in the same form, both file paths or both inline PEM`, instead of `TLS file has disallowed extension ""` when the path half exists and the generic missing-path message when it does not. `docs/configuration.md` and the FAQ now quote the messages that are actually raised. (#688)
+
 ### Tests
 
 - `TlsOptionKeysDocumentationGuardTest` now reads the expected TLS option keys out of `ConnectionFactory::RECOGNISED_TLS_KEYS` instead of a hand-written copy, so a key added to or removed from the client changes what the guard demands from `README.md`, `docs/advanced.md` and `docs/configuration.md` (issue #690). Its markdown parsing now uses the CommonMark-aware block scanner from the sibling `AtomicModeDocumentationGuardTest`: a nested fence no longer ends the block at the shorter inner run, and 4-space-indented blocks count as code rather than prose. Two fixtures pin that a deprecated key inside an indented block and inside a nested fence is still reported.
+- Removed the dead "fail-closed contract not implemented yet" probes from `RawKvBatchUnresolvedKeyTest` and `CommitPrewriteKeyCoverageTest`. Both now assert the `TiKvException` fail-closed contract of #244 directly, and the placeholder `E_USER_WARNING` branches are gone. (#682)
+- `RegionErrorHandlerTest` moved from `tests/Unit/RawKv/` to `tests/Unit/Region/` and its namespace from `CrazyGoat\TiKV\Tests\Unit\RawKv` to `CrazyGoat\TiKV\Tests\Unit\Region`, so the test mirrors the location of `src/Client/Region/RegionErrorHandler.php` (the class moved in #153). No test behaviour change. (#681)
+- `TxnKvFanoutTest::testBatchGetDispatchesAllRegionsBeforeAwaitingAny()` now proves the batchGet fan-out with a relative timing comparison instead of an absolute millisecond bound (issue #676). The test measures a sequential control on the same fake with the same latency in the same run and requires the batched path to stay below two thirds of it, so scheduling noise on a loaded machine inflates both measurements and no longer flakes the suite; the structural assertion that every send is issued before the first wait is unchanged. (#676)
+
+### Docs
+
+- The `docs/helpers/faq.md` entry on `unlink()` and directory permissions now quotes the errno and both platform messages: `unlink()` on a directory fails with `EISDIR` / "Is a directory" on Linux (where CI runs) and with `EPERM` / "Operation not permitted" on macOS and the BSDs, and the following `rmdir()` fails with `ENOTEMPTY` / "Directory not empty". The entry previously quoted only the macOS wording. (#666)
 
 ## [v0.14.0] - 2026-11-08
 
