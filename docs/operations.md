@@ -449,7 +449,13 @@ foreach ($client->scanPrefixIterator('user:') as $key => $value) {
 }
 ```
 
-**Implementation Note:** ScanPrefix is a convenience method that calculates the end key automatically by incrementing the last byte of the prefix.
+**Implementation Note:** `scanPrefix()` and `scanPrefixIterator()` derive the end
+key with `RawKvSplitter::calculatePrefixEndKey()`, which trims trailing `0xFF`
+bytes and increments the preceding byte; an all-`0xFF` prefix (like the empty
+prefix) ends at the end of the keyspace, i.e. an empty end key (+infinity). It
+is **not** a plain increment of the last byte, which wraps `0xFF` to `"\x00"` —
+below the start key, so a hand-rolled range is empty or smaller than intended.
+See [the `0xFF` note](advanced.md#pagination).
 
 ### Iterating Large Ranges
 
