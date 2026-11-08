@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
+use CrazyGoat\Proto\Kvrpcpb\BatchGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
@@ -107,7 +108,7 @@ final class TxnKvFanoutTest extends TestCase
 
     /**
      * @param list<RegionInfo> $regions
-     * @param array{asyncCommit?: bool, onePc?: bool} $options
+     * @param array{asyncCommit?: bool, onePc?: bool, maxBackoffMs?: int} $options
      */
     private function createTransaction(
         array $regions,
@@ -142,6 +143,7 @@ final class TxnKvFanoutTest extends TestCase
             regionCache: $regionCache,
             lockResolver: $lockResolver,
             regionResolver: $regionResolver,
+            maxBackoffMs: $options['maxBackoffMs'] ?? 20000,
             logger: $logger,
             timeoutConfig: $timeoutConfig,
             enable1Pc: $options['onePc'] ?? false,
@@ -361,23 +363,54 @@ final class TxnKvFanoutTest extends TestCase
     /**
      * AC: TxnReader::batchGetFromTiKV dispatches all per-region KvBatchGet
      * calls before awaiting any.
+     *
+     * The fan-out is proven structurally (every send is issued before the
+     * first response is awaited) and relatively (issue #676): the batched
+     * call is compared with a sequential control measured on the same fake
+     * with the same latency, in the same test, so a loaded machine inflates
+     * both and the ratio stays ~1:3. An absolute millisecond bound measured
+     * scheduling noise and failed intermittently under load.
      */
     public function testBatchGetDispatchesAllRegionsBeforeAwaitingAny(): void
     {
         $regions = $this->makeRegions(3);
         $this->stubPdClient($regions);
-        $grpc = new FanoutFakeGrpc(
-            latencyMs: 5.0,
-            responder: static fn(string $method): Message => match ($method) {
-                'KvBatchGet' => new BatchGetResponse(),
-                default => throw new \RuntimeException("unexpected method $method"),
-            },
-        );
+        $latencyMs = 20.0;
+        $responder = static fn(string $method): Message => match ($method) {
+            'KvBatchGet' => new BatchGetResponse(),
+            default => throw new \RuntimeException("unexpected method $method"),
+        };
+
+        // Warm the code paths (protobuf class loading, TxnReader, the batch
+        // executor) so neither measured phase pays the one-time autoload
+        // cost: on a cold process that cost is hundreds of milliseconds and
+        // would dwarf the fake latency of whichever phase runs first.
+        $warmupGrpc = new FanoutFakeGrpc(latencyMs: 0.0, responder: $responder);
+        $this->createTransaction($regions, $warmupGrpc)->batchGet(['k0', 'k1', 'k2']);
+
+        // Sequential control: the same three RPCs one at a time, through the
+        // fake's blocking call() (the shape a serialized implementation
+        // amounts to). It is the baseline the batched path must beat,
+        // measured on the same machine and in the same test run.
+        $sequentialGrpc = new FanoutFakeGrpc(latencyMs: $latencyMs, responder: $responder);
+        $sequentialStartMs = microtime(true) * 1000;
+        for ($i = 0; $i < 3; $i++) {
+            $sequentialGrpc->call(
+                'store-1000:20160',
+                'tikvpb.Tikv',
+                'KvBatchGet',
+                new BatchGetRequest(),
+                BatchGetResponse::class,
+            );
+        }
+        $sequentialMs = microtime(true) * 1000 - $sequentialStartMs;
+
+        $grpc = new FanoutFakeGrpc(latencyMs: $latencyMs, responder: $responder);
         $txn = $this->createTransaction($regions, $grpc);
 
-        $startMs = microtime(true) * 1000;
+        $batchedStartMs = microtime(true) * 1000;
         $results = $txn->batchGet(['k0', 'k1', 'k2']);
-        $elapsedMs = microtime(true) * 1000 - $startMs;
+        $batchedMs = microtime(true) * 1000 - $batchedStartMs;
 
         $this->assertSame(3, $grpc->callCount);
         $this->assertSame(['k0' => null, 'k1' => null, 'k2' => null], $results);
@@ -387,8 +420,15 @@ final class TxnKvFanoutTest extends TestCase
         $firstWait = $grpc->waitLog[0]['at'];
         $this->assertGreaterThan($lastDispatch, $firstWait, 'a response was awaited before all sends were issued');
 
-        // Sequential would be 3 x 5 ms; fanned out ~5 ms.
-        self::assertLessThan(12, $elapsedMs, sprintf('batchGet took %.1f ms', $elapsedMs));
+        // Sequential costs 3 x latency; fanned out it costs ~1 x latency.
+        // The batched path must stay below two thirds of the sequential
+        // control: that is the midpoint between the ~33% of a real fan-out
+        // and the ~100% a serialized regression would take.
+        self::assertLessThan(
+            $sequentialMs * 2 / 3,
+            $batchedMs,
+            sprintf('batched batchGet took %.1f ms vs %.1f ms sequential', $batchedMs, $sequentialMs),
+        );
     }
 
     /**
@@ -397,6 +437,11 @@ final class TxnKvFanoutTest extends TestCase
      * BatchPartialFailureException aggregate. The error is the executor's
      * RetryBudgetExhaustedException, which carries the region's original
      * GrpcException as getPrevious().
+     *
+     * `Unknown` is a retryable gRPC status, so the prewrite is retried until
+     * the budget runs out. The transaction is built with a 200 ms budget
+     * (issue #692): the default 20 s made this the slowest test of the Unit
+     * suite by an order of magnitude while asserting nothing about the wait.
      */
     public function testFailingPrewriteSurfacesOriginalException(): void
     {
@@ -409,7 +454,7 @@ final class TxnKvFanoutTest extends TestCase
                 GrpcStatusCode::Unknown->value,
             ),
         );
-        $txn = $this->createTransaction($regions, $grpc);
+        $txn = $this->createTransaction($regions, $grpc, ['maxBackoffMs' => 200]);
 
         for ($i = 0; $i < 3; $i++) {
             $txn->set("k{$i}", "v{$i}");
@@ -423,6 +468,12 @@ final class TxnKvFanoutTest extends TestCase
             self::assertInstanceOf(GrpcException::class, $previous);
             self::assertStringContainsString('boom', $previous->getMessage());
         }
+
+        self::assertGreaterThan(
+            1,
+            $grpc->callCount,
+            'a retryable prewrite error must be retried before the budget is exhausted',
+        );
     }
 
     /**
