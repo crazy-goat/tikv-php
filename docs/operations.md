@@ -1412,9 +1412,11 @@ calls continue (and become the application's responsibility when it closes
 the transport).
 
 `__destruct()` calls `close()`, so a client built by `create()` releases its
-caches, handles and connections when the object is destroyed. A client
-assembled by hand releases only its own caches: the transport and PD client
-it was given stay open, because the caller owns them (issue #204). In a
+caches, handles and connections when the object is destroyed. A hand-assembled
+`RawKvClient` releases only its own caches: the transport and PD client it was
+given stay open, because the caller owns them (issue #204). A hand-assembled
+`TxnKvClient` is the exception — its `ownsGrpcClient` still defaults to `true`,
+so it closes the transport unless you pass `ownsGrpcClient: false`. In a
 long-running process, still call `close()` explicitly so resources are
 released at a known point instead of at an arbitrary destructor.
 

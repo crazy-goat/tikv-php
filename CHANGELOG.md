@@ -35,6 +35,7 @@ policy now classifies as internal.
 
 ### Docs
 
+- The `options['grpcClient']` ownership rule is now stated the same way in every place that documents it. The `RawKvClient::create()` and `TxnKvClient::create()` docblocks name the five transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`, `grpc`) that cannot be combined with `grpcClient` and the `InvalidArgumentException` that rejects the combination; `GrpcClientInterface::close()` and the `GrpcClient` class docblock say which client closes a hand-assembled transport (`RawKvClient` defaults `ownsGrpcClient` to `false`, `TxnKvClient` still to `true`); and "Sharing One Transport Between Clients", the manual-path paragraph and the `close()` semantics in `docs/operations.md` now agree that `__destruct()` delegates to `close()`, so destruction follows the same ownership rule. (#696)
 - The `docs/helpers/faq.md` entry on `unlink()` and directory permissions now quotes the errno and both platform messages: `unlink()` on a directory fails with `EISDIR` / "Is a directory" on Linux (where CI runs) and with `EPERM` / "Operation not permitted" on macOS and the BSDs, and the following `rmdir()` fails with `ENOTEMPTY` / "Directory not empty". The entry previously quoted only the macOS wording. (#666)
 
 ## [v0.14.0] - 2026-11-08

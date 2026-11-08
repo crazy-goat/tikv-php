@@ -124,7 +124,9 @@ interface GrpcClientInterface
     /**
      * Close all open channels of this client.
      *
-     * **Ownership.** The transport belongs to whoever created it:
+     * **Ownership.** The transport belongs to whoever created it. A client's
+     * `__destruct()` calls this method through its own `close()`, so
+     * destruction follows the same rule:
      *
      * - a client built by `RawKvClient::create()` / `TxnKvClient::create()`
      *   creates the transport itself and closes it here;
@@ -133,9 +135,14 @@ interface GrpcClientInterface
      *   same transport can be shared by several clients. Close it yourself
      *   when the application is done with it;
      * - a client assembled by hand (`new RawKvClient($pdClient, $grpc)`) is
-     *   given a transport it did not create and does not close it; pass
-     *   `ownsGrpcClient: true` to transfer ownership. `TxnKvClient` has the
-     *   same flag but still defaults to `true`.
+     *   given a transport it did not create. Whether this call closes it is
+     *   controlled by the `ownsGrpcClient` flag, whose default differs between
+     *   the two clients: `RawKvClient` defaults to `false`, so it does **not**
+     *   close the transport and the caller keeps owning it — pass
+     *   `ownsGrpcClient: true` to transfer ownership. `TxnKvClient` still
+     *   defaults to `true` for backward compatibility (issue #204 tracks
+     *   aligning it), so a hand-assembled `TxnKvClient` **does** close the
+     *   transport — pass `ownsGrpcClient: false` to keep it open.
      *
      * "Close" means this client's handles: ext-grpc keeps the underlying
      * channel in its process-global persistent table, so the TCP connection

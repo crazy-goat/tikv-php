@@ -600,10 +600,11 @@ $grpc->close();
 
 `options['grpcClient']` accepts a `GrpcClientInterface` (any implementation —
 `GrpcClient`, a test double, an application-specific transport). The client
-then uses it as it is and **never closes it**: the transport belongs to the
-application, so closing one client cannot break the other clients sharing it.
-A client that built its own transport (the normal case) closes it in
-`close()` as before.
+then uses it as it is and **never closes it** — neither in `close()` nor in
+`__destruct()`, which delegates to `close()`: the transport belongs to the
+application, so closing or destroying one client cannot break the other
+clients sharing it. A client that built its own transport (the normal case)
+closes it in `close()`, and therefore in `__destruct()` too.
 
 A `TxnKvClient` still owns the transactions it began when the transport is
 shared: `close()` rolls the still-active ones back before releasing its other
@@ -861,12 +862,18 @@ $client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 
 **Who closes the connections on the manual path.** The rule of
 [Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
-is "the connections belong to whoever created them", and it holds for the
-factory path. A client assembled by hand is *given* a transport and a PD
-client it did not create, so it does not own them: `close()` and the
-destructor leave both open (issue #204). That makes sharing safe — destroying
-one client cannot close the channels another one still uses. The client still
-clears its own region cache.
+is "the connections belong to whoever created them", and it holds on the
+manual path too. A `RawKvClient` assembled by hand is *given* a transport and
+a PD client it did not create, so it does not own them by default: `close()`
+— and therefore `__destruct()`, which delegates to it — leaves both open
+(issue #204). That makes sharing safe: destroying one client cannot close the
+channels another one still uses. The client still clears its own region
+cache.
+
+The exception is a hand-assembled `TxnKvClient`: its `ownsGrpcClient` still
+defaults to `true` for backward compatibility, so `close()` and the
+destructor close the transport it was given. Pass `ownsGrpcClient: false` to
+keep the transport open there (issue #204 tracks aligning the default).
 
 If the application wants to hand ownership over instead, say so explicitly:
 
@@ -880,9 +887,9 @@ $client = new RawKvClient(
 ```
 
 With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
-matching dependency in `close()`; the defaults are `false` for a
-hand-assembled `RawKvClient`. `TxnKvClient` has the same `ownsGrpcClient`
-parameter but still defaults to `true`.
+matching dependency in `close()` (and in the destructor); the defaults are
+`false` for a hand-assembled `RawKvClient`. `TxnKvClient` has the same
+`ownsGrpcClient` parameter but still defaults to `true`.
 
 ### Security: Fail-Closed TLS
 

@@ -325,11 +325,25 @@ final class TxnKvClient
      *                                      built by the application — the client
      *                                      uses it and never closes it, so one
      *                                      transport can be shared with other
-     *                                      clients).
+     *                                      clients). 'grpcClient' is mutually
+     *                                      exclusive with the five options that
+     *                                      configure the transport the factory
+     *                                      would otherwise build ('tls',
+     *                                      'allowInsecure', 'maxChannels',
+     *                                      'idleTtlMs', 'grpc'): passing both
+     *                                      throws `InvalidArgumentException`,
+     *                                      because those options configure a
+     *                                      transport `create()` does not build.
+     *                                      Configure them on the transport
+     *                                      passed in.
      *                                      Transaction defaults are accepted
      *                                      too, e.g. 'lockWaitTimeMs' (the
      *                                      client-wide pessimistic-lock wait
      *                                      timeout, issue #229).
+     *
+     * @throws InvalidArgumentException if PD endpoints array is empty or an
+     *         option value is invalid, or if 'grpcClient' is combined with one
+     *         of the transport options listed above
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
