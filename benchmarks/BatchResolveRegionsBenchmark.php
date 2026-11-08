@@ -152,7 +152,7 @@ $pdClient = static function (array $regions): PdClientInterface {
             return null;
         }
 
-        public function setClusterId(int $clusterId): void
+        public function setClusterId(int|string $clusterId): void
         {
         }
 

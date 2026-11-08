@@ -183,7 +183,7 @@ final class BenchPd implements PdClientInterface
         return null;
     }
 
-    public function setClusterId(int $clusterId): void
+    public function setClusterId(int|string $clusterId): void
     {
     }
 

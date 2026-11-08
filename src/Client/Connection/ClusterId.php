@@ -160,7 +160,8 @@ final class ClusterId
             return (int) $canonical;
         }
 
-        // 2^64 - value fits in an int for every value >= 2^63.
+        // 2^64-1 - value fits in an int for every value >= 2^63; the extra
+        // -1 turns the complement into the two's-complement signed form.
         $complement = self::subtract(self::MAX_UINT64_DECIMAL, $canonical);
 
         return -1 - (int) $complement;

@@ -12,6 +12,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [A `uint64` above `PHP_INT_MAX` wraps when decoded but clamps when set](#a-uint64-above-php_int_max-wraps-when-decoded-but-clamps-when-set)
 - [Detect the cluster mode with a V2 RawKV read — the error names the storage mode](#detect-the-cluster-mode-with-a-v2-rawkv-read--the-error-names-the-storage-mode)
 - [A test that reads a value out of the file under test pins the relation, not the value (issue #731)](#a-test-that-reads-a-value-out-of-the-file-under-test-pins-the-relation-not-the-value-issue-731)
 - [A transactional scan is a read: one timestamp for every returned key](#a-transactional-scan-is-a-read-one-timestamp-for-every-returned-key)
@@ -157,6 +158,29 @@ of the file.
 - [The batch deadline is finite by default, and checked only between waits (#275)](#the-batch-deadline-is-finite-by-default-and-checked-only-between-waits-275)
 - [Destructors log best-effort and skip rollback during shutdown (#287)](#destructors-log-best-effort-and-skip-rollback-during-shutdown-287)
 <!-- index:end -->
+
+## A `uint64` above `PHP_INT_MAX` wraps when decoded but clamps when set
+
+The pure-PHP protobuf runtime treats a `uint64` field as a 64-bit PHP int, so
+the two directions of a value above `PHP_INT_MAX` are asymmetric:
+
+- **Decoding** wraps to two's complement: `2^63` becomes `PHP_INT_MIN` and
+  `2^64-1` becomes `-1`. The generated getter is annotated `int|string`, but
+  the pure-PHP runtime returns the wrapped int.
+- **Setting** a numeric string clamps: `GPBUtil::checkUint64()` runs
+  `intval()` on it, so `setClusterId('18446744073709551615')` stores
+  `PHP_INT_MAX` and encodes the wrong varint. A negative int is left alone and
+  the encoder writes the correct uint64 varint for it.
+
+Do not "fix" a wrapped decode by comparing against a positive int, and do not
+pass the canonical decimal string to a generated `uint64` setter. Convert the
+canonical value to its two's-complement form instead: `ClusterId::toSignedInt()`
+does this for cluster IDs (`-1 - (2^64-1 - value)`), and
+`PdClient::uint64ToInt()` is the fail-closed counterpart for GC safe points.
+The round trip is pinned by `ClusterIdTest` and by the request-header tests in
+`PdClientTest` / `TimestampOracleTest`: decoded `PHP_INT_MIN` / `-1`, encoded
+back to the same `08 …` varint. See `docs/configuration.md` ("Cluster Identity
+Verification") for the user-facing contract (issue #818).
 
 ## Detect the cluster mode with a V2 RawKV read — the error names the storage mode
 

@@ -30,6 +30,8 @@ use Psr\Log\NullLogger;
  * {@see PdClient} and {@see TimestampOracle} both use this guard, so the
  * header path, the error-string path and the expected-ID check cannot drift
  * apart.
+ *
+ * @internal
  */
 final readonly class ClusterIdGuard
 {
