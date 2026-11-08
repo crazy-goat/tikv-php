@@ -64,6 +64,20 @@ final class TxnKvClient
     public const OPT_RETRY_DEADLINE = 'retryDeadlineMs';
 
     /**
+     * options[] key for a custom error classifier (issue #719): a callable
+     * `TiKvException -> RetryVerdict` handed to every transaction this client
+     * begins and consulted by that transaction's retry executor, after any
+     * internal per-call classifier and before the built-in
+     * {@see \CrazyGoat\TiKV\Client\Retry\ErrorClassifier}. Return
+     * {@see \CrazyGoat\TiKV\Client\Retry\RetryVerdict::retry()} to retry with
+     * a chosen backoff, {@see \CrazyGoat\TiKV\Client\Retry\RetryVerdict::fatal()}
+     * to stop, or {@see \CrazyGoat\TiKV\Client\Retry\RetryVerdict::pass()} to
+     * fall through to the built-in classification. Omitted or null (the
+     * default) keeps the built-in behaviour unchanged.
+     */
+    public const OPT_RETRY_CLASSIFIER = 'retryClassifier';
+
+    /**
      * options[] key for per-client GC safe-point validation (issue #422).
      * true (default): every begin() validates the fresh start timestamp
      * against a cached GC safe point and throws TxnAbortedByGcException
@@ -307,6 +321,15 @@ final class TxnKvClient
     private readonly ResolvedTxnStatusCache $resolvedStatusCache;
     /** Wall-clock deadline (ms) handed to every Transaction this client begins. */
     private readonly int $retryDeadlineMs;
+
+    /**
+     * Custom classifier (issue #719) handed to every Transaction this client
+     * begins, or null for the built-in classification only. Normalised to a
+     * Closure because `callable` is not a legal property type.
+     *
+     * @var (\Closure(TiKvException): \CrazyGoat\TiKV\Client\Retry\RetryVerdict)|null
+     */
+    private readonly ?Closure $retryClassifier;
     /** Per-instance default service ID for service safe-point registrations. */
     private readonly string $serviceId;
 
@@ -325,11 +348,35 @@ final class TxnKvClient
      *                                      built by the application — the client
      *                                      uses it and never closes it, so one
      *                                      transport can be shared with other
-     *                                      clients).
+     *                                      clients). 'grpcClient' is mutually
+     *                                      exclusive with the five options that
+     *                                      configure the transport the factory
+     *                                      would otherwise build ('tls',
+     *                                      'allowInsecure', 'maxChannels',
+     *                                      'idleTtlMs', 'grpc'): when
+     *                                      `grpcClient` is a
+     *                                      `GrpcClientInterface`, combining it
+     *                                      with any of them throws
+     *                                      `InvalidArgumentException`, because
+     *                                      those options configure a transport
+     *                                      `create()` does not build. Configure
+     *                                      them on the transport passed in.
      *                                      Transaction defaults are accepted
      *                                      too, e.g. 'lockWaitTimeMs' (the
      *                                      client-wide pessimistic-lock wait
      *                                      timeout, issue #229).
+     *                                      'retryClassifier' (a callable
+     *                                      `TiKvException -> RetryVerdict`,
+     *                                      issue #719) extends or overrides
+     *                                      the built-in error classification
+     *                                      for every transaction; a
+     *                                      `RetryVerdict::pass()` falls
+     *                                      through to it. See
+     *                                      {@see self::OPT_RETRY_CLASSIFIER}.
+     *
+     * @throws InvalidArgumentException if PD endpoints array is empty or an
+     *         option value is invalid, or if 'grpcClient' is combined with one
+     *         of the transport options listed above
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
@@ -373,6 +420,7 @@ final class TxnKvClient
             resourceControl: ResourceControl::fromOptions($options),
             lockWaitTimeMs: self::resolveLockWaitTimeMs($options, Transaction::DEFAULT_LOCK_WAIT_TIME_MS),
             tracer: $bundle->tracer,
+            retryClassifier: self::resolveRetryClassifier($options),
         );
     }
 
@@ -403,13 +451,15 @@ final class TxnKvClient
          * Whether this client owns the gRPC transport and may close it.
          *
          * true (the default) for a client that built the transport itself —
-         * and for a client assembled by hand, which therefore closes the
-         * transport it was given (issue #204 tracks the change to close only
-         * what a client owns).
+         * and, because that is the legacy behaviour, for a client assembled
+         * by hand, which therefore closes the transport it was given. #990
+         * tracks aligning this default with `RawKvClient`, which closes only
+         * what the client created (issue #204).
          * false when the transport was supplied by the application
          * (options['grpcClient']): the application stays its owner, so the
          * client never closes it and the same transport can be shared with
-         * other clients.
+         * other clients. Pass false explicitly to keep a hand-supplied
+         * transport open.
          */
         private readonly bool $ownsGrpcClient = true,
         /**
@@ -471,6 +521,15 @@ final class TxnKvClient
          * is the zero-cost no-op.
          */
         private readonly TraceEventInterface $tracer = new NoOpTracer(),
+        /**
+         * Custom error classifier (issue #719): a callable
+         * `TiKvException -> RetryVerdict` handed to every transaction this
+         * client begins, after any internal per-call classifier and before
+         * the built-in classifier. Null (the default) keeps the built-in
+         * classification. {@see self::OPT_RETRY_CLASSIFIER} exposes the same
+         * seam through `create()`.
+         */
+        ?callable $retryClassifier = null,
     ) {
         if ($regionCacheRefreshMs < 0) {
             throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
@@ -486,6 +545,7 @@ final class TxnKvClient
         // objects (issue #287, GRPC-28).
         ShutdownState::ensureRegistered();
         $this->retryDeadlineMs = $retryDeadlineMs;
+        $this->retryClassifier = $retryClassifier !== null ? Closure::fromCallable($retryClassifier) : null;
         $this->resolvedStatusCache = new ResolvedTxnStatusCache();
         $this->serviceId = self::SERVICE_ID_PREFIX . '-' . substr(md5(uniqid('svc', true)), 0, 8);
         if ($this->regionCache instanceof RegionCache) {
@@ -543,6 +603,35 @@ final class TxnKvClient
         }
 
         return $deadlineMs;
+    }
+
+    /**
+     * Resolve options['retryClassifier'] (see OPT_RETRY_CLASSIFIER) for
+     * create(): a custom `TiKvException -> RetryVerdict` classifier handed to
+     * every transaction this client begins (issue #719). Omitted or null
+     * keeps the built-in classification.
+     *
+     * @param array<string, mixed> $options
+     * @return (\Closure(TiKvException): \CrazyGoat\TiKV\Client\Retry\RetryVerdict)|null
+     */
+    private static function resolveRetryClassifier(array $options): ?Closure
+    {
+        if (
+            !array_key_exists(self::OPT_RETRY_CLASSIFIER, $options)
+            || $options[self::OPT_RETRY_CLASSIFIER] === null
+        ) {
+            return null;
+        }
+
+        $classifier = $options[self::OPT_RETRY_CLASSIFIER];
+        if (!is_callable($classifier)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['retryClassifier'] must be callable, %s given",
+                get_debug_type($classifier),
+            ));
+        }
+
+        return Closure::fromCallable($classifier);
     }
 
     /**
@@ -811,6 +900,7 @@ final class TxnKvClient
             requestContext: $requestContext,
             resourceControl: $resourceControl,
             tracer: $this->tracer,
+            retryClassifier: $this->retryClassifier,
         );
 
         $this->pruneFinishedTransactions();

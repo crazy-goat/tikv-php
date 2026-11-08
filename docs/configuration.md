@@ -600,10 +600,11 @@ $grpc->close();
 
 `options['grpcClient']` accepts a `GrpcClientInterface` (any implementation —
 `GrpcClient`, a test double, an application-specific transport). The client
-then uses it as it is and **never closes it**: the transport belongs to the
-application, so closing one client cannot break the other clients sharing it.
-A client that built its own transport (the normal case) closes it in
-`close()` as before.
+then uses it as it is and **never closes it** — neither in `close()` nor in
+`__destruct()`, which delegates to `close()`: the transport belongs to the
+application, so closing or destroying one client cannot break the other
+clients sharing it. A client that built its own transport (the normal case)
+closes it in `close()`, and therefore in `__destruct()` too.
 
 A `TxnKvClient` still owns the transactions it began when the transport is
 shared: `close()` rolls the still-active ones back before releasing its other
@@ -617,15 +618,25 @@ transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
 `grpc`) cannot be combined with it — they would configure a transport the
 factory does not build, so they are rejected with an
 `InvalidArgumentException` instead of being silently ignored. Configure them
-on the `GrpcClient` you pass in.
+on the `GrpcClient` you pass in. An explicit `'tls' => null` is the one
+exception: it means "no TLS configuration" everywhere else, so it is treated
+as absent rather than as a conflict (issue #695).
 
-One caveat of sharing: on a retryable transport error the client closes the
-channel of the affected address. With a shared transport that affects every
-client using the same address — the channel is dropped from the cache and
-reopened on the next request, but a request in flight on it can be
-interrupted. The close does **not** force a reconnect, though: ext-grpc keeps
-the channel in its process-global persistent table, so the reopened channel is
-the same underlying channel and the same TCP connection (see below).
+One caveat of sharing: on a retryable transport error the client calls
+`closeChannel()` on the affected address. With a shared transport
+(`options['grpcClient']`) every client shares **one** `GrpcClient` and hence
+one channel cache: the close drops that transport's cached handle and arms the
+forced reconnect, and whichever client calls that store next consumes it — so
+every client using that transport reconnects to that store, not only the one
+whose call failed. A call already in flight on the old handle is not
+interrupted: the close is deferred while the channel is busy (issue #278) and
+ext-grpc reference-counts the channel. Other transports in the process are
+unaffected; they keep their own cache and their own persistent and subchannel
+pool entries.
+
+The replacement is built with `'force_new' => true` and
+`'grpc.use_local_subchannel_pool' => 1`, so it is a new underlying channel on
+a new subchannel and a new TCP connection (see below, issue #717).
 
 Sharing the transport shares the **channels** only. Every client keeps its own
 region cache and its own store-address cache, so the two clients do not warm
@@ -642,8 +653,21 @@ when the error is handled, and it runs only for `UNAVAILABLE`, not for a
 `options['metrics']` is a **client-side** option and is always applied: it
 backs the client-side counters (region cache, retries). The transport's own
 RPC counters follow the transport — with an injected transport they are the
-ones it was built with, so pass the same backend to the transport
-(`new GrpcClient(metrics: $metrics)`) to get them everywhere.
+ones it was built with, and `options['metrics']` is **not** forwarded to it.
+Pass the same backend to the transport (`new GrpcClient(metrics: $metrics)`)
+to get them everywhere.
+
+The `ConnectionBundle` that `ConnectionFactory::create()` returns — an
+internal value object, not part of the public client API — also reports the
+transport's TLS state. `ConnectionBundle::$tlsState` is
+`Connection\TlsState::Unknown` for a supplied transport, because the factory
+does not inspect its TLS configuration. For a transport the factory built it
+is `Connection\TlsState::Plaintext` when the configuration carries no TLS
+material (including an empty `'tls' => []`), and `Connection\TlsState::Tls`
+when `TlsConfig::isEnabled()` is true.
+`ConnectionBundle::$tlsConfig` alone cannot express that difference: it is
+`null` both for a factory-built plaintext transport and for an injected one,
+and non-null but disabled for an empty TLS configuration (issue #695).
 
 #### What the shared channel really is
 
@@ -666,15 +690,30 @@ client holds — it only drops that client's own reference to it. Verified
 against the deployed extension (grpc 1.83.0; the persistent-channel code is
 unchanged in the oldest supported release, 1.57).
 
+The connection lives one layer below the channel. `grpc_channel_create()`
+builds a `ClientChannel`, and the `ClientChannel` takes its subchannel — the
+object that owns the TCP connection — from either a local pool or gRPC core's
+process-global subchannel pool (`client_channel.cc`, `GetSubchannelPool()`).
+The global pool is the default (`grpc.use_local_subchannel_pool` defaults to
+false) and shares subchannels among channels, so two distinct
+`grpc_channel` objects with the same target and channel arguments can still
+share one TCP connection. Resetting only the ext-grpc layer therefore does not
+reset the connection.
+
 The practical consequences for the API:
 
 - `close()` releases this client's handles; the TCP connection stays warm in
   the process (until the process ends or the per-target persist bound drops
   the entry). It does not tear the connection down.
-- `closeChannel()` drops the cached handle but does **not** force a
-  reconnect: the persistent entry survives, so the next call reuses the same
-  underlying channel and the same TCP connection. Forcing a real reconnect
-  needs a new persistent entry.
+- `closeChannel()` drops the cached handle and forces a new connection: the
+  replacement channel is created with `'force_new' => true` and
+  `'grpc.use_local_subchannel_pool' => 1`. `force_new` keeps it out of
+  ext-grpc's persistent table; the local subchannel pool keeps it out of gRPC
+  core's global subchannel pool, which would otherwise hand it the existing
+  subchannel and the same TCP connection (verified against grpc 1.83.0 by
+  counting accepted TCP connections; issue #717). The retry path is its
+  caller. The idle and the LRU evictions keep both pools and reuse the warm
+  connection.
 
 Two clients with **different** channel arguments (`options['grpc']`) or
 different credentials for the same store address do not share a channel: the
@@ -911,14 +950,22 @@ directory"), like the matching option does.
 
 **Who closes the connections on the manual path.** The rule of
 [Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
-is "the connections belong to whoever created them", and it holds for the
-factory path. A client assembled by hand is *given* a transport and a PD
-client it did not create, so it does not own them: `close()` and the
-destructor leave both open (issue #204). That makes sharing safe — destroying
-one client cannot close the channels another one still uses. The client still
-clears its own region cache.
+is "the connections belong to whoever created them". A client assembled by
+hand is *given* a transport and a PD client it did not create, but the two
+clients do not treat them the same way today:
 
-If the application wants to hand ownership over instead, say so explicitly:
+- `RawKvClient` defaults `ownsGrpcClient` and `ownsPdClient` to `false`:
+  `close()` — and therefore `__destruct()`, which delegates to it — leaves
+  both open (issue #204). That makes sharing safe: destroying one client
+  cannot close the channels another one still uses. The client still clears
+  its own region cache.
+- `TxnKvClient` differs: `ownsGrpcClient` still defaults to `true`, and
+  `close()` closes the PD client unconditionally (there is no `ownsPdClient`
+  flag). Pass `ownsGrpcClient: false` to keep a shared transport open; the PD
+  client it is given is always closed. #990 tracks aligning the two clients.
+
+If the application wants to hand ownership over on a `RawKvClient`, say so
+explicitly:
 
 ```php
 $client = new RawKvClient(
@@ -929,10 +976,9 @@ $client = new RawKvClient(
 );
 ```
 
-With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
-matching dependency in `close()`; the defaults are `false` for a
-hand-assembled `RawKvClient`. `TxnKvClient` has the same `ownsGrpcClient`
-parameter but still defaults to `true`.
+With `ownsGrpcClient: true` / `ownsPdClient: true` the `RawKvClient` closes
+the matching dependency in `close()` (and in the destructor). `TxnKvClient`
+accepts `ownsGrpcClient` only, and still defaults it to `true`.
 
 ### Security: Fail-Closed TLS
 
@@ -2169,13 +2215,19 @@ two bounds binds first; the `ServerIsBusy` error is always available through
 
 ### Custom Retry (Advanced)
 
-`RawKvClient` is `final` and its retry loop cannot be customised by
-subclassing — there is no `classifyError()` hook on the client and no
-`BackoffType::Custom` case. The supported extension point is the optional
-`$classifier` callable accepted by `RetryExecutor::execute()`
-(`src/Client/Retry/RetryExecutor.php`): it receives the caught
-`TiKvException` and returns a `RetryVerdict`
-(`src/Client/Retry/RetryVerdict.php`):
+`RawKvClient` and `TxnKvClient` are `final` and their retry loop cannot be
+customised by subclassing — there is no `classifyError()` hook on the client
+and no `BackoffType::Custom` case. Instead, both clients accept a custom
+error classifier (issue #719):
+
+| Entry point | Seam |
+|---|---|
+| `RawKvClient::create()` / `TxnKvClient::create()` | `options['retryClassifier']` |
+| `RawKvClient` / `TxnKvClient` constructor | `retryClassifier: $callable` |
+| `RetryExecutor` | constructor `classifier:`, or per-call `classifier:` |
+
+The callable receives the caught `TiKvException` and returns a
+`RetryVerdict` (`src/Client/Retry/RetryVerdict.php`):
 
 - `RetryVerdict::retry($backoffType)` retries with that `BackoffType` (see
   `src/Client/Retry/BackoffType.php` for the full case list);
@@ -2189,53 +2241,92 @@ The backoff taxonomy mirrors client-go's set: besides the region-error curves,
 `TxnNotFound` and `CommitTSLag` (2–500 ms each), the equivalents of client-go's
 `BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound` and `BoCommitTSLag`.
 
-Note that a `NotLeader` error is classified before your classifier is
-consulted.
-
-To use it you must construct the `RetryExecutor` yourself and invoke your
-operation through it, rather than going through `RawKvClient`'s methods:
-
 ```php
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
-use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
+use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 
-$executor = new RetryExecutor(
-    maxBackoffMs: 20000,
-    serverBusyBudgetMs: 60000,
-    regionCache: $regionCache,
-    grpc: $grpc,
-    regionResolver: $regionResolver,
-    logger: $logger,
-);
+$client = RawKvClient::create(
+    ['127.0.0.1:2379'],
+    options: [
+        'retryClassifier' => static function (TiKvException $e): RetryVerdict {
+            // Fail fast on a busy cluster instead of backing off.
+            if ($e instanceof RegionException && $e->errorKind === ErrorKind::ServerIsBusy) {
+                return RetryVerdict::fatal();
+            }
 
-$result = $executor->execute(
-    $key,
-    function () use ($key): string {
-        // your RawKV RPC call
-        return $value;
-    },
-    classifier: function (TiKvException $e): RetryVerdict {
-        if (str_contains($e->getMessage(), 'CustomError')) {
-            return RetryVerdict::retry(BackoffType::StaleCmd); // pick a real BackoffType case
-        }
-        return RetryVerdict::pass(); // fall through to the built-in ErrorClassifier
-    },
+            return RetryVerdict::pass(); // fall through to the built-in ErrorClassifier
+        },
+    ],
 );
 ```
 
-For a user-level fan-out that must share one budget, call
-`$executor = $executor->beginOperation()` once and pass the returned
-executor to every `execute()` call of that logical operation; call
-`beginOperation()` again for the next operation. A standalone executor keeps
-the per-call reset described above.
+`TxnKvClient::create()` accepts the same option; the classifier is handed to
+every transaction `begin()` returns, so reads, writes, commit, rollback and
+lock resolution share it:
 
-Note that `maxAttempts` (default 30) and `deadlineMs` (default 30000,
-`0` disables) are constructor parameters of `RetryExecutor` and are **not**
-settable through `RawKvClient::create()` options — `create()` only exposes
-`retryDeadlineMs` (see the [Automatic Retry](#automatic-retry) section
-above); `maxBackoffMs` and `serverBusyBudgetMs` are likewise constructor
-arguments of `RawKvClient`, not `create()` options.
+```php
+use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+
+$client = TxnKvClient::create(
+    ['127.0.0.1:2379'],
+    options: [
+        'retryClassifier' => static function (TiKvException $e): RetryVerdict {
+            if ($e instanceof RegionException && $e->errorKind === ErrorKind::ServerIsBusy) {
+                return RetryVerdict::fatal();
+            }
+
+            return RetryVerdict::pass();
+        },
+    ],
+);
+
+$txn = $client->begin();
+```
+
+The classifier applies to every retry loop the client builds: point
+operations, batch fan-outs, scans, range operations and SST ingest on RawKV,
+and every transaction on TxnKV. A client assembled by hand accepts the same
+callable as the `retryClassifier` constructor argument.
+
+Resolution order:
+
+1. the library's own per-call classifier (for example a transaction's
+   `TxnRetryableException` handling);
+2. your `retryClassifier`;
+3. the built-in `ErrorClassifier`.
+
+A `NotLeader` error is classified before any classifier is consulted, and
+`RetryVerdict::pass()` from your classifier preserves the built-in decision.
+`RetryVerdict::fatal()` runs the executor's full fatal path, so a custom
+classifier cannot skip the region invalidation or the broken-channel cleanup.
+
+If you drive a `RetryExecutor` yourself (a fan-out outside the client, as in
+earlier versions of this section), pass `classifier:` to the constructor for
+the same client-level default, or `classifier:` to one `execute()` call to
+override it for that operation. Both accept any PHP callable (a closure,
+`[$object, 'method']`, a function name or an invokable object); the executor
+normalises it to a `Closure` internally. Per-call classifiers win over the
+constructor-level one, so a library-owned per-call classifier cannot be
+shadowed. For a user-level fan-out that must share one budget, call
+`$executor = $executor->beginOperation()` once and pass the returned executor
+to every `execute()` call of that logical operation; call `beginOperation()`
+again for the next operation. A standalone executor keeps the per-call reset
+described above.
+
+The retry budget stays configurable independently of the classifier:
+`retryDeadlineMs` is a `create()` option (see [Automatic
+Retry](#automatic-retry)), while `maxBackoffMs` and `serverBusyBudgetMs` are
+constructor arguments of the clients, and `maxAttempts` (default 30) and
+`deadlineMs` (default 30000, `0` disables) are constructor parameters of
+`RetryExecutor`. None of them is settable through `create()` except
+`retryDeadlineMs`.
 
 ## Caching
 
