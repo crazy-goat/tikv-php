@@ -1,13 +1,16 @@
 <?php
+
 /**
  * TiKV PHP Client - TLS/SSL Configuration Example
- * 
+ *
  * Demonstrates how to configure TLS for secure connections.
- * 
+ *
  * NOTE: This example requires a TiKV cluster with TLS enabled.
  * For testing, you can generate test certificates with:
  *   openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
  */
+
+declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
@@ -91,7 +94,7 @@ $clientKeyPath = __DIR__ . '/../certs/client.key';
 
 if (file_exists($caCertPath)) {
     echo "Found certificates, attempting connection...\n";
-    
+
     try {
         $options = [
             'tls' => [
@@ -107,17 +110,17 @@ if (file_exists($caCertPath)) {
         } else {
             echo "Using server verification only\n";
         }
-        
-        $pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', getenv('PD_ENDPOINTS')) : ['127.0.0.1:2379'];
+
+        $pdEndpoints = explode(',', getenv('PD_ENDPOINTS') ?: '127.0.0.1:2379');
         $client = RawKvClient::create($pdEndpoints, options: $options);
-        
+
         // Test the connection
         $client->put('tls:test', 'secure-value');
         $value = $client->get('tls:test');
         $client->delete('tls:test');
-        
+
         echo "✓ TLS connection successful! Retrieved value: $value\n";
-        
+
         $client->close();
     } catch (Exception $e) {
         echo "✗ Connection failed: " . $e->getMessage() . "\n";

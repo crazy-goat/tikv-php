@@ -1,4 +1,7 @@
 <?php
+
+declare(strict_types=1);
+
 require __DIR__ . '/../vendor/autoload.php';
 
 use CrazyGoat\TiKV\Client\TxnKv\Exception\DeadlockException;
@@ -15,9 +18,8 @@ use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
  * startTs that has already lost the race, so re-running the same object can
  * never succeed.
  */
-function transfer(TxnKvClient $client, string $from, string $to, int $amount): void
-{
-    for ($attempt = 1; ; $attempt++) {
+$transfer = static function (TxnKvClient $client, string $from, string $to, int $amount): void {
+    for ($attempt = 1;; $attempt++) {
         $txn = $client->begin(); // pessimistic by default
         try {
             $fromBalance = (int) $txn->get($from);
@@ -32,7 +34,12 @@ function transfer(TxnKvClient $client, string $from, string $to, int $amount): v
             $txn->commit();
 
             return;
-        } catch (TransactionConflictException | DeadlockException | LockWaitTimeoutException | TxnRetryableException $e) {
+        } catch (
+            TransactionConflictException
+            | DeadlockException
+            | LockWaitTimeoutException
+            | TxnRetryableException $e
+        ) {
             if ($txn->getStatus() === TransactionStatus::Active) {
                 $txn->rollback();
             }
@@ -48,9 +55,9 @@ function transfer(TxnKvClient $client, string $from, string $to, int $amount): v
             throw $e;
         }
     }
-}
+};
 
-$pdEndpoints = getenv('PD_ENDPOINTS') ? explode(',', getenv('PD_ENDPOINTS')) : ['127.0.0.1:2379'];
+$pdEndpoints = explode(',', getenv('PD_ENDPOINTS') ?: '127.0.0.1:2379');
 $client = TxnKvClient::create($pdEndpoints);
 
 try {
@@ -65,7 +72,7 @@ try {
     echo "✓ alice=1000 bob=0\n\n";
 
     echo "Transferring 100 from alice to bob...\n";
-    transfer($client, 'txn:account:alice', 'txn:account:bob', 100);
+    $transfer($client, 'txn:account:alice', 'txn:account:bob', 100);
     echo "✓ committed\n\n";
 
     echo "Reading both accounts back in one snapshot...\n";
