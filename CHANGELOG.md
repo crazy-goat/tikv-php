@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- `TlsOptionKeysDocumentationGuardTest` now reads the expected TLS option keys out of `ConnectionFactory::RECOGNISED_TLS_KEYS` instead of a hand-written copy, so a key added to or removed from the client changes what the guard demands from `README.md`, `docs/advanced.md` and `docs/configuration.md` (issue #690). Its markdown parsing now uses the CommonMark-aware block scanner from the sibling `AtomicModeDocumentationGuardTest`: a nested fence no longer ends the block at the shorter inner run, and 4-space-indented blocks count as code rather than prose. Two fixtures pin that a deprecated key inside an indented block and inside a nested fence is still reported.
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
