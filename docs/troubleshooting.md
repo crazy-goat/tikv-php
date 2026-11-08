@@ -932,12 +932,17 @@ echo "Took: {$elapsed}s\n";
 
 1. **Enable logging to see retries:**
    ```php
+   use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
+   use Monolog\Handler\StreamHandler;
    use Monolog\Logger;
-   
+
    $logger = new Logger('debug');
    $logger->pushHandler(new StreamHandler('php://stderr', Logger::DEBUG));
    $client = RawKvClient::create($pdEndpoints, logger: $logger);
    ```
+
+   The snippet assumes `$pdEndpoints` (the PD endpoints) and `$client` already
+   exist; only the logger and the client it builds are new.
 
 2. **Check for retries:**
    - If seeing many retries, TiKV may be overloaded
