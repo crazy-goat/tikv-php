@@ -11,6 +11,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [The TxnKV prewrite/commit fan-outs are windowed by `maxConcurrency` (issue #789)](#the-txnkv-prewritecommit-fan-outs-are-windowed-by-maxconcurrency-issue-789)
 - [`closeChannel()` forces a new connection; eviction does not (issue #717)](#closechannel-forces-a-new-connection-eviction-does-not-issue-717)
 - [Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)](#branch-naming-fixn-kebab-case-no-issue--prefix)
 - [Commit style: `type: subject (#N)`](#commit-style-type-subject-n)
@@ -72,6 +73,34 @@ of the file.
 - [Workflows pin actions by commit SHA (issue #316, SEC-13)](#workflows-pin-actions-by-commit-sha-issue-316-sec-13)
 - [Resolved-lock tracking lives on the per-transaction LockResolver (issue #432, GAP-18)](#resolved-lock-tracking-lives-on-the-per-transaction-lockresolver-issue-432-gap-18)
 <!-- index:end -->
+
+## The TxnKV prewrite/commit fan-outs are windowed by `maxConcurrency` (issue #789)
+
+Request batching (#430) turned one prewrite/commit request per region into
+N per region, but the secondary fan-outs still used `executeParallel()`,
+which invokes every callable before awaiting any of them. A large write set
+could allocate one gRPC call, serialized request and future per sub-batch
+before the first response was awaited, and could exhaust `memory_limit` or
+file descriptors. Both fan-outs now use `executeParallelCapped()` with
+`maxConcurrency` (default 16, accepted on `TxnKvClient::create()` as a
+client-wide default and on `begin()` per transaction; the `begin()` value
+wins). Two consequences are deliberate:
+
+1. **The batch deadline is shared by every window.** Capping must not stretch
+   `timeout.batchDeadlineMs` to `windows × deadline`; a deadline hit between
+   windows is still reported as `BatchDeadlineExceededException`, and after
+   the primary commit it is still logged without failing the transaction.
+2. **The partial-failure aggregate is window-scoped.** Inside a window the
+   executor still waits for every dispatched call, collects every failure and
+   rethrows the first error in dispatch order; but windows after the failing
+   one are never dispatched, so their regions cannot appear in the log. The
+   full-fan-out coverage promised by the #431 entry below holds only while
+   `secondaryCalls <= maxConcurrency`.
+
+Do not "fix" either consequence by removing the cap or by throwing the
+aggregate. Pinned by
+`TxnKvFanoutTest::testPrewriteAndCommitFanOutRespectTheConfiguredConcurrencyCap()`
+and `::testPrewriteAndCommitFanOutUseTheDefaultConcurrencyCap()`.
 
 ## `closeChannel()` forces a new connection; eviction does not (issue #717)
 
@@ -1224,9 +1253,10 @@ stays sequential.
 
 ## The parallel prewrite reports its aggregated failure, it does not throw it (issue #431, GAP-17)
 
-The prewrite fan-out (issue #291, PERF-04) collects every failing region into
-a `BatchPartialFailureException` and rethrows the **first failing region's own
-error**, so the sequential "abort at the first failing region" contract holds
+The prewrite fan-out (issue #291, PERF-04) collects every failing call among
+the dispatched windows into a `BatchPartialFailureException` and rethrows the
+**first failing region's own error**, so the sequential "abort at the first
+failing region" contract holds
 and `docs/error-handling.md`'s exception list for `Transaction::commit()` stays
 accurate — it does not mention `BatchPartialFailureException`, and callers
 catching `GrpcException` or `RegionException` around `commit()` keep working
@@ -1244,7 +1274,14 @@ loop. What was missing was the third step: the aggregate was **dropped**
 together with the rethrown error, so a failure in several regions looked like a
 single-region one — and the aggregate's own keys are group indices, which
 identify no region. The aggregate is now logged with the identity of every
-failed region before the first error is rethrown.
+failed call before the first error is rethrown.
+
+Coverage is window-scoped since issue #789: the fan-out dispatches at most
+`maxConcurrency` sub-batches at a time, so a failure in an earlier window
+means later windows are never sent and their regions never fail (they are not
+attempted). The "every failing region" guarantee therefore holds only while
+the whole secondary fan-out fits in a single window — see the #789 entry
+above the index.
 
 Do not "improve" this by throwing the aggregate: that changes the exception
 type of every multi-region prewrite failure and breaks the callers the

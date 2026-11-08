@@ -1124,6 +1124,83 @@ final class TxnKvFanoutTest extends TestCase
     }
 
     /**
+     * Issue #789: the partial-failure aggregate is window-scoped. With 19
+     * secondary calls, a cap of 6 and two failures in the second window,
+     * later windows are never dispatched: the aggregate's `totalRegions` is
+     * the failing window's size (6), not the 19 scheduled calls, and no
+     * prewrite reaches r13..r19. The first error in dispatch order still
+     * surfaces.
+     */
+    public function testPrewriteFailureInALaterWindowIsReportedForThatWindowOnly(): void
+    {
+        [$regions, $keys] = $this->makeWideRegions(20, 1);
+        $this->stubPdClient($regions);
+        $failing = ['r08k0', 'r10k0'];
+        /** @var list<string> $prewrites */
+        $prewrites = [];
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request) use ($failing, &$prewrites): Message {
+                if ($method === 'KvPrewrite') {
+                    $requestKeys = self::requestKeys($request);
+                    $prewrites[] = $requestKeys[0] ?? '';
+                    foreach ($failing as $key) {
+                        if (in_array($key, $requestKeys, true)) {
+                            throw new GrpcException(
+                                "prewrite failed on {$key}",
+                                GrpcStatusCode::InvalidArgument->value,
+                            );
+                        }
+                    }
+                }
+
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+        $logger = $this->recordingLogger();
+        $txn = $this->createTransaction($regions, $grpc, ['maxConcurrency' => 6], $logger);
+        foreach ($keys as $index => $key) {
+            $txn->set($key, "v{$index}");
+        }
+
+        try {
+            $txn->commit();
+            self::fail('the failing prewrite must abort the commit');
+        } catch (GrpcException $e) {
+            self::assertSame('gRPC error: prewrite failed on r08k0', $e->getMessage());
+        }
+
+        // Primary r00 + the first two windows (r01..r06, r07..r12). Windows
+        // r13..r18 and r19 were never dispatched.
+        self::assertContains('r12k0', $prewrites);
+        self::assertNotContains('r13k0', $prewrites);
+        self::assertNotContains('r19k0', $prewrites);
+        self::assertCount(13, $prewrites);
+        self::assertSame(6, $grpc->maxInFlight, 'the second window must fill the cap, and no more');
+
+        $reports = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['message'] === 'Prewrite fan-out failed for some regions',
+        ));
+        self::assertCount(1, $reports, 'the aggregated failure must be reported once');
+
+        $context = $reports[0]['context'];
+        self::assertSame(2, $context['failedRegions']);
+        self::assertSame(6, $context['totalRegions'], 'the aggregate covers the failing window, not the whole fan-out');
+        self::assertSame(
+            [
+                ['regionId' => 108, 'subBatchIndex' => 0, 'error' => 'gRPC error: prewrite failed on r08k0'],
+                ['regionId' => 110, 'subBatchIndex' => 0, 'error' => 'gRPC error: prewrite failed on r10k0'],
+            ],
+            $context['errors'],
+        );
+    }
+
+    /**
      * @param list<array{method: string, at: float}> $log
      */
     private function countMethod(array $log, string $method): int
