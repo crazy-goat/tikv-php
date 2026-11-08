@@ -12,6 +12,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [A reflective probe cannot pass an argument by reference with `invoke()`](#a-reflective-probe-cannot-pass-an-argument-by-reference-with-invoke)
 - [A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep](#a-lock-resolution-deadline-fix-starts-from-the-current-lockresolver-not-from-470s-ttl-sleep)
 - [RetryExecutor unit tests that need zero-sleep retries: use DataIsNotReady or an explicit classifier](#retryexecutor-unit-tests-that-need-zero-sleep-retries-use-dataisnotready-or-an-explicit-classifier)
 - [Sizing a retry-budget regression test under equal jitter: do the min-cumulative-sleep math](#sizing-a-retry-budget-regression-test-under-equal-jitter-do-the-min-cumulative-sleep-math)
@@ -154,6 +155,20 @@ of the file.
 - [The batch deadline is finite by default, and checked only between waits (#275)](#the-batch-deadline-is-finite-by-default-and-checked-only-between-waits-275)
 - [Destructors log best-effort and skip rollback during shutdown (#287)](#destructors-log-best-effort-and-skip-rollback-during-shutdown-287)
 <!-- index:end -->
+
+## A reflective probe cannot pass an argument by reference with `invoke()`
+
+`ReflectionMethod::invoke($target, $argument)` always passes `$argument` by
+value. A method that declares the parameter by reference (`isHandling(int|string &$level)`)
+therefore emits `Argument #1 ($level) must be passed by reference, value
+given` **before** the call throws, and the warning escapes to the user even
+though the probe catches the `TypeError` and falls back (issue #716).
+
+Use `ReflectionMethod::invokeArgs($target, [&$argument])` instead: the array
+element is a reference, so a by-reference parameter is satisfied, and a
+by-value parameter accepts a reference just as well. One call shape covers
+both signatures, with no warning and no need to inspect
+`getParameters()`.
 
 ## A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep
 
@@ -3169,20 +3184,6 @@ what the user has to do: configure the logger's level and handlers before
 the client is built, and build a new client after changing them. A
 limitation that is only described in the commit message is a limitation
 that the next integrator re-discovers the hard way.
-
-## A reflective probe cannot pass an argument by reference with `invoke()`
-
-`ReflectionMethod::invoke($target, $argument)` always passes `$argument` by
-value. A method that declares the parameter by reference (`isHandling(int|string &$level)`)
-therefore emits `Argument #1 ($level) must be passed by reference, value
-given` **before** the call throws, and the warning escapes to the user even
-though the probe catches the `TypeError` and falls back (issue #716).
-
-Use `ReflectionMethod::invokeArgs($target, [&$argument])` instead: the array
-element is a reference, so a by-reference parameter is satisfied, and a
-by-value parameter accepts a reference just as well. One call shape covers
-both signatures, with no warning and no need to inspect
-`getParameters()`.
 
 ## `0` means "disabled" in one knob and "invalid" in another — the knob decides
 
