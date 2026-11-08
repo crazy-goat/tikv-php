@@ -15,7 +15,7 @@ use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
-use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\DetailedMetricsInterface;
@@ -698,21 +698,14 @@ final readonly class LockResolver
     ): void {
         $keys = [...$secondaries, (string) $lock->getKey()];
 
-        try {
-            $keysByRegion = RegionGrouper::groupKeysByRegionBatch(
-                $keys,
-                $this->regionResolver,
-                $this->pdTimeoutWithinBudget($deadlineAtMs),
-            );
-        } catch (RegionException $e) {
-            $this->logger->warning('Async-commit resolve failed to group keys', [
-                'key' => KeyRedactor::redact((string) $lock->getKey()),
-                'lockTs' => $lockTs,
-                'commitTs' => $commitTs,
-                'error' => $e->getMessage(),
-            ]);
-            return;
-        }
+        // A routing failure must reach the caller's retry executor. Swallowing
+        // it here reported the lock as resolved although no ResolveLock RPC
+        // was sent, leaving the lock in place (issue #844, mirrors #224).
+        $keysByRegion = RegionGrouper::groupKeysByRegionBatch(
+            $keys,
+            $this->regionResolver,
+            $this->pdTimeoutWithinBudget($deadlineAtMs),
+        );
 
         foreach ($keysByRegion as $regionData) {
             $region = $regionData['region'];
@@ -751,6 +744,8 @@ final readonly class LockResolver
                 notLeaderOwnedByRetryExecutor: $notLeaderOwnedByRetryExecutor,
                 keyErrorsHandledByCaller: true,
             );
+
+            $this->assertResolveLockSucceeded($response, $lockTs);
         }
 
         $this->recordResolvedLock($lockTs, $commitTs);
@@ -813,6 +808,8 @@ final readonly class LockResolver
                 keyErrorsHandledByCaller: true,
             );
 
+            $this->assertResolveLockSucceeded($response, $lockTs);
+
             $this->invalidateRegionFor($regionData['keys'][0]);
         }
 
@@ -866,6 +863,8 @@ final readonly class LockResolver
             keyErrorsHandledByCaller: true,
         );
 
+        $this->assertResolveLockSucceeded($response, $lockTs);
+
         $this->recordResolvedLock($lockTs, $commitTs);
     }
 
@@ -914,7 +913,54 @@ final readonly class LockResolver
             keyErrorsHandledByCaller: true,
         );
 
+        $this->assertResolveLockSucceeded($response, $lockTs);
+
         $this->recordResolvedLock($lockTs, 0);
+    }
+
+    /**
+     * Reject an errored KvResolveLock response (issue #844).
+     *
+     * `ResolveLockResponse` carries no status: the absence of `error` is the
+     * only success signal. Treating a `KeyError` as "resolved" left the lock
+     * in place, kept the region cache stale and spent the caller's retry
+     * budget anyway. A retryable variant is transient, so the caller's
+     * executor retries it with the lock backoff; every other variant
+     * (`abort`, `txn_not_found`, an unknown future one) fails closed with the
+     * shared description. `abort` is checked first so a fatal abort is never
+     * swallowed by a co-set compatibility `retryable` string (same precedence
+     * as the rollback handler, #559). `KeyErrorDescriber` sanitises the
+     * server text, so no raw key reaches the exception message.
+     */
+    private function assertResolveLockSucceeded(ResolveLockResponse $response, int $lockTs): void
+    {
+        $error = $response->getError();
+        if ($error === null) {
+            return;
+        }
+
+        $detail = KeyErrorDescriber::describe($error);
+        $this->logger->warning('ResolveLock returned error', [
+            'lockTs' => $lockTs,
+            'error' => $detail,
+        ]);
+
+        if ($error->getAbort() !== '') {
+            throw new TiKvException('ResolveLock failed: ' . $detail);
+        }
+
+        if ($error->getRetryable() !== '') {
+            throw new TxnRetryableException(
+                'ResolveLock failed: ' . $detail,
+                BackoffType::TxnLock,
+            );
+        }
+
+        // txn_not_found / txn_lock_not_found do not prove that the lock this
+        // resolution was asked to clear is gone: unlike rollback (#559), a
+        // resolve carries no per-key outcome, so only a clean response may be
+        // reported as resolved. Unknown variants fail closed too.
+        throw new TiKvException('ResolveLock failed: ' . $detail);
     }
 
     /**

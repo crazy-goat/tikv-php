@@ -701,6 +701,127 @@ class OnePhaseAsyncCommitTest extends TestCase
         $this->assertSame(self::START_TS, (int) $resolves[0]->getStartVersion());
     }
 
+    public function testErroredAsyncCommitResolveIsRetryableAndRecordsNothing(): void
+    {
+        $this->stubRegionLookup([$this->makeRegion(1, '', '')]);
+        $this->pdClient->method('getLowResolutionTimestamp')->willReturn((1 << 42) | 999);
+
+        $keyError = new KeyError();
+        $keyError->setRetryable('region is busy');
+        $erroredResolve = new ResolveLockResponse();
+        $erroredResolve->setError($keyError);
+
+        $queue = [
+            ['method' => 'KvCheckTxnStatus', 'response' => $this->makeUndecidedStatusResponse()],
+            ['method' => 'KvCheckSecondaryLocks', 'response' => $this->makeLockedSecondaryResponse()],
+            ['method' => 'KvResolveLock', 'response' => $erroredResolve],
+        ];
+        $index = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+            ?object $request = null,
+        ) use (
+            &$queue,
+            &$index
+        ): object {
+            $call = $queue[$index++] ?? null;
+            if ($call === null || $call['method'] !== $method) {
+                throw new \RuntimeException("Unexpected method at $index: $method");
+            }
+            return $call['response'];
+        });
+
+        $resolver = new LockResolver(
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            $this->pdClient,
+            self::START_TS,
+        );
+
+        try {
+            $resolver->resolveLock('p', $this->makeAsyncLock());
+            $this->fail('Expected an errored async-commit resolve to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+            $this->assertStringContainsString(
+                'ResolveLock failed: retryable: region is busy',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertTrue(
+            $resolver->getResolvedLockTracker()->isEmpty(),
+            'an errored async-commit resolve must not be recorded as resolved',
+        );
+    }
+
+    public function testRegionErrorWhileGroupingAsyncCommitKeysPropagates(): void
+    {
+        $region = $this->makeRegion(1, '', '');
+        // 'p' (status check) and 's2' (secondary check) are cached, so the
+        // first two RPCs run. The finalization groups ['s1', 's2'] and 's1'
+        // is a cache miss: the PD scan fails, and that failure must reach
+        // the caller instead of being reported as a resolved lock.
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn (string $key): ?RegionInfo => in_array($key, ['p', 's2'], true) ? $region : null,
+        );
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturn($region);
+        $this->pdClient->method('scanRegions')->willThrowException(
+            new RegionException('RegionResolver', 'PD scan failed', errorKind: ErrorKind::RegionNotFound),
+        );
+        $this->pdClient->method('getLowResolutionTimestamp')->willReturn((1 << 42) | 999);
+
+        /** @var list<string> $methods */
+        $methods = [];
+        $queue = [
+            ['method' => 'KvCheckTxnStatus', 'response' => $this->makeUndecidedStatusResponse()],
+            ['method' => 'KvCheckSecondaryLocks', 'response' => $this->makeLockedSecondaryResponse()],
+        ];
+        $index = 0;
+        $this->grpc->method('call')->willReturnCallback(function (
+            string $addr,
+            string $svc,
+            string $method,
+            ?object $request = null,
+        ) use (
+            &$methods,
+            &$queue,
+            &$index
+        ): object {
+            $methods[] = $method;
+            $call = $queue[$index++] ?? null;
+            if ($call === null || $call['method'] !== $method) {
+                throw new \RuntimeException("Unexpected method at $index: $method");
+            }
+            return $call['response'];
+        });
+
+        $resolver = new LockResolver(
+            $this->grpc,
+            $this->regionResolver,
+            $this->regionCache,
+            $this->pdClient,
+            self::START_TS,
+        );
+
+        try {
+            $resolver->resolveLock('p', $this->makeAsyncLock());
+            $this->fail('Expected the async-commit grouping region error to propagate');
+        } catch (RegionException $e) {
+            $this->assertSame(ErrorKind::RegionNotFound, $e->errorKind);
+        }
+
+        $this->assertSame(
+            ['KvCheckTxnStatus', 'KvCheckSecondaryLocks'],
+            $methods,
+            'a grouping failure must not be reported as a successful resolve',
+        );
+    }
+
     private function makeUndecidedStatusResponse(): CheckTxnStatusResponse
     {
         $status = new CheckTxnStatusResponse();

@@ -56,6 +56,7 @@ of the file.
 - [`composer.lock` is committed and pinned to the lowest PHP (#311)](#composerlock-is-committed-and-pinned-to-the-lowest-php-311)
 - [Resolved transaction statuses are cached, FIFO, 2048, final outcomes only (#428)](#resolved-transaction-statuses-are-cached-fifo-2048-final-outcomes-only-428)
 - [An errored `CheckTxnStatus` response is not a status (#224)](#an-errored-checktxnstatus-response-is-not-a-status-224)
+- [An errored `KvResolveLock` response is not a resolution (#844)](#an-errored-kvresolvelock-response-is-not-a-resolution-844)
 - [Atomic mode and plain writes use different TiKV paths (#399)](#atomic-mode-and-plain-writes-use-different-tikv-paths-399)
 - [Opportunistic primary-lock heartbeat: pessimistic only, every lock TTL is `uptime + TTL`, no timer (#429)](#opportunistic-primary-lock-heartbeat-pessimistic-only-every-lock-ttl-is-uptime--ttl-no-timer-429)
 - [The idle sweep touches the returned channel before it sweeps, and `reapIdleChannels()` is public on the clients (#277)](#the-idle-sweep-touches-the-returned-channel-before-it-sweeps-and-reapidlechannels-is-public-on-the-clients-277)
@@ -1587,6 +1588,38 @@ async-commit transaction. Pinned by
 `OnePhaseAsyncCommitTest::testErroredCheckSecondaryLocksIsRetryableAndResolvesNothing()`,
 `::testRegionErrorWhileGroupingSecondariesPropagates()` and
 `::testGenuineRolledBackSecondaryResolvesAtCommitTsZero()`.
+
+## An errored `KvResolveLock` response is not a resolution (#844)
+
+`ResolveLockResponse` carries no status fields: the absence of `error` is
+the only success signal. All four `LockResolver` call sites
+(`resolveLockCommitted()`, `resolveLockRolledBack()`, the batch `resolveKeys()`
+and `resolveAsyncCommitLocks()`) passed `keyErrorsHandledByCaller: true` to
+`RegionErrorHandler::check()` and then ignored `getError()`, so an `abort`,
+`txn_not_found` or unknown variant looked like "resolved": the lock stayed in
+place, `ResolvedLockTracker` recorded a transaction that was never resolved,
+and the caller's retry budget could be spent without changing anything.
+
+The shared `assertResolveLockSucceeded()` fails closed: `abort` is checked
+first and throws a `TiKvException` (a fatal abort must not be masked by a
+co-set compatibility `retryable` string, the #559 precedence); a bare
+`retryable` throws `TxnRetryableException(BackoffType::TxnLock)` so the
+caller's executor owns the backoff; every other variant, including
+`txn_not_found` and `txn_lock_not_found`, throws `TiKvException`. Unlike
+rollback (#559), those two "already gone" variants are deliberately not
+success here: a resolve response carries no per-key outcome, so it cannot
+prove that the lock this call was asked to clear is gone, and a retry is the
+only safe answer.
+
+`resolveAsyncCommitLocks()` also no longer catches `RegionException` from
+`RegionGrouper::groupKeysByRegionBatch()`. The old `return` reported success
+although no resolve RPC was sent — the same shape as the #224
+`checkSecondaryLocks()` grouping bug. Pinned by
+`LockResolverTest::testRetryableResolveLockErrorRequestsRetryAndRecordsNothing()`,
+`::testAbortedResolveLockFailsClosedAndRecordsNothing()`,
+`LockResolverBatchTest::testErroredBatchResolveRequestsRetryAndRecordsNothing()`,
+`OnePhaseAsyncCommitTest::testErroredAsyncCommitResolveIsRetryableAndRecordsNothing()`
+and `::testRegionErrorWhileGroupingAsyncCommitKeysPropagates()`.
 
 ## Atomic mode and plain writes use different TiKV paths (#399)
 

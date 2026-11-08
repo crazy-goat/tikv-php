@@ -48,6 +48,9 @@ class LockResolverBatchTest extends TestCase
     /** @var array<int, CheckTxnStatusResponse> status answer per lock start ts */
     private array $statusByTs = [];
 
+    /** Response returned for KvResolveLock; tests override it to inject an error */
+    private ResolveLockResponse $resolveResponse;
+
     protected function setUp(): void
     {
         $this->grpc = $this->createMock(GrpcClientInterface::class);
@@ -56,6 +59,7 @@ class LockResolverBatchTest extends TestCase
         $this->checks = [];
         $this->resolves = [];
         $this->statusByTs = [];
+        $this->resolveResponse = new ResolveLockResponse();
 
         $left = new RegionInfo(1, 1, 1, 1, 1, '', self::BOUNDARY);
         $right = new RegionInfo(2, 2, 1, 1, 1, self::BOUNDARY, '');
@@ -76,7 +80,7 @@ class LockResolverBatchTest extends TestCase
                 }
                 if ($request instanceof ResolveLockRequest) {
                     $this->resolves[] = $request;
-                    return new ResolveLockResponse();
+                    return $this->resolveResponse;
                 }
                 throw new \RuntimeException("Unexpected method: $method");
             },
@@ -251,6 +255,34 @@ class LockResolverBatchTest extends TestCase
         $this->assertSame(['1001', '1002', '1003'], $this->keysOf($this->resolves[0]));
         $this->assertSame(120, (int) $this->resolves[0]->getCommitVersion());
         $this->assertSame(100, (int) $this->resolves[0]->getStartVersion());
+    }
+
+    public function testErroredBatchResolveRequestsRetryAndRecordsNothing(): void
+    {
+        $this->statusByTs[100] = $this->txnStatus(commitTs: 120);
+        $keyError = new KeyError();
+        $keyError->setRetryable('region is busy');
+        $this->resolveResponse = new ResolveLockResponse();
+        $this->resolveResponse->setError($keyError);
+
+        $resolver = $this->resolver();
+
+        try {
+            $resolver->resolveLocks([$this->lock('1001', 100), $this->lock('6001', 100)]);
+            $this->fail('Expected an errored batch KvResolveLock to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+            $this->assertStringContainsString(
+                'ResolveLock failed: retryable: region is busy',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertCount(1, $this->resolves, 'the first region was attempted and failed');
+        $this->assertTrue(
+            $resolver->getResolvedLockTracker()->isEmpty(),
+            'an errored resolve must not be recorded as resolved',
+        );
     }
 
     public function testRolledBackTransactionBatchUsesCommitVersionZero(): void

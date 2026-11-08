@@ -20,6 +20,7 @@ use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
@@ -65,6 +66,9 @@ class LockResolverTest extends TestCase
     /** @var ResolveLockRequest[] Requests captured from KvResolveLock calls */
     private array $resolveLockRequests = [];
 
+    /** Response returned for KvResolveLock; tests override it to inject an error */
+    private ResolveLockResponse $resolveResponse;
+
     /** @var list<string> Method names of every gRPC call, in order */
     private array $callSequence = [];
 
@@ -79,6 +83,7 @@ class LockResolverTest extends TestCase
         $this->logger = $this->createMock(LoggerInterface::class);
         $this->checkTxnStatusRequests = [];
         $this->resolveLockRequests = [];
+        $this->resolveResponse = new ResolveLockResponse();
         $this->callSequence = [];
         $this->callTimeouts = [];
 
@@ -149,6 +154,21 @@ class LockResolverTest extends TestCase
         return $response;
     }
 
+    private function makeResolveResponseWithError(string $abort = '', string $retryable = ''): ResolveLockResponse
+    {
+        $error = new KeyError();
+        if ($abort !== '') {
+            $error->setAbort($abort);
+        }
+        if ($retryable !== '') {
+            $error->setRetryable($retryable);
+        }
+        $response = new ResolveLockResponse();
+        $response->setError($error);
+
+        return $response;
+    }
+
     private function makeLockInfo(
         string $key = self::TEST_KEY,
         int $lockVersion = self::LOCK_TS,
@@ -194,7 +214,7 @@ class LockResolverTest extends TestCase
                     return $checkResponses[$checkIndex++];
                 }
                 if ($method === 'KvResolveLock') {
-                    return new ResolveLockResponse();
+                    return $this->resolveResponse;
                 }
                 throw new \RuntimeException("Unexpected method: $method");
             });
@@ -237,7 +257,7 @@ class LockResolverTest extends TestCase
                     if ($request instanceof ResolveLockRequest) {
                         $this->resolveLockRequests[] = $request;
                     }
-                    return new ResolveLockResponse();
+                    return $this->resolveResponse;
                 }
                 throw new \RuntimeException("Unexpected method: $method");
             });
@@ -520,6 +540,70 @@ class LockResolverTest extends TestCase
     }
 
     // ========================================================================
+    // An errored KvResolveLock is not a successful resolution (issue #844)
+    // ========================================================================
+
+    public function testRetryableResolveLockErrorRequestsRetryAndRecordsNothing(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->resolveResponse = $this->makeResolveResponseWithError(retryable: 'lock is busy');
+
+        $this->mockGrpcCallsAndCaptureResolve($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+        $resolver = $this->createResolver();
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected an errored KvResolveLock to request a retry');
+        } catch (TxnRetryableException $e) {
+            $this->assertSame(BackoffType::TxnLock, $e->backoffType);
+            $this->assertStringContainsString(
+                'ResolveLock failed: retryable: lock is busy',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertCount(1, $this->resolveLockRequests, 'the RPC was attempted');
+        $this->assertTrue(
+            $resolver->getResolvedLockTracker()->isEmpty(),
+            'an errored resolve must not be recorded as resolved',
+        );
+    }
+
+    public function testAbortedResolveLockFailsClosedAndRecordsNothing(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->resolveResponse = $this->makeResolveResponseWithError(abort: 'transaction aborted');
+
+        // Rolled-back path: a final status with commit_ts 0.
+        $this->mockGrpcCallsAndCaptureResolve(
+            $this->makeCheckTxnStatusResponse(action: Action::TTLExpireRollback),
+        );
+
+        $resolver = $this->createResolver();
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected an aborted KvResolveLock to fail closed');
+        } catch (TxnRetryableException $e) {
+            $this->fail('Abort must not be retried: ' . $e->getMessage());
+        } catch (TiKvException $e) {
+            $this->assertSame(TiKvException::class, $e::class);
+            $this->assertStringContainsString(
+                'ResolveLock failed: abort: transaction aborted',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertTrue(
+            $resolver->getResolvedLockTracker()->isEmpty(),
+            'an errored resolve must not be recorded as resolved',
+        );
+    }
+
+    // ========================================================================
     // checkTxnStatus() — an errored response is not a status (issue #224)
     // ========================================================================
 
@@ -709,12 +793,18 @@ class LockResolverTest extends TestCase
 
         $grpcCallCount = 0;
         $this->grpc->method('call')
-            ->willReturnCallback(function () use (&$grpcCallCount): object {
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+            ) use (&$grpcCallCount): object {
                 $grpcCallCount++;
-                return match ($grpcCallCount) { // @phpstan-ignore match.unhandled
-                    1, 3 => $this->makeCheckTxnStatusResponse(commitVersion: 1),
-                    2, 4 => new ResolveLockResponse(),
-                };
+                // The two locks share the default lock ts, so only the first
+                // resolveLock() performs a status check (the final outcome is
+                // cached); both still issue KvResolveLock.
+                return $method === 'KvCheckTxnStatus'
+                    ? $this->makeCheckTxnStatusResponse(commitVersion: 1)
+                    : new ResolveLockResponse();
             });
 
         $resolver = $this->createResolver();
