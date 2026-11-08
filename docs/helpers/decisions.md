@@ -143,8 +143,9 @@ explicitly lowered — and lowering it is a visible act, because the value lives
 `bin/check-coverage.php` and nothing else restates it: the check prints the floor it applied, and
 `tests/Unit/Bin/CoverageFloorCheckTest.php` reads the constant back and drives the check with it.
 That test therefore pins the comparison (a report a tenth of a point below the floor has to fail),
-not the value: raising or lowering the constant keeps the suite green, and the ratchet is this
-documented convention plus a visible diff, not a machine check.
+not the value: every fixture is derived from the constant, so raising or lowering it — one-decimal
+steps included — keeps the suite green, and the ratchet is this documented convention plus a
+visible diff, not a machine check.
 
 ## PHP support: >= 8.2, CI matrix 8.2–8.4
 

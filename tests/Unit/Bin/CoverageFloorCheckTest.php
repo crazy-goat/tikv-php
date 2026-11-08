@@ -28,25 +28,34 @@ final class CoverageFloorCheckTest extends TestCase
 
     public function testCoverageBelowTheFloorFails(): void
     {
-        [$exitCode, $output] = $this->runCheck($this->writeReport(60, 100));
+        // Derived from the constant, so raising or lowering the floor keeps
+        // this test meaningful instead of pinning it to one value.
+        $below = max(0.0, $this->defaultFloor() - 5.0);
+
+        [$exitCode, $output] = $this->runCheck($this->writeReport($below, 1000));
 
         self::assertSame(1, $exitCode);
-        self::assertStringContainsString('60.00%', $output);
+        self::assertStringContainsString(sprintf('%.2f%%', $below), $output);
         self::assertStringContainsString(sprintf('floor: %.2f%%', $this->defaultFloor()), $output);
     }
 
     public function testCoverageAboveTheFloorPasses(): void
     {
-        [$exitCode, $output] = $this->runCheck($this->writeReport(95, 100));
+        $above = min(100.0, $this->defaultFloor() + 5.0);
+
+        [$exitCode, $output] = $this->runCheck($this->writeReport($above, 1000));
 
         self::assertSame(0, $exitCode);
-        self::assertStringContainsString('95.00%', $output);
+        self::assertStringContainsString(sprintf('%.2f%%', $above), $output);
         self::assertStringContainsString('Coverage floor satisfied.', $output);
     }
 
     public function testCoverageExactlyAtTheFloorPasses(): void
     {
-        [$exitCode] = $this->runCheck($this->writeReport($this->defaultFloor(), 100));
+        // 1 000 lines, so a one-decimal floor is representable in the report;
+        // with 100 lines a floor such as 87.4 would be written as 87 % and the
+        // check would fail a report that is meant to be exactly at the floor.
+        [$exitCode] = $this->runCheck($this->writeReport($this->defaultFloor(), 1000));
 
         self::assertSame(0, $exitCode);
     }

@@ -161,9 +161,9 @@ of the file.
 `tests/Unit/Bin/CoverageFloorCheckTest.php` greps `DEFAULT_COVERAGE_FLOOR` out of
 `bin/check-coverage.php` and drives the check with it. That is the right shape — the
 script owns the value and the test cannot drift from it — but it does **not** guard the
-value: a scratch copy of the script with the constant set to 86.5 (or to 88.0) passes the
-whole suite, because every assertion is relative to whatever the constant says. What the
-test pins is the comparison (below the floor fails, at or above it passes, a report a
+value: a scratch copy of the script with the constant set to 86.5, 88.2 (or 100.0) passes
+the whole suite, because every fixture is derived from whatever the constant says. What
+the test pins is the comparison (below the floor fails, at or above it passes, a report a
 tenth of a point below it fails, `--floor` overrides the default).
 
 Two consequences worth remembering:
