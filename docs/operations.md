@@ -1423,6 +1423,14 @@ before calling `close()`, or expect them to fail. A client built with
 calls continue (and become the application's responsibility when it closes
 the transport).
 
+Multi-RPC RawKV operations re-check the closed flag between their dispatch
+windows and pages: a `close()` that lands while a batch fan-out window
+(`batchGet()` / `batchPut()` / `batchDelete()`) or an unbounded `scan()`
+page is in flight stops the next window or page before it opens an RPC, and
+the operation throws `ClientClosedException` instead of starting new calls
+on a closed transport (issue #783). Calls already dispatched keep the
+non-graceful contract above.
+
 `__destruct()` calls `close()`, so a client built by `create()` releases its
 caches, handles and connections when the object is destroyed. A hand-assembled
 `RawKvClient` releases only its own caches: the transport and PD client it was

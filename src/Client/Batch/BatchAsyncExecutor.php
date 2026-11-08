@@ -260,6 +260,16 @@ final readonly class BatchAsyncExecutor
      *                                                      {@see self::executeParallel()}
      *                                                      (issue #285,
      *                                                      GRPC-26)
+     * @param (\Closure(): void)|null       $ensureOpen     invoked before every
+     *                                                      window is dispatched
+     *                                                      (issue #783). A
+     *                                                      throwable it raises
+     *                                                      (e.g.
+     *                                                      ClientClosedException)
+     *                                                      propagates unchanged and
+     *                                                      skips all later windows;
+     *                                                      it is never folded into
+     *                                                      {@see BatchPartialFailureException}
      * @return array<int, mixed> results keyed by the original fan-out slot
      * @throws BatchPartialFailureException   If any region fails
      * @throws BatchDeadlineExceededException If $deadlineMs > 0 and dispatch+wait exceeds it
@@ -270,6 +280,7 @@ final readonly class BatchAsyncExecutor
         int $maxConcurrency = self::DEFAULT_MAX_CONCURRENCY,
         int $deadlineMs = TimeoutConfig::DEFAULT_BATCH_DEADLINE_MS,
         array $labels = [],
+        ?\Closure $ensureOpen = null,
     ): array {
         if ($maxConcurrency < 1) {
             throw new \InvalidArgumentException(sprintf(
@@ -285,6 +296,13 @@ final readonly class BatchAsyncExecutor
         $startTimeMs = $deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0;
         $results = [];
         foreach (array_chunk($regionCalls, $maxConcurrency, true) as $window) {
+            // Re-check the owner's lifecycle before starting a new window: a
+            // close() while the previous window was in flight must not let
+            // this multi-window fan-out open new RPCs (issue #783).
+            if ($ensureOpen instanceof \Closure) {
+                $ensureOpen();
+            }
+
             // One budget for ALL windows: each window gets what is left, so
             // N windows cannot stretch the batch to N times the deadline.
             $windowDeadlineMs = $deadlineMs;

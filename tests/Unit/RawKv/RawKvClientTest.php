@@ -1157,6 +1157,94 @@ class RawKvClientTest extends TestCase
         $this->assertSame(['dispatch', 'dispatch', 'close'], $events);
     }
 
+    public function testCloseDuringFirstBatchWindowPreventsSecondWindowDispatch(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response1 = new RawBatchGetResponse();
+        $pair1 = new KvPair();
+        $pair1->setKey('a1');
+        $pair1->setValue('v1');
+        $response1->setPairs([$pair1]);
+
+        // maxConcurrency 1 puts the two regions in separate windows: the
+        // second one must never be dispatched once the first window's
+        // waiter closed the client (issue #783).
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            maxConcurrency: 1,
+            ownsGrpcClient: true,
+            ownsPdClient: true,
+        );
+
+        $closed = false;
+        /** @var list<string> $events */
+        $events = [];
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                    string $responseClass,
+                    ?int $timeoutMs = null,
+                ) use (
+                    $response1,
+                    $client,
+                    &$closed,
+                    &$events,
+                ): GrpcFuture {
+                    $events[] = 'dispatch';
+
+                    return GrpcFuture::fromWaiter(function () use ($response1, $client, &$closed, &$events): Message {
+                        if (!$closed) {
+                            $closed = true;
+                            $events[] = 'close';
+                            $client->close();
+                        }
+
+                        return $response1;
+                    });
+                },
+            );
+
+        try {
+            $client->batchGet(['a1', 'z1']);
+            $this->fail('Expected ClientClosedException was not thrown');
+        } catch (ClientClosedException) {
+        }
+
+        $this->assertTrue($closed);
+        $this->assertSame(['dispatch', 'close'], $events);
+    }
+
     // ========================================================================
     // batchPut()
     // ========================================================================
@@ -1300,6 +1388,41 @@ class RawKvClientTest extends TestCase
         $this->expectExceptionMessage('Scan limit (99999) exceeds maximum allowed scan limit of 10240');
 
         $this->client->reverseScan('l', 'k', 99999);
+    }
+
+    public function testCloseDuringUnboundedScanPreventsNextPageFetch(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // A full page makes scanUnbounded() want a second page; the first
+        // page's response closes the client, so the guard must stop the
+        // second RawScan before it reaches the wire (issue #783).
+        $pairs = [];
+        for ($i = 0; $i < RawKvScanner::MAX_SCAN_LIMIT; $i++) {
+            $pair = new KvPair();
+            $pair->setKey(sprintf('k%05d', $i));
+            $pair->setValue('v');
+            $pairs[] = $pair;
+        }
+        $fullPage = new RawScanResponse();
+        $fullPage->setKvs($pairs);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(function () use ($fullPage): Message {
+                $this->client->close();
+
+                return $fullPage;
+            });
+
+        try {
+            $this->client->scan('a', 'z', 0);
+            $this->fail('Expected ClientClosedException was not thrown');
+        } catch (ClientClosedException) {
+        }
     }
 
     // ========================================================================

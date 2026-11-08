@@ -100,6 +100,16 @@ final readonly class RawKvScanner
          * @var (\Closure(TiKvException): \CrazyGoat\TiKV\Client\Retry\RetryVerdict)|null
          */
         private ?Closure $retryClassifier = null,
+        /**
+         * Owner lifecycle check invoked before every unbounded scan page
+         * (issue #783); null disables the re-check. RawKvClient passes its
+         * ensureOpen() so a close() from a callback during a `limit: 0`
+         * scan stops the next RawScan page with ClientClosedException
+         * instead of opening it on a closed transport.
+         *
+         * @var (Closure(): void)|null
+         */
+        private ?Closure $ensureOpen = null,
     ) {
         if ($this->maxScanRows < 1) {
             throw new InvalidArgumentException('maxScanRows must be >= 1');
@@ -175,6 +185,14 @@ final readonly class RawKvScanner
         $cursor = $startKey;
 
         while (true) {
+            // Re-check the owner's lifecycle before fetching a new page: a
+            // close() from a callback during the previous page must stop the
+            // scan here instead of opening another RawScan on a closed
+            // transport (issue #783).
+            if ($this->ensureOpen instanceof \Closure) {
+                ($this->ensureOpen)();
+            }
+
             $page = $this->scanPage($executor, $cursor, $endKey, $this->scanPageSize, $keyOnly, $columnFamily);
 
             if ($page === []) {

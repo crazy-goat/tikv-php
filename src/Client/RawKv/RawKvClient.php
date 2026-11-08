@@ -622,6 +622,7 @@ final class RawKvClient
             ) : null,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            ensureOpen: $this->ensureOpen(...),
         );
         $this->scanner = $scanner ?? new RawKvScanner(
             $pdClient,
@@ -641,6 +642,7 @@ final class RawKvClient
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
             retryClassifier: $this->retryClassifier,
+            ensureOpen: $this->ensureOpen(...),
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
