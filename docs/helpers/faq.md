@@ -2542,6 +2542,23 @@ assertions). Three consequences for the test suite:
    are both passed to `check()` — with `$regionId === null` the handler cannot
    invalidate anything and the expectation would be vacuous.
 
+Since #665 `phpunit.xml` sets `failOnRisky="true"`, so a risky test fails the
+run instead of being reported and staying green. A runner that passes
+`--do-not-fail-on-risky` overrides the attribute;
+`TestSuiteSelectorGuardTest::testRiskyTestsFailTheRun()` fails when the
+attribute disappears or a runner opts out (the mutation run in
+`infection.json` is the deliberate exception).
+
+`$this->fail()` in a `catch` block is **not** an assertion. It only runs when
+the expected exception does not fire, so a test whose body is
+`try { ... } catch (ClientClosedException) { /* expected */ }` passes with zero
+assertions and is reported risky. The pattern that counts is to bind the
+exception and assert something about it —
+`catch (ClientClosedException $e) { $this->assertSame('Client is closed', $e->getMessage()); }`
+— which is what #665 applied to
+`RawKvE2ETest::testMultiplePostCloseOperationsAllThrow()` (after the
+`failOnRisky` flag exposed it), mirroring the `TxnKvE2ETest` sibling.
+
 ## A TTL array shorter than the pair list breaks the `int[]` contract — the count check belongs in the public helper
 
 `RawKvSplitter::splitPairsIntoBatches()` used to pad a short TTL array with
