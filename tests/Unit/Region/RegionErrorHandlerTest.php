@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
+namespace CrazyGoat\TiKV\Tests\Unit\Region;
 
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
