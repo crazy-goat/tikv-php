@@ -118,20 +118,29 @@ class ReplicaReadTargetResolutionTest extends TestCase
 
     public function testMixedModeMayTargetAnyPeer(): void
     {
+        $bounds = [];
         $storeIds = [];
-        for ($i = 0; $i < 20; $i++) {
+        // Walk every candidate index deterministically instead of relying on
+        // random_int() hitting all three peers in a bounded number of draws.
+        foreach ([0, 1, 2] as $index) {
             $target = RegionContextFactory::resolveTarget(
                 $this->region(),
                 new ReplicaReadPolicy(mode: ReplicaReadMode::Mixed),
                 $this->storeLookup(),
+                randomInt: static function (int $min, int $max) use ($index, &$bounds): int {
+                    $bounds[] = [$min, $max];
+
+                    return $min + $index;
+                },
             );
             $storeIds[] = $target->storeId;
             self::assertTrue($target->context->getReplicaRead() || $target->storeId === 3);
         }
 
-        self::assertContains(3, $storeIds);
-        self::assertContains(4, $storeIds);
-        self::assertContains(5, $storeIds);
+        // Peers are [leader 7/3, 8/4, 9/5], so each candidate index reaches
+        // one distinct store, leader included.
+        self::assertSame([3, 4, 5], $storeIds);
+        self::assertSame([[0, 2], [0, 2], [0, 2]], $bounds);
     }
 
     public function testPreferLeaderKeepsLeaderWhenLabelsAllowIt(): void

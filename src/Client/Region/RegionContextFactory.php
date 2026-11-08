@@ -66,6 +66,10 @@ final class RegionContextFactory
      *     (issue #424): a replica whose store is in its health cooldown is
      *     skipped, so a retry does not re-select the same unhealthy replica.
      *     Null keeps the historical selection unchanged.
+     * @param (Closure(int, int): int)|null $randomInt Internal test seam for
+     *     the replica choice (issue #817): it receives the candidate index
+     *     bounds and must return an index inside them. Null uses random_int()
+     *     as before; application code must leave it null.
      */
     public static function resolveTarget(
         RegionInfo $region,
@@ -77,6 +81,7 @@ final class RegionContextFactory
         ?RequestContextOptions $requestContext = null,
         ?ResourceControl $resourceControl = null,
         ?Closure $storeAvailable = null,
+        ?Closure $randomInt = null,
     ): ReplicaReadTarget {
         $leader = self::leaderPeer($region);
         $leaderTarget = new ReplicaReadTarget(
@@ -127,7 +132,9 @@ final class RegionContextFactory
             return $leaderTarget;
         }
 
-        $peerInfo = $candidates[random_int(0, count($candidates) - 1)];
+        $lastIndex = count($candidates) - 1;
+        $index = $randomInt instanceof Closure ? $randomInt(0, $lastIndex) : random_int(0, $lastIndex);
+        $peerInfo = $candidates[$index];
 
         return new ReplicaReadTarget(
             self::buildContext(
