@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- `RegionErrorHandler::check()` no longer tests the region cache with `$cache instanceof RegionCacheInterface` before using it: the parameter is already typed `?RegionCacheInterface`, so the cache is now used through `?->` and `$regionId !== null` is the only guard. The behaviour is unchanged — a `null` cache with a region id still skips the capture and the invalidation. The docblock now names `NotLeader` as the exception to the routing-error invalidation rule, matching the ownership paragraph below it. (#680)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
