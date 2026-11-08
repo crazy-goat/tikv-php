@@ -618,7 +618,9 @@ transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
 `grpc`) cannot be combined with it — they would configure a transport the
 factory does not build, so they are rejected with an
 `InvalidArgumentException` instead of being silently ignored. Configure them
-on the `GrpcClient` you pass in.
+on the `GrpcClient` you pass in. An explicit `'tls' => null` is the one
+exception: it means "no TLS configuration" everywhere else, so it is treated
+as absent rather than as a conflict (issue #695).
 
 One caveat of sharing: on a retryable transport error the client closes the
 channel of the affected address. With a shared transport that affects every
@@ -643,8 +645,21 @@ when the error is handled, and it runs only for `UNAVAILABLE`, not for a
 `options['metrics']` is a **client-side** option and is always applied: it
 backs the client-side counters (region cache, retries). The transport's own
 RPC counters follow the transport — with an injected transport they are the
-ones it was built with, so pass the same backend to the transport
-(`new GrpcClient(metrics: $metrics)`) to get them everywhere.
+ones it was built with, and `options['metrics']` is **not** forwarded to it.
+Pass the same backend to the transport (`new GrpcClient(metrics: $metrics)`)
+to get them everywhere.
+
+The `ConnectionBundle` that `ConnectionFactory::create()` returns — an
+internal value object, not part of the public client API — also reports the
+transport's TLS state. `ConnectionBundle::$tlsState` is
+`Connection\TlsState::Unknown` for a supplied transport, because the factory
+does not inspect its TLS configuration. For a transport the factory built it
+is `Connection\TlsState::Plaintext` when the configuration carries no TLS
+material (including an empty `'tls' => []`), and `Connection\TlsState::Tls`
+when `TlsConfig::isEnabled()` is true.
+`ConnectionBundle::$tlsConfig` alone cannot express that difference: it is
+`null` both for a factory-built plaintext transport and for an injected one,
+and non-null but disabled for an empty TLS configuration (issue #695).
 
 #### What the shared channel really is
 
