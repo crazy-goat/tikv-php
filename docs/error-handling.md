@@ -67,11 +67,11 @@ any custom project-wide exception work).
 > The client never throws a raw `\Exception`, `\RuntimeException` or
 > `\InvalidArgumentException` as an operation failure: everything that can
 > reach your code from a TiKV operation is one of the classes above.
-> The two bootstrap/environment errors described next are the deliberate
+> The three bootstrap/environment errors described next are the deliberate
 > exceptions.
 
-Two failures outside that hierarchy come from the redaction helper rather than
-from an operation:
+Three failures outside that hierarchy come from the redaction helper rather
+than from an operation:
 
 - [`KeyRedactor::setRedactor()`](../src/Client/Util/KeyRedactor.php) and
   `KeyRedactor::setSalt()` throw `\LogicException` when called after the first

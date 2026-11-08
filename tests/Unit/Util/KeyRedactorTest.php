@@ -165,9 +165,17 @@ class KeyRedactorTest extends TestCase
 
     public function testNullSaltIsAcceptedAndSelectsTheDefault(): void
     {
-        KeyRedactor::setSalt(null);
+        $fixedSalt = str_repeat('s', KeyRedactor::MIN_SALT_BYTES);
+        $fixedToken = '#' . substr(hash_hmac('sha256', 'user1234', $fixedSalt), 0, 16) . ' (8 bytes)';
 
-        self::assertMatchesRegularExpression('/\A#[0-9a-f]{16} \(8 bytes\)\z/', KeyRedactor::redact('user1234'));
+        KeyRedactor::setSalt($fixedSalt);
+        // Both calls happen before the first redact(), so the one-shot guard
+        // still allows the reset to the default salt.
+        KeyRedactor::setSalt(null);
+        $default = KeyRedactor::redact('user1234');
+
+        self::assertMatchesRegularExpression('/\A#[0-9a-f]{16} \(8 bytes\)\z/', $default);
+        self::assertNotSame($fixedToken, $default);
     }
 
     public function testGenerateSaltProducesAValidSalt(): void
