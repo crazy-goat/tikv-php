@@ -48,7 +48,10 @@ class RetryExecutorDefaultClassifierTest extends TestCase
         $this->regionCache->method('getByKey')->willReturn(null);
     }
 
-    private function createExecutor(?\Closure $classifier = null): RetryExecutor
+    /**
+     * @param (callable(TiKvException): RetryVerdict)|null $classifier
+     */
+    private function createExecutor(?callable $classifier = null): RetryExecutor
     {
         return new RetryExecutor(
             maxBackoffMs: 10000,
@@ -161,6 +164,37 @@ class RetryExecutorDefaultClassifierTest extends TestCase
 
         self::assertSame($error, $caught);
         self::assertSame(1, $calls, 'the per-call classifier must be consulted first');
+    }
+
+    public function testConstructorAcceptsANonClosureCallable(): void
+    {
+        // An invokable object is a callable but not a Closure; the executor
+        // must normalise it (issue #719 review).
+        $classifier = new class {
+            public function __invoke(TiKvException $e): RetryVerdict
+            {
+                return RetryVerdict::fatal();
+            }
+        };
+
+        $error = new TiKvException('DataIsNotReady');
+
+        $calls = 0;
+        $caught = null;
+        try {
+            $this->createExecutor($classifier)->execute(
+                self::KEY,
+                function () use (&$calls, $error): string {
+                    ++$calls;
+                    throw $error;
+                },
+            );
+        } catch (TiKvException $e) {
+            $caught = $e;
+        }
+
+        self::assertSame($error, $caught);
+        self::assertSame(1, $calls, 'an invokable object must be normalised like a Closure');
     }
 
     public function testBeginOperationKeepsTheExecutorClassifier(): void

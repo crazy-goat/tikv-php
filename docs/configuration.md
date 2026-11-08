@@ -2146,19 +2146,25 @@ The backoff taxonomy mirrors client-go's set: besides the region-error curves,
 `BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound` and `BoCommitTSLag`.
 
 ```php
+use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
-use CrazyGoat\TiKV\Client\Retry\BackoffType;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 
-$client = RawKvClient::create(['127.0.0.1:2379'], [
-    'retryClassifier' => static function (TiKvException $e): RetryVerdict {
-        if (str_contains($e->getMessage(), 'CustomError')) {
-            return RetryVerdict::retry(BackoffType::StaleCmd); // pick a real BackoffType case
-        }
-        return RetryVerdict::pass(); // fall through to the built-in ErrorClassifier
-    },
-]);
+$client = RawKvClient::create(
+    ['127.0.0.1:2379'],
+    options: [
+        'retryClassifier' => static function (TiKvException $e): RetryVerdict {
+            // Fail fast on a busy cluster instead of backing off.
+            if ($e instanceof RegionException && $e->errorKind === ErrorKind::ServerIsBusy) {
+                return RetryVerdict::fatal();
+            }
+
+            return RetryVerdict::pass(); // fall through to the built-in ErrorClassifier
+        },
+    ],
+);
 ```
 
 `TxnKvClient::create()` accepts the same option; the classifier is handed to
@@ -2166,9 +2172,25 @@ every transaction `begin()` returns, so reads, writes, commit, rollback and
 lock resolution share it:
 
 ```php
-$client = TxnKvClient::create(['127.0.0.1:2379'], [
-    'retryClassifier' => static fn (TiKvException $e): RetryVerdict => /* … */,
-]);
+use CrazyGoat\TiKV\Client\Exception\RegionException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Retry\ErrorKind;
+use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
+use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+
+$client = TxnKvClient::create(
+    ['127.0.0.1:2379'],
+    options: [
+        'retryClassifier' => static function (TiKvException $e): RetryVerdict {
+            if ($e instanceof RegionException && $e->errorKind === ErrorKind::ServerIsBusy) {
+                return RetryVerdict::fatal();
+            }
+
+            return RetryVerdict::pass();
+        },
+    ],
+);
+
 $txn = $client->begin();
 ```
 
@@ -2192,7 +2214,9 @@ classifier cannot skip the region invalidation or the broken-channel cleanup.
 If you drive a `RetryExecutor` yourself (a fan-out outside the client, as in
 earlier versions of this section), pass `classifier:` to the constructor for
 the same client-level default, or `classifier:` to one `execute()` call to
-override it for that operation. Per-call classifiers win over the
+override it for that operation. Both accept any PHP callable (a closure,
+`[$object, 'method']`, a function name or an invokable object); the executor
+normalises it to a `Closure` internally. Per-call classifiers win over the
 constructor-level one, so a library-owned per-call classifier cannot be
 shadowed. For a user-level fan-out that must share one budget, call
 `$executor = $executor->beginOperation()` once and pass the returned executor

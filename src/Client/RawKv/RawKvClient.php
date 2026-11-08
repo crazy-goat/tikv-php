@@ -346,8 +346,10 @@ final class RawKvClient
      *        built by the application — the client uses it and never closes
      *        it, so one transport can be shared with other clients).
      *        'retryClassifier' (a callable `TiKvException -> RetryVerdict`,
-     *        issue #719) replaces the built-in error classification for every
-     *        retry loop the client builds; see {@see self::OPT_RETRY_CLASSIFIER}.
+     *        issue #719) extends or overrides the built-in error
+     *        classification for every retry loop the client builds; a
+     *        `RetryVerdict::pass()` falls through to it. See
+     *        {@see self::OPT_RETRY_CLASSIFIER}.
      *
      * @throws InvalidArgumentException if PD endpoints array is empty or an
      *         option value is invalid

@@ -48,6 +48,34 @@ final readonly class RetryExecutor
      */
     public const DEFAULT_RETRY_DEADLINE_MS = 30000;
 
+    /**
+     * Client-level classifier (issue #719), consulted when the per-call
+     * classifier has no opinion (Pass) and before the built-in
+     * {@see ErrorClassifier}. Normalised to a `\Closure` because `callable`
+     * is not a legal property type; the constructor accepts any callable.
+     *
+     * @var (\Closure(TiKvException): RetryVerdict)|null
+     */
+    private ?\Closure $classifier;
+
+    /**
+     * @param (callable(TiKvException): RetryVerdict)|null $classifier
+     *        Client-level classifier (issue #719), consulted when the
+     *        per-call classifier has no opinion (Pass) and before the
+     *        built-in {@see ErrorClassifier}: return
+     *        {@see RetryVerdict::retry()} to retry,
+     *        {@see RetryVerdict::fatal()} to stop, or
+     *        {@see RetryVerdict::pass()} to fall through to the built-in
+     *        classification. It is the executor-level seam through which
+     *        RawKvClient and TxnKvClient expose `options['retryClassifier']`
+     *        without requiring the caller to build an executor by hand.
+     *
+     *        A per-call classifier still wins over this one, so the library's
+     *        own call sites (for example a transaction's TxnRetryableException
+     *        handling) cannot be overridden by a user classifier. Any PHP
+     *        callable is accepted and wrapped with
+     *        {@see \Closure::fromCallable()}.
+     */
     public function __construct(
         private int $maxBackoffMs,
         private int $serverBusyBudgetMs,
@@ -64,27 +92,7 @@ final readonly class RetryExecutor
          * {@see self::beginOperation()} sets it; see {@see RetryBudget}.
          */
         private ?RetryBudget $budget = null,
-        /**
-         * Client-level classifier (issue #719), consulted when the per-call
-         * classifier has no opinion (Pass) and before the built-in
-         * {@see ErrorClassifier}: return {@see RetryVerdict::retry()} to
-         * retry, {@see RetryVerdict::fatal()} to stop, or
-         * {@see RetryVerdict::pass()} to fall through to the built-in
-         * classification. It is the executor-level seam through which
-         * RawKvClient and TxnKvClient expose `options['retryClassifier']`
-         * without requiring the caller to build an executor by hand.
-         *
-         * A per-call classifier still wins over this one, so the library's
-         * own call sites (for example a transaction's TxnRetryableException
-         * handling) cannot be overridden by a user classifier.
-         *
-         * A `\Closure` property rather than `callable`: PHP forbids
-         * `callable` as a property type. The clients wrap whatever callable
-         * they receive with {@see \Closure::fromCallable()}.
-         *
-         * @var (\Closure(TiKvException): RetryVerdict)|null
-         */
-        private ?\Closure $classifier = null,
+        ?callable $classifier = null,
     ) {
         if ($maxAttempts < 1) {
             throw new \InvalidArgumentException('maxAttempts must be >= 1');
@@ -92,6 +100,7 @@ final readonly class RetryExecutor
         if ($deadlineMs < 0) {
             throw new \InvalidArgumentException('deadlineMs must be >= 0');
         }
+        $this->classifier = $classifier !== null ? \Closure::fromCallable($classifier) : null;
     }
 
     /**

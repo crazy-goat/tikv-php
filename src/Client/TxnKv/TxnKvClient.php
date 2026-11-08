@@ -355,9 +355,11 @@ final class TxnKvClient
      *                                      timeout, issue #229).
      *                                      'retryClassifier' (a callable
      *                                      `TiKvException -> RetryVerdict`,
-     *                                      issue #719) replaces the built-in
-     *                                      error classification for every
-     *                                      transaction; see
+     *                                      issue #719) extends or overrides
+     *                                      the built-in error classification
+     *                                      for every transaction; a
+     *                                      `RetryVerdict::pass()` falls
+     *                                      through to it. See
      *                                      {@see self::OPT_RETRY_CLASSIFIER}.
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
