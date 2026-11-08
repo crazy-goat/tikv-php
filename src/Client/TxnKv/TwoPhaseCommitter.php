@@ -293,11 +293,6 @@ final readonly class TwoPhaseCommitter
         return $this->pessimistic;
     }
 
-    public function getPriority(): int
-    {
-        return $this->priority;
-    }
-
     /**
      * Build the RPC context for a transaction request, carrying the
      * transaction's priority (issue #441). Mirrors client-go's SetPriority:

@@ -1756,8 +1756,8 @@ context-building call sites. `begin(['priority' => 2])` therefore reaches
 `KvPessimisticLock`, `TxnHeartBeat` and both rollback RPCs; the
 lock-resolution RPCs stay Normal by design, because they resolve other
 transactions' locks. Pinned by
-`TransactionTest::testPriorityIsCarriedOnEveryRequestContext()`,
-`::testPriorityIsCarriedOnEveryReadRequestContext()`,
+`TransactionTest::testPriorityIsCarriedOnGetPrewriteAndCommitContexts()`,
+`::testPriorityIsCarriedOnBatchGetAndScanContexts()`,
 `::testPriorityIsCarriedOnPessimisticLockContext()`,
 `::testPriorityIsCarriedOnRollbackContexts()` and
 `TxnKvClientTest::testBeginWithPriorityReachesTheRpcContext()`, so no source
@@ -1917,17 +1917,25 @@ capture by value. Return `[$txn, static function () use (&$requests): array {
 return $requests; }]` and call the getter after the operation
 (used in `CommitPrewriteKeyCoverageTest`, issue #329).
 
-## Tests pinning a not-yet-merged fail-closed contract — guard with a behavior probe, not an env flag
+## Tests pinning a not-yet-merged contract — a temporary guard, now removed
 
-When an audit issue's tests assert behavior another (open) PR implements
-(e.g. #329's tests assert the fail-closed contract of unmerged #244/PR #531),
-CI must stay green without weakening the pin: probe the contract at runtime
-(call the resolver with an unresolvable key; if it doesn't throw, the fix is
-absent) and `trigger_error(..., E_USER_WARNING)` with a message naming the blocking PR (NOT `markTestSkipped()`: the `unit-tests` CI job runs with `--fail-on-skipped`, so a skip breaks the build; PHPUnit 11 has no add-warning API, and an `E_USER_WARNING` during a test is recorded as a non-failing warning that still names the pending contract). The
-tests then fail against master if the guard is removed (verify once by
-temporarily replacing the warning-early-return with `self::fail()`) and activate
-automatically when the fix merges — no env var to clean up later, and no
-duplicate tests alongside the fix PR's own coverage.
+When an audit issue's tests assert behavior another (open) PR implements, CI
+must stay green without weakening the pin: probe the contract at runtime (call
+the resolver with an unresolvable key; if it doesn't throw, the fix is absent)
+and `trigger_error(..., E_USER_WARNING)` with a message naming the blocking PR
+(NOT `markTestSkipped()`: the `unit-tests` CI job runs with
+`--fail-on-skipped`, so a skip breaks the build; PHPUnit 11 has no add-warning
+API, and an `E_USER_WARNING` during a test is recorded as a non-failing warning
+that still names the pending contract). Verify once by temporarily replacing the
+warning-early-return with `self::fail()`: the tests then fail against master if
+the guard is removed.
+
+This pattern was used by #329 to pin the fail-closed contract of then-unmerged
+#244/PR #531. That contract has since merged and #682 replaced both probes with
+a direct `expectException(TiKvException::class)` assertion, so no such guard
+remains in the suite. The technique is still the fallback for a future
+cross-PR pin, but delete it once the dependency merges rather than leaving a
+dead branch behind.
 
 ## RawKvBatch dispatches through `callAsync()` — tests use a dead endpoint, not a dead channel (issue #273)
 
@@ -2726,9 +2734,9 @@ so a new request path that builds its context by hand, or that forgets the
 `priority:` argument, silently drops the transaction's priority again. The
 transaction's *read* path was missing for a long time: the write path has
 carried the priority since #441, the read path only since #336 (issue
-#336). Pinned by `TransactionTest::testPriorityIsCarriedOnEveryRequestContext()`
+#336). Pinned by `TransactionTest::testPriorityIsCarriedOnGetPrewriteAndCommitContexts()`
 (the `KvGet`, `KvPrewrite` and `KvCommit` contexts),
-`::testPriorityIsCarriedOnEveryReadRequestContext()` (the `KvBatchGet` and
+`::testPriorityIsCarriedOnBatchGetAndScanContexts()` (the `KvBatchGet` and
 `KvScan` contexts — the read path has three independent context-building
 call sites, and pinning only one of them would leave the other two free to
 drop the priority again) and
@@ -2919,12 +2927,13 @@ label. Four lessons:
    Overstating a guard in the docs is a docs bug of the same kind as
    understating it.
 4. **A deprecated API can behave differently per call shape.** `withCaCert()`
-   guesses per value, but `withClientCert()` ORs the two guesses
-   (`resolveWithGuess($cert) || resolveWithGuess($key)`), so the client pair is
-   decided for both values together and a mixed pair (inline PEM certificate
-   with a file key) dies with `TLS file has disallowed extension ""`. Copying
-   the single-value description to the pair is wrong — read the whole method,
-   not its helper.
+   guesses per value, but `withClientCert()` requires both values in the same
+   form: it compares the two guesses and rejects a mixed pair (inline PEM
+   certificate with a file key, or the other way round) with one message,
+   `TLS client certificate and key must be given in the same form, both file
+   paths or both inline PEM`, whether or not the path half exists (issue #688).
+   Copying the single-value description to the pair is wrong — read the whole
+   method, not its helper.
 
 ## An audit issue's "this loop is sequential" premise expires — read the tree before re-implementing
 

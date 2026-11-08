@@ -5010,12 +5010,11 @@ class TransactionTest extends TestCase
         $this->assertSame(2, $commitContext->getPriority());
     }
 
-    public function testPriorityIsCarriedOnEveryRequestContext(): void
+    public function testPriorityIsCarriedOnGetPrewriteAndCommitContexts(): void
     {
-        // The transaction's priority must reach the Context of EVERY request
-        // the transaction sends — the read (KvGet) as well as the writes
-        // (KvPrewrite, KvCommit). Before issue #336 only the write path
-        // carried it: the read path built its Context through
+        // The transaction's priority must reach the Context of the KvGet read
+        // and of the KvPrewrite / KvCommit writes. Before issue #336 only the
+        // write path carried it: the read path built its Context through
         // RegionContextFactory::resolveTarget(), which never set the
         // priority, so a transaction begun with 'priority' => High still
         // had its reads scheduled as Normal inside TiKV.
@@ -5070,11 +5069,12 @@ class TransactionTest extends TestCase
         $this->assertSame(CommandPri::High, $commitContext->getPriority(), 'priority missing on KvCommit');
     }
 
-    public function testPriorityIsCarriedOnEveryReadRequestContext(): void
+    public function testPriorityIsCarriedOnBatchGetAndScanContexts(): void
     {
         // The read path has three independent context-building call sites —
-        // KvGet, KvBatchGet and KvScan. Pinning only one of them would leave
-        // the other two free to drop the priority again (issue #336).
+        // KvGet (pinned by testPriorityIsCarriedOnGetPrewriteAndCommitContexts),
+        // KvBatchGet and KvScan. Pinning only one of them would leave the
+        // other two free to drop the priority again (issue #336).
         $this->stubRegionAndStore();
 
         $capturedRequests = [];
@@ -5173,10 +5173,10 @@ class TransactionTest extends TestCase
 
     public function testDefaultPriorityIsNotSerializedOnTheWire(): void
     {
-        // CommandPri::Normal (0) is the proto3 default, so a Context built
+        // CommandPri::Normal (0) is the proto3 default, so a request built
         // without a priority must not carry the field at all — the request
         // bytes stay exactly what they were before issue #336. The reference
-        // Context is built by hand (not through RegionContextFactory), so the
+        // request is built by hand (not through RegionContextFactory), so the
         // expectation is not derived from the code under test.
         $this->stubRegionAndStore();
 
@@ -5203,8 +5203,6 @@ class TransactionTest extends TestCase
         $txn->get('k1');
 
         $this->assertInstanceOf(GetRequest::class, $capturedRequest);
-        $context = $capturedRequest->getContext();
-        $this->assertNotNull($context);
 
         $epoch = new RegionEpoch();
         $epoch->setConfVer(1);
@@ -5212,12 +5210,19 @@ class TransactionTest extends TestCase
         $peer = new Peer();
         $peer->setId(1);
         $peer->setStoreId(1);
-        $reference = new Context();
-        $reference->setRegionId(1);
-        $reference->setRegionEpoch($epoch);
-        $reference->setPeer($peer);
+        $referenceContext = new Context();
+        $referenceContext->setRegionId(1);
+        $referenceContext->setRegionEpoch($epoch);
+        $referenceContext->setPeer($peer);
 
-        $this->assertSame($reference->serializeToString(), $context->serializeToString());
+        // Compare the whole serialized request, not only its Context: the
+        // promise the name and the changelog make is about the request bytes.
+        $reference = new GetRequest();
+        $reference->setContext($referenceContext);
+        $reference->setKey('k1');
+        $reference->setVersion($txn->getStartTs());
+
+        $this->assertSame($reference->serializeToString(), $capturedRequest->serializeToString());
     }
 
     /**

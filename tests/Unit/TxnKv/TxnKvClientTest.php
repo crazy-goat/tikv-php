@@ -632,6 +632,17 @@ class TxnKvClientTest extends TestCase
         // testBeginWithPriorityPropagatesToTransaction) asserted
         // $txn->getPriority() alone — a constructor round-trip that stayed
         // green while the value never left the client (issue #336).
+        //
+        // The exhaustive per-RPC priority matrix deliberately lives in
+        // TransactionTest (testPriorityIsCarriedOnGetPrewriteAndCommitContexts(),
+        // ::testPriorityIsCarriedOnBatchGetAndScanContexts(),
+        // ::testPriorityIsCarriedOnPessimisticLockContext() and
+        // ::testPriorityIsCarriedOnRollbackContexts()), which build the
+        // transaction directly. The overlap here on KvGet / KvPrewrite /
+        // KvCommit is intentional: this is the only test that drives
+        // TxnKvClient::begin(), so it proves the option survives the client
+        // entry point into the RPC contexts — a break in begin() fails here
+        // and nowhere else (issue #686).
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(4000);
         $pdClient->method('getClusterId')->willReturn(null);
