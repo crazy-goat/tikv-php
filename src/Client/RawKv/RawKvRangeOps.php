@@ -62,7 +62,7 @@ final readonly class RawKvRangeOps
      * Per-region RawDeleteRange requests are fanned out at the wire layer:
      * all sends inside a concurrency window are issued before any wait
      * begins, so server-side latencies overlap instead of accumulating.
-     * At most {@see self::$maxConcurrency} requests are in flight at any
+     * At most {@see RawKvRangeOps::$maxConcurrency} requests are in flight at any
      * moment (issue #295).
      *
      * Failure semantics differ from a sequential loop: a region whose retry

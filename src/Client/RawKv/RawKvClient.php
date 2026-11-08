@@ -1604,6 +1604,12 @@ final class RawKvClient
      * `BatchPartialFailureException`, like the pre-#433 per-range path.
      * See {@see RawKvScanner::batchScan()} for the full cost model.
      *
+     * Every range is capped at `$eachLimit` rows, so a returned list whose
+     * count equals `$eachLimit` may be truncated: the range may hold more
+     * rows (issue #440). `$eachLimit` is required and must be in
+     * `1..MAX_SCAN_LIMIT`; unlike `scan()`, `0` does not mean "the whole
+     * range" and is rejected.
+     *
      * Returns one entry per range, each a list of
      * `['key' => string, 'value' => ?string]` rows (`value` is `null` when
      * `$keyOnly` is true). A list input keeps its order; non-sequential keys
