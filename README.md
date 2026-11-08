@@ -1001,10 +1001,14 @@ try {
 
 ## Implemented Operations
 
-Every public capability of the library, taken from `src/Client/` — the
+Every user-facing capability of the library, taken from `src/Client/` — the
 `RawKvClient`, the `TxnKvClient` (including its explicit
 `beginOptimistic()` / `beginPessimistic()` entry points), the `Transaction` and
-the client options.
+the client options. Lower-level utilities such as `KeyRedactor`,
+`TimeoutConfig`, `SlowLogConfig`, `TlsConfigBuilder`, `StoreCacheInterface`
+and `GrpcStatusCode` are not operations; the [Internal](#internal) section
+explains which of them are extension points and that the rest may change in
+any release.
 The list is cross-checked against `CHANGELOG.md` at release time, see
 [docs/release-workflow.md](docs/release-workflow.md).
 
@@ -1084,6 +1088,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `tracer` | A `TraceEventInterface` callback for structured trace events (gRPC calls, 2PC phases, lock resolution) |
 | `retryDeadlineMs` | Wall-clock bound on one retry loop |
 | `maxConcurrency` | Maximum number of in-flight requests in the batch and range fan-outs |
+| `maxIngestSize` | Payload cap (keys plus values) for one `ingest()` call; `0` (default) = unlimited, exceeding it throws `IngestTooLargeException` |
 | `maxScanRows` | Row cap for an unbounded (`limit: 0`) scan; exceeding it throws `ScanLimitExceededException` |
 | `replicaRead` | A `ReplicaReadPolicy` object — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` ([Replica Reads](docs/configuration.md#replica-reads)) |
 | `requestContext` | A `RequestContextOptions` object — isolation level, not-fill-cache, max execution duration, request source, resource group tag/name and busy threshold applied to every request ([Request Context Controls](docs/configuration.md#request-context-controls-issue-426-gap-12)) |
@@ -1326,7 +1331,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Batch Async Execution**
 - ✅ **Retry with Exponential Backoff**
 - ✅ **Per-key TTL in BatchPut**
-- ✅ **Scan limit enforcement** — MAX 10240 rows per RPC; `limit: 0` returns the whole range or throws `ScanLimitExceededException` past `options['maxScanRows']`; a negative limit throws `InvalidArgumentException` before any RPC
+- ✅ **Scan limit enforcement** — RawKV scans page at MAX 10240 rows per RPC; `limit: 0` returns the whole range or throws `ScanLimitExceededException` past `options['maxScanRows']`; the transactional scan has its own 10240-row cap and throws `ScanLimitExceededException` for a larger range instead of truncating; a negative limit throws `InvalidArgumentException` before any RPC
 - ✅ **Batch auto-splitting by size/count**
 - ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` and a bounded per-transaction `ResolvedLockTracker` that feeds the disjoint `Context.resolved_locks` / `Context.committed_locks` sets
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` when less than half of the lock TTL remains, with `optimisticLockTtlMs` / `pessimisticLockTtlMs`
