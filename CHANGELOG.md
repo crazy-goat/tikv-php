@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Changed
+
+- `RawKvBatch::batchPut()` and `RawKvSplitter::splitPairsIntoBatches()` now reject a TTL array whose length differs from the pair count with one wording, `TTL array count (N) must match pair count (M)`; the `batchPut()` path used to say "key-value pairs count". The contract is documented for the public entry point in `docs/operations.md` (whose parameter list omitted the array form of `$ttl`) and for the internal helper in `docs/development.md` and its class docblock, and the batch-splitting methods of `RawKvSplitter` are now marked `@internal`; the class stays internal, as the stability policy in `README.md` already classifies it. (#683)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
