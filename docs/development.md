@@ -59,8 +59,9 @@ Main entry point. Located at `src/Client/RawKv/RawKvClient.php`.
 **Key Methods:**
 - `get()` / `put()` / `delete()` / … - Public operations, each building a `RetryExecutor` via `createRetryExecutor()` and delegating to a `RawKv*` collaborator
 
-The retry loop lives in `RetryExecutor::execute()` (`src/Client/Retry/RetryExecutor.php`). Batch routing and prefix scans are delegated to dedicated collaborators:
+The retry loop lives in `RetryExecutor::execute()` (`src/Client/Retry/RetryExecutor.php`). Batch routing, batch splitting and prefix scans are delegated to dedicated collaborators:
 - `RegionGrouper::groupKeysByRegionBatch()` - Batch operation routing
+- `RawKvSplitter::splitIntoBatches()` / `splitPairsIntoBatches()` - Split a region's keys or key-value pairs into count- and byte-bounded requests; the pair variant keeps the TTL list aligned and throws `InvalidArgumentException` when a non-empty TTL array's length differs from the pair count (`TTL array count (N) must match pair count (M)`). Both are `@internal`; `calculatePrefixEndKey()` is the helper the user-facing documentation points callers at
 - `RawKvSplitter::calculatePrefixEndKey()` - Prefix scan helper
 
 ### PdClient
