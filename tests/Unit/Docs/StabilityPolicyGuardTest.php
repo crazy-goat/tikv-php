@@ -178,32 +178,74 @@ class StabilityPolicyGuardTest extends TestCase
      * of the policy) or internal (in the list below it). A class that is
      * neither is a class a consumer cannot reason about — it is not covered
      * by the promise, but it also is not announced as internal.
+     *
+     * The classification compares the two lists as sets instead of asking
+     * whether the class is named somewhere in the section: a class that a
+     * release pull request adds to both the public table and the internal
+     * list is ambiguous, and the reader cannot tell which promise applies.
      */
     public function testEveryClassOfTheClientTreeIsClassified(): void
     {
-        // The policy writes a whole namespace as a wildcard ("Exception\*"),
-        // so the wildcard is normalised before the tokens are compared.
-        $policy = str_replace('\\*', '\\', $this->policySection());
+        $violations = $this->classificationViolations($this->policySection(), $this->clientClasses());
 
-        foreach ($this->clientClasses() as $class) {
-            $relative = $this->relativeName($class);
-            $parts = explode('\\', $relative);
-            $namespace = array_slice($parts, 0, -1);
+        self::assertSame(
+            [],
+            $violations,
+            "The stability policy does not classify every class of src/Client/ exactly once:\n"
+            . implode("\n", $violations),
+        );
+    }
 
-            $classified = str_contains($policy, '`' . $relative . '`');
+    /**
+     * The set comparison is the point of the test above, so it has to be
+     * exercised where a class is named twice: the fixture is a miniature
+     * policy whose public table and internal list both name the same class.
+     */
+    public function testTheClassificationRejectsAClassThatIsBothPublicAndInternal(): void
+    {
+        $policy = implode("\n", [
+            '### Public API',
+            '',
+            '| Surface | What it covers |',
+            '|---|---|',
+            '| `RawKv\RawKvClient` | the RawKV entry point |',
+            '',
+            '### Internal',
+            '',
+            '- `RawKv\RawKvClient` — the only collaborator behind the entry point.',
+            '',
+        ]);
 
-            for ($depth = count($namespace); $depth > 0 && !$classified; $depth--) {
-                $prefix = implode('\\', array_slice($namespace, 0, $depth)) . '\\';
-                $classified = str_contains($policy, '`' . $prefix . '`');
-            }
+        $violations = $this->classificationViolations($policy, [RawKvClient::class]);
 
-            self::assertTrue(
-                $classified,
-                $class . ' is neither part of the promised public API nor listed as internal in '
-                . 'the stability policy. Every class of src/Client/ has to be classified: add it '
-                . 'to the public API table or to the internal list.',
-            );
-        }
+        self::assertCount(1, $violations);
+        self::assertStringContainsString('public', $violations[0]);
+        self::assertStringContainsString('internal', $violations[0]);
+    }
+
+    /**
+     * A class that the policy names nowhere is reported as well, so the set
+     * comparison does not silently accept an empty classification.
+     */
+    public function testTheClassificationRejectsAnUnclassifiedClass(): void
+    {
+        $policy = implode("\n", [
+            '### Public API',
+            '',
+            '| Surface | What it covers |',
+            '|---|---|',
+            '| `RawKv\RawKvClient` | the RawKV entry point |',
+            '',
+            '### Internal',
+            '',
+            '- `Batch\` — the batch collaborators.',
+            '',
+        ]);
+
+        $violations = $this->classificationViolations($policy, [TxnKvClient::class]);
+
+        self::assertCount(1, $violations);
+        self::assertStringContainsString('neither', $violations[0]);
     }
 
     /**
@@ -305,10 +347,13 @@ class StabilityPolicyGuardTest extends TestCase
      * JSON block and left the rest would publish a section that
      * contradicts itself — which is what this test prevents.
      *
-     * A version whose major is not the major of the library is not a
-     * version of the library — the SemVer boundary ("1.0.0"), the
-     * version of the SemVer specification, the PHP version — and is
-     * skipped.
+     * A literal whose major is not the major of the current release is
+     * skipped as a reference to another release line — the SemVer boundary
+     * the intro names ("1.0.0"), the version of another product, or a
+     * historical major line. It cannot be a version of the release line
+     * the policy documents. A literal that is part of a URL and a
+     * four-part dotted number never reach this loop: versionLiterals()
+     * skips both.
      */
     public function testThePolicyNamesOnlyTheCurrentReleaseAndTheNextMinor(): void
     {
@@ -348,36 +393,85 @@ class StabilityPolicyGuardTest extends TestCase
      * two-segment number is an example value (a timeout, a port) and not a
      * release; the two-segment forms of the policy itself ("~0.8") are
      * checked by the test above.
+     *
+     * Every three-part version on the current major line has to be the
+     * current release or the next minor. A version older than the current
+     * release is stale wherever it stands outside the policy, and a version
+     * newer than the next minor promises a release that does not exist yet.
+     * A version on another major line belongs to a previous line or to
+     * another product (grpc) and is skipped; a literal that is part of a
+     * URL and a four-part dotted number are not versions at all and are
+     * filtered out by versionLiterals().
      */
     public function testTheReadmeNamesNoReleaseButTheCurrentOneAndTheNextMinor(): void
     {
         $version = $this->latestReleasedVersion();
-        $allowed = [$version, $this->nextMinorVersion($version)];
-        $major = $this->majorOf($version);
+        $violations = $this->readmeReleaseViolations($this->readme(), $version);
 
-        foreach ($this->versionLiterals($this->readme()) as $literal) {
-            if ($literal['parts'] !== 3 || $this->majorOf($literal['literal']) !== $major) {
-                continue;
-            }
+        self::assertSame(
+            [],
+            $violations,
+            "README.md names a release that is neither the current one nor the next minor:\n"
+            . implode("\n", $violations),
+        );
+    }
 
-            // A release that is older than the current one is a historical
-            // reference ("since v0.4.0") and stays valid forever; only a
-            // release that is newer than the next minor is a mistake — the
-            // README must not promise a release that does not exist yet.
-            if (version_compare($literal['literal'], $allowed[1], '<=')) {
-                continue;
-            }
+    /**
+     * A stale release outside the policy is the case the earlier version of
+     * the guard let through, so the comparison has to be exercised without
+     * a stale README in the checkout.
+     */
+    public function testTheReadmeWideCheckRejectsAStaleRelease(): void
+    {
+        $violations = $this->readmeReleaseViolations(
+            "Project status: the current release is v0.9.0.\n",
+            '0.14.0',
+        );
 
-            self::assertContains(
-                $literal['literal'],
-                $allowed,
-                'README.md:' . $literal['line'] . ' names the release ' . $literal['literal']
-                . ', which is neither the current release (' . $version . ') nor the release '
-                . 'that follows it (' . $allowed[1] . '). A release the README names has to '
-                . 'follow the releases: the release pull request updates it in the same commit '
-                . '(see docs/release-workflow.md).',
-            );
-        }
+        self::assertCount(1, $violations);
+        self::assertStringContainsString('0.9.0', $violations[0]);
+
+        self::assertSame(
+            [],
+            $this->readmeReleaseViolations(
+                "Project status: the current release is v0.14.0.\n",
+                '0.14.0',
+            ),
+        );
+    }
+
+    /**
+     * The version scan skips what is not a version of the library: the
+     * version in a URL and an IPv4 address. Both are normal README content
+     * and neither may fail the guard on the library's own release line.
+     */
+    public function testTheVersionScanSkipsAUrlAndAnIpAddress(): void
+    {
+        self::assertSame(
+            [],
+            $this->versionLiterals('See https://example.com/releases/v2.0.0 for details.'),
+            'The version of a URL was read as a release of the library.',
+        );
+        self::assertSame(
+            [],
+            $this->versionLiterals('The SemVer specification is https://semver.org/spec/v2.0.0.html.'),
+            'The version of the SemVer URL was read as a release of the library.',
+        );
+        self::assertSame(
+            [],
+            $this->versionLiterals('Connect to 127.0.0.1:2379 or bind 0.0.0.0.'),
+            'An IPv4 address was read as a version.',
+        );
+        self::assertSame(
+            [['literal' => '0.14.0', 'parts' => 3, 'line' => 1]],
+            $this->versionLiterals('The current release is v0.14.0.'),
+            'A release next to a URL or an address is still read.',
+        );
+        self::assertSame(
+            [['literal' => '0.14.0', 'parts' => 3, 'line' => 1]],
+            $this->versionLiterals('See https://example.com/v2.0.0 and require v0.14.0.'),
+            'The URL hid the release on the same line.',
+        );
     }
 
     /**
@@ -454,16 +548,76 @@ class StabilityPolicyGuardTest extends TestCase
             [],
             $entries,
             'No changelog entry is marked as breaking. The convention is that a breaking '
-            . 'change carries a **BREAKING** prefix.',
+            . 'change carries a **BREAKING** or **Breaking change:** prefix.',
         );
 
-        foreach ($entries as $line => $entry) {
-            self::assertStringContainsString(
-                'Migration:',
-                $entry,
-                'CHANGELOG.md:' . $line . ' is marked as breaking but has no migration note.',
+        $withoutNote = $this->breakingEntriesWithoutMigration($this->changelog());
+
+        foreach ($withoutNote as $line => $entry) {
+            self::fail(
+                'CHANGELOG.md:' . $line . ' is marked as breaking but has no migration note: '
+                . $entry,
             );
         }
+    }
+
+    /**
+     * Both markers of the convention are checked, not only the all-caps one:
+     * a `**Breaking change:**` entry breaks an internal extension point and
+     * carries a migration note like a `**BREAKING**` entry does.
+     */
+    public function testABreakingChangeEntryWithoutAMigrationNoteIsReported(): void
+    {
+        $changelog = "## [Unreleased]\n\n### Changed\n\n"
+            . "- **Breaking change:** the internal hook changed its signature.\n";
+
+        self::assertSame(
+            [5],
+            array_keys($this->breakingEntriesWithoutMigration($changelog)),
+            'A "**Breaking change:**" entry without a migration note was not reported.',
+        );
+
+        self::assertSame(
+            [],
+            $this->breakingEntriesWithoutMigration(
+                $changelog . "  **Migration:** call the new hook instead.\n",
+            ),
+            'A "**Breaking change:**" entry with a migration note was reported.',
+        );
+    }
+
+    /**
+     * The pre-1.0 wording is the part of the policy intro that has to change
+     * at the 1.0.0 release. The guard follows the changelog, so the release
+     * pull request that adds the first 1.x section fails until the intro
+     * describes the released major line instead.
+     */
+    public function testThePreOnePointZeroWordingFailsOnceAVersionOneIsReleased(): void
+    {
+        $violation = $this->preOnePointZeroWordingViolation($this->readme(), $this->changelog());
+
+        self::assertNull(
+            $violation,
+            (string) $violation,
+        );
+
+        $changelog = "## [Unreleased]\n\n### Added\n\n- Something.\n\n## [v1.0.0] - 2027-01-01\n";
+
+        self::assertNotNull(
+            $this->preOnePointZeroWordingViolation(
+                "The library is **pre-1.0**. It follows Semantic Versioning.",
+                $changelog,
+            ),
+            'The "pre-1.0" wording passed after the changelog named a 1.x release.',
+        );
+
+        self::assertNull(
+            $this->preOnePointZeroWordingViolation(
+                'The library is **1.0**. It follows Semantic Versioning.',
+                $changelog,
+            ),
+            'The updated intro was reported after the changelog named a 1.x release.',
+        );
     }
 
     public function testTheTwoBreakingChangesShippedInV040AreMarked(): void
@@ -526,15 +680,226 @@ class StabilityPolicyGuardTest extends TestCase
      */
     private function policyTable(): string
     {
+        return $this->policyTableOf($this->policySection());
+    }
+
+    /**
+     * The rows of the table of a policy section.
+     */
+    private function policyTableOf(string $section): string
+    {
         $rows = [];
 
-        foreach (explode("\n", $this->policySection()) as $line) {
+        foreach (explode("\n", $section) as $line) {
             if (str_starts_with(trim($line), '|')) {
                 $rows[] = $line;
             }
         }
 
         return implode("\n", $rows);
+    }
+
+    /**
+     * The class tokens of the two classification lists of a policy section,
+     * as names relative to the client namespace: the public API table and
+     * the internal list below it.
+     *
+     * Only the first cell of a table row counts: the second cell explains
+     * the surface and mentions classes in prose ("`TiKvException` and every
+     * subclass"), which is not a classification of its own.
+     *
+     * An internal bullet explains its item after an em dash, so only the
+     * part before the dash counts. That is what makes the documented
+     * exceptions work: "`Region\` — except `Region\ReplicaReadMode` ..."
+     * lists the namespace as internal without listing the two public
+     * classes as internal in the same breath.
+     *
+     * @return array{public: list<string>, internal: list<string>}
+     */
+    private function policyClassificationTokens(string $section): array
+    {
+        $public = [];
+
+        foreach (explode("\n", $this->policyTableOf($section)) as $line) {
+            $cells = explode('|', trim($line));
+            $public = array_merge($public, $this->classTokens($cells[1] ?? ''));
+        }
+
+        $internal = [];
+
+        foreach ($this->internalListItems($section) as $item) {
+            $internal = array_merge($internal, $this->classTokens($item));
+        }
+
+        return [
+            'public' => array_values(array_unique($public)),
+            'internal' => array_values(array_unique($internal)),
+        ];
+    }
+
+    /**
+     * The items of the internal list of a policy section: every bullet, up
+     * to the em dash that introduces its explanation.
+     *
+     * @return list<string>
+     */
+    private function internalListItems(string $section): array
+    {
+        $start = strpos($section, '### Internal');
+
+        if ($start === false) {
+            self::fail(
+                'The stability policy has no "### Internal" list, so the guard cannot classify '
+                . 'the internal half of src/Client/.',
+            );
+        }
+
+        $items = [];
+        $current = null;
+
+        foreach (explode("\n", substr($section, $start)) as $line) {
+            $matches = [];
+
+            if (preg_match('/^\s*[-*]\s+(.*)$/', $line, $matches) === 1) {
+                if ($current !== null) {
+                    $items[] = $current;
+                }
+
+                $current = $matches[1];
+
+                continue;
+            }
+
+            if (trim($line) === '') {
+                if ($current !== null) {
+                    $items[] = $current;
+                    $current = null;
+                }
+
+                continue;
+            }
+
+            if ($current !== null && !str_starts_with($line, '#')) {
+                $current .= ' ' . trim($line);
+            }
+        }
+
+        if ($current !== null) {
+            $items[] = $current;
+        }
+
+        return array_map(
+            static fn (string $item): string => explode(' — ', $item, 2)[0],
+            $items,
+        );
+    }
+
+    /**
+     * The backticked class and namespace tokens of a text. A trailing
+     * backslash is the namespace wildcard the policy writes ("Batch\"), and
+     * the "\*" form of the same wildcard is normalised to it.
+     *
+     * A token without a namespace separator, a method name ("create()"), a
+     * path ("src/Proto/") or a property ("RegionException::$errorKind") is
+     * not a class token and is ignored.
+     *
+     * @return list<string>
+     */
+    private function classTokens(string $text): array
+    {
+        $matches = [];
+        preg_match_all('/`([^`]+)`/', $text, $matches);
+
+        $tokens = [];
+
+        foreach ($matches[1] as $token) {
+            $token = str_replace('\\*', '\\', $token);
+
+            if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z0-9_]*)+\\\\?$/', $token) !== 1) {
+                continue;
+            }
+
+            $tokens[] = $token;
+        }
+
+        return $tokens;
+    }
+
+    /**
+     * Every way a class of the client tree is not classified exactly once.
+     *
+     * An exact entry is more specific than a namespace wildcard, so a class
+     * the public table names explicitly stays public although the internal
+     * list covers its namespace ("Region\"). Two exact entries, or two
+     * wildcards, are ambiguous and reported.
+     *
+     * @param list<string> $classes fully qualified class names
+     *
+     * @return list<string>
+     */
+    private function classificationViolations(string $section, array $classes): array
+    {
+        $tokens = $this->policyClassificationTokens($section);
+        $violations = [];
+
+        foreach ($classes as $class) {
+            $relative = $this->relativeName($class);
+            $publicExact = in_array($relative, $tokens['public'], true);
+            $internalExact = in_array($relative, $tokens['internal'], true);
+            $public = $publicExact || $this->matchesAnyToken($relative, $tokens['public']);
+            $internal = $internalExact || $this->matchesAnyToken($relative, $tokens['internal']);
+
+            if ($publicExact && $internalExact) {
+                $violations[] = $class . ' is named in the public API table and in the internal list '
+                    . 'of the stability policy. A class is either public or internal: remove it '
+                    . 'from one of the two lists.';
+
+                continue;
+            }
+
+            if ($public && $internal) {
+                // An exact entry is the documented exception to a wildcard
+                // of the other list, so the two are not ambiguous.
+                if ($publicExact || $internalExact) {
+                    continue;
+                }
+
+                $violations[] = $class . ' matches a wildcard of the public API table and a '
+                    . 'wildcard of the internal list of the stability policy, so its status is '
+                    . 'ambiguous. Name it explicitly in the list that applies to it.';
+
+                continue;
+            }
+
+            if (!$public && !$internal) {
+                $violations[] = $class . ' is neither part of the promised public API nor listed as '
+                    . 'internal in the stability policy. Every class of src/Client/ has to be '
+                    . 'classified: add it to the public API table or to the internal list.';
+            }
+        }
+
+        return $violations;
+    }
+
+    /**
+     * Whether a relative class name matches an exact token or a namespace
+     * wildcard of a token list.
+     *
+     * @param list<string> $tokens
+     */
+    private function matchesAnyToken(string $relative, array $tokens): bool
+    {
+        foreach ($tokens as $token) {
+            if ($token === $relative) {
+                return true;
+            }
+
+            if (str_ends_with($token, '\\') && str_starts_with($relative, $token)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -585,6 +950,33 @@ class StabilityPolicyGuardTest extends TestCase
         );
 
         return $matches[1];
+    }
+
+    /**
+     * The violation of the pre-1.0 wording, or null when the README and the
+     * changelog agree.
+     *
+     * The intro of the policy says "The library is **pre-1.0**" and explains
+     * the minor-bump rule "before `1.0.0`". The wording has to go when the
+     * first 1.x release is cut, because the section then describes a
+     * released major line — the release pull request updates it in the same
+     * commit. The guard follows the changelog instead of a hard-coded
+     * version, so it fails at the release cut and nowhere else.
+     */
+    private function preOnePointZeroWordingViolation(string $readme, string $changelog): ?string
+    {
+        if (preg_match('/^## \[v?([1-9]\d*)\.\d+\.\d+\]/m', $changelog) !== 1) {
+            return null;
+        }
+
+        if (!str_contains($readme, 'pre-1.0')) {
+            return null;
+        }
+
+        return 'README.md still calls the library "pre-1.0", but CHANGELOG.md already names a '
+            . '1.x release. The intro of the stability policy has to describe the released major '
+            . 'line instead: drop the "pre-1.0" wording and the "before `1.0.0`" rule in the '
+            . 'release pull request (see docs/release-workflow.md).';
     }
 
     /**
@@ -644,12 +1036,57 @@ class StabilityPolicyGuardTest extends TestCase
     }
 
     /**
+     * Every three-part release of a text that is neither the current
+     * release nor the next minor, with the line it appears on.
+     *
+     * A version on another major line is skipped: it belongs to a previous
+     * major line or to another product, not to the release line this guard
+     * follows.
+     *
+     * @return list<string>
+     */
+    private function readmeReleaseViolations(string $readme, string $version): array
+    {
+        $allowed = [$version, $this->nextMinorVersion($version)];
+        $major = $this->majorOf($version);
+        $violations = [];
+
+        foreach ($this->versionLiterals($readme) as $literal) {
+            if ($literal['parts'] !== 3 || $this->majorOf($literal['literal']) !== $major) {
+                continue;
+            }
+
+            if (in_array($literal['literal'], $allowed, true)) {
+                continue;
+            }
+
+            $violations[] = 'README.md:' . $literal['line'] . ' names the release '
+                . $literal['literal'] . ', which is neither the current release (' . $version
+                . ') nor the release that follows it (' . $allowed[1] . '). A release the README '
+                . 'names has to follow the releases: the release pull request updates it in the '
+                . 'same commit (see docs/release-workflow.md).';
+        }
+
+        return $violations;
+    }
+
+    /**
      * Every version literal of a text.
      *
-     * A literal is a dotted number — "0.8.0" (a release) or "0.8" (the
-     * minor line of a release, the way a two-segment constraint writes
-     * it). The number of an IP address is not a version, so a literal that
-     * starts inside one is skipped.
+     * A literal is a two- or three-part dotted number — "0.8.0" (a release)
+     * or "0.8" (the minor line of a release, the way a two-segment
+     * constraint writes it).
+     *
+     * A literal that is part of a URL is skipped: the version in a URL
+     * belongs to the URL. The SemVer specification link is
+     * "https://semver.org/spec/v2.0.0.html", and its "2.0.0" is not a
+     * release of this library — it must not start failing the guard when
+     * the library reaches 2.0.0 itself, nor when it reaches 2.x.
+     *
+     * A four-part dotted number is an IPv4 address — "127.0.0.1",
+     * "0.0.0.0" — and not a version, so it is skipped as well. The pattern
+     * captures the whole dotted run and the part count rejects it, instead
+     * of relying on the major version of the current release.
      *
      * @return list<array{literal: string, parts: int, line: int}>
      */
@@ -658,16 +1095,35 @@ class StabilityPolicyGuardTest extends TestCase
         $literals = [];
 
         foreach (explode("\n", $text) as $index => $line) {
+            $urls = $this->urlSpans($line);
             $matches = [];
-            // The lookahead skips an IPv4 address ("127.0.0.1" must not be
-            // read as the version "127.0.0"), the lookbehind skips the
-            // second half of one.
-            preg_match_all('/(?<![\w.])(?:v)?(\d+\.\d+(?:\.\d+)?)(?!\.\d)/', $line, $matches);
+            // The lookbehind skips the second half of a dotted run, and the
+            // lookahead keeps a run that is followed by a word char or by
+            // another dotted segment out of the capture, so a longer run is
+            // captured whole and rejected by its part count. A sentence
+            // period after the version does not start another segment.
+            preg_match_all(
+                '/(?<![\w.])(?:v)?(\d+(?:\.\d+)+)(?!\w|\.\d)/',
+                $line,
+                $matches,
+                PREG_OFFSET_CAPTURE,
+            );
 
-            foreach ($matches[1] as $literal) {
+            foreach ($matches[1] as $match) {
+                $literal = $match[0];
+                $parts = substr_count($literal, '.') + 1;
+
+                if ($parts < 2 || $parts > 3) {
+                    continue;
+                }
+
+                if ($this->isInsideASpan($match[1], $urls)) {
+                    continue;
+                }
+
                 $literals[] = [
                     'literal' => $literal,
-                    'parts' => substr_count($literal, '.') + 1,
+                    'parts' => $parts,
                     'line' => $index + 1,
                 ];
             }
@@ -677,11 +1133,51 @@ class StabilityPolicyGuardTest extends TestCase
     }
 
     /**
+     * The byte spans of the URLs of a line.
+     *
+     * @return list<array{start: int, end: int}>
+     */
+    private function urlSpans(string $line): array
+    {
+        $matches = [];
+        preg_match_all('~\bhttps?://[^\s<>()\[\]]+~', $line, $matches, PREG_OFFSET_CAPTURE);
+
+        $spans = [];
+
+        foreach ($matches[0] as $match) {
+            $spans[] = [
+                'start' => $match[1],
+                'end' => $match[1] + strlen($match[0]),
+            ];
+        }
+
+        return $spans;
+    }
+
+    /**
+     * Whether a byte offset falls inside one of the spans.
+     *
+     * @param list<array{start: int, end: int}> $spans
+     */
+    private function isInsideASpan(int $offset, array $spans): bool
+    {
+        foreach ($spans as $span) {
+            if ($offset >= $span['start'] && $offset < $span['end']) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Every changelog entry marked as breaking, keyed by the line it starts
      * on. An entry spans the bullet and its continuation lines.
      *
-     * Only the version sections are scanned: the preamble of the file
-     * describes the convention itself, and a bullet there explains the
+     * Both markers of the convention count: **BREAKING** for a break of the
+     * public API surface, **Breaking change:** for a break of a class
+     * outside it. Only the version sections are scanned: the preamble of the
+     * file describes the convention itself, and a bullet there explains the
      * marker instead of using it.
      *
      * The marker is a **prefix** of the bullet, not a word anywhere in it: the
@@ -692,7 +1188,31 @@ class StabilityPolicyGuardTest extends TestCase
      */
     private function breakingChangelogEntries(): array
     {
-        $lines = explode("\n", $this->changelog());
+        return $this->breakingEntriesIn($this->changelog());
+    }
+
+    /**
+     * The breaking entries of a changelog text that carry no migration note,
+     * keyed by the line they start on.
+     *
+     * @return array<int, string>
+     */
+    private function breakingEntriesWithoutMigration(string $changelog): array
+    {
+        return array_filter(
+            $this->breakingEntriesIn($changelog),
+            static fn (string $entry): bool => !str_contains($entry, 'Migration:'),
+        );
+    }
+
+    /**
+     * Every changelog entry of a text marked as breaking.
+     *
+     * @return array<int, string>
+     */
+    private function breakingEntriesIn(string $changelog): array
+    {
+        $lines = explode("\n", $changelog);
         $entries = [];
         $current = null;
         $body = [];
@@ -717,7 +1237,7 @@ class StabilityPolicyGuardTest extends TestCase
                 $current = null;
                 $body = [];
 
-                if (preg_match('/^\s*[-*]\s+\*\*BREAKING\*\*/', $line) === 1) {
+                if (preg_match('/^\s*[-*]\s+\*\*(?:BREAKING|Breaking change:)\*\*/', $line) === 1) {
                     $current = $index + 1;
                     $body[] = $line;
                 }
