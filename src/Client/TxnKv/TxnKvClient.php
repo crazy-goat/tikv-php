@@ -341,6 +341,13 @@ final class TxnKvClient
      *                                      too, e.g. 'lockWaitTimeMs' (the
      *                                      client-wide pessimistic-lock wait
      *                                      timeout, issue #229).
+     *                                      Slow-operation logging is **not**
+     *                                      accepted: 'slowLog' is a RawKV
+     *                                      feature, so a non-null value is
+     *                                      rejected with an
+     *                                      InvalidArgumentException instead of
+     *                                      being accepted and ignored (issue
+     *                                      #700).
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
@@ -539,6 +546,12 @@ final class TxnKvClient
      * would leave the caller believing the transactions are monitored
      * (issue #700). An absent key and an explicit null keep meaning "not
      * configured", the same rule as every other option group (issue #272).
+     *
+     * Runs before {@see ConnectionFactory::create()} — and therefore before
+     * its empty-endpoints check — so a `slowLog`-only misconfiguration is
+     * reported ahead of the endpoints error and before any PD client or
+     * channel exists. Both are startup errors; only the precedence differs
+     * from the pre-#700 order.
      *
      * @param array<string, mixed> $options
      */
