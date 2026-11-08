@@ -284,7 +284,15 @@ final readonly class TxnReader
      * {@see ScanLimitExceededException} when the range really holds more
      * (issue #440). A scan with an explicit `limit > 0` returns at most that
      * many rows, so the caller detects a possibly-truncated result by
-     * comparing the returned count with the limit.     *
+     * comparing the returned count with the limit.
+     *
+     * With `$reverse = true` the bounds keep the RawKV reverse-scan meaning:
+     * `$startKey` is the exclusive upper bound and `$endKey` the lower bound,
+     * so the scan reads `[endKey, startKey)` in descending key order (issue
+     * #435, GAP-21). An empty `$startKey` with a non-empty `$endKey` is
+     * rejected before any RPC — reverse scan has no +infinity sentinel — and
+     * `$startKey === $endKey` is the empty range.
+     *
      * @return array<array{key: string, value: ?string}>
      *
      * @throws InvalidArgumentException
@@ -300,10 +308,18 @@ final readonly class TxnReader
         RetryExecutor $retryExecutor,
         callable $classifier,
         int $maxScanLimit = 10240,
+        bool $reverse = false,
     ): array {
         // One scan() call is one logical operation: every page and region
         // shares one retry budget (issue #223).
         $retryExecutor = $retryExecutor->beginOperation();
+
+        if ($reverse) {
+            // A reverse scan reads [endKey, startKey) descending: an empty
+            // upper bound is not +infinity and an inverted range is rejected
+            // before any PD or store RPC (issue #435, GAP-21).
+            RegionRangeClipper::assertReverseRangeOrder($startKey, $endKey, 'scan');
+        }
 
         // `limit: 0` means "the whole range"; the scan budget is the cap and
         // a range that exceeds it must fail loudly instead of returning a
@@ -311,39 +327,71 @@ final readonly class TxnReader
         $wholeRange = $limit === 0;
         $limit = $this->normalizeScanLimit($limit, $maxScanLimit);
 
+        if ($reverse && $startKey === $endKey) {
+            // Both bounds are the keyspace minimum: the reverse range is
+            // empty, so no region has to be resolved (RAW-09 parity).
+            return [];
+        }
+
         $results = [];
         $remaining = $limit;
         $batchSize = RegionScanBatch::forRowBudget($limit);
 
         $clipper = new RegionRangeClipper();
-        // The cache is read first and PD is asked only for the gaps (issue
-        // #425), so a warm cache turns every page of a transactional scan
-        // into zero PD round trips. The source trims a batch to the cursor a
-        // merge may have moved it to, exactly as the old loop did.
-        $source = new RegionScanSource(
-            $this->pdClient,
-            $this->regionCache,
-            $this->metrics,
-            'txn_scan',
-        );
 
-        foreach ($source->batches($startKey, $endKey, $batchSize) as $regions) {
-            foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
-                $regionResults = $this->executeScanForRegion(
-                    $scanStart,
-                    $scanEnd,
-                    $remaining,
-                    $retryExecutor,
-                    $classifier,
-                    $maxScanLimit,
-                );
-                foreach ($regionResults as $row) {
-                    $results[] = $row;
+        if ($reverse) {
+            foreach ($this->reverseRegionBatches($startKey, $endKey, $batchSize) as $regions) {
+                foreach ($clipper->clipReverse($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
+                    $regionResults = $this->executeScanForRegion(
+                        $scanStart,
+                        $scanEnd,
+                        $remaining,
+                        $retryExecutor,
+                        $classifier,
+                        $maxScanLimit,
+                        true,
+                    );
+                    foreach ($regionResults as $row) {
+                        $results[] = $row;
+                    }
+
+                    $remaining -= count($regionResults);
+                    if ($remaining <= 0) {
+                        break 2;
+                    }
                 }
+            }
+        } else {
+            // The cache is read first and PD is asked only for the gaps
+            // (issue #425), so a warm cache turns every page of a
+            // transactional scan into zero PD round trips. The source trims
+            // a batch to the cursor a merge may have moved it to, exactly as
+            // the old loop did.
+            $source = new RegionScanSource(
+                $this->pdClient,
+                $this->regionCache,
+                $this->metrics,
+                'txn_scan',
+            );
 
-                $remaining -= count($regionResults);
-                if ($remaining <= 0) {
-                    break 2;
+            foreach ($source->batches($startKey, $endKey, $batchSize) as $regions) {
+                foreach ($clipper->clipForward($regions, $startKey, $endKey) as [, $scanStart, $scanEnd]) {
+                    $regionResults = $this->executeScanForRegion(
+                        $scanStart,
+                        $scanEnd,
+                        $remaining,
+                        $retryExecutor,
+                        $classifier,
+                        $maxScanLimit,
+                    );
+                    foreach ($regionResults as $row) {
+                        $results[] = $row;
+                    }
+
+                    $remaining -= count($regionResults);
+                    if ($remaining <= 0) {
+                        break 2;
+                    }
                 }
             }
         }
@@ -352,14 +400,78 @@ final readonly class TxnReader
             // The whole budget was spent: the range may hold rows the scan
             // did not return. Probe before answering, so the caller learns
             // that the result was truncated instead of trusting a partial
-            // range (issue #440).
-            $this->assertRangeNotTruncated($results, $endKey, $retryExecutor, $classifier, $maxScanLimit);
+            // range (issue #440). A reverse scan probes below its lowest row.
+            if ($reverse) {
+                $this->assertReverseRangeNotTruncated($results, $endKey, $retryExecutor, $classifier, $maxScanLimit);
+            } else {
+                $this->assertRangeNotTruncated($results, $endKey, $retryExecutor, $classifier, $maxScanLimit);
+            }
         }
 
         // The whole-range path is not capped again here: the cap bounds the
         // TiKV read, while the write-set merge may add the transaction's own
         // in-range keys, which must not be dropped (issue #440).
-        return $this->finalizeScanResults($results, $startKey, $endKey, $wholeRange ? null : $limit, $state);
+        return $this->finalizeScanResults(
+            $results,
+            $startKey,
+            $endKey,
+            $wholeRange ? null : $limit,
+            $state,
+            $reverse,
+        );
+    }
+
+    /**
+     * Enumerate the regions covering the reverse range [endKey, startKey) from
+     * the upper bound downwards, in bounded batches (issue #435, GAP-21).
+     *
+     * A reverse scan consumes a range from its upper bound, so the regions are
+     * resolved from the top: the cache answers the common case and a miss asks
+     * PD for the region containing the cursor, or — when the cursor sits on a
+     * region boundary — for the adjacent region below through `GetPrevRegion`.
+     * This is the same top-down walk RawKV's reverse scan uses (issue #198),
+     * so a narrow reverse scan never enumerates the rest of the range.
+     *
+     * @param string $startKey exclusive upper bound
+     * @param string $endKey lower bound ('' = the start of the keyspace)
+     * @param int $batchSize maximum number of regions per batch
+     * @return \Generator<int, list<RegionInfo>>
+     */
+    private function reverseRegionBatches(string $startKey, string $endKey, int $batchSize): \Generator
+    {
+        $cursor = $startKey;
+        $batch = [];
+
+        while ($cursor !== '') {
+            $region = $this->regionResolver->getRegionBelow($cursor);
+            if (!$region instanceof RegionInfo) {
+                break;
+            }
+
+            // A merge after the previous batch can produce a region that
+            // extends above the cursor already read; clamp it to the cursor.
+            $batch[] = RegionScanBatch::trimEndToCursor($region, $cursor);
+
+            $nextCursor = $region->startKey;
+            $done = $nextCursor === ''
+                || !KeyOrder::lt($nextCursor, $cursor)
+                || ($endKey !== '' && KeyOrder::lte($nextCursor, $endKey));
+
+            if (count($batch) >= $batchSize || $done) {
+                yield $batch;
+                $batch = [];
+            }
+
+            if ($done) {
+                return;
+            }
+
+            $cursor = $nextCursor;
+        }
+
+        if ($batch !== []) {
+            yield $batch;
+        }
     }
 
     /**
@@ -409,6 +521,60 @@ final readonly class TxnReader
         }
 
         $probe = $this->executeScanForRegion($cursor, $endKey, 1, $retryExecutor, $classifier, $maxScanLimit);
+
+        if ($probe !== []) {
+            throw ScanLimitExceededException::forTransactionScan($maxScanLimit, count($results));
+        }
+    }
+
+    /**
+     * The reverse counterpart of {@see assertRangeNotTruncated()}: a reverse
+     * scan returns the highest rows first, so an exhausted budget may hide
+     * rows **below** the lowest key it returned (issue #435, GAP-21).
+     *
+     * One row is probed for in [endKey, lowestKey), the part of the range the
+     * scan has not returned. A row there means the result was truncated, and
+     * the scan throws {@see ScanLimitExceededException} instead of returning a
+     * partial range.
+     *
+     * @param list<array{key: string, value: ?string}> $results the rows the
+     *        scan returned, in descending key order
+     *
+     * @throws ScanLimitExceededException
+     */
+    private function assertReverseRangeNotTruncated(
+        array $results,
+        string $endKey,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
+        int $maxScanLimit,
+    ): void {
+        if ($results === []) {
+            return;
+        }
+
+        $lowestKey = $results[0]['key'];
+        foreach ($results as $row) {
+            if (KeyOrder::lt($row['key'], $lowestKey)) {
+                $lowestKey = $row['key'];
+            }
+        }
+
+        if ($lowestKey === '' || ($endKey !== '' && KeyOrder::lte($lowestKey, $endKey))) {
+            // The range ends at the lowest row the scan returned: nothing can
+            // follow it below the lower bound.
+            return;
+        }
+
+        $probe = $this->executeScanForRegion(
+            $lowestKey,
+            $endKey,
+            1,
+            $retryExecutor,
+            $classifier,
+            $maxScanLimit,
+            true,
+        );
 
         if ($probe !== []) {
             throw ScanLimitExceededException::forTransactionScan($maxScanLimit, count($results));
@@ -714,7 +880,19 @@ final readonly class TxnReader
         RetryExecutor $retryExecutor,
         callable $classifier,
         int $maxScanLimit = 10240,
+        bool $reverse = false,
     ): array {
+        if ($reverse) {
+            return $this->executeReverseScanForRegion(
+                $startKey,
+                $endKey,
+                $limit,
+                $retryExecutor,
+                $classifier,
+                $maxScanLimit,
+            );
+        }
+
         $results = [];
         $pending = $limit;
         $cursorStart = $startKey;
@@ -882,6 +1060,185 @@ final readonly class TxnReader
     }
 
     /**
+     * Reverse-scan one clipped sub-range. The caller passes the original
+     * sub-range as [startKey, endKey) == [upper bound, lower bound); the wire
+     * request reads [endKey, startKey) in descending order with `reverse`.
+     *
+     * The sub-range is resolved on its lower bound, not its upper one: the
+     * upper bound can sit exactly on a region's end boundary, where the cache
+     * lookup would miss and PD would answer with the neighbouring region
+     * outside the sub-range (the same choice RawKV's reverse scan makes).
+     *
+     * A split discovered after the sub-range was clipped leaves the remainder
+     * [freshEndKey, startKey) above the batch; it belongs *before* this batch
+     * in descending order, so it is scanned first and the batch is trimmed to
+     * the remaining limit (issue #435, GAP-21).
+     *
+     * @return array<array{key: string, value: ?string}>
+     */
+    private function executeReverseScanForRegion(
+        string $startKey,
+        string $endKey,
+        int $limit,
+        RetryExecutor $retryExecutor,
+        callable $classifier,
+        int $maxScanLimit = 10240,
+    ): array {
+        $resolutionKey = $endKey;
+        $freshEndKey = '';
+        $emptyReattempts = 0;
+        // The same operation budget bounds lock resolution triggered by a
+        // locked key in this sub-range (issue #569).
+        $budget = $retryExecutor->currentBudget();
+
+        while (true) {
+            $freshEndKey = '';
+            $excludedStore = null;
+            $targetStoreId = null;
+
+            $batch = $retryExecutor->execute($resolutionKey, function () use (
+                $startKey,
+                $endKey,
+                $limit,
+                $maxScanLimit,
+                $resolutionKey,
+                &$excludedStore,
+                &$freshEndKey,
+                &$targetStoreId,
+                $budget,
+            ): array {
+                // Resolve the region on every attempt so cache invalidation
+                // and leader switching performed by the retry executor take
+                // effect (issue #267): a stale captured region would
+                // otherwise reproduce the original error on each retry.
+                $fresh = $this->regionResolver->getRegionInfo($resolutionKey);
+                $target = RegionContextFactory::resolveTarget(
+                    $fresh,
+                    $this->replicaReadPolicy,
+                    $this->regionResolver->getStore(...),
+                    excludedStoreId: $excludedStore,
+                    priority: $this->priority,
+                    requestContext: $this->requestContext,
+                    resourceControl: $this->resourceControl,
+                    storeAvailable: $this->regionResolver->isStoreAvailable(...),
+                );
+                $excludedStore = null;
+                $targetStoreId = $target->storeId;
+                $address = $this->regionResolver->resolveStoreAddress($target->storeId);
+                $freshEndKey = $fresh->endKey;
+
+                // After a split the fresh region is smaller: clip the wire
+                // start (upper) key down to the fresh region's end. TiKV
+                // rejects ranges that cross region boundaries.
+                $wireStartKey = $startKey;
+                if ($freshEndKey !== '' && KeyOrder::lt($freshEndKey, $wireStartKey)) {
+                    $wireStartKey = $freshEndKey;
+                }
+
+                $request = new ScanRequest();
+                $request->setContext($target->context);
+                $request->setStartKey($wireStartKey);
+                if ($endKey !== '') {
+                    $request->setEndKey($endKey);
+                }
+                $request->setLimit($limit > 0 ? $limit : $maxScanLimit);
+                $request->setVersion($this->startTs);
+                $request->setReverse(true);
+
+                try {
+                    /** @var ScanResponse $response */
+                    $response = $this->grpc->call(
+                        $address,
+                        'tikvpb.Tikv',
+                        'KvScan',
+                        $request,
+                        ScanResponse::class,
+                        $this->timeoutMsWithinBudget($this->timeoutMs('scan'), $budget),
+                    );
+                    RegionErrorHandler::check(
+                        $response,
+                        $this->regionCache,
+                        $fresh->regionId,
+                        keyErrorsHandledByCaller: true,
+                    );
+                } catch (RegionException $e) {
+                    if ($e->errorKind === ErrorKind::DataIsNotReady) {
+                        $excludedStore = $target->storeId;
+                    }
+                    throw $e;
+                }
+
+                $error = $response->getError();
+                if ($error instanceof KeyError) {
+                    $this->handleReadKeyError($error, $resolutionKey, 'Scan', $budget);
+                }
+
+                $subResults = [];
+                $pairErrors = [];
+                foreach ($response->getPairs() as $pair) {
+                    $pairError = $pair->getError();
+                    if ($pairError instanceof KeyError) {
+                        $pairErrors[] = [$pairError, $pair->getKey()];
+                    }
+                    $subResults[] = [
+                        'key' => $pair->getKey(),
+                        'value' => $pair->getValue(),
+                    ];
+                }
+                $this->handleReadKeyErrors($pairErrors, 'Scan', $budget);
+
+                return $subResults;
+            }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+                return $targetStoreId;
+            });
+
+            // A transient empty answer is a diagnosed failure mode (issue
+            // #512): when the region covers the whole sub-range and the
+            // caller still wants rows, re-ask the same range once before
+            // accepting the empty answer. This also covers the whole-range
+            // truncation probe, whose sub-range is one region wide.
+            $terminal = $freshEndKey === '' || KeyOrder::gte($freshEndKey, $startKey);
+            if (!$terminal || $batch !== [] || $limit <= 0) {
+                break;
+            }
+            if ($emptyReattempts < self::MAX_EMPTY_SCAN_REATTEMPTS) {
+                usleep(BackoffType::RegionMiss->sleepMs($emptyReattempts) * 1000);
+                $emptyReattempts++;
+                continue;
+            }
+            $this->logger->debug('TxnKV reverse scan accepted an empty batch after re-attempts', [
+                'startKey' => KeyRedactor::redact($startKey),
+                'endKey' => KeyRedactor::redact($endKey),
+                'reattempts' => $emptyReattempts,
+            ]);
+            break;
+        }
+
+        // If the fresh region covers only [endKey, freshEndKey), the higher
+        // remainder [freshEndKey, startKey) belongs BEFORE this batch in the
+        // reverse result order: scan it first, then trim the batch to the
+        // remaining limit.
+        if ($freshEndKey === '' || KeyOrder::gte($freshEndKey, $startKey)) {
+            return $batch;
+        }
+
+        $upper = $this->executeReverseScanForRegion(
+            $startKey,
+            $freshEndKey,
+            $limit,
+            $retryExecutor,
+            $classifier,
+            $maxScanLimit,
+        );
+        $batchCapacity = $limit > 0 ? $limit - count($upper) : count($batch);
+        if ($batchCapacity <= 0) {
+            return $upper;
+        }
+
+        return [...$upper, ...array_slice($batch, 0, $batchCapacity)];
+    }
+
+    /**
      * Build the typed exception for a KeyError abort message.
      *
      * TiKV names the GC case in the abort field ("GC life time is shorter
@@ -977,6 +1334,12 @@ final readonly class TxnReader
      * it, because the write-set merge must not drop the transaction's own
      * in-range keys — the scan cap already bounds the TiKV read (issue #440).
      *
+     * A reverse scan returns rows in descending order (issue #435, GAP-21).
+     * The merge itself is written for ascending input — that is the order the
+     * binary-search splice relies on — so the scanned rows are flipped to
+     * ascending, merged, and flipped back; the limit then trims the highest
+     * keys, which is what a reverse scan's `limit` means.
+     *
      * @param array<array{key: string, value: ?string}> $results
      * @return array<array{key: string, value: ?string}>
      */
@@ -986,7 +1349,12 @@ final readonly class TxnReader
         string $endKey,
         ?int $limit,
         TransactionState $state,
+        bool $reverse = false,
     ): array {
+        if ($reverse) {
+            $results = array_reverse($results);
+        }
+
         $tikvMap = [];
         foreach ($results as $entry) {
             $tikvMap[$entry['key']] = $entry['value'];
@@ -1008,12 +1376,17 @@ final readonly class TxnReader
         // numerically ("9" sorts before "10"), while TiKV orders keys
         // bytewise — pagination resumes from the last returned key, so a
         // numeric-order sort silently skips in-between keys (issue #331).
+        // A reverse scan's bounds are [endKey, startKey), so the in-range
+        // test swaps them; the merge below still runs ascending.
+        $rangeStart = $reverse ? $endKey : $startKey;
+        $rangeEnd = $reverse ? $startKey : $endKey;
+
         $writeKeys = [];
         foreach ($state->getWriteKeys() as $key) {
             // Byte-order comparison: numeric strings must never be compared
             // numerically ("9" >= "10" is true under PHP's loose comparison
             // but false in TiKV's byte order) (issue #331).
-            if (KeyOrder::inRange($key, $startKey, $endKey)) {
+            if (KeyOrder::inRange($key, $rangeStart, $rangeEnd)) {
                 $writeKeys[] = $key;
             }
         }
@@ -1021,7 +1394,15 @@ final readonly class TxnReader
 
         if ($writeKeys === []) {
             // Nothing to merge: the scanned rows are already the result.
-            return $limit === null ? $tikvRows : array_slice($tikvRows, 0, $limit);
+            // A reverse scan's limit keeps the highest keys, i.e. the tail of
+            // the ascending sequence.
+            $rows = match (true) {
+                $limit === null => $tikvRows,
+                $reverse => array_slice($tikvRows, -$limit),
+                default => array_slice($tikvRows, 0, $limit),
+            };
+
+            return $reverse ? array_reverse($rows) : $rows;
         }
 
         $tikvCount = count($tikvRows);
@@ -1069,7 +1450,15 @@ final readonly class TxnReader
         // The limit is an upper bound on the merged rows, so truncating the
         // finished sequence is the same result the old early `break` produced
         // (tombstones were already skipped above, so they do not consume it).
-        return $limit === null ? $merged : array_slice($merged, 0, $limit);
+        // A reverse scan keeps the highest keys: the tail of the ascending
+        // sequence, before it is flipped back to descending.
+        $rows = match (true) {
+            $limit === null => $merged,
+            $reverse => array_slice($merged, -$limit),
+            default => array_slice($merged, 0, $limit),
+        };
+
+        return $reverse ? array_reverse($rows) : $rows;
     }
 
     private function timeoutMs(string $operationType): ?int

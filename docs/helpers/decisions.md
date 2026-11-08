@@ -1307,6 +1307,8 @@ The caller bounds the iteration (a row count, a deadline, `break`).
 answers an empty batch while the limit is unsatisfied and the scan would
 end there. The probe of `assertRangeNotTruncated()` is covered too: a
 transient empty probe would hide a truncated whole-range scan (#440).
+The reverse path (`executeReverseScanForRegion()`) applies the same rule to
+the reverse truncation probe (issue #435).
 Trade-offs:
 
 - `MAX_EMPTY_SCAN_REATTEMPTS = 1`, counted per sub-range: the counter

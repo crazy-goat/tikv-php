@@ -846,6 +846,16 @@ longer collects the whole chain before reading the top region. A region or
 transport error, or a region that split after enumeration, falls back to
 the sequential retrying path.
 
+The transactional reverse scan (`Transaction::reverseScan()`, issue #435)
+shares that top-down resolver walk: `TxnReader::reverseRegionBatches()` loads
+bounded region batches from the upper bound downwards and clips each with
+`RegionRangeClipper::clipReverse()`, then sends `KvScan` with `reverse = true`.
+Its result is merged with the transaction's write set in ascending order and
+flipped back to descending, so read-your-writes holds in both directions. The
+transactional `deleteRange()` builds on the forward scan: it reads the range
+at the snapshot and buffers a delete for each key, which keeps the deletion
+atomic with the transaction and bounded by the scan and write-set limits.
+
 ## Key Design Decisions
 
 ### 1. Synchronous API

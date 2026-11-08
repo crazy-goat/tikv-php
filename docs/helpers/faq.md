@@ -2144,9 +2144,10 @@ implementing issue #415:
    `EncodeBytes` / `DecodeBytes` faithfully, so `decode` is lossless and a
    decoded boundary is a valid txn scan start key. The GAP-01 E2E test
    (`TxnKvE2ETest::testTxnWorkloadAcrossPreSplitRegions`) drives writes, reads,
-   `batchGet()` **and a forward `scan()`** across the split regions. (TxnKV
-   exposes no reverse-scan API — only RawKV does — so a forward scan is the
-   strongest cross-region scan coverage available for the transactional path.)
+   `batchGet()` **and a forward `scan()`** across the split regions. The
+   reverse direction is covered by `Transaction::reverseScan()` in
+   `TxnKvE2ETest::testReverseScanAcrossPreSplitRegionsWithBufferedWrites`,
+   which also asserts read-your-writes for a buffered `set()` / `delete()`.
 3. Manual region pre-split for E2E is reliable on v8.5.5 via the raw gRPC
    call `tikvpb.Tikv/SplitRegion` (service string `tikvpb.Tikv`, method
    `SplitRegion`) with a `kvrpcpb.SplitRegionRequest` carrying

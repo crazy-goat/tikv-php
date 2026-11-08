@@ -485,8 +485,13 @@ $value  = $txn->get('account:1');                        // ?string
 $values = $txn->batchGet(['account:1', 'account:2']);    // array<array-key, ?string>
 $rows   = $txn->scan('account:', 'account;', limit: 100); // array<array{key, value}>
 
+// Reverse scan: the first argument is the exclusive upper bound, the second
+// the lower bound, so this reads [account:, account;) descending.
+$latest = $txn->reverseScan('account;', 'account:', limit: 10);
+
 $txn->set('account:1', '100');
 $txn->delete('account:2');
+$deleted = $txn->deleteRange('account:100', 'account:200'); // atomic tombstones
 ```
 
 Reads are **snapshot reads at `startTs`** and observe your own buffered
@@ -499,6 +504,21 @@ They do *not* see other transactions' uncommitted data.
 > truncated: the scan throws `ScanLimitExceededException` instead, so a
 > partial range is never mistaken for a complete one. Pass an explicit
 > `limit` when you need one.
+
+`Transaction::reverseScan($upper, $lower, $limit)` uses the same
+`RawKvClient::reverseScan()` bound convention — `$upper` is exclusive, so the
+range is `[lower, upper)` — and returns rows in descending key order. It walks
+the regions from the upper bound downwards and observes buffered writes like
+the forward scan; `scan($start, $end, $limit, reverse: true)` is the same call
+with a flag.
+
+`Transaction::deleteRange($start, $end)` reads the range at the snapshot and
+buffers a delete for every key, so the deletion is **atomic with the
+transaction**. It obeys the same 10240-row scan cap and the transaction's
+write-set limits, so use it for bounded ranges; for an unbounded range delete
+in explicit batches across several transactions, or use
+`RawKvClient::deleteRange()` when a raw, non-transactional delete is
+acceptable.
 
 #### Optimistic vs pessimistic
 
@@ -1106,7 +1126,7 @@ Two settings are methods on the client rather than options:
 ### Infrastructure
 - ✅ **PD Region Discovery** — With RegionEpoch support
 - ✅ **Region Routing** — Direct to correct TiKV node
-- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. RawKV forward scans/iterators and TxnKV `Transaction::scan()` read the cache first and query PD only for the uncovered ranges, reporting `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels; RawKV `reverseScan()` resolves regions top-down through the region resolver and reports `region_resolution`
+- ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. RawKV forward scans/iterators and TxnKV `Transaction::scan()` read the cache first and query PD only for the uncovered ranges, reporting `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels; RawKV `reverseScan()` and TxnKV `Transaction::reverseScan()` resolve regions top-down through the region resolver and report `region_resolution`
 - ✅ **Region cache refresh and preload** — opt-in, PHP-process-model friendly (no timers): call `refreshRegionCache()` from a worker tick (throttled by `options['regionCacheRefreshMs']`, default `0` = disabled) and `preloadRegions([['start', 'end'], ...])` at boot to warm the keys the worker will touch without serving a read. Both keep the old entry and only log when PD fails, and are no-ops after `close()` ([Region Cache Refresh and Preload](docs/configuration.md#region-cache-refresh-and-preload))
 - ✅ **Store Cache** — In-memory caching of store addresses
 - ✅ **Retry Logic** — Automatic retry with exponential backoff; the wall-clock bound of one retry loop is `options['retryDeadlineMs']` (see [Retry System](docs/architecture.md#8-retry-system))
@@ -1285,6 +1305,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 
 - ✅ **RawKV core** — CRUD, batch operations, scans, range operations, TTL and compare-and-swap
 - ✅ **Transactions (TxnKV)** — snapshot reads, two-phase commit, pessimistic and optimistic locking, GC safe points
+- ✅ **Transactional reverse scan and range deletion** — `Transaction::reverseScan()` / `scan(..., reverse: true)` walk regions top-down and observe buffered writes; `deleteRange()` buffers atomic tombstones for a bounded range ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ✅ **API V2 and keyspaces** — V2 key encoding and PD keyspace resolution
 - ✅ **Multi-endpoint PD** — leader discovery and failover
 - ✅ **GC safe-point awareness** — service safe points for long-running reads
@@ -1330,7 +1351,6 @@ are tracked in their own issues and are not part of the roadmap. A
 feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
-- ⬜ **Transaction reverse scan and range deletion** ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 
 ## Contributing
