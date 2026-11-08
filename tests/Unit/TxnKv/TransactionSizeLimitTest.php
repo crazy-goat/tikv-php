@@ -39,7 +39,9 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Issue #430 (GAP-16): transaction write-set limits, their queryability and
- * the size/count-bounded prewrite and commit requests.
+ * the size/count-bounded prewrite and commit requests. Issue #791 extends the
+ * suite to the two rollback paths, whose `KvBatchRollback` and
+ * `KVPessimisticRollback` requests use the same split.
  */
 final class TransactionSizeLimitTest extends TestCase
 {
