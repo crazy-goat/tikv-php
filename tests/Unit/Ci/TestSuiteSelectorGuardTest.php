@@ -411,6 +411,24 @@ class TestSuiteSelectorGuardTest extends TestCase
     }
 
     /**
+     * The scan reaches the helpers under `scripts/lib/` too (issue #730).
+     *
+     * The guard used to glob `scripts/*.sh` only, so a PHPUnit invocation in
+     * a helper such as `scripts/lib/wait-for-cluster.sh` escaped every rule.
+     * The list is produced by {@see ShellScriptFinder}, and this test pins
+     * that the repository's helpers are actually in it — a regression to the
+     * single-level glob would drop them.
+     */
+    public function testTheRunnerScanCoversShellHelpersUnderScriptsLib(): void
+    {
+        $scripts = ShellScriptFinder::under($this->repoRoot() . '/scripts');
+
+        self::assertContains($this->repoRoot() . '/scripts/test-e2e-suite.sh', $scripts);
+        self::assertContains($this->repoRoot() . '/scripts/lib/compose.sh', $scripts);
+        self::assertContains($this->repoRoot() . '/scripts/lib/wait-for-cluster.sh', $scripts);
+    }
+
+    /**
      * The suite names declared in `phpunit.xml`.
      *
      * @return list<string>
@@ -517,7 +535,7 @@ class TestSuiteSelectorGuardTest extends TestCase
         $root = $this->repoRoot();
         $files = [$root . '/Makefile'];
 
-        foreach (glob($root . '/scripts/*.sh') ?: [] as $script) {
+        foreach (ShellScriptFinder::under($root . '/scripts') as $script) {
             $files[] = $script;
         }
 
