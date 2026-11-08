@@ -355,6 +355,24 @@ class SstIngestorTest extends TestCase
     }
 
     // ========================================================================
+    // SST metadata column family
+    // ========================================================================
+
+    public function testIngestSendsTheDefaultColumnFamilyWhenNoneIsConfigured(): void
+    {
+        self::assertSame('default', $this->capturedMeta(['key1' => 'value1'])->getCfName());
+    }
+
+    /**
+     * Regression test for issue #718: SstIngestor hard-coded `default`, so
+     * ingest() ignored the client's column family.
+     */
+    public function testIngestSendsTheConfiguredColumnFamily(): void
+    {
+        self::assertSame('write', $this->capturedMeta(['key1' => 'value1'], 'write')->getCfName());
+    }
+
+    // ========================================================================
     // SST metadata checksum
     // ========================================================================
 
@@ -386,7 +404,7 @@ class SstIngestorTest extends TestCase
      *
      * @param array<string, string> $pairs
      */
-    private function capturedMeta(array $pairs): SSTMeta
+    private function capturedMeta(array $pairs, string $columnFamily = ''): SSTMeta
     {
         $region = $this->defaultRegion();
         $store = $this->defaultStore();
@@ -413,7 +431,7 @@ class SstIngestorTest extends TestCase
                 return $writeResponse;
             });
 
-        $this->ingestor->ingest($pairs);
+        $this->ingestor->ingest($pairs, null, $columnFamily);
 
         self::assertNotNull($captured, 'Expected callStreaming to be called');
         $requests = iterator_to_array($captured, false);

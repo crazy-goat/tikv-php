@@ -1693,7 +1693,9 @@ final class RawKvClient
     /**
      * @throws ClientClosedException
      * @throws InvalidArgumentException When the range is reversed
-     *         (`$startKey` sorts after a non-empty `$endKey`)
+     *         (`$startKey` sorts after a non-empty `$endKey`) or the client's
+     *         column family is neither `''` nor `'default'` (`RawChecksum`
+     *         has no `cf` field)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted
@@ -1708,7 +1710,7 @@ final class RawKvClient
     {
         $this->ensureOpen();
 
-        return $this->rangeOps->checksum($startKey, $endKey);
+        return $this->rangeOps->checksum($startKey, $endKey, $this->columnFamily);
     }
 
     // ========================================================================
@@ -1723,7 +1725,9 @@ final class RawKvClient
      * loads.
      *
      * The key-value pairs are sorted by key, grouped by region, and written
-     * as SST files via the TiKV ImportSST service. All TiKV stores are
+     * as SST files via the TiKV ImportSST service into the client's column
+     * family (TiKV's default column family when `setColumnFamily('')` is in
+     * effect). All TiKV stores are
      * switched to import mode during the operation and switched back to
      * normal mode on completion, including on any exception. Process death
      * (OOM kill, deploy restart, `kill -9`) bypasses that `finally` and
@@ -1751,8 +1755,10 @@ final class RawKvClient
      * @param int|null $ttl Time-to-live in seconds (null = no TTL)
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException When a key is empty or a key/value
-     *         exceeds the configured size limit
+     * @throws InvalidArgumentException When a key is empty, a key/value
+     *         exceeds the configured size limit, or an API V2 client asks for
+     *         a column family other than the default (checked before any
+     *         store is switched into import mode)
      * @throws IngestTooLargeException When the payload exceeds
      *         `options['maxIngestSize']`, before any RPC is issued (issue #297)
      * @throws GrpcException
@@ -1783,6 +1789,23 @@ final class RawKvClient
             return;
         }
 
+        // Fail before switchStoresMode(Import) fans out: API V2 supports only
+        // the keyspace default column family, and discovering that inside the
+        // transport would flap every store through import mode first
+        // (issue #718).
+        if (
+            $this->codec instanceof CodecV2
+            && $this->columnFamily !== ''
+            && $this->columnFamily !== 'default'
+        ) {
+            throw new InvalidArgumentException(sprintf(
+                'API V2 supports only the keyspace default column family, but '
+                . 'setColumnFamily("%s") is configured; use API V1 to ingest into '
+                . 'another column family',
+                $this->columnFamily,
+            ));
+        }
+
         foreach ($keyValuePairs as $key => $value) {
             // PHP coerces integer-like string keys ("12345", "0") to int
             // array keys; string-cast before validating (issue #322).
@@ -1792,7 +1815,7 @@ final class RawKvClient
             $this->validateValueSize($value, 'ingest');
         }
 
-        $this->ingestor->ingest($keyValuePairs, $ttl);
+        $this->ingestor->ingest($keyValuePairs, $ttl, $this->columnFamily);
     }
 
     // ========================================================================

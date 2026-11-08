@@ -6,6 +6,10 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\ImportSstpb\IngestResponse;
+use CrazyGoat\Proto\ImportSstpb\RawWriteResponse;
+use CrazyGoat\Proto\ImportSstpb\SSTMeta;
+use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyRange;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest;
@@ -29,6 +33,8 @@ use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
+use CrazyGoat\TiKV\Client\Codec\CodecV2;
+use CrazyGoat\TiKV\Client\Codec\Mode;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\CasIndeterminateException;
@@ -41,6 +47,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Grpc\ApiV2GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
@@ -3073,6 +3080,51 @@ class RawKvClientTest extends TestCase
         $this->assertSame(100, $result->totalBytes);
     }
 
+    /**
+     * Regression test for issue #718: checksum() used to call
+     * RawKvRangeOps::checksum() without the configured column family, so a
+     * client with a non-default CF returned the default CF's checksum.
+     * RawChecksum has no column-family field, so the only correct answer is
+     * to refuse instead of returning a checksum of different data.
+     */
+    public function testChecksumWithAColumnFamilyIsRejected(): void
+    {
+        $this->client->setColumnFamily('write');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'RawChecksum has no column-family field, so checksumming "write" is not supported; '
+            . 'checksum() reads only the default column family'
+        );
+
+        $this->client->checksum('a', 'z');
+    }
+
+    /**
+     * `'default'` names the same column family RawChecksum reads, so it must
+     * not be a hard error (N1 in the #718 review).
+     */
+    public function testChecksumWithTheDefaultColumnFamilyNameIsAccepted(): void
+    {
+        $this->client->setColumnFamily('default');
+
+        $region = new RegionInfo(1, 1, 1, 1, 1, 'a', 'z');
+        $this->regionCache->method('getByKey')->willReturn($region);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $response = new RawChecksumResponse();
+        $response->setChecksum(7);
+        $response->setTotalKvs(1);
+        $response->setTotalBytes(2);
+        $this->grpc->method('callAsync')->willReturn(GrpcFuture::completed($response));
+
+        $result = $this->client->checksum('a', 'z');
+
+        self::assertSame(7, $result->checksum);
+    }
+
     public function testChecksumWithEmptyEndKeyCoversTheFinalRegion(): void
     {
         $first = new RegionInfo(1, 1, 1, 1, 1, 'a', 'm');
@@ -4175,6 +4227,131 @@ class RawKvClientTest extends TestCase
         $this->grpc->expects($this->never())->method('call');
 
         $this->client->ingest([]);
+    }
+
+    /**
+     * Regression test for issue #718: ingest() did not pass the client's
+     * column family to SstIngestor, so every SST landed in the default CF.
+     */
+    public function testIngestWithColumnFamilySetsCfNameOnSstMeta(): void
+    {
+        $this->client->setColumnFamily('write');
+
+        $this->pdClient->method('getAllStores')->willReturn([$this->defaultStore()]);
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('put');
+
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+
+        $captured = null;
+        $this->grpc->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                iterable $requests,
+            ) use (
+                $writeResponse,
+                &$captured,
+            ): Message {
+                $captured = $requests;
+
+                return $writeResponse;
+            });
+
+        $this->client->ingest(['key' => 'value']);
+
+        self::assertNotNull($captured);
+        $requests = iterator_to_array($captured, false);
+        $meta = $requests[0]->getMeta();
+        self::assertNotNull($meta);
+        self::assertSame('write', $meta->getCfName());
+    }
+
+    /**
+     * Regression test for B1 in the #718 review: SstIngestor always sends
+     * `SSTMeta.cf_name = "default"`, which the API V2 transformer used to
+     * reject, so every V2 ingest() failed after switching stores into import
+     * mode.
+     */
+    public function testIngestWithDefaultColumnFamilyWorksOnApiV2(): void
+    {
+        $codec = new CodecV2(Mode::Raw, 0x010203, 'tenant-a');
+        $client = new RawKvClient(
+            $this->pdClient,
+            new ApiV2GrpcClient($this->grpc, $codec, Mode::Raw),
+            $this->regionCache,
+            codec: $codec,
+        );
+
+        $this->pdClient->method('getAllStores')->willReturn([$this->defaultStore()]);
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('put');
+
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+
+        $captured = null;
+        $this->grpc->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                iterable $requests,
+            ) use (
+                $writeResponse,
+                &$captured,
+            ): Message {
+                $captured = $requests;
+
+                return $writeResponse;
+            });
+
+        $client->ingest(['key' => 'value']);
+
+        self::assertNotNull($captured);
+        $requests = iterator_to_array($captured, false);
+        $meta = $requests[0]->getMeta();
+        self::assertNotNull($meta);
+        self::assertSame('default', $meta->getCfName());
+    }
+
+    /**
+     * N3 in the #718 review: a custom CF on API V2 must fail before
+     * switchStoresMode, not after every store has been put into import mode.
+     */
+    public function testIngestWithACustomColumnFamilyFailsBeforeSwitchingStoresOnApiV2(): void
+    {
+        $codec = new CodecV2(Mode::Raw, 0x010203, 'tenant-a');
+        $client = new RawKvClient(
+            $this->pdClient,
+            new ApiV2GrpcClient($this->grpc, $codec, Mode::Raw),
+            $this->regionCache,
+            codec: $codec,
+        );
+        $client->setColumnFamily('write');
+
+        $this->grpc->expects($this->never())->method('callAsync');
+        $this->grpc->expects($this->never())->method('callStreaming');
+        $this->grpc->expects($this->never())->method('call');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('API V2 supports only the keyspace default column family');
+
+        $client->ingest(['key' => 'value']);
     }
 
     public function testIngestAcceptsNumericStringKey(): void

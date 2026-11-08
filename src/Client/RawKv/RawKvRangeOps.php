@@ -15,6 +15,7 @@ use CrazyGoat\TiKV\Client\Batch\BatchCallId;
 use CrazyGoat\TiKV\Client\Batch\CheckedGrpcFuture;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -140,9 +141,29 @@ final readonly class RawKvRangeOps
      * As in {@see self::deleteRange()}, the `scanRegions()` result is
      * pre-populated into the region cache so the per-attempt re-resolution
      * (issue #190) is a cache hit on the first try.
+     *
+     * RawChecksum has no column-family field: the RPC always reads the
+     * default column family. Both `''` and the literal `'default'` are
+     * accepted (they name the same CF); any other `$columnFamily` is
+     * rejected instead of returning the default column family's checksum as
+     * if it covered the configured one (issue #718).
+     *
+     * @throws InvalidArgumentException When `$columnFamily` is neither empty
+     *     nor `'default'`
+     * @throws \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException
+     *     When a region's retry budget is exhausted or it returns a fatal
+     *     region error
      */
-    public function checksum(string $startKey, string $endKey): ChecksumResult
+    public function checksum(string $startKey, string $endKey, string $columnFamily = ''): ChecksumResult
     {
+        if ($columnFamily !== '' && $columnFamily !== 'default') {
+            throw new InvalidArgumentException(sprintf(
+                'RawChecksum has no column-family field, so checksumming "%s" is not '
+                . 'supported; checksum() reads only the default column family',
+                $columnFamily,
+            ));
+        }
+
         RegionRangeClipper::assertForwardRangeOrder($startKey, $endKey, 'checksum');
 
         // One range operation is one logical operation: every region shares

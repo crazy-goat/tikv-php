@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\E2E;
 
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
 use PHPUnit\Framework\TestCase;
@@ -61,12 +62,29 @@ final class ApiV2E2ETest extends TestCase
         }
     }
 
-    public function testRawKvRoundTripUsesDefaultColumnFamily(): void
+    public function testRawKvRejectsANonDefaultColumnFamily(): void
+    {
+        $raw = self::$raw;
+        $this->assertInstanceOf(RawKvClient::class, $raw);
+
+        // API V2 supports only the keyspace default column family; an
+        // explicit cf must fail loudly instead of silently using default
+        // (issue #718).
+        $raw->setColumnFamily('not-default');
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('API V2 supports only the keyspace default column family');
+            $raw->put('php-api-v2-cf-' . uniqid(), 'raw-value');
+        } finally {
+            $raw->setColumnFamily('');
+        }
+    }
+
+    public function testRawKvRoundTripUsesTheDefaultColumnFamily(): void
     {
         $raw = self::$raw;
         $this->assertInstanceOf(RawKvClient::class, $raw);
         $key = 'php-api-v2-raw-' . uniqid();
-        $raw->setColumnFamily('not-default');
         $raw->put($key, 'raw-value');
 
         $this->assertSame('raw-value', $raw->get($key));
