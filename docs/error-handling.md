@@ -40,11 +40,13 @@ extends `\InvalidArgumentException` directly — it is **not** a
     ├── InvalidStoreAddressException                src/Client/Exception/
     ├── KeyErrorException                           src/Client/Exception/
     ├── KeyOutOfBoundsException                     src/Client/Exception/  (API V2 keyspace)
+    ├── IngestPartialFailureException               src/Client/Exception/
     ├── IngestTooLargeException                     src/Client/Exception/
     ├── PdException                                 src/Client/Exception/
     ├── RegionException                             src/Client/Exception/
     ├── ScanLimitExceededException                  src/Client/Exception/
     ├── StoreNotFoundException                      src/Client/Exception/
+    ├── StoreUnavailableException                   src/Client/Exception/
     ├── RetryBudgetExhaustedException               src/Client/Retry/
     ├── DeadlockException                           src/Client/TxnKv/Exception/
     ├── LockWaitTimeoutException                    src/Client/TxnKv/Exception/
@@ -58,13 +60,13 @@ extends `\InvalidArgumentException` directly — it is **not** a
 └── InvalidArgumentException                        src/Client/Exception/
 ```
 
-All twenty-three `TiKvException` subclasses are `final`; `TiKvException`
+Every `TiKvException` subclass is `final`; `TiKvException`
 itself is the only non-final class in the tree (it is the intended base for
 any custom project-wide exception work).
 
 > The client never throws a raw `\Exception`, `\RuntimeException` or
 > `\InvalidArgumentException` as an operation failure: everything that can
-> reach your code from a TiKV operation is one of the twenty-one classes above.
+> reach your code from a TiKV operation is one of the classes above.
 > The two bootstrap/environment errors described next are the deliberate
 > exceptions.
 
@@ -198,9 +200,11 @@ Verdict legend:
 | `RegionException` | **Retry if idempotent** — same reasoning; the client already retried, and both the retry executor and `RegionErrorHandler::check()` invalidated the cached region only when the error was a routing error (`EpochNotMatch`, `RegionNotFound`, `KeyNotInRegion`, `StoreNotMatch`, `RegionNotInitialized`, `NotLeader` without a usable hint — one that is absent, names an unknown peer, or names a learner or witness). An `EpochNotMatch` that carries a usable `current_regions` payload refreshes the cache instead of forcing a PD lookup; an empty or unusable payload still invalidates. A `StoreNotMatch` also drops the store address it names, so the next attempt re-resolves it through PD instead of reusing a stale address (issue #247). `ServerIsBusy`, `DiskFull`, `IsWitness` and `RecoveryInProgress` are retried without a cache drop |
 | `GrpcException` | **Retry if idempotent** — same reasoning; transport-level errors were already retried with backoff. A retryable transport failure also drops the address of the store it could not reach, so a rescheduled store is re-resolved from PD on the next attempt instead of being retried on its old address (issue #247). On `compareAndSwap()`/`putIfAbsent()` it is raised only when the failure happened **before the request was applied**: either it was never sent (e.g. PD unreachable during region resolution) or the server rejected it (`UNAUTHENTICATED`, `PERMISSION_DENIED`, …). The swap definitively did not happen |
 | `CasIndeterminateException` | **Do not retry blindly** — the CAS transport failure leaves the outcome unknown: the swap may already have been applied. Re-read the key and decide from what you find; never treat it as "not swapped" or "lock not acquired" |
+| `UndeterminedCommitException` | **Do not retry blindly** — the primary-key commit failed at the transport level, so the commit may or may not have been applied. Do not re-invoke `commit()` on the same transaction and never roll it back: start a new transaction and re-read the keys before re-applying. `getPrevious()` carries the transport error |
 | `StoreNotFoundException` | **Do not retry blindly** — PD no longer knows the store backing the region. The retry executor treats it as a fatal routing error and invalidates the cached region when the missing store belongs to it (issue #627), so the next request re-resolves instead of serving the same stale entry until its TTL expires. The store still has to come back in PD; a short caller-side delay-then-retry is reasonable for idempotent ops, but inspect the exception's public `$storeId` property first |
 | `BatchPartialFailureException` | **Do not retry blindly** — the operation is *partially applied*: some sub-batches succeeded, others failed. `getRegionErrors()` is keyed by internal call indices (not region IDs, not user keys), but `getFailedRegionIds()` names the real TiKV region IDs of the failed calls and `getFailedCallIds()` maps each index to its region and sub-batch. The affected keys are still unknown; treat the batch as partially applied and re-check per key (see [Batch operations are not atomic](operations.md), and the per-operation verdicts in [Idempotency and Retry Safety](#idempotency-and-retry-safety)) |
 | `BatchDeadlineExceededException` | **Do not retry blindly** — also partially applied; `getContext()['pendingRegions']` lists the fan-out slots without a result (internal sub-batch or segment indices), and `['pendingRegionIds']`/`['dispatchedRegionIds']` carry the real TiKV region IDs when the call site supplied fan-out descriptors. Neither names your user keys. A batch that finishes inside the deadline is unaffected; the deadline is finite by default (`batchDeadlineMs`, 60000 ms) and `0` disables it. `Transaction::commit()` never throws it after the commit point (see below) |
+| `BatchCommandsStreamException` | **Do not retry blindly** — an internal BatchCommands stream-layer failure (the peer half-closed the stream before every request was answered, a wire message was malformed, or the drain deadline expired). `RawKvBatch::tryMultiplex()` catches it and re-runs the affected calls on the unary path, so it does not escape `RawKvClient`; a direct caller of `BatchCommandsMultiplexer` must fall back the same way instead of replaying the failed stream |
 
 ### Transaction::commit() and double-apply
 

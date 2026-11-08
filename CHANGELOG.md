@@ -47,6 +47,7 @@ policy now classifies as internal.
 
 ### Docs
 
+- The exception reference in `docs/error-handling.md` now covers every `TiKvException` subclass in `src/`: the hierarchy tree gained `IngestPartialFailureException` and `StoreUnavailableException`, the caller-retryability table gained `BatchCommandsStreamException` and `UndeterminedCommitException`, and the two hard-coded subclass counts (which had drifted to "twenty-three" and "twenty-one") are gone, so the document no longer states a number it can get wrong. A new `ExceptionHierarchyDocumentationGuardTest` derives the direct subclasses from `src/` and fails when one is missing from the tree, the "What Each Class Means" table or the retryability table. (#721)
 - The `docs/helpers/faq.md` entry on `unlink()` and directory permissions now quotes the errno and both platform messages: `unlink()` on a directory fails with `EISDIR` / "Is a directory" on Linux (where CI runs) and with `EPERM` / "Operation not permitted" on macOS and the BSDs, and the following `rmdir()` fails with `ENOTEMPTY` / "Directory not empty". The entry previously quoted only the macOS wording. (#666)
 
 ## [v0.14.0] - 2026-11-08
