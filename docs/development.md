@@ -635,9 +635,11 @@ The configuration lives in `infection.json`:
 
 Two details of the configuration are not obvious:
 
-1. `--do-not-fail-on-warning --do-not-fail-on-risky` keep PHPUnit's exit
-   code semantics identical to the rest of the project, where a warning does
-   not fail the run.
+1. `--do-not-fail-on-warning --do-not-fail-on-risky` pin the mutation run's
+   exit-code semantics independently of `phpunit.xml`, which sets
+   `failOnRisky="true"` (issue #665): Infection reads a non-zero exit code as
+   a killed mutant, so a risky test must not abort the run for a reason
+   unrelated to the mutant. Warnings do not fail the project's runs either.
 2. The `--filter` expression keeps `TlsConfigBuilderTest` out of the initial
    run. It deliberately reads an unreadable file, and the resulting PHP
    warning is a *defect* for PHPUnit — Infection forces
