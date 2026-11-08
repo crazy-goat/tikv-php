@@ -12,6 +12,8 @@ Everything is written in **English**: code, comments, commits, docs, issues, PRs
 - Work is driven by the **lowest open milestone** (`vX.Y.Z`).
 - Every open issue in a milestone has one `type:*` and one `priority:*` label.
 - Merge with **squash** only, and only when CI (`ci-ok`) is green on a branch that is up to date with the default branch.
+- Rebase onto `origin/<default>` **right before opening the pull request**, never rely on
+  the base the worktree was created from.
 - Update `CHANGELOG.md` in every PR that changes user-visible behaviour.
 - The coder and the reviewer are **subagents** with a fresh context. They talk through
   two scratch files, `findings.md` and `review.md`, in the worktree root. Both are
@@ -63,7 +65,13 @@ cd <worktree path printed by the script>
 ```
 
 The script fetches the default branch and creates a worktree on branch
-`<type>/issue-<N>-<slug>`. You choose where it goes; the first match wins:
+`<type>/issue-<N>-<slug>` from the `origin/<default>` it just fetched, so the
+base is current at creation. It still ages while the branch is coded and
+reviewed: a branch created and reviewed an hour later is already behind, and
+the missing commits can change exactly what the branch documents (issue #723).
+Step 5 therefore rebases again right before the pull request is opened.
+
+You choose where the worktree goes; the first match wins:
 
 1. `--dir <path>`: exactly `<path>` (a relative path is relative to where you are),
 2. `WORKTREES_DIR=<dir>` in the environment: `<dir>/<repo>/issue-<N>`,
@@ -126,9 +134,20 @@ leftovers (debug code, commented-out code), and that everything is in English.
 
 A finding entry has: role, `file:line`, what is wrong, severity, and a suggested fix.
 
-## 5. Push, open the pull request, wait for CI
+## 5. Rebase, push, open the pull request, wait for CI
 
-Only after the review accepts:
+Only after the review accepts. First rebase onto the default branch as it is
+**now**, not as it was when the worktree was created, so the branch and the
+documentation it changes are reviewed and tested against the code that will
+land:
+
+```bash
+git fetch origin
+git rebase origin/<default>
+```
+
+Resolve any conflict now — the `CHANGELOG.md` entry is the common one — run the
+checks again, then push and open the pull request:
 
 ```bash
 git push -u origin HEAD
@@ -258,6 +277,7 @@ Every repo must allow several worktrees to build and test at the same time.
 - [ ] Work done in a worktree (not the main checkout), branch `<type>/issue-<N>-<slug>`
 - [ ] Tests added, all checks pass in the worktree
 - [ ] `CHANGELOG.md` and docs updated
+- [ ] Branch rebased onto `origin/<default>` right before the pull request was opened
 - [ ] Committed but not pushed before the review accepted
 - [ ] `review.md`: every point answered, no open points
 - [ ] `findings.md`: coder and review findings recorded
