@@ -88,6 +88,12 @@ final class TlsReferenceDocumentationGuardTest extends TestCase
             . 'then caCertPem, then the deprecated caCert.',
         );
         self::assertStringContainsString(
+            'troubleshooting.md#tls-configuration-errors',
+            $contents,
+            'The mixed-pair bullet must link to the troubleshooting entry that explains it.',
+        );
+
+        self::assertStringContainsString(
             '| Client certificate and key | `clientCertFile` + `clientKeyFile` → '
             . '`clientCertPem` + `clientKeyPem` → `clientCert` + `clientKey` (deprecated) |',
             $contents,
@@ -116,6 +122,11 @@ final class TlsReferenceDocumentationGuardTest extends TestCase
     {
         $troubleshooting = $this->read(self::TROUBLESHOOTING);
         self::assertStringContainsString('#### TLS Configuration Errors', $troubleshooting);
+        self::assertStringContainsString(
+            'configuration.md#tlsssl-configuration',
+            $troubleshooting,
+            'The troubleshooting section must link to the existing TLS/SSL Configuration heading.',
+        );
 
         $violations = [];
 

@@ -261,7 +261,7 @@ the tables below.
 
 The remaining `options['tls']` validation errors — a non-array `tls` value, an
 unrecognised key, a non-string value and an incomplete client pair — are
-listed in [TLS/SSL Configuration](configuration.md#tlssl-configuration).
+listed in [TLS/SSL Configuration](configuration.md#tlsssl-configuration).
 
 ### Timeout Issues
 

@@ -816,10 +816,12 @@ The precedence is per credential, not per key:
   `clientCertPem` + `clientKeyPem` pair wins over
   `clientCert` + `clientKey`.
 - The client pair is chosen as a pair. Mixing the forms across the two
-  halves — for example `clientCertFile` with `clientKeyPem` — matches no
-  complete pair and is rejected with `Incomplete client certificate pair`
-  (see [Troubleshooting](troubleshooting.md#tls-configuration-errors)),
-  rather than falling back to a lower-precedence pair or to plaintext.
+  halves — for example `clientCertFile` with `clientKeyPem` — does not form
+  a pair. When no complete pair is present at all, that configuration is
+  rejected with `Incomplete client certificate pair` (see
+  [Troubleshooting](troubleshooting.md#tls-configuration-errors)) instead of
+  connecting in plaintext; when a complete lower-precedence pair is also
+  present, that pair is used and the mixed halves are ignored.
 
 The deprecated keys themselves are described in
 [Deprecated TLS Option Keys](#deprecated-tls-option-keys).
