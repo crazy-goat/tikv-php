@@ -862,20 +862,22 @@ $client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 
 **Who closes the connections on the manual path.** The rule of
 [Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
-is "the connections belong to whoever created them", and it holds on the
-manual path too. A `RawKvClient` assembled by hand is *given* a transport and
-a PD client it did not create, so it does not own them by default: `close()`
-— and therefore `__destruct()`, which delegates to it — leaves both open
-(issue #204). That makes sharing safe: destroying one client cannot close the
-channels another one still uses. The client still clears its own region
-cache.
+is "the connections belong to whoever created them". A client assembled by
+hand is *given* a transport and a PD client it did not create, but the two
+clients do not treat them the same way today:
 
-The exception is a hand-assembled `TxnKvClient`: its `ownsGrpcClient` still
-defaults to `true` for backward compatibility, so `close()` and the
-destructor close the transport it was given. Pass `ownsGrpcClient: false` to
-keep the transport open there (issue #204 tracks aligning the default).
+- `RawKvClient` defaults `ownsGrpcClient` and `ownsPdClient` to `false`:
+  `close()` — and therefore `__destruct()`, which delegates to it — leaves
+  both open (issue #204). That makes sharing safe: destroying one client
+  cannot close the channels another one still uses. The client still clears
+  its own region cache.
+- `TxnKvClient` differs: `ownsGrpcClient` still defaults to `true`, and
+  `close()` closes the PD client unconditionally (there is no `ownsPdClient`
+  flag). Pass `ownsGrpcClient: false` to keep a shared transport open; the PD
+  client it is given is always closed. #990 tracks aligning the two clients.
 
-If the application wants to hand ownership over instead, say so explicitly:
+If the application wants to hand ownership over on a `RawKvClient`, say so
+explicitly:
 
 ```php
 $client = new RawKvClient(
@@ -886,10 +888,9 @@ $client = new RawKvClient(
 );
 ```
 
-With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
-matching dependency in `close()` (and in the destructor); the defaults are
-`false` for a hand-assembled `RawKvClient`. `TxnKvClient` has the same
-`ownsGrpcClient` parameter but still defaults to `true`.
+With `ownsGrpcClient: true` / `ownsPdClient: true` the `RawKvClient` closes
+the matching dependency in `close()` (and in the destructor). `TxnKvClient`
+accepts `ownsGrpcClient` only, and still defaults it to `true`.
 
 ### Security: Fail-Closed TLS
 

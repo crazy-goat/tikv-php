@@ -330,12 +330,14 @@ final class TxnKvClient
      *                                      configure the transport the factory
      *                                      would otherwise build ('tls',
      *                                      'allowInsecure', 'maxChannels',
-     *                                      'idleTtlMs', 'grpc'): passing both
-     *                                      throws `InvalidArgumentException`,
-     *                                      because those options configure a
-     *                                      transport `create()` does not build.
-     *                                      Configure them on the transport
-     *                                      passed in.
+     *                                      'idleTtlMs', 'grpc'): when
+     *                                      `grpcClient` is a
+     *                                      `GrpcClientInterface`, combining it
+     *                                      with any of them throws
+     *                                      `InvalidArgumentException`, because
+     *                                      those options configure a transport
+     *                                      `create()` does not build. Configure
+     *                                      them on the transport passed in.
      *                                      Transaction defaults are accepted
      *                                      too, e.g. 'lockWaitTimeMs' (the
      *                                      client-wide pessimistic-lock wait
@@ -417,13 +419,15 @@ final class TxnKvClient
          * Whether this client owns the gRPC transport and may close it.
          *
          * true (the default) for a client that built the transport itself —
-         * and for a client assembled by hand, which therefore closes the
-         * transport it was given (issue #204 tracks the change to close only
-         * what a client owns).
+         * and, because that is the legacy behaviour, for a client assembled
+         * by hand, which therefore closes the transport it was given. #990
+         * tracks aligning this default with `RawKvClient`, which closes only
+         * what the client created (issue #204).
          * false when the transport was supplied by the application
          * (options['grpcClient']): the application stays its owner, so the
          * client never closes it and the same transport can be shared with
-         * other clients.
+         * other clients. Pass false explicitly to keep a hand-supplied
+         * transport open.
          */
         private readonly bool $ownsGrpcClient = true,
         /**

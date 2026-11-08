@@ -325,7 +325,8 @@ final class RawKvClient
      *        'grpcClient' is mutually exclusive with the five options that
      *        configure the transport the factory would otherwise build
      *        ('tls', 'allowInsecure', 'maxChannels', 'idleTtlMs', 'grpc'):
-     *        passing both throws `InvalidArgumentException`, because those
+     *        when `grpcClient` is a `GrpcClientInterface`, combining it with
+     *        any of them throws `InvalidArgumentException`, because those
      *        options configure a transport `create()` does not build, and
      *        silently ignoring them would misrepresent the connection (for
      *        example, a caller could believe TLS is enforced). Configure them

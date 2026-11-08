@@ -140,7 +140,7 @@ interface GrpcClientInterface
      *   the two clients: `RawKvClient` defaults to `false`, so it does **not**
      *   close the transport and the caller keeps owning it — pass
      *   `ownsGrpcClient: true` to transfer ownership. `TxnKvClient` still
-     *   defaults to `true` for backward compatibility (issue #204 tracks
+     *   defaults to `true` for backward compatibility (#990 tracks
      *   aligning it), so a hand-assembled `TxnKvClient` **does** close the
      *   transport — pass `ownsGrpcClient: false` to keep it open.
      *
