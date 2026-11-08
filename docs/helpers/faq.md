@@ -12,6 +12,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [Detect the cluster mode with a V2 RawKV read — the error names the storage mode](#detect-the-cluster-mode-with-a-v2-rawkv-read--the-error-names-the-storage-mode)
 - [A test that reads a value out of the file under test pins the relation, not the value (issue #731)](#a-test-that-reads-a-value-out-of-the-file-under-test-pins-the-relation-not-the-value-issue-731)
 - [A transactional scan is a read: one timestamp for every returned key](#a-transactional-scan-is-a-read-one-timestamp-for-every-returned-key)
 - [A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep](#a-lock-resolution-deadline-fix-starts-from-the-current-lockresolver-not-from-470s-ttl-sleep)
@@ -156,6 +157,29 @@ of the file.
 - [The batch deadline is finite by default, and checked only between waits (#275)](#the-batch-deadline-is-finite-by-default-and-checked-only-between-waits-275)
 - [Destructors log best-effort and skip rollback during shutdown (#287)](#destructors-log-best-effort-and-skip-rollback-during-shutdown-287)
 <!-- index:end -->
+
+## Detect the cluster mode with a V2 RawKV read — the error names the storage mode
+
+The per-mode end-to-end runners have to know whether the cluster is V1,
+V1TTL or API V2 before a suite starts (issue #730). TiKV exposes no
+cluster-level mode endpoint, but one API V2 RawKV read answers all three
+without writing anything (`tests/E2E/ClusterMode.php`, called by
+`bin/cluster-mode.php`):
+
+- an API V2 server serves the read normally;
+- a V1TTL server refuses it with `Api version in request does not match with
+  TiKV storage, cmd: raw_get, storage: V1ttl, request: V2`;
+- a V1 server refuses it with the same message naming `storage: V1`.
+
+The refusal carries the server's storage mode, and the probe parses that
+token. Do not replace it with a V1 raw TTL request: measured against TiKV
+8.5.5, `getKeyTTL()` against a V1 cluster did not answer within 10 s (the
+retry budget expired), and a `put()` with a TTL returned the documented
+`ttl is not enabled` error only after ~2.2 s and wrote a key. The probe is
+best-effort by design: when it cannot reach a store (for example a host run
+where PD advertises `tikv1:20160`, which resolves only inside the compose
+network) it warns and lets the suite run, and `tests/E2E/ClusterProbe.php`
+reports the unreachable cluster with a better message.
 
 ## A test that reads a value out of the file under test pins the relation, not the value (issue #731)
 
