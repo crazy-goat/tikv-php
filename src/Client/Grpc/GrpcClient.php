@@ -37,8 +37,10 @@ use Psr\Log\NullLogger;
  * (the `grpcClient` option) belongs to the application: the client never
  * closes it, so the same transport can serve several clients. A client
  * assembled by hand (`new RawKvClient($pdClient, $grpc)`) does not own the
- * transport it is given, so it never closes it; pass `ownsGrpcClient: true`
- * to transfer ownership. See {@see GrpcClientInterface::close()}.
+ * transport by default, so it leaves it open; a hand-assembled
+ * `TxnKvClient` still defaults `ownsGrpcClient` to `true` and therefore
+ * closes it — see {@see GrpcClientInterface::close()} for the exact defaults
+ * of both clients.
  *
  * ## ext-grpc channel semantics (issue #283)
  *

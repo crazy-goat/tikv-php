@@ -3,6 +3,75 @@
 Important project decisions in crazy-goat/tikv-php that subagents should
 not silently deviate from.
 
+**Index** — one link per section, in file order.
+
+A new section goes directly below this index, newest first, and its link
+goes at the top of the list. The fixed insertion point is what keeps two
+branches that learn something at the same time from conflicting at the end
+of the file.
+
+<!-- index:start -->
+- [Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)](#branch-naming-fixn-kebab-case-no-issue--prefix)
+- [Commit style: `type: subject (#N)`](#commit-style-type-subject-n)
+- [Issues are tracked in version milestones; work proceeds bottom-up](#issues-are-tracked-in-version-milestones-work-proceeds-bottom-up)
+- [Default branch is `master`, direct commits forbidden](#default-branch-is-master-direct-commits-forbidden)
+- [PHPStan level 9, `declare(strict_types=1)` everywhere](#phpstan-level-9-declarestrict_types1-everywhere)
+- [The coverage floor is enforced, and it is a ratchet (issue #362)](#the-coverage-floor-is-enforced-and-it-is-a-ratchet-issue-362)
+- [PHP support: >= 8.2, CI matrix 8.2–8.4](#php-support--82-ci-matrix-8284)
+- [RegionCache superseded-range removal emits no `regionInvalidated` metric; ordered writes use a treap](#regioncache-superseded-range-removal-emits-no-regioninvalidated-metric-ordered-writes-use-a-treap)
+- [Tests are delegated / E2E needs Docker](#tests-are-delegated--e2e-needs-docker)
+- [A test runner that selects nothing must exit non-zero, and the E2E entry point runs the suites one after the other (issue #361)](#a-test-runner-that-selects-nothing-must-exit-non-zero-and-the-e2e-entry-point-runs-the-suites-one-after-the-other-issue-361)
+- [`scan(limit: 0)`'s `maxScanRows` guard is per fetched page, not per row (issue #191)](#scanlimit-0s-maxscanrows-guard-is-per-fetched-page-not-per-row-issue-191)
+- [A scan that hits a cap throws; it never returns a partial range (issue #440)](#a-scan-that-hits-a-cap-throws-it-never-returns-a-partial-range-issue-440)
+- [A PHP-level merge of scan rows is slower than the native `array_unique()` + `sort()` it replaces (issue #302)](#a-php-level-merge-of-scan-rows-is-slower-than-the-native-array_unique--sort-it-replaces-issue-302)
+- [All key ordering goes through `Client\Util\KeyOrder`, enforced by a PHPStan rule (issue #186)](#all-key-ordering-goes-through-clientutilkeyorder-enforced-by-a-phpstan-rule-issue-186)
+- [Region-routing test boundaries must be decimal, not alphabetic (issue #232)](#region-routing-test-boundaries-must-be-decimal-not-alphabetic-issue-232)
+- [Issue #261's inverted region-cache acceptance criterion is not implemented on purpose (issue #261)](#issue-261s-inverted-region-cache-acceptance-criterion-is-not-implemented-on-purpose-issue-261)
+- [Retryability and cache invalidation are two decisions, in two functions (issue #233)](#retryability-and-cache-invalidation-are-two-decisions-in-two-functions-issue-233)
+- [Region errors are classified by their typed oneof, never by their message (issue #444)](#region-errors-are-classified-by-their-typed-oneof-never-by-their-message-issue-444)
+- [`notLeaderOwnedByRetryExecutor` is a call-site property, threaded through every lock-resolution region check (issue #568)](#notleaderownedbyretryexecutor-is-a-call-site-property-threaded-through-every-lock-resolution-region-check-issue-568)
+- [A class of bug gets a seam, a rule and a fixture — not three site patches (issue #180)](#a-class-of-bug-gets-a-seam-a-rule-and-a-fixture--not-three-site-patches-issue-180)
+- [A Raw-mode region boundary is stored bytes, not the key you split at (issue #188)](#a-raw-mode-region-boundary-is-stored-bytes-not-the-key-you-split-at-issue-188)
+- [A key whose region cannot be resolved is an internal error, never a valid outcome (issue #187)](#a-key-whose-region-cannot-be-resolved-is-an-internal-error-never-a-valid-outcome-issue-187)
+- [`batchResolveRegions()` reads the cache first, and a "run" is a provable gap (issue #288)](#batchresolveregions-reads-the-cache-first-and-a-run-is-a-provable-gap-issue-288)
+- [A PD `ResponseHeader.error` is an error even with an empty message, checked at one choke point (issue #234)](#a-pd-responseheadererror-is-an-error-even-with-an-empty-message-checked-at-one-choke-point-issue-234)
+- [Every gRPC call carries a finite deadline, and PD/TSO/lock-resolution time out separately from the store RPCs (issue #260)](#every-grpc-call-carries-a-finite-deadline-and-pdtsolock-resolution-time-out-separately-from-the-store-rpcs-issue-260)
+- [No code path in `src/Client` may derive an infinite gRPC deadline (issue #184)](#no-code-path-in-srcclient-may-derive-an-infinite-grpc-deadline-issue-184)
+- [A non-positive timeout is a configuration error, not a "disabled" spelling (issue #276)](#a-non-positive-timeout-is-a-configuration-error-not-a-disabled-spelling-issue-276)
+- [The ext-grpc channel semantics are verified, not assumed (issue #283)](#the-ext-grpc-channel-semantics-are-verified-not-assumed-issue-283)
+- [The four Percolator invariants of the TxnKV path (issue #182)](#the-four-percolator-invariants-of-the-txnkv-path-issue-182)
+- [A scan's region list is loaded in bounded batches, forwards and backwards (issues #282, #198)](#a-scans-region-list-is-loaded-in-bounded-batches-forwards-and-backwards-issues-282-198)
+- [An unbounded reverse scan fans out like the forward one, but every reverse shrink falls back (issue #555)](#an-unbounded-reverse-scan-fans-out-like-the-forward-one-but-every-reverse-shrink-falls-back-issue-555)
+- [The parallel prewrite reports its aggregated failure, it does not throw it (issue #431, GAP-17)](#the-parallel-prewrite-reports-its-aggregated-failure-it-does-not-throw-it-issue-431-gap-17)
+- [An option the client cannot apply is an error, not a no-op (issue #272)](#an-option-the-client-cannot-apply-is-an-error-not-a-no-op-issue-272)
+- [The transport belongs to whoever created it (issue #407)](#the-transport-belongs-to-whoever-created-it-issue-407)
+- [A client rolls back its live transactions before releasing the transport (issue #226)](#a-client-rolls-back-its-live-transactions-before-releasing-the-transport-issue-226)
+- [The transaction mode is stated explicitly, but `begin()` keeps its pessimistic default (issue #439)](#the-transaction-mode-is-stated-explicitly-but-begin-keeps-its-pessimistic-default-issue-439)
+- [The README project-structure tree is checked by a unit test, not by review (issue #410)](#the-readme-project-structure-tree-is-checked-by-a-unit-test-not-by-review-issue-410)
+- [ScanIterator enforces cursor progress but has no page ceiling (issue #312)](#scaniterator-enforces-cursor-progress-but-has-no-page-ceiling-issue-312)
+- [An empty KvScan batch is re-asked once, outside RetryExecutor (#512)](#an-empty-kvscan-batch-is-re-asked-once-outside-retryexecutor-512)
+- [`composer.lock` is committed and pinned to the lowest PHP (#311)](#composerlock-is-committed-and-pinned-to-the-lowest-php-311)
+- [Resolved transaction statuses are cached, FIFO, 2048, final outcomes only (#428)](#resolved-transaction-statuses-are-cached-fifo-2048-final-outcomes-only-428)
+- [An errored `CheckTxnStatus` response is not a status (#224)](#an-errored-checktxnstatus-response-is-not-a-status-224)
+- [Atomic mode and plain writes use different TiKV paths (#399)](#atomic-mode-and-plain-writes-use-different-tikv-paths-399)
+- [Opportunistic primary-lock heartbeat: pessimistic only, every lock TTL is `uptime + TTL`, no timer (#429)](#opportunistic-primary-lock-heartbeat-pessimistic-only-every-lock-ttl-is-uptime--ttl-no-timer-429)
+- [The idle sweep touches the returned channel before it sweeps, and `reapIdleChannels()` is public on the clients (#277)](#the-idle-sweep-touches-the-returned-channel-before-it-sweeps-and-reapidlechannels-is-public-on-the-clients-277)
+- [The batch deadline is finite by default (#275)](#the-batch-deadline-is-finite-by-default-275)
+- [Transaction size limits are opt-in, request batching is on by default (#430)](#transaction-size-limits-are-opt-in-request-batching-is-on-by-default-430)
+- [`is_first_lock` belongs to the batch that holds the primary lock (#225)](#is_first_lock-belongs-to-the-batch-that-holds-the-primary-lock-225)
+- [Reversed RawKV ranges are rejected before any RPC (#343)](#reversed-rawkv-ranges-are-rejected-before-any-rpc-343)
+- [Reverse scan has no +infinity upper-bound sentinel (RAW-09, #194)](#reverse-scan-has-no-infinity-upper-bound-sentinel-raw-09-194)
+- [Rollback KeyErrors fail closed; only `txn_not_found` / `txn_lock_not_found` are success (#559)](#rollback-keyerrors-fail-closed-only-txn_not_found--txn_lock_not_found-are-success-559)
+- [Resource-control E2E observation limit (issue #427)](#resource-control-e2e-observation-limit-issue-427)
+- [A CAS transport failure is indeterminate only after the request is sent (issue #537)](#a-cas-transport-failure-is-indeterminate-only-after-the-request-is-sent-issue-537)
+- [SST ingest retry budget is per region group (issue #197)](#sst-ingest-retry-budget-is-per-region-group-issue-197)
+- [Compose ports bind to loopback, not `0.0.0.0` (issue #318, SEC-15)](#compose-ports-bind-to-loopback-not-0000-issue-318-sec-15)
+- [gRPC receive limit defaults to 64 MB, not the core's 4 MB (SEC-16, issue #319)](#grpc-receive-limit-defaults-to-64-mb-not-the-cores-4-mb-sec-16-issue-319)
+- [`TlsConfig` does not try to scrub credentials (SEC-12, issue #315)](#tlsconfig-does-not-try-to-scrub-credentials-sec-12-issue-315)
+- [Workflows pin actions by commit SHA (issue #316, SEC-13)](#workflows-pin-actions-by-commit-sha-issue-316-sec-13)
+- [Resolved-lock tracking lives on the per-transaction LockResolver (issue #432, GAP-18)](#resolved-lock-tracking-lives-on-the-per-transaction-lockresolver-issue-432-gap-18)
+<!-- index:end -->
+
 ## Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)
 
 Feature branches use `fix/<NUMBER>-<short-description>` (preferred), or
@@ -1178,7 +1247,7 @@ to be unambiguous, and the answer is not "whoever calls `close()`":
    `close()` and in the destructor. `ownsGrpcClient: true` / `ownsPdClient:
    true` transfers ownership (issue #204). `TxnKvClient` still defaults
    `ownsGrpcClient` to `true` and closes its PD client unconditionally, pending
-   a follow-up issue.
+   the follow-up issue #990.
 
 The rule is published in three places, and a reader of any one of them has to
 find the same answer: `GrpcClientInterface::close()` (the API contract), the
