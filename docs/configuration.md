@@ -793,11 +793,36 @@ $options = [
 ];
 ```
 
-When both forms are given for the same credential, the explicit file path wins:
-`caCertFile` takes priority over `caCertPem`, and a complete
-`clientCertFile` + `clientKeyFile` pair takes priority over
-`clientCertPem` + `clientKeyPem`. Supplying both is redundant rather than an
-error, but the file is the one that is read.
+### TLS Option Precedence
+
+`options['tls']` accepts the same credential in more than one form. When
+several forms are present, the factory uses exactly one of them and ignores
+the rest, in this order:
+
+| Credential | Precedence (highest first) |
+| --- | --- |
+| CA certificate | `caCertFile` → `caCertPem` → `caCert` (deprecated) |
+| Client certificate and key | `clientCertFile` + `clientKeyFile` → `clientCertPem` + `clientKeyPem` → `clientCert` + `clientKey` (deprecated) |
+
+The precedence is per credential, not per key:
+
+- A file form wins over the matching PEM form: `caCertFile` over
+  `caCertPem`, and the complete `clientCertFile` + `clientKeyFile` pair over
+  `clientCertPem` + `clientKeyPem`. Supplying both forms is redundant rather
+  than an error, but only the file is read — the PEM value is never parsed,
+  so an invalid PEM there does not fail the configuration.
+- The deprecated keys are the last fallback: `caCertPem` wins over `caCert`
+  even though the latter can also carry inline PEM, and a complete
+  `clientCertPem` + `clientKeyPem` pair wins over
+  `clientCert` + `clientKey`.
+- The client pair is chosen as a pair. Mixing the forms across the two
+  halves — for example `clientCertFile` with `clientKeyPem` — matches no
+  complete pair and is rejected with `Incomplete client certificate pair`
+  (see [Troubleshooting](troubleshooting.md#tls-configuration-errors)),
+  rather than falling back to a lower-precedence pair or to plaintext.
+
+The deprecated keys themselves are described in
+[Deprecated TLS Option Keys](#deprecated-tls-option-keys).
 
 ### Deprecated TLS Option Keys
 
@@ -829,8 +854,12 @@ use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 
 $builder = new TlsConfigBuilder();
-$builder->withCaCertFile('/path/to/ca.crt')
-    ->withClientCertFile('/path/to/client.crt', '/path/to/client.key');
+$builder->withCaCertFile('/etc/tikv/certs/ca.crt', '/etc/tikv/certs')
+    ->withClientCertFile(
+        '/etc/tikv/certs/client.crt',
+        '/etc/tikv/certs/client.key',
+        '/etc/tikv/certs',
+    );
 
 $tlsConfig = $builder->build();
 
@@ -852,6 +881,18 @@ $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
 // early invalidation.
 $client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 ```
+
+Both file methods take an optional trailing `$baseDir` argument:
+`withCaCertFile($path, $baseDir = null)` and
+`withClientCertFile($certPath, $keyPath, $baseDir = null)`. It is the
+builder-level equivalent of `caCertBaseDir` / `clientCertBaseDir` and applies
+the same restriction: the base directory is canonicalized with `realpath()`
+(it must exist), and every file passed to that call must canonicalize to the
+base directory itself or lie beneath it. Omit the argument — or pass `null` —
+to disable the restriction. The client form applies the one base directory to
+both the certificate and the key. A path outside it throws
+`InvalidArgumentException` ("TLS file path is outside the allowed base
+directory"), like the matching option does.
 
 > **Note:** the manual path above is for the rare case where the client has
 > to be assembled by hand. `RawKvClient::create()` /

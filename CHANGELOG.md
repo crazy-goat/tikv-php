@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Docs
+
+- The TLS reference now states the precedence of the `options['tls']` keys — `caCertFile` before `caCertPem` before the deprecated `caCert`, and the matching file → PEM → deprecated order for the client pair, including the mixed-pair rejection — documents the optional `$baseDir` argument of `TlsConfigBuilder::withCaCertFile()` / `withClientCertFile()`, and lists the TLS `InvalidArgumentException` messages raised before a connection is opened in `docs/troubleshooting.md`. `TlsReferenceDocumentationGuardTest` pins the precedence rows, the builder signatures and every documented message against the class that throws it. (#689)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
