@@ -29,17 +29,23 @@ final class InjectedTransportMetricsTest extends TestCase
 {
     public function testMetricsBackendIsAppliedToTheClientSideWithAnInjectedTransport(): void
     {
+        $grpc = $this->createMock(GrpcClientInterface::class);
         $metrics = $this->createMock(MetricsInterface::class);
 
         $bundle = ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: [
-                'grpcClient' => $this->createMock(GrpcClientInterface::class),
+                'grpcClient' => $grpc,
                 'metrics' => $metrics,
             ],
         );
 
         $this->assertSame($metrics, $bundle->metrics);
+        $this->assertSame(
+            $grpc,
+            $bundle->grpc,
+            'the factory replaced the supplied transport instead of keeping it',
+        );
     }
 
     public function testTheMetricsSplitIsAnnouncedWhenTheOptionWasGiven(): void
@@ -75,28 +81,5 @@ final class InjectedTransportMetricsTest extends TestCase
             "options['metrics']",
             implode("\n", $logger->messages),
         );
-    }
-
-    /**
-     * The option cannot reach the supplied transport: the factory does not
-     * rebuild or replace it, it only applies the backend to the client-side
-     * counters. The transport keeps the backend it was built with (issue
-     * #695, documented in docs/configuration.md).
-     */
-    public function testTheMetricsOptionDoesNotReplaceTheSuppliedTransport(): void
-    {
-        $grpc = $this->createMock(GrpcClientInterface::class);
-        $metrics = $this->createMock(MetricsInterface::class);
-
-        $bundle = ConnectionFactory::create(
-            ['127.0.0.1:2379'],
-            options: [
-                'grpcClient' => $grpc,
-                'metrics' => $metrics,
-            ],
-        );
-
-        $this->assertSame($grpc, $bundle->grpc);
-        $this->assertSame($metrics, $bundle->metrics);
     }
 }

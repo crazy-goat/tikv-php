@@ -648,12 +648,17 @@ ones it was built with, and `options['metrics']` is **not** forwarded to it.
 Pass the same backend to the transport (`new GrpcClient(metrics: $metrics)`)
 to get them everywhere.
 
-The TLS state is reported the same way: `$bundle->tlsState` is
-`TlsState::Unknown` for a supplied transport, because the factory does not
-inspect its TLS configuration, and `TlsState::Plaintext` / `TlsState::Tls`
-for a transport the factory built. `$bundle->tlsConfig` alone cannot express
-that difference: it is `null` both for a factory-built plaintext transport
-and for an injected one (issue #695).
+The `ConnectionBundle` that `ConnectionFactory::create()` returns — an
+internal value object, not part of the public client API — also reports the
+transport's TLS state. `ConnectionBundle::$tlsState` is
+`Connection\TlsState::Unknown` for a supplied transport, because the factory
+does not inspect its TLS configuration. For a transport the factory built it
+is `Connection\TlsState::Plaintext` when the configuration carries no TLS
+material (including an empty `'tls' => []`), and `Connection\TlsState::Tls`
+when `TlsConfig::isEnabled()` is true.
+`ConnectionBundle::$tlsConfig` alone cannot express that difference: it is
+`null` both for a factory-built plaintext transport and for an injected one,
+and non-null but disabled for an empty TLS configuration (issue #695).
 
 #### What the shared channel really is
 

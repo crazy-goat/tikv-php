@@ -29,7 +29,7 @@ policy now classifies as internal.
 
 ### Fixed
 
-- `options['grpcClient']` no longer loses information on three points (issue #695). `ConnectionBundle::$tlsState` reports `TlsState::Unknown` for an application-supplied transport instead of letting the `null` `tlsConfig` read as plaintext, while a factory-built transport reports `TlsState::Plaintext` or `TlsState::Tls`. `'tls' => null` is treated as absent in the transport-option conflict check, matching `buildTlsConfig()`, so it no longer throws next to `options['grpcClient']`. The existing split of `options['metrics']` — client-side counters only, the supplied transport keeps its own backend — is now stated explicitly in `docs/configuration.md`.
+- `options['grpcClient']` no longer loses information on three points (issue #695). `ConnectionBundle::$tlsState` reports `TlsState::Unknown` for an application-supplied transport instead of letting the `null` `tlsConfig` read as plaintext. A factory-built transport is `TlsState::Tls` only when its `TlsConfig::isEnabled()` is true and `TlsState::Plaintext` otherwise — an empty `'tls' => []` no longer reports TLS while the channel is insecure. `'tls' => null` is treated as absent in the transport-option conflict check, matching `buildTlsConfig()`, so it no longer throws next to `options['grpcClient']`. The existing split of `options['metrics']` — client-side counters only, the supplied transport keeps its own backend — is now stated explicitly in `docs/configuration.md`.
 
 ### Tests
 

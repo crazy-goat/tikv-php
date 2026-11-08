@@ -1231,6 +1231,36 @@ class ConnectionFactoryTest extends TestCase
         $this->assertNotNull($bundle->tlsConfig);
     }
 
+    /**
+     * `'tls' => []` and a base-dir-only config build a `TlsConfig` with no
+     * material, and `GrpcClient::createChannel()` opens an insecure channel
+     * for it. Reporting `TlsState::Tls` on object presence alone would be
+     * the same fail-open signal #304 removed (issue #695).
+     */
+    public function testEmptyTlsConfigReportsPlaintextTlsState(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => []],
+        );
+
+        $this->assertSame(TlsState::Plaintext, $bundle->tlsState);
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertFalse($bundle->tlsConfig->isEnabled());
+    }
+
+    public function testBaseDirOnlyTlsConfigReportsPlaintextTlsState(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => ['caCertBaseDir' => $this->tempDir]],
+        );
+
+        $this->assertSame(TlsState::Plaintext, $bundle->tlsState);
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertFalse($bundle->tlsConfig->isEnabled());
+    }
+
     public function testTlsNonArrayStringThrowsInsteadOfSilentPlaintext(): void
     {
         $this->expectException(InvalidArgumentException::class);

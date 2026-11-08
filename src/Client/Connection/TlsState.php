@@ -20,17 +20,24 @@ enum TlsState
     /** The factory did not build the transport, so its TLS state is unknown. */
     case Unknown;
 
-    /** The factory built a transport without TLS configuration. */
+    /** The factory built a transport without usable TLS material. */
     case Plaintext;
 
-    /** The factory built a transport with TLS configuration. */
+    /**
+     * The factory built a transport with usable TLS material
+     * ({@see TlsConfig::isEnabled()}).
+     */
     case Tls;
 
     /**
      * State of a transport the factory built from the given TLS configuration.
+     *
+     * Keyed off {@see TlsConfig::isEnabled()}, not object presence: an empty
+     * `'tls' => []` or a base-dir-only config still builds a `TlsConfig`, but
+     * `GrpcClient` opens an insecure channel for it (issue #695).
      */
     public static function forFactoryBuiltTransport(?TlsConfig $tlsConfig): self
     {
-        return $tlsConfig instanceof \CrazyGoat\TiKV\Client\Tls\TlsConfig ? self::Tls : self::Plaintext;
+        return ($tlsConfig?->isEnabled() ?? false) ? self::Tls : self::Plaintext;
     }
 }
