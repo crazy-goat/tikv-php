@@ -473,7 +473,9 @@ options as `RawKvClient`, plus `retryDeadlineMs` (the wall-clock bound on one
 transaction's internal retry loop, default
 `Transaction::DEFAULT_RETRY_DEADLINE_MS`), `gcSafePointValidation`,
 `replicaRead`, `tsoPoolSize` and `lockWaitTimeMs` (the client-wide default
-for the pessimistic-lock wait). The per-transaction options (`pessimistic`,
+for the pessimistic-lock wait). It does not accept `slowLog`: that option is
+RawKV-only and is rejected with an `InvalidArgumentException` (issue #700).
+The per-transaction options (`pessimistic`,
 `priority`, `enable1Pc`, `enableAsyncCommit`, `eagerPessimisticLocks`,
 `lockWaitTimeMs` and `requestContext`) belong to `TxnKvClient::begin()`;
 `lockWaitTimeMs` is the one option accepted by both, where the `begin()`
@@ -1054,7 +1056,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 - ✅ **Tracing hooks** — `options['tracer']` accepts a `TraceEventInterface` callback; the client emits structured events for gRPC calls, 2PC phases and lock resolution, ready to bridge to OpenTelemetry (see [Tracing](docs/advanced.md#tracing))
 - ✅ **Health check** — `healthCheck()` probes PD with a lightweight `GetMembers` RPC and returns the cluster ID (with `options['expectedClusterId']` set, a response without a cluster-ID header is an error)
 - ✅ **Cluster ID** — `getClusterId()` returns the cluster ID learned from PD
-- ✅ **Slow log** — `options['slowLog']` logs the RawKV operations that are slower than their per-operation threshold
+- ✅ **Slow log** — `options['slowLog']` logs the RawKV operations that are slower than their per-operation threshold; the option is RawKV-only, and `TxnKvClient::create()` rejects it instead of ignoring it
 - ✅ **PSR-3 Logging** — Structured logging with any PSR-3 logger
 - ✅ **Idle channel reaping** — `reapIdleChannels()` on both clients drops cached gRPC channels idle longer than `idleTtlMs`, for a worker to call from its own tick
 - ✅ **Region cache refresh** — `refreshRegionCache()` on both clients re-queries PD for the cached regions at most once per `regionCacheRefreshMs`, for the same worker tick; `preloadRegions()` warms the cache at boot
@@ -1075,7 +1077,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `tls` | Server or mutual TLS, from file paths or inline PEM |
 | `allowInsecure` | `false` refuses to open a channel without usable TLS credentials |
 | `timeout` | A gRPC deadline per operation class — read, write, batch, scan, delete-range, checksum, ingest, PD, TSO, lock resolution |
-| `slowLog` | Thresholds above which an operation is logged as slow |
+| `slowLog` | Thresholds above which a RawKV operation is logged as slow (RawKV only; `TxnKvClient::create()` rejects it) |
 | `metrics` | A `MetricsInterface` backend for the RPC, retry and region-cache counters |
 | `tracer` | A `TraceEventInterface` callback for structured trace events (gRPC calls, 2PC phases, lock resolution) |
 | `retryDeadlineMs` | Wall-clock bound on one retry loop |

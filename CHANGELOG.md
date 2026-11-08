@@ -27,6 +27,10 @@ policy now classifies as internal.
 
 - `RegionErrorHandler::check()` no longer tests the region cache with `$cache instanceof RegionCacheInterface` before using it: the parameter is already typed `?RegionCacheInterface`, so the cache is now used through `?->` and `$regionId !== null` is the only guard. The behaviour is unchanged — a `null` cache with a region id still skips the capture and the invalidation. The docblock now names `NotLeader` as the exception to the routing-error invalidation rule, matching the ownership paragraph below it. (#680)
 
+### Fixed
+
+- `TxnKvClient::create()` now rejects `options['slowLog']` with an `InvalidArgumentException` instead of accepting it and emitting nothing. Slow-operation logging is a RawKV feature: the shared `ConnectionFactory` parsed the option for both clients, but no component on the transactional read/write path took a `SlowLogConfig`, so a transactional client configured with `slowLog` looked monitored while every transaction ran unmeasured (issue #700). An absent key and an explicit `null` still mean "not configured", like every other option group; the message tells the caller to remove the option or measure transaction timings in the application. `TxnKvClient::OPT_SLOW_LOG` names the key, and the documentation now states which client supports the option. **Migration:** remove `slowLog` from the options passed to `TxnKvClient::create()`; `RawKvClient::create()` keeps supporting it unchanged. (#700)
+
 ### Tests
 
 - Removed the dead "fail-closed contract not implemented yet" probes from `RawKvBatchUnresolvedKeyTest` and `CommitPrewriteKeyCoverageTest`. Both now assert the `TiKvException` fail-closed contract of #244 directly, and the placeholder `E_USER_WARNING` branches are gone. (#682)

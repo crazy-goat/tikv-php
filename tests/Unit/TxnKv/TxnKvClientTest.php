@@ -36,6 +36,30 @@ class TxnKvClientTest extends TestCase
         TxnKvClient::create([]);
     }
 
+    public function testCreateRejectsTheSlowLogOption(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['slowLog'] is not supported by TxnKvClient");
+
+        TxnKvClient::create(['pd:2379'], options: ['slowLog' => ['readThresholdMs' => 10]]);
+    }
+
+    public function testCreateRejectsAnyNonNullSlowLogValueBeforeParsingIt(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['slowLog'] is not supported by TxnKvClient");
+
+        TxnKvClient::create(['pd:2379'], options: ['slowLog' => 'readThresholdMs=10']);
+    }
+
+    public function testCreateAcceptsAnExplicitlyNullSlowLogOption(): void
+    {
+        $client = TxnKvClient::create(['pd:2379'], options: ['slowLog' => null]);
+
+        $this->assertInstanceOf(TxnKvClient::class, $client);
+        $client->close();
+    }
+
     public function testConstruction(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);
