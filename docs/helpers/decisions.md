@@ -953,8 +953,9 @@ The decisions that follow:
    process ends). `closeChannel()` first documented the same non-effect, but
    the retry path closed a channel after a transport error *expecting* a
    reconnect, so the transport now creates the replacement channel with
-   `'force_new' => true` (issue #717 — see the next section). The idle and
-   LRU evictions still reuse the persistent entry.
+   `'force_new' => true` and `'grpc.use_local_subchannel_pool' => 1` (issue
+   #717 — see the next section; either option alone reuses the old TCP
+   connection). The idle and LRU evictions still reuse both pools.
 
 The ownership model that answers "who closes what" — a transport belongs to
 whoever created it, `options['grpcClient']` injects a borrowed one, and the
@@ -970,32 +971,53 @@ a fresh connection. It did not: `closeChannel()` only dropped the PHP handle,
 and the next `getChannel()` resolved to the same persistent entry — the same
 `grpc_channel` and the same TCP connection that had just failed.
 
-The fix is `'force_new' => true` on the replacement channel, not a new retry
-path. Verified against grpc 1.83.0, `src/php/ext/grpc/channel.c`:
+The fix has to reset **two** layers, because a new `grpc_channel` does not
+imply a new connection. Verified against grpc 1.83.0:
 
-- `force_new` is read from the same options array as `credentials`, before the
-  channel-arguments hash is built. It is one of the three keys the extension
-  excludes from that hash (`credentials`, `force_new`,
-  `grpc_target_persist_bound`), so setting it does not change the persistent
-  key.
-- with `force_new` the extension calls `grpc_channel_create()` directly and
-  never inserts the channel into the persistent table. The forced channel is
-  private to its handle (destroyed when the last reference goes) and existing
-  channels are untouched — the extension's own docblock says "This will not
-  affect existing channels".
+- ext-grpc layer (`src/php/ext/grpc/channel.c`): `force_new` is read from the
+  same options array as `credentials`, before the channel-arguments hash is
+  built. It is one of the three keys the extension excludes from that hash
+  (`credentials`, `force_new`, `grpc_target_persist_bound`), so setting it
+  does not change the persistent key. With it the extension calls
+  `grpc_channel_create()` directly and never inserts the channel into the
+  persistent table; existing channels are untouched — the extension's own
+  docblock says "This will not affect existing channels".
+- gRPC core layer (`src/core/client_channel/client_channel.cc`,
+  `GetSubchannelPool()`): `grpc_channel_create()` builds a `ClientChannel`,
+  whose subchannel — the owner of the TCP connection — comes from a
+  `LocalSubchannelPool` only when `GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL`
+  (`grpc.use_local_subchannel_pool`) is set; otherwise from
+  `GlobalSubchannelPool::instance()`, which "shares subchannels among
+  channels" (`include/grpc/impl/channel_arg_names.h` documents the default as
+  false). The persistent table still holds the failed channel, so its
+  subchannel stays alive in the global pool and the `force_new` channel finds
+  it: the retry lands on the same TCP connection.
 
-Why not use `force_new` everywhere: the persistent table is the cross-request
-connection reuse the long-lived transport exists for. An idle or LRU eviction
-drops a *healthy* handle and should keep resolving to the warm persistent
-channel; only `closeChannel()` carries the "this connection is broken"
+The replacement therefore sets both `'force_new' => true` and
+`'grpc.use_local_subchannel_pool' => 1`. Measured in the `php-test` container
+(grpc 1.83.0) with a plain `stream_socket_server` and a count of
+`stream_socket_accept()`s:
+
+| scenario | accepted TCP connections |
+|---|---|
+| persistent channel, close handle, plain re-create | 1 (warm connection reused) |
+| failed persistent channel still held, replacement `force_new` only | 1 |
+| `force_new` only, old channel destroyed | 2 (not the retry situation) |
+| old persistent channel held, replacement `force_new` + local pool | 2 |
+| `GrpcClient`: `getChannel()` → `closeChannel()` → `getChannel()` | 2 |
+
+The last row is now
+`tests/Unit/Grpc/GrpcClientForceReconnectTest::testTheRetryAfterCloseChannelOpensASecondTcpConnection()`,
+which counts accepts itself: dropping the local-pool argument makes it fail
+with 1 instead of 2. The `channelFactory` seam additionally pins the option
+array, and the idle/LRU case pins that both options are absent there.
+
+Why not use the pair everywhere: both pools are the cross-request connection
+reuse the long-lived transport exists for. An idle or LRU eviction drops a
+*healthy* handle and should keep resolving to the warm channel and
+connection; only `closeChannel()` carries the "this connection is broken"
 meaning, and it is the retry path's only caller. The distinction is stated on
 `GrpcClientInterface::closeChannel()` / `::reapIdleChannels()`.
-
-Testing it without a server: the `channelFactory` constructor seam (same style
-as `callFactory` and `credentialsFactory`) receives the options array the
-channel would be built from, so
-`tests/Unit/Grpc/GrpcClientForceReconnectTest.php` asserts that the
-replacement carries `force_new` while an idle/LRU replacement does not.
 
 This slightly narrows the earlier #283 decision ("`force_new` was rejected"):
 that rejection was about isolating two clients, a hazard that does not exist.

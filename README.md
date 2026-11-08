@@ -869,18 +869,27 @@ holds — it only drops that client's own reference to it. Verified against the
 deployed extension (grpc 1.83.0; the persistent-channel code is unchanged in
 the oldest supported release, 1.57).
 
+The connection itself lives one layer below: gRPC core gives each
+`ClientChannel` a subchannel from either a local pool or its process-global
+subchannel pool (the default, `grpc.use_local_subchannel_pool` false), and the
+global pool shares subchannels — and therefore TCP connections — among
+channels (`client_channel.cc`, `GetSubchannelPool()`). A new `grpc_channel`
+that keeps that default can still reuse the old connection.
+
 Two consequences for the API:
 
 - `close()` releases this client's handles; the TCP connection stays warm in
   the process (until the process ends or the per-target persist bound drops
   the entry). It does not tear the connection down.
 - `closeChannel()` drops the cached handle and forces a new connection: the
-  replacement channel is built with `'force_new' => true`, so it is a new
-  underlying `grpc_channel` and a new TCP connection rather than the
-  persistent entry for the same key (issue #717). The retry path is its
-  caller — it closes the channel after a transport error. The idle and the
-  LRU evictions are different: they keep the persistent entry, so a later
-  call reuses the warm connection.
+  replacement channel is built with `'force_new' => true` and
+  `'grpc.use_local_subchannel_pool' => 1`. The first keeps it out of
+  ext-grpc's persistent table; the second keeps its subchannel out of gRPC
+  core's global subchannel pool, which would otherwise hand the new channel
+  the existing subchannel — and with it the TCP connection that just failed
+  (issue #717). The retry path is its caller — it closes the channel after a
+  transport error. The idle and the LRU evictions are different: they keep
+  both pools, so a later call reuses the warm connection.
 
 ### PSR-3 Logging
 

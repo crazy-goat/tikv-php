@@ -10,18 +10,25 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Issue #717: a channel closed after a transport error must be replaced by a
- * **new connection**, not by the persistent entry the failed channel came
- * from.
+ * **new connection**, not by the connection the failed channel came from.
  *
- * ext-grpc resolves `new Grpc\Channel($target, $opts)` from its process-global
- * persistent table unless `$opts['force_new']` is true, so a fresh PHP handle
- * alone still talks over the connection that just failed. The
- * `channelFactory` seam receives the options the channel would be built from,
- * which is the layer the transport controls — no server is needed to pin it.
+ * Two process-global pools decide that, and both have to be bypassed:
+ *
+ * - ext-grpc resolves `new Grpc\Channel($target, $opts)` from its persistent
+ *   table unless `$opts['force_new']` is true;
+ * - gRPC core resolves the channel's subchannel — the thing that owns the TCP
+ *   connection — from its global subchannel pool unless
+ *   `$opts['grpc.use_local_subchannel_pool']` is set. `force_new` alone still
+ *   lands on the connection that just failed.
+ *
+ * The `channelFactory` seam asserts both options at the layer the transport
+ * controls, and `testTheRetryAfterCloseChannelOpensASecondTcpConnection()`
+ * measures the property that matters: a plain TCP listener accepts a second
+ * connection after `closeChannel()`.
  *
  * The idle and LRU evictions are the counter-case: they drop a healthy handle
  * and must keep resolving to the warm persistent channel, so their
- * replacements must NOT carry `force_new`.
+ * replacements must carry neither option.
  */
 final class GrpcClientForceReconnectTest extends TestCase
 {
@@ -37,9 +44,20 @@ final class GrpcClientForceReconnectTest extends TestCase
     /** @var list<array<string, mixed>> */
     private array $seenOptions = [];
 
+    /** @var list<resource> Accepted sockets, kept open for the connection count. */
+    private array $acceptedSockets = [];
+
     protected function setUp(): void
     {
         $this->requireGrpcExtension();
+    }
+
+    protected function tearDown(): void
+    {
+        foreach ($this->acceptedSockets as $socket) {
+            fclose($socket);
+        }
+        $this->acceptedSockets = [];
     }
 
     public function testTheChannelAfterCloseChannelForcesANewConnection(): void
@@ -49,6 +67,7 @@ final class GrpcClientForceReconnectTest extends TestCase
         try {
             $first = $client->getChannel(self::ADDRESS);
             self::assertArrayNotHasKey('force_new', $this->seenOptions[0]);
+            self::assertArrayNotHasKey('grpc.use_local_subchannel_pool', $this->seenOptions[0]);
 
             $client->closeChannel(self::ADDRESS);
             $second = $client->getChannel(self::ADDRESS);
@@ -58,7 +77,12 @@ final class GrpcClientForceReconnectTest extends TestCase
             self::assertSame(
                 true,
                 $this->seenOptions[1]['force_new'] ?? null,
-                'the retry after a transport error must get a new connection',
+                'the retry after a transport error must not reuse the persistent channel',
+            );
+            self::assertSame(
+                1,
+                $this->seenOptions[1]['grpc.use_local_subchannel_pool'] ?? null,
+                'the retry must get its own subchannel, not the pooled one',
             );
         } finally {
             $client->close();
@@ -81,7 +105,7 @@ final class GrpcClientForceReconnectTest extends TestCase
             self::assertCount(2, $this->seenOptions);
 
             // Evicting the forced channel later follows the ordinary idle
-            // path: the replacement reuses the persistent entry.
+            // path: the replacement reuses the warm persistent channel.
             $this->now += 200.0;
             $client->reapIdleChannels();
             $client->getChannel(self::ADDRESS);
@@ -91,6 +115,11 @@ final class GrpcClientForceReconnectTest extends TestCase
                 'force_new',
                 $this->seenOptions[2],
                 'an idle eviction drops a healthy handle and must reuse the persistent channel',
+            );
+            self::assertArrayNotHasKey(
+                'grpc.use_local_subchannel_pool',
+                $this->seenOptions[2],
+                'an idle eviction must keep the pooled subchannel and its TCP connection',
             );
         } finally {
             $client->close();
@@ -128,8 +157,97 @@ final class GrpcClientForceReconnectTest extends TestCase
 
             self::assertCount(1, $this->seenOptions);
             self::assertSame(true, $this->seenOptions[0]['force_new'] ?? null);
+            self::assertSame(1, $this->seenOptions[0]['grpc.use_local_subchannel_pool'] ?? null);
         } finally {
             $client->close();
+        }
+    }
+
+    public function testAFailedChannelConstructionKeepsTheReconnectArmed(): void
+    {
+        $attempts = 0;
+        $this->seenOptions = [];
+
+        $client = new GrpcClient(
+            channelFactory: function (string $address, array $options) use (&$attempts): Channel {
+                $attempts++;
+                $this->seenOptions[] = $options;
+
+                if ($attempts === 2) {
+                    throw new \RuntimeException('cannot create the channel');
+                }
+
+                return $this->createMock(Channel::class);
+            },
+        );
+
+        try {
+            $client->getChannel(self::ADDRESS);
+            $client->closeChannel(self::ADDRESS);
+
+            try {
+                $client->getChannel(self::ADDRESS);
+                self::fail('The failing factory should have thrown');
+            } catch (\RuntimeException) {
+            }
+
+            // The flag is consumed only after a successful construction, so
+            // the next attempt still reconnects instead of silently falling
+            // back to the persistent entry.
+            $client->getChannel(self::ADDRESS);
+
+            self::assertCount(3, $this->seenOptions);
+            self::assertSame(true, $this->seenOptions[2]['force_new'] ?? null);
+            self::assertSame(1, $this->seenOptions[2]['grpc.use_local_subchannel_pool'] ?? null);
+        } finally {
+            $client->close();
+        }
+    }
+
+    /**
+     * The property the issue is about: the retry runs on a different TCP
+     * connection.
+     *
+     * A plain listener that never speaks HTTP/2 is enough — the client opens
+     * the TCP connection, so each accepted socket is one connection attempt.
+     * Measured on grpc 1.83.0: with `force_new` alone the listener accepts
+     * one socket (the global subchannel pool hands the old subchannel back);
+     * with `force_new` and the local subchannel pool it accepts two.
+     */
+    public function testTheRetryAfterCloseChannelOpensASecondTcpConnection(): void
+    {
+        $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        self::assertIsResource($server, "failed to listen on a random port: $errstr ($errno)");
+        stream_set_blocking($server, false);
+
+        try {
+            $address = stream_socket_get_name($server, false);
+            self::assertIsString($address);
+
+            $client = new GrpcClient();
+
+            try {
+                $client->getChannel($address)->getConnectivityState(true);
+
+                self::assertSame(
+                    1,
+                    $this->acceptUpTo($server, 1),
+                    'the first channel must open exactly one TCP connection',
+                );
+
+                $client->closeChannel($address);
+                $client->getChannel($address)->getConnectivityState(true);
+
+                self::assertSame(
+                    2,
+                    $this->acceptUpTo($server, 2),
+                    'the retry after closeChannel() must open a second TCP connection',
+                );
+            } finally {
+                $client->close();
+            }
+        } finally {
+            fclose($server);
         }
     }
 
@@ -146,5 +264,31 @@ final class GrpcClientForceReconnectTest extends TestCase
                 return $this->createMock(Channel::class);
             },
         );
+    }
+
+    /**
+     * Accept connections until `$expected` were counted or the deadline
+     * passes, and return the count. Accepted sockets stay open in
+     * `$acceptedSockets` so the client keeps seeing a live TCP connection.
+     *
+     * @param resource $server
+     */
+    private function acceptUpTo($server, int $expected, float $timeoutSeconds = 5.0): int
+    {
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        do {
+            while (($socket = @stream_socket_accept($server, 0)) !== false) {
+                $this->acceptedSockets[] = $socket;
+            }
+
+            if (count($this->acceptedSockets) >= $expected) {
+                break;
+            }
+
+            usleep(10_000);
+        } while (microtime(true) < $deadline);
+
+        return count($this->acceptedSockets);
     }
 }

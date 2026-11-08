@@ -154,12 +154,16 @@ interface GrpcClientInterface
      * next use.
      *
      * The cached handle for that address is dropped, and the replacement
-     * channel is created with `'force_new' => true`, so it is a **new**
-     * underlying `grpc_channel` and a new TCP connection — not the
-     * process-global persistent entry ext-grpc would otherwise return for
-     * the same target and channel arguments (verified against grpc 1.83.0).
-     * This is what the retry path needs after a transport error: the channel
-     * it closes is the one that just failed (issue #717).
+     * channel is created with `'force_new' => true` **and**
+     * `'grpc.use_local_subchannel_pool' => 1`, so it is a new underlying
+     * `grpc_channel` on a new subchannel and a new TCP connection. Both are
+     * needed: `force_new` skips ext-grpc's process-global persistent table,
+     * while the local subchannel pool keeps gRPC core's global pool from
+     * handing the new channel the subchannel it already has for the same
+     * target and arguments — and with it the same TCP connection (verified
+     * against grpc 1.83.0 by counting accepted TCP connections). This is what
+     * the retry path needs after a transport error: the channel it closes is
+     * the one that just failed (issue #717).
      *
      * No-op if the client has already been closed, or if no channel is
      * cached for the address.

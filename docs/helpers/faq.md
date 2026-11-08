@@ -1283,7 +1283,16 @@ channel for the target is maxed out bounded"). Measured: two handles
 on one target open a single TCP connection. `Channel::close()` is a
 reference-count decrement (`php_grpc_channel_unref()`), **not** a destroy —
 the channel survives until its last holder releases it, and the persistent
-table is one of those holders. Consequences worth remembering:
+table is one of those holders.
+
+Connection identity has a second layer: gRPC core gives each `ClientChannel`
+a subchannel from a local pool or from its process-global subchannel pool (the
+default, `grpc.use_local_subchannel_pool` false), and the global pool shares
+subchannels — and therefore TCP connections — among channels
+(`client_channel.cc`, `GetSubchannelPool()`). A different `grpc_channel` is
+therefore not automatically a different connection.
+
+Consequences worth remembering:
 
 - closing one `GrpcClient` cannot invalidate a channel another
   `GrpcClient` holds — the audit finding GRPC-24 assumed otherwise, and the
@@ -1293,14 +1302,16 @@ table is one of those holders. Consequences worth remembering:
 - a shared channel is always in the persistent table (a channel that is not
   persisted is never shared), so `close()` is safe even for a channel nobody
   else holds;
-- `GrpcClient::closeChannel()` forces a reconnect: it drops the cached handle
-  and builds the replacement with `'force_new' => true`, so the next call gets
-  a new underlying channel and a new TCP connection instead of the persistent
-  entry ext-grpc would otherwise return (issue #717). The retry path is its
-  caller — it closes the channel after an `UNAVAILABLE` because that
-  connection just failed. The idle and the LRU eviction are different: they
-  drop the cached handle but keep the persistent entry, so a later call
-  reuses the warm connection;
+- `GrpcClient::closeChannel()` forces a reconnect in both layers: it drops the
+  cached handle and builds the replacement with `'force_new' => true` (keeps
+  it out of ext-grpc's persistent table) and
+  `'grpc.use_local_subchannel_pool' => 1` (keeps its subchannel out of gRPC
+  core's global pool), so the next call gets a new underlying channel on a new
+  subchannel and a new TCP connection (issue #717; measured by counting TCP
+  accepts). The retry path is its caller — it closes the channel after an
+  `UNAVAILABLE` because that connection just failed. The idle and the LRU
+  eviction are different: they drop the cached handle but keep both pools, so
+  a later call reuses the warm connection;
 - `GrpcClient::close()` does **not** release the TCP connection either: the
   persistent entry keeps the channel alive until the process ends (or until
   the per-target bound drops the entry);
@@ -2615,9 +2626,9 @@ GRPC-19): every cache entry counts the calls dispatched on its channel, and
 the LRU eviction, the idle eviction and `closeChannel()` skip busy channels.
 `closeChannel()` (which `RetryExecutor` calls to force a reconnect) removes the
 entry from the cache right away — the next call gets a fresh channel on a new
-connection, because the replacement is built with `'force_new' => true`
-(issue #717) — but defers the actual `close()` until the last in-flight call
-settles.
+connection, because the replacement is built with `'force_new' => true` and
+`'grpc.use_local_subchannel_pool' => 1` (both pools bypassed, issue #717) —
+but defers the actual `close()` until the last in-flight call settles.
 `maxChannels` is therefore a **soft** cap: when every cached channel is busy
 the cache grows past it, and the overshoot is logged at warning level.
 
