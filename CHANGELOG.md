@@ -27,6 +27,10 @@ policy now classifies as internal.
 
 - `RegionErrorHandler::check()` no longer tests the region cache with `$cache instanceof RegionCacheInterface` before using it: the parameter is already typed `?RegionCacheInterface`, so the cache is now used through `?->` and `$regionId !== null` is the only guard. The behaviour is unchanged — a `null` cache with a region id still skips the capture and the invalidation. The docblock now names `NotLeader` as the exception to the routing-error invalidation rule, matching the ownership paragraph below it. (#680)
 
+### Fixed
+
+- `options['grpcClient']` no longer loses information on three points (issue #695). `ConnectionBundle::$tlsState` reports `TlsState::Unknown` for an application-supplied transport instead of letting the `null` `tlsConfig` read as plaintext, while a factory-built transport reports `TlsState::Plaintext` or `TlsState::Tls`. `'tls' => null` is treated as absent in the transport-option conflict check, matching `buildTlsConfig()`, so it no longer throws next to `options['grpcClient']`. The existing split of `options['metrics']` — client-side counters only, the supplied transport keeps its own backend — is now stated explicitly in `docs/configuration.md`.
+
 ### Tests
 
 - Removed the dead "fail-closed contract not implemented yet" probes from `RawKvBatchUnresolvedKeyTest` and `CommitPrewriteKeyCoverageTest`. Both now assert the `TiKvException` fail-closed contract of #244 directly, and the placeholder `E_USER_WARNING` branches are gone. (#682)
