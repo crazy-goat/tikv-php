@@ -1028,7 +1028,9 @@ answers "no" to Monolog's `isHandling()` — therefore costs nothing on the hot
 path. The guard covers the region cache, the store cache, the lock resolver,
 the transaction committer and the reader's scan path — the components whose
 context carries a redacted key — and the debug records of PD RPCs, channel
-management, the TSO pool, batch execution and the SST import mode switch.
+management, the TSO pool, batch execution, the SST import mode switch and the
+optional region-cache warmer. `ConnectionFactory`'s two construction-time
+records stay unconditional: they fire once per client.
 
 A logger that cannot be asked (a plain PSR-3 logger without a level API) is
 assumed to handle `debug`, so a record is never lost. A `NullLogger`

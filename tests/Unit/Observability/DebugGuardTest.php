@@ -13,13 +13,21 @@ use PHPUnit\Framework\TestCase;
  * The behavioural tests of `RegionCacheDebugLoggingTest` prove the property
  * for the cache's own paths; this test states the rule over the source tree:
  *
- * - no `debug()` call that redacts a key may sit on an unguarded path, so a
- *   call site added later cannot reintroduce the per-attempt `hash_hmac`;
+ * - no `debug()` / `SafeLogging::log(..., 'debug', ...)` call that redacts a
+ *   key may sit on an unguarded path, so a call site added later cannot
+ *   reintroduce the per-attempt `hash_hmac`;
  * - every component that decides the answer at construction keeps its
  *   `debugEnabled` flag and keeps every debug record behind it.
  *
  * The scan is token-based, so a comment or a docblock mentioning `debug()`
- * does not count as a call.
+ * does not count as a call. It matches the redactor by its short or its
+ * fully-qualified name, and it accepts only the positive guard form:
+ * `if ($this->debugEnabled)`, never `if (!$this->debugEnabled)` or a
+ * comparison to `false`.
+ *
+ * A redaction assigned to a local variable and passed to the logger later
+ * is outside a token scan of the call's own arguments; no call site does
+ * that today.
  */
 final class DebugGuardTest extends TestCase
 {
@@ -27,6 +35,12 @@ final class DebugGuardTest extends TestCase
      * The property every guarded component decides once at construction.
      */
     private const GUARD_PROPERTY = 'debugEnabled';
+
+    /**
+     * Short name of the class whose `redact()` produces a key-dependent
+     * string; matched in short and fully-qualified form.
+     */
+    private const REDACTOR_CLASS = 'KeyRedactor';
 
     /**
      * Components that decide at construction whether they emit debug records.
@@ -42,6 +56,7 @@ final class DebugGuardTest extends TestCase
         'src/Client/Connection/TimestampOracle.php',
         'src/Client/Grpc/GrpcClient.php',
         'src/Client/RawKv/SstIngestor.php',
+        'src/Client/Region/RegionCacheWarmer.php',
         'src/Client/TxnKv/LockResolver.php',
         'src/Client/TxnKv/TxnReader.php',
         'src/Client/TxnKv/TwoPhaseCommitter.php',
@@ -52,17 +67,13 @@ final class DebugGuardTest extends TestCase
         $redacted = 0;
         $unguarded = [];
         foreach ($this->clientFiles() as $file) {
-            $tokens = $this->tokens($file);
-            $guardRanges = $this->guardRanges($tokens);
+            $contents = file_get_contents($file);
+            self::assertNotFalse($contents, "Unable to read {$file}");
 
-            foreach ($this->debugCalls($tokens) as $index => $line) {
-                if (!$this->callArgumentTokensContain($tokens, $index, 'KeyRedactor')) {
-                    continue;
-                }
-                $redacted++;
-                if (!$this->isInside($index, $guardRanges)) {
-                    $unguarded[] = $this->relative($file) . ':' . $line;
-                }
+            $scan = $this->scanRedactedDebugCalls($contents);
+            $redacted += $scan['total'];
+            foreach ($scan['unguarded'] as $line) {
+                $unguarded[] = $this->relative($file) . ':' . $line;
             }
         }
 
@@ -74,6 +85,53 @@ final class DebugGuardTest extends TestCase
             'Every debug call that redacts a key must sit behind the $this->' . self::GUARD_PROPERTY . " guard:\n"
             . implode("\n", $unguarded),
         );
+    }
+
+    public function testFullyQualifiedRedactionIsDetected(): void
+    {
+        $scan = $this->scanRedactedDebugCalls(
+            '<?php $this->logger->debug("x", ["key" => '
+            . '\CrazyGoat\TiKV\Client\Util\KeyRedactor::redact("k")]);',
+        );
+
+        self::assertSame(1, $scan['total']);
+        self::assertSame([1], $scan['unguarded']);
+    }
+
+    public function testSafeLoggingDebugCallIsScannedOutsideTheGuardedList(): void
+    {
+        $scan = $this->scanRedactedDebugCalls(
+            '<?php SafeLogging::log($this->logger, \'debug\', ["key" => KeyRedactor::redact("k")]);',
+        );
+
+        self::assertSame(1, $scan['total']);
+        self::assertSame([1], $scan['unguarded']);
+    }
+
+    public function testInvertedGuardDoesNotCountAsAGuard(): void
+    {
+        $guarded = $this->scanRedactedDebugCalls(
+            '<?php if (!$this->debugEnabled) { $this->logger->debug("x", '
+            . '["key" => KeyRedactor::redact("k")]); }',
+        );
+        $compared = $this->scanRedactedDebugCalls(
+            '<?php if ($this->debugEnabled === false) { $this->logger->debug("x", '
+            . '["key" => KeyRedactor::redact("k")]); }',
+        );
+
+        self::assertSame([1], $guarded['unguarded']);
+        self::assertSame([1], $compared['unguarded']);
+    }
+
+    public function testPositiveGuardIsAccepted(): void
+    {
+        $scan = $this->scanRedactedDebugCalls(
+            '<?php if ($this->debugEnabled) { $this->logger->debug("x", '
+            . '["key" => KeyRedactor::redact("k")]); }',
+        );
+
+        self::assertSame(1, $scan['total']);
+        self::assertSame([], $scan['unguarded']);
     }
 
     public function testEveryGuardedComponentKeepsEveryDebugCallGuarded(): void
@@ -139,6 +197,35 @@ final class DebugGuardTest extends TestCase
         self::assertNotSame([], $files, 'The scan found no client source file.');
 
         return $files;
+    }
+
+    /**
+     * Count the debug records whose arguments redact a key, and list the
+     * lines of those that do not sit behind a positive guard.
+     *
+     * `debug()` and `SafeLogging::log(..., 'debug', ...)` are both scanned,
+     * so a file outside {@see self::GUARDED_FILES} is not exempt.
+     *
+     * @return array{total: int, unguarded: list<int>}
+     */
+    private function scanRedactedDebugCalls(string $source): array
+    {
+        $tokens = token_get_all($source);
+        $guardRanges = $this->guardRanges($tokens);
+
+        $total = 0;
+        $unguarded = [];
+        foreach ($this->debugCalls($tokens) + $this->safeDebugCalls($tokens) as $index => $line) {
+            if (!$this->callArgumentsContainClassName($tokens, $index, self::REDACTOR_CLASS)) {
+                continue;
+            }
+            $total++;
+            if (!$this->isInside($index, $guardRanges)) {
+                $unguarded[] = $line;
+            }
+        }
+
+        return ['total' => $total, 'unguarded' => $unguarded];
     }
 
     /**
@@ -284,12 +371,51 @@ final class DebugGuardTest extends TestCase
      * Whether the argument list of the call starting at the given index
      * contains the given token text.
      *
-     * The text is matched against `T_STRING` names (`KeyRedactor`) and
-     * `T_CONSTANT_ENCAPSED_STRING` literals (`'debug'`).
+     * The text is matched against `T_CONSTANT_ENCAPSED_STRING` literals
+     * (`'debug'`).
      *
      * @param array<int, array{int, string, int}|string> $tokens
      */
     private function callArgumentTokensContain(array $tokens, int $index, string $needle): bool
+    {
+        return $this->callArgumentsContain($tokens, $index, static fn (array $token): bool => $token[1] === $needle);
+    }
+
+    /**
+     * Whether the argument list of the call starting at the given index
+     * contains the class name, in short (`KeyRedactor`) or fully-qualified
+     * (`\CrazyGoat\TiKV\Client\Util\KeyRedactor`) form.
+     *
+     * PHP 8 tokenises a fully-qualified name as one
+     * `T_NAME_FULLY_QUALIFIED` token, so comparing the short name alone
+     * would miss that form.
+     *
+     * @param array<int, array{int, string, int}|string> $tokens
+     */
+    private function callArgumentsContainClassName(array $tokens, int $index, string $shortName): bool
+    {
+        return $this->callArgumentsContain(
+            $tokens,
+            $index,
+            static function (array $token) use ($shortName): bool {
+                if (!in_array($token[0], [T_STRING, T_NAME_QUALIFIED, T_NAME_FULLY_QUALIFIED], true)) {
+                    return false;
+                }
+                $name = ltrim($token[1], '\\');
+
+                return $name === $shortName || str_ends_with($name, '\\' . $shortName);
+            },
+        );
+    }
+
+    /**
+     * Whether any argument token of the call starting at the given index
+     * satisfies the matcher.
+     *
+     * @param array<int, array{int, string, int}|string> $tokens
+     * @param callable(array{int, string, int}): bool  $matches
+     */
+    private function callArgumentsContain(array $tokens, int $index, callable $matches): bool
     {
         $count = count($tokens);
         $open = $this->nextMeaningful($tokens, $index + 1);
@@ -311,7 +437,7 @@ final class DebugGuardTest extends TestCase
                 }
                 continue;
             }
-            if (is_array($token) && $token[1] === $needle) {
+            if (is_array($token) && $matches($token)) {
                 return true;
             }
         }
@@ -384,6 +510,9 @@ final class DebugGuardTest extends TestCase
         if (!$isGuard || $conditionEnd === null) {
             return null;
         }
+        if (!$this->guardConditionIsPositive($tokens, $open, $conditionEnd)) {
+            return null;
+        }
 
         $blockStart = $this->nextMeaningful($tokens, $conditionEnd + 1);
         if ($blockStart >= $count || $tokens[$blockStart] !== '{') {
@@ -405,6 +534,103 @@ final class DebugGuardTest extends TestCase
         }
 
         return null;
+    }
+
+    /**
+     * Whether the `if` condition accepts the guard property in its positive
+     * form — `if ($this->debugEnabled)`, optionally compounded with `&&`.
+     *
+     * An inverted condition (`!$this->debugEnabled`, `=== false`,
+     * `!== true`) logs exactly when debug is off, so it must not count as a
+     * guard.
+     *
+     * @param array<int, array{int, string, int}|string> $tokens
+     */
+    private function guardConditionIsPositive(array $tokens, int $open, int $conditionEnd): bool
+    {
+        $first = $this->nextMeaningful($tokens, $open + 1);
+        if ($first < $conditionEnd && $tokens[$first] === '!') {
+            return false;
+        }
+
+        for ($i = $open + 1; $i < $conditionEnd; $i++) {
+            $token = $tokens[$i];
+            if (!is_array($token) || !$this->isGuardProperty($token)) {
+                continue;
+            }
+            if ($this->guardPropertyIsNegated($tokens, $i, $open, $conditionEnd)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether a `!` or a comparison to a boolean literal inverts the guard
+     * property at the given index.
+     *
+     * @param array<int, array{int, string, int}|string> $tokens
+     */
+    private function guardPropertyIsNegated(array $tokens, int $index, int $open, int $conditionEnd): bool
+    {
+        $previous = $this->previousMeaningful($tokens, $index - 1);
+        if ($previous > $open && $tokens[$previous] === '!') {
+            return true;
+        }
+        $literalBefore = $this->previousMeaningful($tokens, $previous - 1);
+        if ($this->comparisonInvertsGuard($tokens, $previous, $literalBefore, $open, $conditionEnd)) {
+            return true;
+        }
+
+        $next = $this->nextMeaningful($tokens, $index + 1);
+        $literalAfter = $this->nextMeaningful($tokens, $next + 1);
+
+        return $this->comparisonInvertsGuard($tokens, $next, $literalAfter, $open, $conditionEnd);
+    }
+
+    /**
+     * Whether the comparison at the given token indexes inverts the guard.
+     *
+     * `=== false` and `== false` (or `!== true` / `!= true`) hold exactly
+     * when debug is disabled. Either operand order is checked, and a
+     * non-comparison or a non-boolean literal is not a guard concern.
+     *
+     * @param array<int, array{int, string, int}|string> $tokens
+     */
+    private function comparisonInvertsGuard(
+        array $tokens,
+        int $comparatorIndex,
+        int $literalIndex,
+        int $open,
+        int $conditionEnd,
+    ): bool {
+        if ($comparatorIndex <= $open || $comparatorIndex >= $conditionEnd) {
+            return false;
+        }
+        if ($literalIndex <= $open || $literalIndex >= $conditionEnd) {
+            return false;
+        }
+
+        $comparator = $tokens[$comparatorIndex];
+        $literal = $tokens[$literalIndex];
+        if (!is_array($comparator) || !is_array($literal)) {
+            return false;
+        }
+
+        $comparisons = [T_IS_IDENTICAL, T_IS_NOT_IDENTICAL, T_IS_EQUAL, T_IS_NOT_EQUAL];
+        if (!in_array($comparator[0], $comparisons, true)) {
+            return false;
+        }
+
+        $value = strtolower($literal[1]);
+        if ($value !== 'true' && $value !== 'false') {
+            return false;
+        }
+
+        $negatedComparison = $comparator[0] === T_IS_NOT_IDENTICAL || $comparator[0] === T_IS_NOT_EQUAL;
+
+        return $negatedComparison ? $value === 'true' : $value === 'false';
     }
 
     /**

@@ -8,6 +8,7 @@ use Closure;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use Psr\Log\LoggerInterface;
@@ -93,6 +94,18 @@ final class RegionCacheWarmer
     private int $refreshOffset = 0;
 
     /**
+     * Whether this warmer emits its debug records at all.
+     *
+     * A refresh tick logs one record per region it could not store, and a
+     * preload logs the same for every page it reads. A logger that discards
+     * the record makes those context arrays pointless, so
+     * {@see DebugLogging} asks the logger once, at construction (issue
+     * #715). Reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private readonly bool $debugEnabled;
+
+    /**
      * @param int $refreshIntervalMs Minimum time between two non-forced
      *     refreshes, in milliseconds. 0 (the default) disables the non-forced
      *     refresh and turns a plain `refresh()` into a no-op — the feature is
@@ -117,6 +130,7 @@ final class RegionCacheWarmer
         if ($maxRegionsPerRefresh < 1) {
             throw new InvalidArgumentException('maxRegionsPerRefresh must be >= 1');
         }
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     /**
@@ -199,9 +213,11 @@ final class RegionCacheWarmer
             if ($this->regionCache->getById($fresh->regionId) instanceof RegionInfo) {
                 $confirmed[$fresh->regionId] = true;
             } else {
-                $this->logger->debug('Refreshed region not cached (no leader)', [
-                    'regionId' => $fresh->regionId,
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('Refreshed region not cached (no leader)', [
+                        'regionId' => $fresh->regionId,
+                    ]);
+                }
             }
         }
 
@@ -211,7 +227,9 @@ final class RegionCacheWarmer
         $refreshed = $this->countStillCached($confirmed);
 
         if ($refreshed > 0) {
-            $this->logger->debug('Refreshed cached regions', ['refreshed' => $refreshed]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Refreshed cached regions', ['refreshed' => $refreshed]);
+            }
         }
 
         return $refreshed;
@@ -306,9 +324,11 @@ final class RegionCacheWarmer
                 if ($region->leaderStoreId === 0) {
                     // put() refuses a leaderless region (issues #576, #627);
                     // count only what the cache actually holds.
-                    $this->logger->debug('Preloaded region not cached (no leader)', [
-                        'regionId' => $region->regionId,
-                    ]);
+                    if ($this->debugEnabled) {
+                        $this->logger->debug('Preloaded region not cached (no leader)', [
+                            'regionId' => $region->regionId,
+                        ]);
+                    }
                     continue;
                 }
 
