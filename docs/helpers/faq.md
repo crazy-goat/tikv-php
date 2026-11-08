@@ -2987,10 +2987,14 @@ written (issue #431).
 `options['slowLog']` (shipped in #31, documented in #396) is parsed by
 `ConnectionFactory::buildSlowLogConfig()` for **both** clients, but only the
 RawKV path is instrumented: nothing under `src/Client/TxnKv/` takes a
-`SlowLogConfig`, so `TxnKvClient::create(['slowLog' => …])` accepts the option
-and never emits a warning. There is also no threshold for SST ingest —
-`SlowLogConfig::getThreshold('ingest')` falls into the `default => 0` arm, and
-`RawKvClient::OP_INGEST` is not wired to any measurement.
+`SlowLogConfig`. Accepting the option there and emitting nothing was the
+bug (issue #700), so `TxnKvClient::create()` now **rejects** it with an
+`InvalidArgumentException` instead of silently ignoring it — the same
+fail-closed rule the rest of the option groups follow. An absent key and an
+explicit `null` still mean "not configured". There is also no threshold for
+SST ingest — `SlowLogConfig::getThreshold('ingest')` falls into the
+`default => 0` arm, and `RawKvClient::OP_INGEST` is not wired to any
+measurement.
 
 The warning itself (`Slow TiKV operation`, context `operation`, `key`,
 `duration_ms`, `threshold_ms`) is written out **five times**: four identical

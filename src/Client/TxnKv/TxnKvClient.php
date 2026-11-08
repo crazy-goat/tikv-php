@@ -41,6 +41,17 @@ use Psr\Log\NullLogger;
 final class TxnKvClient
 {
     public const OPT_TIMEOUT = 'timeout';
+
+    /**
+     * options[] key for slow-operation logging. Slow logging is a RawKV
+     * feature: this client rejects the option with an
+     * {@see InvalidArgumentException} instead of accepting it and emitting
+     * nothing, because no component on the transactional read/write path
+     * measures an operation (issue #700). The key is declared here so the
+     * rejection names it and so both clients document the same option set.
+     */
+    public const OPT_SLOW_LOG = 'slowLog';
+
     public const OPT_METRICS = 'metrics';
 
     /**
@@ -330,9 +341,18 @@ final class TxnKvClient
      *                                      too, e.g. 'lockWaitTimeMs' (the
      *                                      client-wide pessimistic-lock wait
      *                                      timeout, issue #229).
+     *                                      Slow-operation logging is **not**
+     *                                      accepted: 'slowLog' is a RawKV
+     *                                      feature, so a non-null value is
+     *                                      rejected with an
+     *                                      InvalidArgumentException instead of
+     *                                      being accepted and ignored (issue
+     *                                      #700).
      */
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self
     {
+        self::assertSlowLogNotConfigured($options);
+
         // V1 TxnKV resolves regions in the memory-comparable-encoded key
         // space; API V2 adds its mode/keyspace prefix at the shared
         // transport boundary. PD boundaries are decoded before caching.
@@ -516,6 +536,36 @@ final class TxnKvClient
             );
         $this->regionCacheWarmer = $regionCacheWarmer
             ?? new RegionCacheWarmer($this->pdClient, $this->regionCache, $this->logger, $regionCacheRefreshMs);
+    }
+
+    /**
+     * Reject options['slowLog'] (see OPT_SLOW_LOG) at create() time.
+     *
+     * The shared ConnectionFactory parses the option for both clients, but
+     * nothing under src/Client/TxnKv/ measures an operation, so accepting it
+     * would leave the caller believing the transactions are monitored
+     * (issue #700). An absent key and an explicit null keep meaning "not
+     * configured", the same rule as every other option group (issue #272).
+     *
+     * Runs before {@see ConnectionFactory::create()} — and therefore before
+     * its empty-endpoints check — so a `slowLog`-only misconfiguration is
+     * reported ahead of the endpoints error and before any PD client or
+     * channel exists. Both are startup errors; only the precedence differs
+     * from the pre-#700 order.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function assertSlowLogNotConfigured(array $options): void
+    {
+        if (!array_key_exists(self::OPT_SLOW_LOG, $options) || $options[self::OPT_SLOW_LOG] === null) {
+            return;
+        }
+
+        throw new InvalidArgumentException(
+            "options['slowLog'] is not supported by TxnKvClient: slow-operation logging is a "
+            . 'RawKV feature (RawKvClient::create()). Remove the option from the transactional '
+            . 'client, or measure transaction timings in the application.',
+        );
     }
 
     /**

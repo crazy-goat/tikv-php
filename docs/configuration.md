@@ -1353,10 +1353,13 @@ wait for the responses (the round-trip latency), not the dispatch.
 The warning is emitted through the PSR-3 logger passed to `create()`, so it
 appears only when that logger's level includes `warning`.
 
-`slowLog` is a RawKV feature. `TxnKvClient::create()` accepts the option (the
-shared connection layer parses it for both clients), but the transactional path
-carries no slow-operation instrumentation, so no warning is emitted for
-transactions.
+`slowLog` is a RawKV feature. `TxnKvClient::create()` **rejects** the option
+with an `InvalidArgumentException` instead of accepting it and emitting
+nothing: the transactional read/write path carries no slow-operation
+instrumentation, so a warning could never be emitted (issue #700). An absent
+key and an explicit `null` still mean "not configured". Measure transaction
+timings in the application — for example around `begin()` and `commit()` — if
+you need them.
 
 ## Replica Reads
 
