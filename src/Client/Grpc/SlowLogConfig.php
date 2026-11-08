@@ -48,22 +48,21 @@ final readonly class SlowLogConfig
     /**
      * Return the threshold for a given operation type (in milliseconds).
      *
-     * Operation types: 'read', 'write', 'batch_read', 'batch_write', 'scan',
-     * 'delete_range', 'checksum'.
-     *
-     * Returns 0 when the operation type is unknown (disables logging).
+     * The `match` is exhaustive over {@see SlowLogOperation} with no
+     * `default` arm: a new operation type fails static analysis until it is
+     * classified here, and an unknown operation cannot be expressed at all
+     * (issue #701). A threshold of 0 still disables that operation.
      */
-    public function getThreshold(string $operation): int
+    public function getThreshold(SlowLogOperation $operation): int
     {
         return match ($operation) {
-            'read' => $this->readThresholdMs,
-            'write' => $this->writeThresholdMs,
-            'batch_read' => $this->batchReadThresholdMs,
-            'batch_write' => $this->batchWriteThresholdMs,
-            'scan' => $this->scanThresholdMs,
-            'delete_range' => $this->deleteRangeThresholdMs,
-            'checksum' => $this->checksumThresholdMs,
-            default => 0,
+            SlowLogOperation::Read => $this->readThresholdMs,
+            SlowLogOperation::Write => $this->writeThresholdMs,
+            SlowLogOperation::BatchRead => $this->batchReadThresholdMs,
+            SlowLogOperation::BatchWrite => $this->batchWriteThresholdMs,
+            SlowLogOperation::Scan => $this->scanThresholdMs,
+            SlowLogOperation::DeleteRange => $this->deleteRangeThresholdMs,
+            SlowLogOperation::Checksum => $this->checksumThresholdMs,
         };
     }
 }
