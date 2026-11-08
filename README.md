@@ -184,7 +184,7 @@ that keeps existing, correct code working.
 | `RawKv\CasResult`, `RawKv\ChecksumResult`, `RawKv\KeyTtl` | the result DTOs of `compareAndSwap()`, `checksum()` and `getKeyTTLResult()` |
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
 | `TxnKv\TransactionStatus` | the enum returned by `Transaction::getStatus()` |
-| `Exception\*` | `TiKvException` and every subclass, plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
+| `Exception\*` | `TiKvException` and every subclass, `NotLeaderHint` (the value object behind `RegionException::$notLeader`), plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
 | `TxnKv\Exception\*` | the seven transaction exceptions: `DeadlockException`, `LockWaitTimeoutException`, `TransactionConflictException`, `TransactionTooLargeException`, `TxnAbortedByGcException`, `TxnRetryableException`, `UndeterminedCommitException` |
 | `Retry\RetryBudgetExhaustedException` | thrown when the internal retry budget is exhausted |
 | `Retry\ErrorKind` | the enum behind `RegionException::$errorKind` — the typed variant of a region error |
@@ -198,10 +198,10 @@ that keeps existing, correct code working.
 | `Region\ReplicaReadMode`, `Region\ReplicaReadPolicy` | the values you pass as `options['replicaRead']` |
 | the documented `options[]` keys | every key documented in the [configuration guide](docs/configuration.md) — `tls`, `timeout`, `metrics`, `tracer`, `apiVersion`, `keyspace`, `replicaRead`, `batchCommands`, `maxScanRows`, `maxConcurrency`, `tsoPoolSize`, … |
 
-The namespaces above are relative to `CrazyGoat\TiKV\Client\`. One class
-outside that namespace is part of the promise as well:
-`CrazyGoat\Proto\Errorpb\NotLeader`, the message behind
-`RegionException::$notLeader`.
+The namespaces above are relative to `CrazyGoat\TiKV\Client\`. No generated
+protobuf or gRPC class is part of the promise: a message such as
+`Errorpb\NotLeader` reaches consumers only through a library-owned value
+object (`Exception\NotLeaderHint` for `RegionException::$notLeader`).
 
 ### Internal
 
@@ -233,8 +233,8 @@ of the contract.
   `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
   `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget`,
   `Retry\RetryExecutor` and `Retry\RetryVerdict`;
-- the generated protobuf and gRPC classes under `src/Proto/` — except
-  `Errorpb\NotLeader`, which the promise covers.
+- the generated protobuf and gRPC classes under `src/Proto/` — no generated
+  class is part of the promise.
 
 The advanced extension points — `Retry\RetryExecutor`,
 `Retry\RetryVerdict` and `Retry\BackoffType` in
