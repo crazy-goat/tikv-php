@@ -1815,10 +1815,9 @@ attempt, exactly as for `put()`.
 - The SwitchMode fan-out to all stores, the `RawWrite` stream and the `Ingest`
   RPC each use the ingest gRPC deadline (`TimeoutConfig::ingestTimeoutMs`,
   default `60000`), configurable through `RawKvClient::create()`
-  `options['timeout']['ingestTimeoutMs']` (alongside the
-  `readTimeoutMs`, `writeTimeoutMs`, `batchReadTimeoutMs`,
-  `batchWriteTimeoutMs`, `scanTimeoutMs`, `deleteRangeTimeoutMs` and
-  `checksumTimeoutMs` keys).
+  `options['timeout']['ingestTimeoutMs']`. That is one key of the
+  [Per-Operation Timeouts](configuration.md#per-operation-timeouts) map; the
+  table there lists every `options['timeout']` key and its default.
 - Keys that cannot be resolved to a region fail the import with a
   `TiKvException` naming the redacted key — `ingest()` never writes a subset
   of the pairs and reports success (issue #187).

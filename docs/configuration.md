@@ -12,13 +12,18 @@ Complete guide to configuring the TiKV PHP Client for development and production
 6. [Replica Reads](#replica-reads)
 7. [Batch Commands Multiplexing (Experimental)](#batch-commands-multiplexing-experimental)
 8. [Fast Commit Modes (TxnKV)](#fast-commit-modes-txnkv)
-9. [Transaction Priority (TxnKV)](#transaction-priority-txnkv)
-10. [Resource Control (Resource Groups)](#resource-control-resource-groups)
-11. [Request Context Controls (issue #426, GAP-12)](#request-context-controls-issue-426-gap-12)
-12. [Retry and Backoff](#retry-and-backoff)
-13. [Caching](#caching)
-14. [Timeouts](#timeouts)
-15. [Production Configuration](#production-configuration)
+9. [Lock TTLs and the Primary Lock Keepalive (TxnKV)](#lock-ttls-and-the-primary-lock-keepalive-txnkv)
+10. [Pessimistic Lock Wait Timeout (TxnKV)](#pessimistic-lock-wait-timeout-txnkv)
+11. [Transaction Size Limits and Request Batching (TxnKV)](#transaction-size-limits-and-request-batching-txnkv)
+12. [Transaction Priority (TxnKV)](#transaction-priority-txnkv)
+13. [Resource Control (Resource Groups)](#resource-control-resource-groups)
+14. [Request Context Controls (issue #426, GAP-12)](#request-context-controls-issue-426-gap-12)
+15. [Retry and Backoff](#retry-and-backoff)
+16. [Caching](#caching)
+17. [Timeouts](#timeouts)
+18. [Production Configuration](#production-configuration)
+19. [Configuration Checklist](#configuration-checklist)
+20. [See Also](#see-also)
 
 ## Basic Configuration
 
@@ -33,6 +38,11 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 ```
 
 ### Full Configuration Options
+
+> **Monolog is optional.** This snippet uses Monolog for illustration, but it
+> is a **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ```php
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
@@ -1082,6 +1092,11 @@ Recognised `options['tls']` keys:
   [Deprecated TLS Option Keys](#deprecated-tls-option-keys).
 
 ## Logging
+
+> **Monolog is optional.** The snippets in this section use Monolog for
+> illustration, but it is a **dev-only** dependency of this library. Install it
+> with `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ### PSR-3 Logger Integration
 
@@ -2584,6 +2599,11 @@ Batch methods already send their sub-batches in parallel (default concurrency 16
 ## Production Configuration
 
 ### Recommended Production Setup
+
+> **Monolog is optional.** This snippet uses Monolog for illustration, but it
+> is a **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ```php
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;

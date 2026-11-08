@@ -21,7 +21,9 @@ use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLog;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogOperation;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -753,7 +755,11 @@ final readonly class RawKvBatch
                     // Resolves to the collected key => value map: the per-pair
                     // error check and the collection share one traversal
                     // (issue #303).
-                    return $this->wrapWithLogging(CheckedGrpcFuture::fromBatchGetFuture($inner), 'batch_read', $key);
+                    return $this->wrapWithLogging(
+                        CheckedGrpcFuture::fromBatchGetFuture($inner),
+                        SlowLogOperation::BatchRead,
+                        $key,
+                    );
                 }
 
                 // Multi-region recovery has several targets; a single
@@ -822,7 +828,7 @@ final readonly class RawKvBatch
                 };
                 return $this->wrapWithLogging(
                     CheckedGrpcFuture::fromCallable($waiter),
-                    'batch_read',
+                    SlowLogOperation::BatchRead,
                     $key,
                 );
             },
@@ -877,7 +883,11 @@ final readonly class RawKvBatch
                         $columnFamily,
                         $targetStoreId,
                     );
-                    return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $firstKey);
+                    return $this->wrapWithLogging(
+                        CheckedGrpcFuture::fromGrpcFuture($inner),
+                        SlowLogOperation::BatchWrite,
+                        $firstKey,
+                    );
                 }
 
                 // Multi-region path: dispatch every sub-region's send up-front.
@@ -934,7 +944,7 @@ final readonly class RawKvBatch
                 };
                 return $this->wrapWithLogging(
                     CheckedGrpcFuture::fromCallable($waiter),
-                    'batch_write',
+                    SlowLogOperation::BatchWrite,
                     $firstKey,
                 );
             },
@@ -985,7 +995,11 @@ final readonly class RawKvBatch
                         $columnFamily,
                         $targetStoreId,
                     );
-                    return $this->wrapWithLogging(CheckedGrpcFuture::fromGrpcFuture($inner), 'batch_write', $key);
+                    return $this->wrapWithLogging(
+                        CheckedGrpcFuture::fromGrpcFuture($inner),
+                        SlowLogOperation::BatchWrite,
+                        $key,
+                    );
                 }
 
                 // Multi-region path: dispatch every sub-region's send up-front.
@@ -1033,7 +1047,7 @@ final readonly class RawKvBatch
                 };
                 return $this->wrapWithLogging(
                     CheckedGrpcFuture::fromCallable($waiter),
-                    'batch_write',
+                    SlowLogOperation::BatchWrite,
                     $key,
                 );
             },
@@ -1054,24 +1068,16 @@ final readonly class RawKvBatch
      */
     private function wrapWithLogging(
         CheckedGrpcFuture $inner,
-        string $operation,
+        SlowLogOperation $operation,
         string $key,
     ): CheckedGrpcFuture {
-        if (!$this->slowLogConfig instanceof SlowLogConfig) {
-            return $inner;
-        }
-        $threshold = $this->slowLogConfig->getThreshold($operation);
-        if ($threshold <= 0) {
+        $threshold = SlowLog::threshold($this->slowLogConfig, $operation);
+        if ($threshold === null) {
             return $inner;
         }
         $logger = $this->logger;
         $logCallback = function (float $durationMs) use ($threshold, $operation, $key, $logger): void {
-            $logger->warning('Slow TiKV operation', [
-                'operation' => $operation,
-                'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
-                'duration_ms' => round($durationMs, 2),
-                'threshold_ms' => $threshold,
-            ]);
+            SlowLog::warning($logger, $operation, $key, $durationMs, $threshold);
         };
         return CheckedGrpcFuture::fromCallable(
             function () use ($inner, $threshold, $logCallback): mixed {

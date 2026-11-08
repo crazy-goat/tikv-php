@@ -389,18 +389,35 @@ final class TransactionSizeLimitTest extends TestCase
     {
         $state = new TransactionState(0, 0, 3, 0);
 
-        $this->expectException(TransactionTooLargeException::class);
-        $this->expectExceptionMessage('exceeding maxTxnEntrySize of 3 bytes');
-        $state->setWriteSet(['ab' => 'cd']);
+        try {
+            $state->setWriteSet(['ab' => 'cd']);
+            self::fail('The entry-size limit did not reject the write set');
+        } catch (TransactionTooLargeException $e) {
+            // "ab" + "cd" = 4 bytes against a 3-byte limit. The accessors must
+            // report the limit and the actual value separately: the message is
+            // built from the factory parameters and cannot tell them apart
+            // (issue #790).
+            self::assertSame('maxTxnEntrySize', $e->getLimitName());
+            self::assertSame(3, $e->getLimit());
+            self::assertSame(4, $e->getActual());
+            self::assertStringContainsString('exceeding maxTxnEntrySize of 3 bytes', $e->getMessage());
+        }
     }
 
     public function testSetWriteSetEnforcesTheTotalSizeLimit(): void
     {
         $state = new TransactionState(0, 0, 0, 3);
 
-        $this->expectException(TransactionTooLargeException::class);
-        $this->expectExceptionMessage('exceeding maxTxnTotalSize of 3 bytes');
-        $state->setWriteSet(['ab' => 'cd']);
+        try {
+            $state->setWriteSet(['ab' => 'cd']);
+            self::fail('The total-size limit did not reject the write set');
+        } catch (TransactionTooLargeException $e) {
+            // "ab" + "cd" = 4 bytes against a 3-byte limit (issue #790).
+            self::assertSame('maxTxnTotalSize', $e->getLimitName());
+            self::assertSame(3, $e->getLimit());
+            self::assertSame(4, $e->getActual());
+            self::assertStringContainsString('exceeding maxTxnTotalSize of 3 bytes', $e->getMessage());
+        }
     }
 
     public function testExceptionReportsTheLimitNameLimitAndActualValue(): void
