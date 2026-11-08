@@ -11,6 +11,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [The mutation score is enforced nightly, and it is a ratchet too (issue #363)](#the-mutation-score-is-enforced-nightly-and-it-is-a-ratchet-too-issue-363)
 - [Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)](#branch-naming-fixn-kebab-case-no-issue--prefix)
 - [Commit style: `type: subject (#N)`](#commit-style-type-subject-n)
 - [Issues are tracked in version milestones; work proceeds bottom-up](#issues-are-tracked-in-version-milestones-work-proceeds-bottom-up)
@@ -71,6 +72,35 @@ of the file.
 - [Workflows pin actions by commit SHA (issue #316, SEC-13)](#workflows-pin-actions-by-commit-sha-issue-316-sec-13)
 - [Resolved-lock tracking lives on the per-transaction LockResolver (issue #432, GAP-18)](#resolved-lock-tracking-lives-on-the-per-transaction-lockresolver-issue-432-gap-18)
 <!-- index:end -->
+
+## The mutation score is enforced nightly, and it is a ratchet too (issue #363)
+
+The second quality gate, next to the coverage floor, is the **mutation score** (MSI) measured by
+Infection. It lives in `infection.json` as `minMsi` and `minCoveredMsi`, both currently 72, and is
+applied by `composer mutation` (add `--show-mutations`, via `composer mutation:show`, to see the
+survivors). The scope is deliberately narrow — `src/Client/TxnKv/` and `src/Client/Region/` — so a
+run still finishes in tens of minutes even though every mutant re-runs the covering test file.
+
+Three decisions are worth keeping:
+
+1. **Mutation testing is a nightly ratchet, not a pull-request gate.** It runs from
+   `.github/workflows/mutation.yml` on a schedule and on demand, never on a pull request: a
+   mutation run is slow and non-deterministic enough in wall-clock time that it would dominate the
+   `ci-ok` gate, while the score only matters when it *drops*. A pull request that lowers the score
+   is caught by the next nightly run. `ci-ok` stays fast and deterministic.
+2. **The threshold is below the measurement, never above it.** Like the coverage floor,
+   `minMsi`/`minCoveredMsi` are set a little under the measured score and only move up. They are
+   the regression guard, not a target for a specific change.
+3. **The Infection constraint tracks the newest release that still supports PHP 8.2.** It is
+   `^0.32.6`: 0.32.7 was the first release to raise its own requirement to PHP `^8.3` (and every
+   later line kept it), so the constraint moves only when the project drops 8.2 (see the
+   PHP-support entry below). The current pin is therefore a floor imposed by the supported PHP
+   range, not by choice, and 0.32.6 also replaces the deprecated `SplObjectStorage::contains()`
+   call, so the notice that 0.31 printed on PHP 8.5 is gone.
+
+The report is uploaded as the `infection-report` artifact (`infection.log`, `infection-summary.log`)
+with `actions/upload-artifact`, on every run (`if: always()`) so a failed run still leaves the
+survivors behind.
 
 ## Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)
 
