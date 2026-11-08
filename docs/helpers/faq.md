@@ -2776,12 +2776,13 @@ label. Four lessons:
    Overstating a guard in the docs is a docs bug of the same kind as
    understating it.
 4. **A deprecated API can behave differently per call shape.** `withCaCert()`
-   guesses per value, but `withClientCert()` ORs the two guesses
-   (`resolveWithGuess($cert) || resolveWithGuess($key)`), so the client pair is
-   decided for both values together and a mixed pair (inline PEM certificate
-   with a file key) dies with `TLS file has disallowed extension ""`. Copying
-   the single-value description to the pair is wrong — read the whole method,
-   not its helper.
+   guesses per value, but `withClientCert()` requires both values in the same
+   form: it compares the two guesses and rejects a mixed pair (inline PEM
+   certificate with a file key, or the other way round) with one message,
+   `TLS client certificate and key must be given in the same form, both file
+   paths or both inline PEM`, whether or not the path half exists (issue #688).
+   Copying the single-value description to the pair is wrong — read the whole
+   method, not its helper.
 
 ## An audit issue's "this loop is sequential" premise expires — read the tree before re-implementing
 

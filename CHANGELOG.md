@@ -32,6 +32,10 @@ policy now classifies as internal.
 
 - **Breaking change:** `TwoPhaseCommitter::getPriority()` has been removed (issue #685). The accessor had no caller anywhere in `src/`, `tests/`, `examples/` or `benchmarks/`: `Transaction::getPriority()` is the accessor callers use, and the committer reads its own readonly `$priority` property directly when it builds the `Context` of every request, so the method was dead public surface. **Migration:** call `Transaction::getPriority()` instead; `TwoPhaseCommitter` is an internal collaborator behind the entry points (see the stability policy in `README.md`), so the removal needs no version bump. The priority carried on the `Context` of every transaction RPC is unchanged.
 
+### Fixed
+
+- TLS configuration errors now name the supported option keys instead of the deprecated ones (issue #688). `TlsConfig` reports the properties with a leading `$` (`$caCert`, `$clientCert`, `$clientKey`), so they cannot be mistaken for the deprecated `options['tls']` keys of the same bare name, and the partial-configuration message points at `caCertFile` (or `caCertPem`) for the missing CA. A mixed client certificate/key pair passed to the deprecated `withClientCert()` now raises one message, `TLS client certificate and key must be given in the same form, both file paths or both inline PEM`, instead of `TLS file has disallowed extension ""` when the path half exists and the generic missing-path message when it does not. `docs/configuration.md` and the FAQ now quote the messages that are actually raised. (#688)
+
 ### Tests
 
 - Removed the dead "fail-closed contract not implemented yet" probes from `RawKvBatchUnresolvedKeyTest` and `CommitPrewriteKeyCoverageTest`. Both now assert the `TiKvException` fail-closed contract of #244 directly, and the placeholder `E_USER_WARNING` branches are gone. (#682)

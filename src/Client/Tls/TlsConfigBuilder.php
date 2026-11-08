@@ -96,12 +96,32 @@ final class TlsConfigBuilder
      * like a path but is missing or unreadable throws instead of being silently
      * reinterpreted as inline content.
      *
+     * @throws InvalidArgumentException if only one of the two values looks like a
+     *                                  file path (a mixed pair has no single
+     *                                  interpretation), or if a file cannot be read
+     *
      * @deprecated Use withClientCertFile() for file paths or withClientCertPem() for inline content.
      *             This method guesses the input type, which is ambiguous and less secure.
      */
     public function withClientCert(string $cert, string $key): self
     {
-        return $this->resolveWithGuess($cert) || $this->resolveWithGuess($key)
+        $certIsPath = $this->looksLikePath($cert);
+        $keyIsPath = $this->looksLikePath($key);
+
+        // A mixed pair used to fall through to readFile() and fail with the
+        // confusing 'disallowed extension ""' (or, when the path was missing,
+        // with the generic missing-path message). Name the actual mistake once,
+        // whichever value is the odd one out (issue #688).
+        if ($certIsPath !== $keyIsPath) {
+            throw new InvalidArgumentException(
+                'TLS client certificate and key must be given in the same form, '
+                . 'both file paths or both inline PEM; got '
+                . ($certIsPath ? 'a file path' : 'inline PEM') . ' for the certificate and '
+                . ($keyIsPath ? 'a file path' : 'inline PEM') . ' for the key'
+            );
+        }
+
+        return $certIsPath
             ? $this->withClientCertFile($cert, $key)
             : $this->withClientCertPem($cert, $key);
     }
@@ -112,13 +132,23 @@ final class TlsConfigBuilder
     }
 
     /**
-     * Check whether a string looks like a file path or inline PEM.
-     * This is used for backward compatibility with the deprecated guessing methods.
+     * Whether a value looks like a file path rather than inline PEM content.
+     */
+    private function looksLikePath(string $value): bool
+    {
+        return !str_contains($value, '-----BEGIN');
+    }
+
+    /**
+     * Check whether a single value looks like a file path or inline PEM.
+     * Used by the deprecated single-value guessing method withCaCert(), where
+     * a value that looks like a path but is missing must fail loudly instead of
+     * being silently reinterpreted as inline content (SEC-02).
      * Extension validation is done later in readFile().
      */
     private function resolveWithGuess(string $value): bool
     {
-        $looksLikePath = !str_contains($value, '-----BEGIN');
+        $looksLikePath = $this->looksLikePath($value);
 
         if ($looksLikePath && (!file_exists($value) || !is_readable($value))) {
             throw new InvalidArgumentException(
