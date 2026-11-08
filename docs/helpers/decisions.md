@@ -1600,16 +1600,17 @@ and `resolveAsyncCommitLocks()`) passed `keyErrorsHandledByCaller: true` to
 place, `ResolvedLockTracker` recorded a transaction that was never resolved,
 and the caller's retry budget could be spent without changing anything.
 
-The shared `assertResolveLockSucceeded()` fails closed: `abort` is checked
-first and throws a `TiKvException` (a fatal abort must not be masked by a
-co-set compatibility `retryable` string, the #559 precedence); a bare
-`retryable` throws `TxnRetryableException(BackoffType::TxnLock)` so the
-caller's executor owns the backoff; every other variant, including
-`txn_not_found` and `txn_lock_not_found`, throws `TiKvException`. Unlike
-rollback (#559), those two "already gone" variants are deliberately not
-success here: a resolve response carries no per-key outcome, so it cannot
-prove that the lock this call was asked to clear is gone, and a retry is the
-only safe answer.
+The shared `assertResolveLockSucceeded()` fails closed. `abort`,
+`txn_not_found` and `txn_lock_not_found` are decided **before** the
+compatibility `retryable` string — newer TiKV co-sets it with
+`txn_lock_not_found` (#559) — and all three throw a `TiKvException`, so a
+fatal abort can never be masked by a co-set string. A bare `retryable` throws
+`TxnRetryableException(BackoffType::TxnLock)` so the caller's executor owns the
+backoff; every other variant throws `TiKvException` too. Unlike rollback
+(#559), the two "already gone" variants are deliberately not success here: a
+resolve response carries no per-key outcome, so it cannot prove that the lock
+this call was asked to clear is gone, and failing closed is the only safe
+answer.
 
 `resolveAsyncCommitLocks()` also no longer catches `RegionException` from
 `RegionGrouper::groupKeysByRegionBatch()`. The old `return` reported success
@@ -1617,6 +1618,8 @@ although no resolve RPC was sent — the same shape as the #224
 `checkSecondaryLocks()` grouping bug. Pinned by
 `LockResolverTest::testRetryableResolveLockErrorRequestsRetryAndRecordsNothing()`,
 `::testAbortedResolveLockFailsClosedAndRecordsNothing()`,
+`::testBareTxnNotFoundResolveLockFailsClosedAndRecordsNothing()`,
+`::testCoSetTxnLockNotFoundResolveLockFailsClosedAndRecordsNothing()`,
 `LockResolverBatchTest::testErroredBatchResolveRequestsRetryAndRecordsNothing()`,
 `OnePhaseAsyncCommitTest::testErroredAsyncCommitResolveIsRetryableAndRecordsNothing()`
 and `::testRegionErrorWhileGroupingAsyncCommitKeysPropagates()`.

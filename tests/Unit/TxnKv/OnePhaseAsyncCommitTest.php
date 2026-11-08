@@ -820,6 +820,10 @@ class OnePhaseAsyncCommitTest extends TestCase
             $methods,
             'a grouping failure must not be reported as a successful resolve',
         );
+        $this->assertTrue(
+            $resolver->getResolvedLockTracker()->isEmpty(),
+            'a grouping failure must not be recorded as resolved',
+        );
     }
 
     private function makeUndecidedStatusResponse(): CheckTxnStatusResponse

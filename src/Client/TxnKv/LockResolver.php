@@ -945,7 +945,14 @@ final readonly class LockResolver
             'error' => $detail,
         ]);
 
-        if ($error->getAbort() !== '') {
+        // Structured variants are decided before the compatibility
+        // `retryable` string, which newer TiKV co-sets with `txn_lock_not_found`
+        // (#559). `abort` is fatal even when a retryable string tags along.
+        if (
+            $error->getAbort() !== ''
+            || $error->hasTxnNotFound()
+            || $error->hasTxnLockNotFound()
+        ) {
             throw new TiKvException('ResolveLock failed: ' . $detail);
         }
 
@@ -956,10 +963,10 @@ final readonly class LockResolver
             );
         }
 
-        // txn_not_found / txn_lock_not_found do not prove that the lock this
-        // resolution was asked to clear is gone: unlike rollback (#559), a
+        // Any other variant fails closed too. Unlike rollback (#559),
+        // `txn_not_found` / `txn_lock_not_found` are not success here: a
         // resolve carries no per-key outcome, so only a clean response may be
-        // reported as resolved. Unknown variants fail closed too.
+        // reported as resolved.
         throw new TiKvException('ResolveLock failed: ' . $detail);
     }
 

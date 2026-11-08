@@ -14,6 +14,8 @@ use CrazyGoat\Proto\Kvrpcpb\KeyError;
 use CrazyGoat\Proto\Kvrpcpb\LockInfo;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockRequest;
 use CrazyGoat\Proto\Kvrpcpb\ResolveLockResponse;
+use CrazyGoat\Proto\Kvrpcpb\TxnLockNotFound;
+use CrazyGoat\Proto\Kvrpcpb\TxnNotFound;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
@@ -154,14 +156,24 @@ class LockResolverTest extends TestCase
         return $response;
     }
 
-    private function makeResolveResponseWithError(string $abort = '', string $retryable = ''): ResolveLockResponse
-    {
+    private function makeResolveResponseWithError(
+        string $abort = '',
+        string $retryable = '',
+        bool $txnNotFound = false,
+        bool $txnLockNotFound = false,
+    ): ResolveLockResponse {
         $error = new KeyError();
         if ($abort !== '') {
             $error->setAbort($abort);
         }
         if ($retryable !== '') {
             $error->setRetryable($retryable);
+        }
+        if ($txnNotFound) {
+            $error->setTxnNotFound(new TxnNotFound());
+        }
+        if ($txnLockNotFound) {
+            $error->setTxnLockNotFound(new TxnLockNotFound());
         }
         $response = new ResolveLockResponse();
         $response->setError($error);
@@ -603,6 +615,67 @@ class LockResolverTest extends TestCase
         );
     }
 
+    public function testBareTxnNotFoundResolveLockFailsClosedAndRecordsNothing(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->resolveResponse = $this->makeResolveResponseWithError(txnNotFound: true);
+
+        $this->mockGrpcCallsAndCaptureResolve($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+        $resolver = $this->createResolver();
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected a txn_not_found resolve error to fail closed');
+        } catch (TxnRetryableException $e) {
+            $this->fail('txn_not_found must not be retried: ' . $e->getMessage());
+        } catch (TiKvException $e) {
+            $this->assertSame(TiKvException::class, $e::class);
+            $this->assertSame('ResolveLock failed: TxnNotFound', $e->getMessage());
+        }
+
+        $this->assertTrue(
+            $resolver->getResolvedLockTracker()->isEmpty(),
+            'an errored resolve must not be recorded as resolved',
+        );
+    }
+
+    public function testCoSetTxnLockNotFoundResolveLockFailsClosedAndRecordsNothing(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->region);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        // Newer TiKV co-sets the compatibility `retryable` string with
+        // txn_lock_not_found; the structured variant must win, so this is
+        // fatal instead of a retry (issue #844, #559).
+        $this->resolveResponse = $this->makeResolveResponseWithError(
+            retryable: 'lock gone',
+            txnLockNotFound: true,
+        );
+
+        $this->mockGrpcCallsAndCaptureResolve($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+        $resolver = $this->createResolver();
+
+        try {
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+            $this->fail('Expected a txn_lock_not_found resolve error to fail closed');
+        } catch (TxnRetryableException $e) {
+            $this->fail('txn_lock_not_found must not be retried: ' . $e->getMessage());
+        } catch (TiKvException $e) {
+            $this->assertSame(TiKvException::class, $e::class);
+            $this->assertSame(
+                'ResolveLock failed: retryable: lock gone, TxnLockNotFound',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertTrue(
+            $resolver->getResolvedLockTracker()->isEmpty(),
+            'an errored resolve must not be recorded as resolved',
+        );
+    }
+
     // ========================================================================
     // checkTxnStatus() — an errored response is not a status (issue #224)
     // ========================================================================
@@ -791,21 +864,14 @@ class LockResolverTest extends TestCase
                 }
             });
 
-        $grpcCallCount = 0;
-        $this->grpc->method('call')
-            ->willReturnCallback(function (
-                string $address,
-                string $service,
-                string $method,
-            ) use (&$grpcCallCount): object {
-                $grpcCallCount++;
-                // The two locks share the default lock ts, so only the first
-                // resolveLock() performs a status check (the final outcome is
-                // cached); both still issue KvResolveLock.
-                return $method === 'KvCheckTxnStatus'
-                    ? $this->makeCheckTxnStatusResponse(commitVersion: 1)
-                    : new ResolveLockResponse();
-            });
+        // The two locks share the default lock ts, so only the first
+        // resolveLock() performs a status check (the final outcome is
+        // cached); both still issue KvResolveLock.
+        $this->grpc->method('call')->willReturnCallback(
+            fn (string $address, string $service, string $method): object => $method === 'KvCheckTxnStatus'
+                ? $this->makeCheckTxnStatusResponse(commitVersion: 1)
+                : new ResolveLockResponse(),
+        );
 
         $resolver = $this->createResolver();
         $resolver->resolveLock('key-a', $this->makeLockInfo(key: 'key-a'));
