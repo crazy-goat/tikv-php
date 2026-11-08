@@ -59,8 +59,9 @@ Main entry point. Located at `src/Client/RawKv/RawKvClient.php`.
 **Key Methods:**
 - `get()` / `put()` / `delete()` / … - Public operations, each building a `RetryExecutor` via `createRetryExecutor()` and delegating to a `RawKv*` collaborator
 
-The retry loop lives in `RetryExecutor::execute()` (`src/Client/Retry/RetryExecutor.php`). Batch routing and prefix scans are delegated to dedicated collaborators:
+The retry loop lives in `RetryExecutor::execute()` (`src/Client/Retry/RetryExecutor.php`). Batch routing, batch splitting and prefix scans are delegated to dedicated collaborators:
 - `RegionGrouper::groupKeysByRegionBatch()` - Batch operation routing
+- `RawKvSplitter::splitIntoBatches()` / `splitPairsIntoBatches()` - Split a region's keys or key-value pairs into count- and byte-bounded requests; the pair variant keeps the TTL list aligned and throws `InvalidArgumentException` when a non-empty TTL array's length differs from the pair count (`TTL array count (N) must match pair count (M)`). Both are `@internal`; `calculatePrefixEndKey()` is the helper the user-facing documentation points callers at
 - `RawKvSplitter::calculatePrefixEndKey()` - Prefix scan helper
 
 ### PdClient
@@ -634,9 +635,11 @@ The configuration lives in `infection.json`:
 
 Two details of the configuration are not obvious:
 
-1. `--do-not-fail-on-warning --do-not-fail-on-risky` keep PHPUnit's exit
-   code semantics identical to the rest of the project, where a warning does
-   not fail the run.
+1. `--do-not-fail-on-warning --do-not-fail-on-risky` pin the mutation run's
+   exit-code semantics independently of `phpunit.xml`, which sets
+   `failOnRisky="true"` (issue #665): Infection reads a non-zero exit code as
+   a killed mutant, so a risky test must not abort the run for a reason
+   unrelated to the mutant. Warnings do not fail the project's runs either.
 2. The `--filter` expression keeps `TlsConfigBuilderTest` out of the initial
    run. It deliberately reads an unreadable file, and the resulting PHP
    warning is a *defect* for PHPUnit — Infection forces
