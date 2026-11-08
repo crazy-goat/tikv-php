@@ -1424,9 +1424,11 @@ Three rules from issue #421 (`RegionContextFactory::resolveTarget()`):
    catches the `RegionException`, remembers the failing store id in a
    by-ref local (`$excludedStore`) and the next attempt excludes it — with
    a single follower left this degrades to the leader. Sync paths
-   (get/getKeyTTL/scan/txn reads) do this; the async batchGet dispatch
-   cannot (errors surface at wait time outside the retry closure), so
-   there a re-pick relies on the random choice among replicas.
+   (get/getKeyTTL/scan/txn reads) do this, and so does the transactional
+   `batchGet()` dispatch (issue #815): the exclusion is declared next to the
+   per-region retry wrapper and written from the wait-phase catch through a
+   callback (`TxnReader::batchGetForRegionWithRetry()`), because the response
+   error surfaces at wait time, after peer selection already ran.
 3. **No new store-label cache is needed.** `StoreCache` already caches the
    full `metapb.Store` message *including* its labels, and
    `RegionResolver::getStore()` exposes it; the issue's "extend StoreCache
@@ -1457,6 +1459,19 @@ incremented only inside the regroup branch is proven always-0 at the check
 site (single-pass narrowing) → `identical.alwaysFalse` / `alwaysFalse`.
 Workaround: collect regroups into an array and test
 `count($regroups) >= CAP` (same escape hatch as the by-ref-flag lesson above).
+
+The transactional `batchGet()` has the same recovery shape (issue #815):
+`TxnReader::batchGetForRegionWithRetry()` re-resolves the group's first key on
+every attempt and checks every key with `KeyOrder::inRange()`; when the fresh
+region no longer covers the group, it re-groups with
+`RegionResolver::batchResolveRegions()`, dispatches one sub-batch per fresh
+region before awaiting any of them, and merges their pairs. Without the
+containment check a split between the initial grouping and the dispatch turns
+into a fatal `KeyNotInRegion` (or a `null` for keys outside the re-resolved
+region). The replica exclusion is threaded separately: the wait-phase catch of
+`batchGetForRegionAsync()` reports the lagging store through a callback into
+the retry wrapper, so the assignment lands on a local PHPStan can follow
+instead of on a by-ref parameter it cannot connect across a future boundary.
 
 ## Channel arguments change ext-grpc's persistent-channel key (#265)
 

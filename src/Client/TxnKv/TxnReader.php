@@ -698,15 +698,112 @@ final readonly class TxnReader
         // locked key in any region of this batch (issue #569).
         $budget = $retryExecutor->currentBudget();
         $targetStoreId = 0;
+        // A DataIsNotReady response excludes the lagging replica for the next
+        // attempt of this group (issue #421, #815). Kept next to the region
+        // rather than inside the per-attempt async closure because the error
+        // surfaces at wait time and the retry is driven from here.
+        $excludedStore = null;
 
         return CheckedGrpcFuture::fromRetryableDispatch(
-            function () use ($firstKey, $regionKeys, &$targetStoreId, $budget): CheckedGrpcFuture {
-                return $this->batchGetForRegionAsync(
-                    $this->regionResolver->getRegionInfo($firstKey),
-                    $regionKeys,
-                    $targetStoreId,
-                    $budget,
-                );
+            function () use ($firstKey, $regionKeys, &$targetStoreId, &$excludedStore, $budget): CheckedGrpcFuture {
+                $fresh = $this->regionResolver->getRegionInfo($firstKey);
+
+                // The exclusion applies to this attempt only: a target is
+                // about to be selected, so start the next attempt clean and
+                // let the wait-phase catch record a new lagging store.
+                $attemptExcluded = $excludedStore;
+                $excludedStore = null;
+                $onDataIsNotReady = static function (int $storeId) use (&$excludedStore): void {
+                    $excludedStore = $storeId;
+                };
+
+                // A split (or merge) between the initial grouping and this
+                // attempt means the fresh region for the first key may no
+                // longer cover every key of the group. Sending the whole group
+                // anyway answers KeyNotInRegion — classified as fatal — or
+                // leaves the moved keys filled with null (issue #815). Re-group
+                // them against the fresh layout, mirroring
+                // RawKvBatch::batchGetWithRetry() (issue #140).
+                $allInRegion = true;
+                foreach ($regionKeys as $key) {
+                    if (!KeyOrder::inRange($key, $fresh->startKey, $fresh->endKey)) {
+                        $allInRegion = false;
+                        break;
+                    }
+                }
+
+                if ($allInRegion) {
+                    return $this->batchGetForRegionAsync(
+                        $fresh,
+                        $regionKeys,
+                        $targetStoreId,
+                        $budget,
+                        $attemptExcluded,
+                        $onDataIsNotReady,
+                    );
+                }
+
+                // Multi-region recovery has several targets; a single target
+                // cannot describe the failed attempt, so leave it unknown and
+                // let the executor fall back to the cached leader.
+                $targetStoreId = 0;
+
+                $resolved = $this->regionResolver->batchResolveRegions($regionKeys);
+                /** @var array<int, array{region: RegionInfo, keys: list<string>}> $groups */
+                $groups = [];
+                foreach ($regionKeys as $key) {
+                    // Fails closed rather than skipping: a skipped key here
+                    // would read back as null — indistinguishable from "key
+                    // not present" (issue #187).
+                    $region = RegionGrouper::resolvedRegion($resolved, $key);
+                    $regionId = $region->regionId;
+                    $groups[$regionId] ??= ['region' => $region, 'keys' => []];
+                    $groups[$regionId]['keys'][] = $key;
+                }
+
+                // Dispatch every sub-region's send before any wait, so their
+                // server-side latencies still overlap (issue #291).
+                $innerFutures = [];
+                /** @var list<int> $innerTargets */
+                $innerTargets = [];
+                foreach ($groups as $group) {
+                    $subTarget = 0;
+                    $innerFutures[] = $this->batchGetForRegionAsync(
+                        $group['region'],
+                        $group['keys'],
+                        $subTarget,
+                        $budget,
+                        $attemptExcluded,
+                        $onDataIsNotReady,
+                    );
+                    $innerTargets[] = $subTarget;
+                }
+
+                $waiter = function () use ($innerFutures, $innerTargets, &$targetStoreId): BatchGetResponse {
+                    $pairs = [];
+                    foreach ($innerFutures as $index => $future) {
+                        // Report the sub-future's own store before awaiting it
+                        // so a transport failure closes that channel, not the
+                        // first key's region leader (issue #248).
+                        $targetStoreId = $innerTargets[$index];
+
+                        $response = $future->waitForExecutor();
+                        assert($response instanceof BatchGetResponse);
+                        foreach ($response->getPairs() as $pair) {
+                            $pairs[] = $pair;
+                        }
+                    }
+                    $targetStoreId = 0;
+
+                    // The caller merges per-region responses by their pairs;
+                    // rebuilding one response keeps that merge unchanged.
+                    $merged = new BatchGetResponse();
+                    $merged->setPairs($pairs);
+
+                    return $merged;
+                };
+
+                return CheckedGrpcFuture::fromCallable($waiter);
             },
             $retryExecutor,
             $firstKey,
@@ -722,18 +819,29 @@ final readonly class TxnReader
      * response (issue #291); the returned future's wait phase runs the
      * region-error check and GC-abort mapping.
      *
+     * A `DataIsNotReady` response is reported through
+     * `$onDataIsNotReady` so the caller's retry closure can exclude the
+     * lagging store on the next attempt (issue #815) — the error surfaces at
+     * wait time, after peer selection already ran.
+     *
      * @param string[] $regionKeys
+     * @param int|null $excludedStoreId store to skip while selecting the peer
+     * @param (callable(int): void)|null $onDataIsNotReady receives the store
+     *        id the failed attempt was addressed to
      */
     private function batchGetForRegionAsync(
         RegionInfo $region,
         array $regionKeys,
         int &$targetStoreId = 0,
         ?RetryBudget $budget = null,
+        ?int $excludedStoreId = null,
+        ?callable $onDataIsNotReady = null,
     ): CheckedGrpcFuture {
         $target = RegionContextFactory::resolveTarget(
             $region,
             $this->replicaReadPolicy,
             $this->regionResolver->getStore(...),
+            excludedStoreId: $excludedStoreId,
             priority: $this->priority,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
@@ -757,18 +865,35 @@ final readonly class TxnReader
             $this->timeoutMsWithinBudget($this->timeoutMs('batch_read'), $budget),
         );
 
-        return CheckedGrpcFuture::fromCallable(function () use ($future, $region, $regionKeys, $budget) {
+        return CheckedGrpcFuture::fromCallable(function () use (
+            $future,
+            $region,
+            $regionKeys,
+            $budget,
+            $target,
+            $onDataIsNotReady,
+        ) {
             /** @var BatchGetResponse $response */
             $response = $future->wait();
             // The wait-boundary RetryExecutor is the sole NotLeader owner
             // for this response (issue #474).
-            RegionErrorHandler::check(
-                $response,
-                $this->regionCache,
-                $region->regionId,
-                notLeaderOwnedByRetryExecutor: true,
-                keyErrorsHandledByCaller: true,
-            );
+            try {
+                RegionErrorHandler::check(
+                    $response,
+                    $this->regionCache,
+                    $region->regionId,
+                    notLeaderOwnedByRetryExecutor: true,
+                    keyErrorsHandledByCaller: true,
+                );
+            } catch (RegionException $e) {
+                if ($e->errorKind === ErrorKind::DataIsNotReady && $onDataIsNotReady !== null) {
+                    // The selected replica's applied index is behind: let the
+                    // caller exclude it so the next attempt falls back to
+                    // another replica or the leader (issue #421, #815).
+                    $onDataIsNotReady($target->storeId);
+                }
+                throw $e;
+            }
 
             $error = $response->getError();
             if ($error instanceof KeyError) {
