@@ -107,7 +107,7 @@ final class TxnKvFanoutTest extends TestCase
 
     /**
      * @param list<RegionInfo> $regions
-     * @param array{asyncCommit?: bool, onePc?: bool} $options
+     * @param array{asyncCommit?: bool, onePc?: bool, maxBackoffMs?: int} $options
      */
     private function createTransaction(
         array $regions,
@@ -142,6 +142,7 @@ final class TxnKvFanoutTest extends TestCase
             regionCache: $regionCache,
             lockResolver: $lockResolver,
             regionResolver: $regionResolver,
+            maxBackoffMs: $options['maxBackoffMs'] ?? 20000,
             logger: $logger,
             timeoutConfig: $timeoutConfig,
             enable1Pc: $options['onePc'] ?? false,
@@ -397,6 +398,11 @@ final class TxnKvFanoutTest extends TestCase
      * BatchPartialFailureException aggregate. The error is the executor's
      * RetryBudgetExhaustedException, which carries the region's original
      * GrpcException as getPrevious().
+     *
+     * `Unknown` is a retryable gRPC status, so the prewrite is retried until
+     * the budget runs out. The transaction is built with a 200 ms budget
+     * (issue #692): the default 20 s made this the slowest test of the Unit
+     * suite by an order of magnitude while asserting nothing about the wait.
      */
     public function testFailingPrewriteSurfacesOriginalException(): void
     {
@@ -409,7 +415,7 @@ final class TxnKvFanoutTest extends TestCase
                 GrpcStatusCode::Unknown->value,
             ),
         );
-        $txn = $this->createTransaction($regions, $grpc);
+        $txn = $this->createTransaction($regions, $grpc, ['maxBackoffMs' => 200]);
 
         for ($i = 0; $i < 3; $i++) {
             $txn->set("k{$i}", "v{$i}");
@@ -423,6 +429,12 @@ final class TxnKvFanoutTest extends TestCase
             self::assertInstanceOf(GrpcException::class, $previous);
             self::assertStringContainsString('boom', $previous->getMessage());
         }
+
+        self::assertGreaterThan(
+            1,
+            $grpc->callCount,
+            'a retryable prewrite error must be retried before the budget is exhausted',
+        );
     }
 
     /**

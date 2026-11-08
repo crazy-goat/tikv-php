@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- `TxnKvFanoutTest::testFailingPrewriteSurfacesOriginalException` now builds its transaction with a 200 ms `maxBackoffMs` instead of the 20 s default (issue #692). The test raises a retryable `Unknown` gRPC status on purpose, so the prewrite was retried until the entire default backoff budget ran out — about 20 s, by an order of magnitude the slowest test in the `Unit` suite — while asserting nothing about the wait. The smaller budget keeps the same contract (a retryable error is retried, then the original `GrpcException` surfaces through `RetryBudgetExhaustedException`), adds an assertion that the error really was retried, and drops the test to well under a second. No production behaviour change. (#692)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
