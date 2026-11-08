@@ -2074,10 +2074,15 @@ final readonly class TwoPhaseCommitter
         $pendingKeys = $keys;
 
         while ($pendingKeys !== []) {
-            $keysByRegion = $this->groupStringsByRegion($pendingKeys);
+            // Split each region's keys into size- and count-bounded request
+            // batches (issue #791): rollback is the recovery path, so a
+            // transaction that is legal under the transaction size limits
+            // must not fail its rollback with RaftEntryTooLarge and leave the
+            // locks to expire.
+            $keysByRegion = $this->splitKeyGroups($this->groupStringsByRegion($pendingKeys));
             $pendingKeys = [];
 
-            // Fan out all region groups in parallel (issue #291): every
+            // Fan out all region batches in parallel (issue #291): every
             // group's first BatchRollback attempt is dispatched before any
             // wait begins, so their server-side latencies overlap. The
             // responses are then awaited in dispatch order, so the first
@@ -2086,9 +2091,17 @@ final readonly class TwoPhaseCommitter
             $regionCalls = [];
             /** @var array<int, BatchCallId> $labels */
             $labels = [];
-            foreach ($keysByRegion as $regionId => $regionData) {
+            /** @var array<int, int> $subBatchIndexes */
+            $subBatchIndexes = [];
+            foreach ($keysByRegion as $regionData) {
                 $regionKeys = $regionData['keys'];
                 $firstKey = $regionKeys[0] ?? '';
+                $regionId = $regionData['region']->regionId;
+                // A region can yield several sub-batches, so the fan-out
+                // label needs the sub-batch ordinal to stay unique
+                // (issue #285, GRPC-26 — same shape as commitKeys()).
+                $subBatchIndex = $subBatchIndexes[$regionId] ?? 0;
+                $subBatchIndexes[$regionId] = $subBatchIndex + 1;
 
                 $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->batchRollbackWithRetry(
@@ -2097,7 +2110,7 @@ final readonly class TwoPhaseCommitter
                     $retryExecutor,
                     $classifier,
                 );
-                $labels[$slot] = new BatchCallId($regionId);
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
             }
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
@@ -3060,17 +3073,25 @@ final readonly class TwoPhaseCommitter
         $pendingKeys = $pessimisticKeys;
 
         while ($pendingKeys !== []) {
-            $keysByRegion = $this->groupStringsByRegion($pendingKeys);
+            // Split each region's key list into size- and count-bounded
+            // request batches (issue #791), the same limits prewrite, commit
+            // and pessimistic lock use.
+            $keysByRegion = $this->splitKeyGroups($this->groupStringsByRegion($pendingKeys));
             $pendingKeys = [];
 
-            // Fan out all region groups in parallel (issue #291) — same
+            // Fan out all region batches in parallel (issue #291) — same
             // pattern as batchRollback() above.
             $regionCalls = [];
             /** @var array<int, BatchCallId> $labels */
             $labels = [];
-            foreach ($keysByRegion as $regionId => $regionData) {
+            /** @var array<int, int> $subBatchIndexes */
+            $subBatchIndexes = [];
+            foreach ($keysByRegion as $regionData) {
                 $regionKeys = $regionData['keys'];
                 $firstKey = $regionKeys[0] ?? '';
+                $regionId = $regionData['region']->regionId;
+                $subBatchIndex = $subBatchIndexes[$regionId] ?? 0;
+                $subBatchIndexes[$regionId] = $subBatchIndex + 1;
 
                 $slot = count($regionCalls);
                 $regionCalls[] = fn(): CheckedGrpcFuture => $this->pessimisticRollbackWithRetry(
@@ -3080,7 +3101,7 @@ final readonly class TwoPhaseCommitter
                     $retryExecutor,
                     $classifier,
                 );
-                $labels[$slot] = new BatchCallId($regionId);
+                $labels[$slot] = new BatchCallId($regionId, $subBatchIndex);
             }
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
@@ -3346,10 +3367,10 @@ final readonly class TwoPhaseCommitter
 
     /**
      * Split each region's key list into size- and count-bounded request
-     * batches (issue #430). Used by the commit phase, whose request carries
-     * only keys, and by the pessimistic-lock phase, whose mutations carry
-     * keys with an empty value (issue #225); in both cases the payload size
-     * of an item is its key length.
+     * batches (issue #430). Used by the commit phase, by the pessimistic-lock
+     * phase, whose mutations carry keys with an empty value (issue #225), and
+     * by both rollback paths (issue #791), whose requests also carry keys
+     * only; in every case the payload size of an item is its key length.
      *
      * @param array<int, array{region: RegionInfo, keys: string[]}> $keysByRegion
      * @return list<array{region: RegionInfo, keys: string[]}>

@@ -33,6 +33,7 @@ use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter;
 use Google\Protobuf\Internal\Message;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\AbstractLogger;
@@ -151,6 +152,7 @@ final class TxnKvFanoutTest extends TestCase
      *     onePc?: bool,
      *     pessimistic?: bool,
      *     maxBackoffMs?: int,
+     *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
      *     maxConcurrency?: int,
      * } $options
@@ -193,6 +195,7 @@ final class TxnKvFanoutTest extends TestCase
             timeoutConfig: $timeoutConfig,
             enable1Pc: $options['onePc'] ?? false,
             enableAsyncCommit: $options['asyncCommit'] ?? false,
+            maxTxnBatchSize: $options['maxTxnBatchSize'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
             maxTxnBatchCount: $options['maxTxnBatchCount'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
             maxConcurrency: $options['maxConcurrency'] ?? BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
         );
@@ -864,6 +867,103 @@ final class TxnKvFanoutTest extends TestCase
                 ['regionId' => 101, 'subBatchIndex' => 0, 'error' => 'gRPC error: pessimistic rollback failed on k1'],
                 ['regionId' => 102, 'subBatchIndex' => 0, 'error' => 'gRPC error: pessimistic rollback failed on k2'],
             ],
+            $context['errors'],
+        );
+    }
+
+    /**
+     * Issue #791: one region now yields several rollback sub-batches, so the
+     * fan-out label must carry the sub-batch ordinal and not only the region
+     * ID. The second sub-batch ([k2, k3]) fails, so the aggregate must name
+     * `subBatchIndex: 1` for it.
+     *
+     * @return iterable<string, array{bool, string, string}>
+     */
+    public static function rollbackSubBatchLabelProvider(): iterable
+    {
+        yield 'batch rollback' => [
+            false,
+            'KvBatchRollback',
+            'Rollback fan-out failed for some regions',
+        ];
+        yield 'pessimistic rollback' => [
+            true,
+            'KVPessimisticRollback',
+            'Pessimistic rollback fan-out failed for some regions',
+        ];
+    }
+
+    #[DataProvider('rollbackSubBatchLabelProvider')]
+    public function testRollbackAggregateNamesANonZeroSubBatchIndex(
+        bool $pessimistic,
+        string $requestMethod,
+        string $logMessage,
+    ): void {
+        $region = new RegionInfo(
+            regionId: 100,
+            leaderPeerId: 1,
+            leaderStoreId: 1000,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: '',
+            peers: [],
+        );
+        $this->stubPdClient([$region]);
+
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request) use ($requestMethod): Message {
+                if ($method === $requestMethod && in_array('k2', self::requestKeys($request), true)) {
+                    // A fatal gRPC status: the sub-batch is not retried.
+                    throw new GrpcException(
+                        'rollback failed on k2',
+                        GrpcStatusCode::InvalidArgument->value,
+                    );
+                }
+
+                return match ($method) {
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KVPessimisticRollback' => new PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new BatchRollbackResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+
+        $logger = $this->recordingLogger();
+        $txn = $this->createTransaction(
+            [$region],
+            $grpc,
+            ['pessimistic' => $pessimistic, 'maxTxnBatchCount' => 2],
+            $logger,
+        );
+        if ($pessimistic) {
+            $txn->lockKeys('k0', 'k1', 'k2', 'k3');
+        } else {
+            foreach (['k0', 'k1', 'k2', 'k3'] as $index => $key) {
+                $txn->set($key, 'v' . $index);
+            }
+        }
+
+        try {
+            $txn->rollback();
+            self::fail('the failing rollback sub-batch must propagate its error');
+        } catch (GrpcException $e) {
+            self::assertSame('gRPC error: rollback failed on k2', $e->getMessage());
+        }
+
+        $reports = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['message'] === $logMessage,
+        ));
+        self::assertCount(1, $reports, 'the aggregated failure must be reported once');
+
+        $context = $reports[0]['context'];
+        self::assertSame(1, $context['failedRegions']);
+        self::assertSame(2, $context['totalRegions']);
+        self::assertSame(
+            [['regionId' => 100, 'subBatchIndex' => 1, 'error' => 'gRPC error: rollback failed on k2']],
             $context['errors'],
         );
     }
