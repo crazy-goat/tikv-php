@@ -468,29 +468,26 @@ final class ConnectionFactory
      * Resolve options['expectedClusterId'] (issue #308, SEC-05): the PD
      * cluster ID every response header and cluster-id mismatch error must
      * report. An absent or explicitly null option keeps the historical
-     * learn-and-adopt behaviour; any other non-positive or non-int value is
-     * a configuration error, not a silent no-op.
+     * learn-and-adopt behaviour; any other non-positive, non-numeric or
+     * out-of-uint64 value is a configuration error, not a silent no-op.
+     *
+     * Accepts a positive int or its canonical unsigned decimal string, so a
+     * uint64 above `PHP_INT_MAX` can be pinned (issue #818). The returned
+     * canonical string is what {@see PdClient} and {@see TimestampOracle}
+     * compare against.
      *
      * @param array<string, mixed> $options
      */
-    private static function resolveExpectedClusterId(array $options): ?int
+    private static function resolveExpectedClusterId(array $options): ?string
     {
         if (!array_key_exists('expectedClusterId', $options) || $options['expectedClusterId'] === null) {
             return null;
         }
 
-        $clusterId = $options['expectedClusterId'];
-        if (!is_int($clusterId)) {
-            throw new InvalidArgumentException(sprintf(
-                "options['expectedClusterId'] must be an int (cluster ID), %s given",
-                get_debug_type($clusterId),
-            ));
-        }
-        if ($clusterId < 1) {
-            throw new InvalidArgumentException("options['expectedClusterId'] must be >= 1");
-        }
-
-        return $clusterId;
+        return ClusterId::normalizeExpected(
+            $options['expectedClusterId'],
+            "options['expectedClusterId']",
+        );
     }
 
     /**

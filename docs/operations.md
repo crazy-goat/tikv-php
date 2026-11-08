@@ -1503,8 +1503,8 @@ column-family and atomic-mode settings are RawKV-only.
 **Signatures:**
 
 ```php
-public function healthCheck(): ?int;
-public function getClusterId(): ?int;
+public function healthCheck(): int|string|null;
+public function getClusterId(): int|string|null;
 public function getMetrics(): MetricsInterface;
 public function pdClient(): PdClientInterface;
 ```
@@ -1515,7 +1515,8 @@ user data and cannot fail with a "no region" error.
 
 - **Returns:** the cluster ID, or `null` when PD answered but the response
   carried no cluster-ID header or reported `0` ("reachable, identity
-  unknown"). Both are a successful probe.
+  unknown"). Both are a successful probe. Like `getClusterId()`, a uint64
+  above `PHP_INT_MAX` is returned as the canonical unsigned decimal string.
 - **Throws:** `ClientClosedException` when the client has been closed, and
   `HealthCheckException` for every other failure (PD unreachable, a gRPC
   transport error, or a PD-level error in the response header). The underlying
@@ -1566,11 +1567,15 @@ individual store health; the state changes are visible through
 `MetricsInterface::storeHealthChanged()` when a metrics backend is configured.
 
 **`getClusterId()`** returns the cluster ID the client has already learned, or
-`null` when it has not learned one yet. It is a cached accessor: it sends no RPC
-and, while the client is open, throws nothing. The ID is learned from the first
-PD response whose header carries a non-zero cluster ID, and every later response
-header must report the same ID (a different one throws `TiKvException` before
-the response is used), or explicitly by `healthCheck()`.
+`null` when it has not learned one yet. PD cluster IDs are `uint64`: the value
+is an `int` while it fits in `PHP_INT_MAX` and the canonical unsigned decimal
+string above that bound (for example `"18446744073709551615"`), so a caller
+that needs a string can always cast with `(string) $id`. It is a cached
+accessor: it sends no RPC and, while the client is open, throws nothing. The ID
+is learned from the first PD response whose header carries a non-zero cluster
+ID, and every later response header must report the same ID (a different one
+throws `TiKvException` before the response is used), or explicitly by
+`healthCheck()`.
 `RawKvClient::getClusterId()` throws `ClientClosedException` after `close()`,
 like the other cluster operations, instead of returning the cache the closed PD
 client has reset. `TxnKvClient::getClusterId()` has no open check: it remains

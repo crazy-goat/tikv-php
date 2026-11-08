@@ -34,7 +34,7 @@ class ClusterIdGuardTest extends TestCase
     {
         $guard = new ClusterIdGuard(
             static fn (): ?int => null,
-            static function (int $id): void {
+            static function (int|string $id): void {
             },
             expectedClusterId: 12345,
         );
@@ -53,7 +53,7 @@ class ClusterIdGuardTest extends TestCase
             static function () use (&$clusterId): ?int {
                 return $clusterId;
             },
-            static function (int $id) use (&$clusterId, &$setCalls): void {
+            static function (int|string $id) use (&$clusterId, &$setCalls): void {
                 $clusterId = $id;
                 $setCalls[] = $id;
             },

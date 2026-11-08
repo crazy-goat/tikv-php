@@ -870,7 +870,7 @@ use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 
 try {
-    $clusterId = $client->healthCheck();   // ?int; null = PD answered without a cluster ID
+    $clusterId = $client->healthCheck();   // int|string|null; null = PD answered without a cluster ID
 } catch (ClientClosedException $e) {
     // close() was called; the probe did not run
 } catch (HealthCheckException $e) {

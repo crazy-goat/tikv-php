@@ -363,7 +363,7 @@ class ConnectionFactoryTest extends TestCase
         $pdClient = $bundle->pdClient;
         $this->assertInstanceOf(PdClient::class, $pdClient);
 
-        /** @var int|null $expected */
+        /** @var string|null $expected */
         $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
         $this->assertNull($expected);
     }
@@ -377,9 +377,9 @@ class ConnectionFactoryTest extends TestCase
         $pdClient = $bundle->pdClient;
         $this->assertInstanceOf(PdClient::class, $pdClient);
 
-        /** @var int|null $expected */
+        /** @var string|null $expected */
         $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
-        $this->assertSame(12345, $expected);
+        $this->assertSame('12345', $expected);
     }
 
     public function testExpectedClusterIdIsThreadedThroughToTimestampOracle(): void
@@ -394,26 +394,83 @@ class ConnectionFactoryTest extends TestCase
         $oracle = (new \ReflectionMethod(PdClient::class, 'oracle'))->invoke($pdClient);
         $this->assertInstanceOf(TimestampOracle::class, $oracle);
 
-        /** @var int|null $expected */
+        /** @var string|null $expected */
         $expected = (new \ReflectionProperty(TimestampOracle::class, 'expectedClusterId'))->getValue($oracle);
-        $this->assertSame(12345, $expected);
+        $this->assertSame('12345', $expected);
     }
 
-    public function testExpectedClusterIdRejectsNonIntValue(): void
+    public function testExpectedClusterIdAcceptsCanonicalDecimalStringAbovePhpIntMax(): void
+    {
+        // PD cluster IDs are uint64; a canonical decimal string must survive
+        // the factory unchanged instead of being rejected as a non-int
+        // (issue #818).
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => '18446744073709551615'],
+        );
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        /** @var string|null $expected */
+        $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
+        $this->assertSame('18446744073709551615', $expected);
+    }
+
+    public function testExpectedClusterIdNormalisesLeadingZeros(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => '00012345'],
+        );
+        $pdClient = $bundle->pdClient;
+        $this->assertInstanceOf(PdClient::class, $pdClient);
+
+        /** @var string|null $expected */
+        $expected = (new \ReflectionProperty(PdClient::class, 'expectedClusterId'))->getValue($pdClient);
+        $this->assertSame('12345', $expected);
+    }
+
+    public function testExpectedClusterIdRejectsNonNumericString(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage("options['expectedClusterId'] must be an int (cluster ID)");
+        $this->expectExceptionMessage("options['expectedClusterId'] must be a decimal string (uint64 cluster ID)");
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
-            options: ['expectedClusterId' => '12345'],
+            options: ['expectedClusterId' => '12ab'],
+        );
+    }
+
+    public function testExpectedClusterIdRejectsNonIntNonStringValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['expectedClusterId'] must be an int or a decimal string (uint64 cluster ID), bool given",
+        );
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => true],
+        );
+    }
+
+    public function testExpectedClusterIdRejectsValueAboveUint64(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "options['expectedClusterId'] must not exceed 18446744073709551615 (uint64)",
+        );
+
+        ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['expectedClusterId' => '18446744073709551616'],
         );
     }
 
     public function testExpectedClusterIdRejectsZero(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage("options['expectedClusterId'] must be >= 1");
+        $this->expectExceptionMessage("options['expectedClusterId'] must be greater than 0, got 0");
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],
@@ -424,7 +481,7 @@ class ConnectionFactoryTest extends TestCase
     public function testExpectedClusterIdRejectsNegative(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage("options['expectedClusterId'] must be >= 1");
+        $this->expectExceptionMessage("options['expectedClusterId'] must be greater than 0, got -1");
 
         ConnectionFactory::create(
             ['127.0.0.1:2379'],

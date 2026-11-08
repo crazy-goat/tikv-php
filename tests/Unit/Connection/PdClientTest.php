@@ -16,6 +16,7 @@ use CrazyGoat\Proto\Pdpb\GetAllStoresResponse;
 use CrazyGoat\Proto\Pdpb\GetRegionRequest;
 use CrazyGoat\Proto\Pdpb\GetRegionResponse;
 use CrazyGoat\Proto\Pdpb\GetStoreResponse;
+use CrazyGoat\Proto\Pdpb\RequestHeader;
 use CrazyGoat\Proto\Pdpb\ResponseHeader;
 use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
@@ -510,6 +511,18 @@ class PdClientTest extends TestCase
         $this->assertSame(42, $result->regionId);
         $this->assertSame(0, $result->leaderPeerId);
         $this->assertSame(0, $result->leaderStoreId);
+    }
+
+    private function makeGetRegionResponseWithRawClusterId(string $varint): GetRegionResponse
+    {
+        $response = $this->makeGetRegionResponse();
+        $header = new ResponseHeader();
+        // Field 1, varint; the bytes are the raw uint64 value so the test
+        // exercises the decoder rather than the clamping setter.
+        $header->mergeFromString("\x08" . $varint);
+        $response->setHeader($header);
+
+        return $response;
     }
 
     private function makeGetRegionResponse(): GetRegionResponse
@@ -1678,6 +1691,108 @@ class PdClientTest extends TestCase
         $this->expectExceptionMessage('expectedClusterId must be greater than 0, got -1');
 
         new PdClient($this->createMock(GrpcClientInterface::class), 'pd:2379', expectedClusterId: -1);
+    }
+
+    // ------------------------------------------------------------------------
+    //  uint64 IDs above PHP_INT_MAX (issue #818)
+    // ------------------------------------------------------------------------
+
+    public function testExpectedClusterIdAcceptsUint64AbovePhpIntMax(): void
+    {
+        // The pure-PHP decoder returns 2^63 as PHP_INT_MIN; the guard must
+        // normalise it to the unsigned decimal form before comparing.
+        $response = $this->makeGetRegionResponseWithRawClusterId(str_repeat("\x80", 9) . "\x01");
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient(
+            $grpc,
+            'pd:2379',
+            expectedClusterId: '9223372036854775808',
+        );
+        $result = $client->getRegion('key');
+
+        $this->assertSame(1, $result->regionId);
+        $this->assertSame('9223372036854775808', $client->getClusterId());
+    }
+
+    public function testExpectedClusterIdAcceptsMaxUint64(): void
+    {
+        // 2^64-1 decodes to -1 in the pure-PHP runtime.
+        $response = $this->makeGetRegionResponseWithRawClusterId(str_repeat("\xff", 9) . "\x01");
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient(
+            $grpc,
+            'pd:2379',
+            expectedClusterId: '18446744073709551615',
+        );
+        $client->getRegion('key');
+
+        $this->assertSame('18446744073709551615', $client->getClusterId());
+    }
+
+    public function testMismatchingUint64AbovePhpIntMaxFailsClosed(): void
+    {
+        // The response carries 2^64-1; the configured ID names 2^63, so the
+        // client must refuse and report both values unsigned rather than as
+        // negative ints.
+        $response = $this->makeGetRegionResponseWithRawClusterId(str_repeat("\xff", 9) . "\x01");
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient(
+            $grpc,
+            'pd:2379',
+            expectedClusterId: '9223372036854775808',
+        );
+
+        try {
+            $client->getRegion('key');
+            $this->fail('Expected TiKvException for a mismatching out-of-range cluster ID');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 9223372036854775808, '
+                . 'server reported 18446744073709551615',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertNull($client->getClusterId());
+    }
+
+    public function testOutOfRangeClusterIdIsSentBackAsUint64RequestHeader(): void
+    {
+        // GPBUtil::checkUint64() clamps a numeric string above PHP_INT_MAX via
+        // intval(); the client must instead send the two's-complement int so
+        // the encoder emits the correct uint64 varint (issue #818).
+        $response = $this->makeGetRegionResponseWithRawClusterId(str_repeat("\xff", 9) . "\x01");
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $client = new PdClient($grpc, 'pd:2379', expectedClusterId: '18446744073709551615');
+        $client->getRegion('key');
+
+        $header = (new \ReflectionMethod(PdClient::class, 'createHeader'))->invoke($client);
+        $this->assertInstanceOf(RequestHeader::class, $header);
+        $this->assertSame(
+            '08' . str_repeat('ff', 9) . '01',
+            bin2hex($header->serializeToString()),
+        );
+    }
+
+    public function testSetClusterIdAcceptsCanonicalStringAbovePhpIntMax(): void
+    {
+        $client = new PdClient($this->createMock(GrpcClientInterface::class), 'pd:2379');
+
+        $client->setClusterId('18446744073709551615');
+
+        $this->assertSame('18446744073709551615', $client->getClusterId());
     }
 
     // ========================================================================

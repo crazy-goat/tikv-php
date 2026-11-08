@@ -565,8 +565,8 @@ an earlier group already landed (issue #197).
 | `deletePrefix(string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | Rejects empty prefix and all-`0xFF` prefixes; range errors surface from `deleteRange()` semantics. The pre-fan-out PD region enumeration can throw the base `TiKvException` |
 | `checksum(string, string)` | `ClientClosedException`, `InvalidArgumentException`, `RegionException`, `GrpcException`, `BatchPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | A reversed range is rejected before any RPC. Concurrent per-region checksums; idempotent. A retry-budget or store failure is wrapped; the pre-fan-out PD region enumeration can throw the base `TiKvException` (for example from a custom `PdClientInterface`) |
 | `ingest(array, ?int $ttl = null)` | `ClientClosedException`, `InvalidArgumentException`, `GrpcException`, `RegionException`, `InvalidStoreAddressException`, `StoreNotFoundException`, `RetryBudgetExhaustedException`, `IngestPartialFailureException`, `BatchDeadlineExceededException`, `TiKvException` | SST import path; store mode switches fan out concurrently. Each region group is retried against a freshly resolved region. A permanent failure with no applied group rethrows the original exception; once a group has landed it is wrapped in `IngestPartialFailureException` (issue #197) |
-| `getClusterId(): ?int` | `ClientClosedException` | Returns `null` when unknown; throws after `close()` |
-| `healthCheck(): ?int` | `ClientClosedException`, `HealthCheckException` | Wraps any PD failure into `HealthCheckException` |
+| `getClusterId(): int|string|null` | `ClientClosedException` | Returns `null` when unknown; returns the canonical unsigned decimal string for a uint64 above `PHP_INT_MAX`; throws after `close()` |
+| `healthCheck(): int|string|null` | `ClientClosedException`, `HealthCheckException` | Wraps any PD failure into `HealthCheckException` |
 | `getMetrics(): MetricsInterface` | — | Pure accessor |
 | `close(): void` | — | Swallows and logs shutdown errors |
 

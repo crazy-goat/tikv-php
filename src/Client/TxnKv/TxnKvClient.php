@@ -1259,8 +1259,12 @@ final class TxnKvClient
 
     /**
      * Get the learned cluster ID, or null if not yet discovered.
+     *
+     * PD cluster IDs are `uint64`: the value is an `int` while it fits in
+     * `PHP_INT_MAX` and the canonical unsigned decimal string above that
+     * bound (issue #818).
      */
-    public function getClusterId(): ?int
+    public function getClusterId(): int|string|null
     {
         return $this->pdClient->getClusterId();
     }
@@ -1359,7 +1363,7 @@ final class TxnKvClient
      * @throws ClientClosedException When the client has been closed
      * @throws HealthCheckException When the PD probe fails
      */
-    public function healthCheck(): ?int
+    public function healthCheck(): int|string|null
     {
         $this->ensureOpen();
 

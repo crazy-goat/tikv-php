@@ -34,8 +34,8 @@ final class ClusterAndLifecycleDocumentationGuardTest extends TestCase
         );
 
         $signatures = [
-            'public function healthCheck(): ?int',
-            'public function getClusterId(): ?int',
+            'public function healthCheck(): int|string|null',
+            'public function getClusterId(): int|string|null',
             'public function getMetrics(): MetricsInterface',
             'public function setColumnFamily(string $cf): self',
             'public function getColumnFamily(): string',

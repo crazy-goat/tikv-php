@@ -30,7 +30,6 @@ use CrazyGoat\TiKV\Client\Codec\CodecInterface;
 use CrazyGoat\TiKV\Client\Codec\CodecV1;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
-use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\PdException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -43,7 +42,9 @@ use Psr\Log\NullLogger;
 
 final class PdClient implements PdClientInterface
 {
-    private ?int $clusterId = null;
+    private ?string $clusterId = null;
+    /** Canonical unsigned decimal expected cluster ID (issue #818). */
+    private readonly ?string $expectedClusterId;
     private readonly ClusterIdGuard $clusterIdGuard;
     private ?TimestampOracle $tso = null;
 
@@ -64,11 +65,13 @@ final class PdClient implements PdClientInterface
      * @param TimeoutConfig $timeoutConfig deadlines for the PD and TSO RPCs
      *        (issue #260). Added last so the #416 positional signature stays
      *        stable; the default is {@see TimeoutConfig}
-     * @param int|null $expectedClusterId cluster ID every PD response must
-     *        report (issue #308, SEC-05). null = learn and adopt the ID PD
+     * @param int|string|null $expectedClusterId cluster ID every PD response
+     *        must report (issue #308, SEC-05). null = learn and adopt the ID PD
      *        reports (the historical behaviour). A non-null value must be a
-     *        positive int; a response header or a cluster-id mismatch error
-     *        naming another ID throws before any retry or data-path request.
+     *        positive int or its canonical unsigned decimal string, so a
+     *        uint64 above `PHP_INT_MAX` can be pinned (issue #818); a response
+     *        header or a cluster-id mismatch error naming another ID throws
+     *        before any retry or data-path request.
      */
     public function __construct(
         private readonly GrpcClientInterface $grpc,
@@ -86,7 +89,7 @@ final class PdClient implements PdClientInterface
          */
         private readonly CodecInterface $codec = new CodecV1(),
         private readonly TimeoutConfig $timeoutConfig = new TimeoutConfig(),
-        private readonly ?int $expectedClusterId = null,
+        int|string|null $expectedClusterId = null,
     ) {
         if (is_string($pdAddresses)) {
             $pdAddresses = [$pdAddresses];
@@ -103,6 +106,7 @@ final class PdClient implements PdClientInterface
         }
         $this->pdAddresses = $addresses;
         $this->currentAddress = $addresses[0];
+        $this->expectedClusterId = ClusterId::normalizeExpected($expectedClusterId);
         $this->clusterIdGuard = new ClusterIdGuard(
             $this->getClusterId(...),
             $this->setClusterId(...),
@@ -306,9 +310,9 @@ final class PdClient implements PdClientInterface
         return $regions;
     }
 
-    public function getClusterId(): ?int
+    public function getClusterId(): int|string|null
     {
-        return $this->clusterId;
+        return $this->clusterId === null ? null : ClusterId::toPublic($this->clusterId);
     }
 
     /**
@@ -331,7 +335,7 @@ final class PdClient implements PdClientInterface
      * @throws PdException On a PD-level error in the response header
      * @throws TiKvException On PD-level error
      */
-    public function ping(): ?int
+    public function ping(): int|string|null
     {
         $request = new GetMembersRequest();
         $request->setHeader($this->createHeader());
@@ -346,7 +350,7 @@ final class PdClient implements PdClientInterface
         $this->learnClusterId($response);
         $this->adoptDiscoveredLeader($response);
 
-        return $this->clusterId;
+        return $this->getClusterId();
     }
 
     /**
@@ -461,18 +465,18 @@ final class PdClient implements PdClientInterface
         return $value;
     }
 
-    public function setClusterId(int $clusterId): void
+    public function setClusterId(int|string $clusterId): void
     {
-        if ($clusterId < 1) {
-            throw new InvalidArgumentException(sprintf(
-                'clusterId must be greater than 0, got %d',
-                $clusterId,
-            ));
+        $canonical = ClusterId::normalizeExpected($clusterId, 'clusterId');
+        if ($canonical === null) {
+            // normalizeExpected() only returns null for a null input, which
+            // the non-nullable parameter rules out.
+            throw new \LogicException('Cluster ID must be set');
         }
 
-        ClusterIdGuard::assertMatches($this->expectedClusterId, $this->clusterId, $clusterId);
+        ClusterIdGuard::assertMatches($this->expectedClusterId, $this->clusterId, $canonical);
 
-        $this->clusterId = $clusterId;
+        $this->clusterId = $canonical;
     }
 
     public function close(): void
@@ -493,7 +497,13 @@ final class PdClient implements PdClientInterface
     private function createHeader(): RequestHeader
     {
         $header = new RequestHeader();
-        $header->setClusterId($this->clusterId ?? 0);
+        if ($this->clusterId !== null) {
+            // The generated setter clamps a numeric string above PHP_INT_MAX
+            // through intval(); the two's-complement int keeps the encoder's
+            // uint64 varint correct (issue #818).
+            $header->setClusterId(ClusterId::toSignedInt($this->clusterId));
+        }
+
         return $header;
     }
 
@@ -999,7 +1009,7 @@ final class PdClient implements PdClientInterface
             return;
         }
 
-        /** @var int $clusterId */
+        /** @var int|string $clusterId */
         $clusterId = $header->getClusterId();
         $this->clusterIdGuard->check($clusterId);
     }

@@ -516,7 +516,7 @@ class RpcDeadlineTest extends TestCase
             $this->recordingGrpc($respond),
             'pd:2379',
             static fn (): ?int => $clusterId,
-            static function (int $clusterId): void {
+            static function (int|string $clusterId): void {
             },
             new NullLogger(),
             tsoTimeoutMs: self::TSO_DEADLINE_MS,

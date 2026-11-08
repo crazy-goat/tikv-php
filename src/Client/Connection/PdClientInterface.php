@@ -182,8 +182,15 @@ interface PdClientInterface
 
     /**
      * Get the learned cluster ID, or null if not yet discovered.
+     *
+     * PD cluster IDs are `uint64`. The ID is returned as an `int` while it
+     * fits in `PHP_INT_MAX`; an ID above that bound is returned as its
+     * canonical unsigned decimal string (for example
+     * `"18446744073709551615"`), because a PHP int cannot represent it
+     * (issue #818). Callers that need a string can cast with
+     * `(string) $id`.
      */
-    public function getClusterId(): ?int;
+    public function getClusterId(): int|string|null;
 
     /**
      * Probe PD connectivity and learn the cluster ID.
@@ -194,10 +201,14 @@ interface PdClientInterface
      * header throws instead of returning null. Suitable as a health check: no
      * user data is looked up and no "no region" failure can occur.
      *
+     * The return value follows {@see self::getClusterId()}: an int while the
+     * ID fits, the canonical unsigned decimal string above `PHP_INT_MAX`
+     * (issue #818).
+     *
      * @throws GrpcException On transport error
      * @throws TiKvException On PD-level error
      */
-    public function ping(): ?int;
+    public function ping(): int|string|null;
 
     /**
      * Set the cluster ID (learned from PD response headers).
@@ -211,11 +222,15 @@ interface PdClientInterface
      * non-positive value (including the proto3 default `0`) is rejected
      * (issue #250, REG-19).
      *
-     * @throws InvalidArgumentException when $clusterId is not positive
+     * Accepts a positive int or the canonical unsigned decimal string, so a
+     * uint64 above `PHP_INT_MAX` can be set (issue #818).
+     *
+     * @throws InvalidArgumentException when $clusterId is not a positive
+     *         uint64 value
      * @throws TiKvException when $clusterId differs from the expected or the
      *         already-established cluster ID
      */
-    public function setClusterId(int $clusterId): void;
+    public function setClusterId(int|string $clusterId): void;
 
     /**
      * Close the PD connection and release resources.

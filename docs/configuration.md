@@ -122,8 +122,9 @@ $options = [
     // missing cluster-ID header throws TiKvException before any data-path
     // request. Independently of this option, an established cluster ID can
     // never be overwritten by a value parsed out of an error string. Default:
-    // unset = learn and adopt the first ID PD reports. Must be a positive int.
-    // See "Cluster Identity Verification" below.
+    // unset = learn and adopt the first ID PD reports. Accepts a positive int
+    // or its canonical unsigned decimal string, so a uint64 above PHP_INT_MAX
+    // can be pinned. See "Cluster Identity Verification" below.
     'expectedClusterId' => 123456789,
     // Replica read preference (issue #421): an instance of
     // ReplicaReadPolicy controlling which peer serves read requests.
@@ -302,15 +303,28 @@ REG-19).
 An absent or explicitly `null` option keeps the historical initial
 learn-and-adopt behaviour: the first non-zero cluster ID PD reports is
 adopted. Existing deployments that relied on an error string replacing an
-already established ID do change — intentionally. The option must be a
-positive integer; any other type, `0` or a negative value throws
-`InvalidArgumentException` at client creation. The value must fit in a PHP
-`int`: PD cluster IDs are `uint64`, and the protobuf runtime clamps a decoded
-value above `PHP_INT_MAX` to `PHP_INT_MAX`, so a cluster whose ID exceeds
-that bound cannot be pinned through this option. This is a partial control on
-its own: it detects a wrong cluster but does not authenticate the server —
-genuine server authentication comes from TLS (`allowInsecure: false` plus a
-verified CA, see the TLS section below).
+already established ID do change — intentionally.
+
+PD cluster IDs are `uint64`. The option accepts a positive `int` or the same
+value as a decimal string; a canonical unsigned decimal string is the only
+way to pin an ID above `PHP_INT_MAX` (`9,223,372,036,854,775,807`), for
+example `'expectedClusterId' => '9223372036854775808'`. Strings are validated
+as decimal digits, stripped of leading zeros and range-checked against
+`2^64-1`; `0`, negative values, non-numeric strings and values above
+`18446744073709551615` throw `InvalidArgumentException` at client creation.
+
+The pure-PHP protobuf runtime decodes a `uint64` above `PHP_INT_MAX` into a
+negative PHP int using two's complement (`2^63` becomes `PHP_INT_MIN` and
+`2^64-1` becomes `-1`); it does not clamp the value to `PHP_INT_MAX`. The
+client normalises both the configured ID and every reported ID to the
+canonical unsigned decimal string, so a decode that wrapped negative still
+matches the pinned value. The same range applies to the learned ID:
+`getClusterId()` and `healthCheck()` return an `int` while the ID fits in
+`PHP_INT_MAX`, and the canonical decimal string for an ID above that bound
+(`(string) $id` is always safe). This is a partial control on its own: it
+detects a wrong cluster but does not authenticate the server — genuine
+server authentication comes from TLS (`allowInsecure: false` plus a verified
+CA, see the TLS section below).
 
 ### Timestamp Batching and Pooling (issues #420, #292)
 

@@ -94,16 +94,18 @@ final class TimestampOracle
     /** Wall-clock milliseconds at which the current pool was fetched. */
     private ?int $poolFetchedAtMs = null;
     /** Cluster ID observed when the pool was fetched (null = not yet learned). */
-    private ?int $poolClusterId = null;
+    private ?string $poolClusterId = null;
     /** PID that fetched the pool; a fork invalidates the pool. */
     private ?int $poolPid = null;
 
+    /** Canonical unsigned decimal expected cluster ID (issue #818). */
+    private readonly ?string $expectedClusterId;
     /** Shared cluster-ID learning/verification rules (issue #250, REG-19). */
     private readonly ClusterIdGuard $clusterIdGuard;
 
     /**
-     * @param \Closure(): ?int $getClusterId
-     * @param \Closure(int): void $setClusterId
+     * @param \Closure(): (int|string|null) $getClusterId
+     * @param \Closure(int|string): void $setClusterId
      * @param int|null $lowResMaxStalenessMs maximum allowed staleness (ms) of the
      *                                       low-resolution timestamp cache;
      *                                       null = no caching (default), 0 = a
@@ -135,11 +137,13 @@ final class TimestampOracle
      *        #260). Added last so the #292 positional signature stays
      *        stable; {@see TimeoutConfig} supplies the value, whose default
      *        is {@see self::DEFAULT_TSO_TIMEOUT_MS}
-     * @param int|null $expectedClusterId cluster ID every TSO response must
-     *        report (issue #308, SEC-05). null = learn and adopt the ID PD
+     * @param int|string|null $expectedClusterId cluster ID every TSO response
+     *        must report (issue #308, SEC-05). null = learn and adopt the ID PD
      *        reports (the historical behaviour). A non-null value must be a
-     *        positive int; a response header or a cluster-id mismatch error
-     *        naming another ID throws before a timestamp is served.
+     *        positive int or its canonical unsigned decimal string, so a
+     *        uint64 above `PHP_INT_MAX` can be pinned (issue #818); a response
+     *        header or a cluster-id mismatch error naming another ID throws
+     *        before a timestamp is served.
      */
     public function __construct(
         private readonly GrpcClientInterface $grpc,
@@ -154,7 +158,7 @@ final class TimestampOracle
         ?\Closure $pid = null,
         private readonly ?\Closure $onTransportFailure = null,
         private readonly int $tsoTimeoutMs = self::DEFAULT_TSO_TIMEOUT_MS,
-        private readonly ?int $expectedClusterId = null,
+        int|string|null $expectedClusterId = null,
     ) {
         $this->pdAddress = $pdAddress instanceof \Closure
             ? $pdAddress
@@ -191,6 +195,7 @@ final class TimestampOracle
 
         $this->pid = $pid ?? static fn (): int => (int) getmypid();
 
+        $this->expectedClusterId = ClusterId::normalizeExpected($expectedClusterId);
         $this->clusterIdGuard = new ClusterIdGuard(
             $this->getClusterId,
             $this->setClusterId,
@@ -380,7 +385,7 @@ final class TimestampOracle
         if ($range !== []) {
             $this->timestampPool = $range;
             $this->poolFetchedAtMs = $fetchedAtMs;
-            $this->poolClusterId = ($this->getClusterId)();
+            $this->poolClusterId = $this->establishedClusterId();
             $this->poolPid = ($this->pid)();
         }
 
@@ -424,7 +429,7 @@ final class TimestampOracle
             return;
         }
 
-        if ($this->poolClusterId !== ($this->getClusterId)()) {
+        if ($this->poolClusterId !== $this->establishedClusterId()) {
             $this->logger->debug('Discarding TSO pool after cluster ID change');
             $this->resetPool();
         }
@@ -488,12 +493,31 @@ final class TimestampOracle
     private function createHeader(): RequestHeader
     {
         $header = new RequestHeader();
-        $clusterId = ($this->getClusterId)();
+        $clusterId = $this->establishedClusterId();
         if ($clusterId !== null) {
-            $header->setClusterId($clusterId);
+            // The generated setter clamps a numeric string above PHP_INT_MAX
+            // through intval(); the two's-complement int keeps the encoder's
+            // uint64 varint correct (issue #818).
+            $header->setClusterId(ClusterId::toSignedInt($clusterId));
         }
 
         return $header;
+    }
+
+    /**
+     * Canonical unsigned decimal form of the established cluster ID, or null
+     * when none is known yet. Reported zeros mean "not reported".
+     */
+    private function establishedClusterId(): ?string
+    {
+        $value = ($this->getClusterId)();
+        if (!is_int($value) && !is_string($value)) {
+            return null;
+        }
+
+        $canonical = ClusterId::normalizeReported($value);
+
+        return $canonical === '0' ? null : $canonical;
     }
 
     /**
@@ -569,7 +593,7 @@ final class TimestampOracle
     private function learnClusterId(TsoResponse $response): void
     {
         $header = $response->getHeader();
-        $this->clusterIdGuard->check($header === null ? null : (int) $header->getClusterId());
+        $this->clusterIdGuard->check($header?->getClusterId());
     }
 
     /**

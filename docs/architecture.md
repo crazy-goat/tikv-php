@@ -314,7 +314,7 @@ interface PdClientInterface
     public function scanRegions(string $startKey, string $endKey, int $limit): array;
     public function getStore(int $storeId): ?Store;
     public function getTimestamp(): int;
-    public function getClusterId(): int;
+    public function getClusterId(): int|string|null;
     public function close(): void;
 }
 ```

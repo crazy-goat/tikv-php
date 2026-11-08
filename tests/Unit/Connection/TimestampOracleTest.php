@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\Connection;
 
+use CrazyGoat\Proto\Pdpb\RequestHeader;
 use CrazyGoat\Proto\Pdpb\ResponseHeader;
 use CrazyGoat\Proto\Pdpb\Timestamp;
 use CrazyGoat\Proto\Pdpb\TsoRequest;
@@ -40,7 +41,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
             tsoTimeoutMs: 0,
         );
@@ -60,7 +61,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
         );
 
@@ -89,7 +90,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
         );
         $result = $oracle->getTimestamp();
@@ -117,7 +118,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
         );
         $result = $oracle->getTimestamp();
@@ -140,7 +141,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
         );
 
@@ -213,7 +214,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
         );
 
@@ -235,7 +236,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
         );
 
@@ -272,7 +273,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             $logger,
         );
 
@@ -312,7 +313,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
         );
 
@@ -428,7 +429,7 @@ class TimestampOracleTest extends TestCase
             function () use (&$clusterId): ?int {
                 return $clusterId;
             },
-            function (int $id) use (&$clusterId): void {
+            function (int|string $id) use (&$clusterId): void {
                 $clusterId = $id;
             },
             new NullLogger(),
@@ -467,7 +468,7 @@ class TimestampOracleTest extends TestCase
             function () use (&$clusterId): ?int {
                 return $clusterId;
             },
-            function (int $id) use (&$clusterId): void {
+            function (int|string $id) use (&$clusterId): void {
                 $clusterId = $id;
             },
             new NullLogger(),
@@ -491,7 +492,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
         );
 
@@ -564,7 +565,7 @@ class TimestampOracleTest extends TestCase
             $grpc,
             '127.0.0.1:2379',
             fn() => $pdClient->getClusterId(),
-            fn(int $id) => $pdClient->setClusterId($id),
+            fn(int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
             $stalenessMs,
             $clock,
@@ -913,8 +914,8 @@ class TimestampOracleTest extends TestCase
         $oracle = new TimestampOracle(
             $grpc,
             '127.0.0.1:2379',
-            fn (): ?int => $pdClient->getClusterId(),
-            fn (int $id) => $pdClient->setClusterId($id),
+            fn (): int|string|null => $pdClient->getClusterId(),
+            fn (int|string $id) => $pdClient->setClusterId($id),
             new NullLogger(),
             null,
             static fn (): int => 1_000_000,
@@ -1143,7 +1144,7 @@ class TimestampOracleTest extends TestCase
             function () use (&$clusterId): ?int {
                 return $clusterId;
             },
-            function (int $id) use (&$clusterId, &$setCalls): void {
+            function (int|string $id) use (&$clusterId, &$setCalls): void {
                 $clusterId = $id;
                 $setCalls[] = $id;
             },
@@ -1174,7 +1175,7 @@ class TimestampOracleTest extends TestCase
             function () use (&$clusterId): ?int {
                 return $clusterId;
             },
-            function (int $id) use (&$clusterId, &$setCalls): void {
+            function (int|string $id) use (&$clusterId, &$setCalls): void {
                 $clusterId = $id;
                 $setCalls[] = $id;
             },
@@ -1211,7 +1212,7 @@ class TimestampOracleTest extends TestCase
             function () use (&$clusterId): ?int {
                 return $clusterId;
             },
-            function (int $id) use (&$clusterId, &$setCalls): void {
+            function (int|string $id) use (&$clusterId, &$setCalls): void {
                 $clusterId = $id;
                 $setCalls[] = $id;
             },
@@ -1257,7 +1258,7 @@ class TimestampOracleTest extends TestCase
             function () use (&$clusterId): ?int {
                 return $clusterId;
             },
-            function (int $id) use (&$clusterId): void {
+            function (int|string $id) use (&$clusterId): void {
                 $clusterId = $id;
             },
             new NullLogger(),
@@ -1295,7 +1296,7 @@ class TimestampOracleTest extends TestCase
             function () use (&$clusterId): ?int {
                 return $clusterId;
             },
-            function (int $id) use (&$clusterId, &$setCalls): void {
+            function (int|string $id) use (&$clusterId, &$setCalls): void {
                 $clusterId = $id;
                 $setCalls[] = $id;
             },
@@ -1332,7 +1333,7 @@ class TimestampOracleTest extends TestCase
             function () use (&$clusterId): int {
                 return $clusterId;
             },
-            function (int $id) use (&$clusterId, &$setCalls): void {
+            function (int|string $id) use (&$clusterId, &$setCalls): void {
                 $clusterId = $id;
                 $setCalls[] = $id;
             },
@@ -1362,7 +1363,7 @@ class TimestampOracleTest extends TestCase
             $this->createMock(GrpcClientInterface::class),
             '127.0.0.1:2379',
             static fn (): ?int => null,
-            static function (int $id): void {
+            static function (int|string $id): void {
             },
             expectedClusterId: 0,
         );
@@ -1377,9 +1378,145 @@ class TimestampOracleTest extends TestCase
             $this->createMock(GrpcClientInterface::class),
             '127.0.0.1:2379',
             static fn (): ?int => null,
-            static function (int $id): void {
+            static function (int|string $id): void {
             },
             expectedClusterId: -1,
+        );
+    }
+
+    // ==================================================================
+    // uint64 IDs above PHP_INT_MAX (issue #818)
+    // ==================================================================
+
+    public function testExpectedClusterIdAcceptsUint64AbovePhpIntMax(): void
+    {
+        $response = $this->makeTsoResponse(1715000000000, 5, 1);
+        $header = new ResponseHeader();
+        // 2^63: the pure-PHP decoder returns PHP_INT_MIN.
+        $header->mergeFromString("\x08" . str_repeat("\x80", 9) . "\x01");
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $clusterId = null;
+        $setCalls = [];
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            function () use (&$clusterId): int|string|null {
+                return $clusterId;
+            },
+            function (int|string $id) use (&$clusterId, &$setCalls): void {
+                $clusterId = $id;
+                $setCalls[] = $id;
+            },
+            new NullLogger(),
+            expectedClusterId: '9223372036854775808',
+        );
+
+        $this->assertSame((1715000000000 << 18) + 5, $oracle->getTimestamp());
+        $this->assertSame('9223372036854775808', $clusterId);
+        $this->assertSame(['9223372036854775808'], $setCalls);
+    }
+
+    public function testExpectedClusterIdAcceptsMaxUint64(): void
+    {
+        $response = $this->makeTsoResponse(1715000000000, 5, 1);
+        $header = new ResponseHeader();
+        // 2^64-1: the pure-PHP decoder returns -1.
+        $header->mergeFromString("\x08" . str_repeat("\xff", 9) . "\x01");
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $clusterId = null;
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            function () use (&$clusterId): int|string|null {
+                return $clusterId;
+            },
+            function (int|string $id) use (&$clusterId): void {
+                $clusterId = $id;
+            },
+            new NullLogger(),
+            expectedClusterId: '18446744073709551615',
+        );
+
+        $this->assertSame((1715000000000 << 18) + 5, $oracle->getTimestamp());
+        $this->assertSame('18446744073709551615', $clusterId);
+    }
+
+    public function testMismatchingUint64AbovePhpIntMaxFailsClosed(): void
+    {
+        $response = $this->makeTsoResponse(1715000000000, 5, 1);
+        $header = new ResponseHeader();
+        $header->mergeFromString("\x08" . str_repeat("\xff", 9) . "\x01");
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $clusterId = null;
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            function () use (&$clusterId): int|string|null {
+                return $clusterId;
+            },
+            function (int|string $id) use (&$clusterId): void {
+                $clusterId = $id;
+            },
+            new NullLogger(),
+            expectedClusterId: '9223372036854775808',
+        );
+
+        try {
+            $oracle->getTimestamp();
+            $this->fail('Expected TiKvException for a mismatching out-of-range TSO header');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 9223372036854775808, '
+                . 'server reported 18446744073709551615',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertNull($clusterId);
+    }
+
+    public function testOutOfRangeClusterIdIsSentBackAsUint64RequestHeader(): void
+    {
+        $response = $this->makeTsoResponse(1715000000000, 5, 1);
+        $header = new ResponseHeader();
+        $header->mergeFromString("\x08" . str_repeat("\xff", 9) . "\x01");
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $clusterId = null;
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            function () use (&$clusterId): int|string|null {
+                return $clusterId;
+            },
+            function (int|string $id) use (&$clusterId): void {
+                $clusterId = $id;
+            },
+            new NullLogger(),
+        );
+
+        $oracle->getTimestamp();
+
+        $header = (new \ReflectionMethod(TimestampOracle::class, 'createHeader'))->invoke($oracle);
+        $this->assertInstanceOf(RequestHeader::class, $header);
+        $this->assertSame(
+            '08' . str_repeat('ff', 9) . '01',
+            bin2hex($header->serializeToString()),
         );
     }
 }
