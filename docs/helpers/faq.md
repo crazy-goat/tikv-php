@@ -1424,9 +1424,15 @@ Three rules from issue #421 (`RegionContextFactory::resolveTarget()`):
    catches the `RegionException`, remembers the failing store id in a
    by-ref local (`$excludedStore`) and the next attempt excludes it — with
    a single follower left this degrades to the leader. Sync paths
-   (get/getKeyTTL/scan/txn reads) do this; the async batchGet dispatch
-   cannot (errors surface at wait time outside the retry closure), so
-   there a re-pick relies on the random choice among replicas.
+   (get/getKeyTTL/scan/txn reads) do this. The async batchGet dispatch
+   runs its wait phase inside the retry executor since #222 (PR #806), so
+   the `RegionException` is raised inside the retry closure, but
+   `TxnReader::batchGetForRegionAsync()` does not pass an
+   `excludedStoreId` to `RegionContextFactory::resolveTarget()` and has no
+   `ErrorKind::DataIsNotReady` catch yet. A batchGet re-pick therefore
+   relies on the random choice among replicas and can land on the same
+   lagging peer until the retry budget runs out; the missing exclusion is
+   tracked in issue #815.
 3. **No new store-label cache is needed.** `StoreCache` already caches the
    full `metapb.Store` message *including* its labels, and
    `RegionResolver::getStore()` exposes it; the issue's "extend StoreCache
