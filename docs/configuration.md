@@ -1474,6 +1474,14 @@ Details:
   leader.
 - A `DataIsNotReady` region error on a replica excludes that store for the
   current operation and the retry falls back to another replica or the leader.
+  This holds for the paths that track the exclusion — RawKV `get()`,
+  `getKeyTTL()`, the sequential `scan()` / `reverseScan()` paths (including the
+  iterators), and the transaction `get()` / `scan()` reads. RawKV
+  `batchScan()` and the transactional `batchGet()` do not pass
+  `excludedStoreId` yet: the batch scan has no per-attempt exclusion, and the
+  batchGet retry — whose wait phase runs inside the retry executor since
+  #222 — can land on the same lagging replica until the retry budget runs out
+  (issue #815).
 - **Writes always target the leader**, regardless of the policy. On
   `TxnKvClient` the policy applies to transaction reads (`get`, `batchGet`,
   `scan`); pessimistic locking and commits remain leader-only.
