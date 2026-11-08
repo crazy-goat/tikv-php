@@ -15,16 +15,6 @@ use PHPUnit\Framework\TestCase;
  */
 final class CoverageFloorCheckTest extends TestCase
 {
-    /**
-     * The ratcheted floor, read out of the script itself.
-     *
-     * The script owns the value (raising it is a deliberate act, and the
-     * script is the only place that enforces it). This test reads the constant
-     * out of the script instead of repeating it, so the two can never drift
-     * apart — and the "a tenth below the floor has to fail" test below uses
-     * the real value, so even a fractional lowering is caught.
-     */
-
     private string $reportPath = '';
 
     protected function tearDown(): void
@@ -38,34 +28,44 @@ final class CoverageFloorCheckTest extends TestCase
 
     public function testCoverageBelowTheFloorFails(): void
     {
-        [$exitCode, $output] = $this->runCheck($this->writeReport(60, 100));
+        // Derived from the constant, so raising or lowering the floor keeps
+        // this test meaningful instead of pinning it to one value.
+        $below = max(0.0, $this->defaultFloor() - 5.0);
+
+        [$exitCode, $output] = $this->runCheck($this->writeReport($below, 1000));
 
         self::assertSame(1, $exitCode);
-        self::assertStringContainsString('60.00%', $output);
+        self::assertStringContainsString(sprintf('%.2f%%', $below), $output);
         self::assertStringContainsString(sprintf('floor: %.2f%%', $this->defaultFloor()), $output);
     }
 
     public function testCoverageAboveTheFloorPasses(): void
     {
-        [$exitCode, $output] = $this->runCheck($this->writeReport(95, 100));
+        $above = min(100.0, $this->defaultFloor() + 5.0);
+
+        [$exitCode, $output] = $this->runCheck($this->writeReport($above, 1000));
 
         self::assertSame(0, $exitCode);
-        self::assertStringContainsString('95.00%', $output);
+        self::assertStringContainsString(sprintf('%.2f%%', $above), $output);
         self::assertStringContainsString('Coverage floor satisfied.', $output);
     }
 
     public function testCoverageExactlyAtTheFloorPasses(): void
     {
-        [$exitCode] = $this->runCheck($this->writeReport($this->defaultFloor(), 100));
+        // 1 000 lines, so a one-decimal floor is representable in the report;
+        // with 100 lines a floor such as 87.4 would be written as 87 % and the
+        // check would fail a report that is meant to be exactly at the floor.
+        [$exitCode] = $this->runCheck($this->writeReport($this->defaultFloor(), 1000));
 
         self::assertSame(0, $exitCode);
     }
 
-    public function testTheDefaultFloorIsTheRatchetedOne(): void
+    public function testAReportATenthBelowTheDefaultFloorFails(): void
     {
         // Without an explicit --floor the script uses DEFAULT_COVERAGE_FLOOR,
-        // so a report a tenth of a point below it has to fail — the floor is
-        // not allowed to be lowered silently, not even by a fraction.
+        // so a report a tenth of a point below it has to fail. That pins the
+        // comparison against the real value, not the value itself: the
+        // constant is read from the script, so changing it keeps this green.
         // 1 000 lines, so a tenth of a point is representable in the report.
         [$exitCode] = $this->runCheck($this->writeReport($this->defaultFloor() - 0.1, 1000));
 
@@ -110,6 +110,13 @@ final class CoverageFloorCheckTest extends TestCase
 
     /**
      * The floor the script enforces by default.
+     *
+     * The script owns the value: raising it is a deliberate act, and the
+     * script is the only place that enforces it. Reading the constant here
+     * instead of repeating it keeps the two from drifting apart, but it also
+     * means this suite pins the comparison, not the value — a scratch copy
+     * with the constant set to 86.5 or 88.0 still passes every test. The
+     * ratchet is a convention and a visible diff, not a machine check.
      */
     private function defaultFloor(): float
     {

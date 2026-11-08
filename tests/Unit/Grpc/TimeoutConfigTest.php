@@ -168,17 +168,17 @@ class TimeoutConfigTest extends TestCase
     }
 
     /**
+     * The fan-out fields come from `TimeoutConfig::BATCH_FAN_OUT_TIMEOUTS`
+     * through the one test reader, not from a second hand-maintained list
+     * (issue #775). `BatchFanOutTimeoutGuardTest` pins that constant to the
+     * timeouts the fan-out classes actually read.
+     *
      * @return array<string, array{string}>
      */
     public static function fanOutTimeoutFields(): array
     {
         $fields = [];
-        foreach (
-            [
-            'writeTimeoutMs', 'batchReadTimeoutMs', 'batchWriteTimeoutMs',
-            'scanTimeoutMs', 'deleteRangeTimeoutMs', 'checksumTimeoutMs', 'ingestTimeoutMs',
-            ] as $field
-        ) {
+        foreach (BatchFanOutTimeouts::declared() as $field) {
             $fields[$field] = [$field];
         }
 
