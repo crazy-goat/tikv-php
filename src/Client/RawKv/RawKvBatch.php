@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use Closure;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteResponse;
@@ -73,6 +74,16 @@ final readonly class RawKvBatch
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Owner lifecycle check invoked before each fan-out window is
+         * dispatched (issue #783); null disables the re-check. RawKvClient
+         * passes its ensureOpen() so a close() during an in-flight window
+         * stops the next one with ClientClosedException instead of opening
+         * RPCs on a closed transport.
+         *
+         * @var (Closure(): void)|null
+         */
+        private ?Closure $ensureOpen = null,
     ) {
     }
 
@@ -152,6 +163,7 @@ final readonly class RawKvBatch
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
                 array_intersect_key($labels, $fallbackCalls),
+                $this->ensureOpen,
             );
 
             foreach ($regionResults as $collected) {
@@ -296,6 +308,7 @@ final readonly class RawKvBatch
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
                 array_intersect_key($labels, $fallbackCalls),
+                $this->ensureOpen,
             );
         }
     }
@@ -358,6 +371,7 @@ final readonly class RawKvBatch
                 $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
                 array_intersect_key($labels, $fallbackCalls),
+                $this->ensureOpen,
             );
         }
     }

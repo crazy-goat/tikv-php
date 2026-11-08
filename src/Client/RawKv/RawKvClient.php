@@ -619,6 +619,7 @@ final class RawKvClient
             ) : null,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
+            ensureOpen: $this->lifecycleGuard(),
         );
         $this->scanner = $scanner ?? new RawKvScanner(
             $pdClient,
@@ -638,6 +639,7 @@ final class RawKvClient
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
             retryClassifier: $this->retryClassifier,
+            ensureOpen: $this->lifecycleGuard(),
         );
         $this->rangeOps = $rangeOps ?? new RawKvRangeOps(
             $pdClient,
@@ -716,6 +718,30 @@ final class RawKvClient
         if ($this->closed) {
             throw new ClientClosedException();
         }
+    }
+
+    /**
+     * Build the lifecycle guard handed to the owned batch and scan
+     * collaborators (issue #783).
+     *
+     * The guard must not bind `$this`: a bound closure would create the
+     * cycle client -> collaborator -> closure -> client, so dropping the last
+     * external reference would leave the client alive until the cycle
+     * collector ran and delay the documented `__destruct()` -> `close()`
+     * behaviour. A {@see \WeakReference} lets the guard observe the client
+     * without keeping it alive; once the client is gone the guard is a
+     * no-op (there is nothing left to close).
+     */
+    private function lifecycleGuard(): \Closure
+    {
+        $client = \WeakReference::create($this);
+
+        return static function () use ($client): void {
+            $owner = $client->get();
+            if ($owner instanceof self) {
+                $owner->ensureOpen();
+            }
+        };
     }
 
     /**

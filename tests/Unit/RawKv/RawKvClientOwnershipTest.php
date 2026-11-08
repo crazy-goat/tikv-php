@@ -117,6 +117,32 @@ class RawKvClientOwnershipTest extends TestCase
         $client->close();
     }
 
+    /**
+     * Dropping the last reference must run the destructor immediately.
+     *
+     * The batch/scan lifecycle guards must not bind $this, or they form a
+     * client -> collaborator -> closure -> client cycle and `__destruct()`
+     * (and therefore close()) only runs once the cycle collector is invoked
+     * (issue #783). No gc_collect_cycles() here on purpose.
+     */
+    public function testDroppingTheLastReferenceRunsTheDestructorWithoutTheCycleCollector(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $pdClient->expects($this->once())->method('close');
+        $grpc->expects($this->once())->method('close');
+
+        $client = new RawKvClient(
+            $pdClient,
+            $grpc,
+            ownsGrpcClient: true,
+            ownsPdClient: true,
+        );
+
+        unset($client);
+    }
+
     private function property(RawKvClient $client, string $name): bool
     {
         $value = (new \ReflectionProperty(RawKvClient::class, $name))->getValue($client);
