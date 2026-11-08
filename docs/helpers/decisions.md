@@ -123,7 +123,7 @@ Three decisions are worth keeping:
    `phpunit.xml` excludes the generated `src/Proto` classes from the `<source>` set. They are
    ~62 % of the executable lines of `src/`, they are not written by hand and nobody writes tests
    for them, so counting them would make the floor measure the generated code instead of the
-   client (the same tree measures 42 % with them and 87 % without). The issue's own baselines
+   client (the same tree measures 42 % with them). The issue's own baselines
    (58.4 % for `Unit`, 70.2 % for `Unit` + `Grpc`) are only reproducible on this metric — measured
    on the audit-time tree (2026-08-08) the whole-tree numbers were 14.6 % and 18.3 %.
 2. **The floor is checked in the existing `grpc-unit-tests` job, not in a new one.** That job
@@ -131,16 +131,20 @@ Three decisions are worth keeping:
    produce one report covering the whole client; the `unit-tests` matrix keeps running the `Unit`
    suite on every PHP version without coverage, so the matrix is not slowed down.
 3. **The threshold is below the measurement, never above it.** A floor above the current coverage
-   fails the build immediately; the shipped floor is 87.0 %, set against a measured 87.6 % (PCOV,
-   PHP 8.4 — the measurement moves with the tree, the floor only moves up). PCOV and Xdebug measure
+   fails the build immediately; the shipped floor is set a little below the measured coverage
+   (PCOV, PHP 8.4 — the measurement moves with the tree, the floor only moves up), and
+   `bin/check-coverage.php` prints the value it applied. PCOV and Xdebug measure
    the same metric within a few tenths of a point (0.3 points apart on the tree the floor was set
    on), so the same floor holds whichever driver a contributor has installed.
 
 The floor is deliberately *not* a quality target for new code: it is a regression guard. A change
 that drops the coverage fails CI until either the missing tests are added or the floor is
 explicitly lowered — and lowering it is a visible act, because the value lives in
-`bin/check-coverage.php` and `tests/Unit/Bin/CoverageFloorCheckTest.php` reads it back from there
-(a report a tenth of a point below it has to fail).
+`bin/check-coverage.php` and nothing else restates it: the check prints the floor it applied, and
+`tests/Unit/Bin/CoverageFloorCheckTest.php` reads the constant back and drives the check with it.
+That test therefore pins the comparison (a report a tenth of a point below the floor has to fail),
+not the value: raising or lowering the constant keeps the suite green, and the ratchet is this
+documented convention plus a visible diff, not a machine check.
 
 ## PHP support: >= 8.2, CI matrix 8.2–8.4
 

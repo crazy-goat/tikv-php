@@ -15,16 +15,6 @@ use PHPUnit\Framework\TestCase;
  */
 final class CoverageFloorCheckTest extends TestCase
 {
-    /**
-     * The ratcheted floor, read out of the script itself.
-     *
-     * The script owns the value (raising it is a deliberate act, and the
-     * script is the only place that enforces it). This test reads the constant
-     * out of the script instead of repeating it, so the two can never drift
-     * apart — and the "a tenth below the floor has to fail" test below uses
-     * the real value, so even a fractional lowering is caught.
-     */
-
     private string $reportPath = '';
 
     protected function tearDown(): void
@@ -61,11 +51,12 @@ final class CoverageFloorCheckTest extends TestCase
         self::assertSame(0, $exitCode);
     }
 
-    public function testTheDefaultFloorIsTheRatchetedOne(): void
+    public function testAReportATenthBelowTheDefaultFloorFails(): void
     {
         // Without an explicit --floor the script uses DEFAULT_COVERAGE_FLOOR,
-        // so a report a tenth of a point below it has to fail — the floor is
-        // not allowed to be lowered silently, not even by a fraction.
+        // so a report a tenth of a point below it has to fail. That pins the
+        // comparison against the real value, not the value itself: the
+        // constant is read from the script, so changing it keeps this green.
         // 1 000 lines, so a tenth of a point is representable in the report.
         [$exitCode] = $this->runCheck($this->writeReport($this->defaultFloor() - 0.1, 1000));
 
@@ -110,6 +101,13 @@ final class CoverageFloorCheckTest extends TestCase
 
     /**
      * The floor the script enforces by default.
+     *
+     * The script owns the value: raising it is a deliberate act, and the
+     * script is the only place that enforces it. Reading the constant here
+     * instead of repeating it keeps the two from drifting apart, but it also
+     * means this suite pins the comparison, not the value — a scratch copy
+     * with the constant set to 86.5 or 88.0 still passes every test. The
+     * ratchet is a convention and a visible diff, not a machine check.
      */
     private function defaultFloor(): float
     {
