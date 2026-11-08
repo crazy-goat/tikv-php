@@ -14,27 +14,32 @@ final class TlsConfig
      * @param string|null $clientKey  Client private key content (PEM)
      *
      * @throws InvalidArgumentException if the configuration is partial:
-     *         - clientCert is set without clientKey, or vice versa
-     *         - clientCert and clientKey are set without caCert
+     *         - $clientCert is set without $clientKey, or vice versa
+     *         - $clientCert and $clientKey are set without $caCert
+     *
+     * The messages name the properties with a leading `$`, so they cannot be
+     * confused with the deprecated `options['tls']` keys of the same bare name
+     * (`caCert`, `clientCert`, `clientKey`); where an option key is named, it
+     * is the supported `caCertFile` / `caCertPem` form.
      */
     public function __construct(
         public ?string $caCert = null,
         public ?string $clientCert = null,
         public ?string $clientKey = null,
     ) {
-        // If one of clientCert/clientKey is set but not the other
+        // If one of the client certificate/key properties is set but not the other
         if (($this->clientCert !== null) xor ($this->clientKey !== null)) {
             throw new InvalidArgumentException(
-                'Both clientCert and clientKey must be provided together; '
-                . 'got clientCert=' . var_export($this->clientCert !== null, true)
-                . ', clientKey=' . var_export($this->clientKey !== null, true)
+                'TlsConfig requires $clientCert and $clientKey together; '
+                . 'got $clientCert=' . var_export($this->clientCert !== null, true)
+                . ', $clientKey=' . var_export($this->clientKey !== null, true)
             );
         }
 
         // Reject non-PEM material (e.g. a path string that was misinterpreted)
         foreach (['caCert' => $caCert, 'clientCert' => $clientCert, 'clientKey' => $clientKey] as $name => $pem) {
             if ($pem !== null && !str_contains($pem, '-----BEGIN')) {
-                throw new InvalidArgumentException(sprintf('%s does not contain PEM data', $name));
+                throw new InvalidArgumentException(sprintf('$%s does not contain PEM data', $name));
             }
         }
 
@@ -42,10 +47,10 @@ final class TlsConfig
         // and would silently downgrade to plaintext — reject it.
         if ($this->clientCert !== null && $this->clientKey !== null && $this->caCert === null) {
             throw new InvalidArgumentException(
-                'Partial TLS configuration: client certificate and key are provided '
-                . 'but no CA certificate is set. A CA certificate is required to '
-                . 'verify the server certificate. Either provide a CA certificate '
-                . 'via caCert, or remove the client certificate and key if you '
+                'Partial TLS configuration: $clientCert and $clientKey are set but '
+                . '$caCert is not. A CA certificate is required to verify the server '
+                . 'certificate. Provide one with caCertFile (or caCertPem), or remove '
+                . 'the client certificate and key ($clientCert and $clientKey) if you '
                 . 'intend to use an insecure connection.'
             );
         }

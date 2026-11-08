@@ -156,11 +156,19 @@ $client->batchPut(['key1' => 'value1', 'key2' => 'value2']);
 
 **Parameters:**
 - `keyValuePairs` (array<string, string>): Associative array of key => value
-- `ttl` (int, optional): TTL applied to all keys (0 = no expiration)
+- `ttl` (int|array<int|string, int>, optional): TTL applied to all keys (0 = no
+  expiration), or one TTL per key. An array must hold exactly one entry per
+  key-value pair — a positional list aligned with `$keyValuePairs`, or a map
+  keyed like it — and a different count is rejected with
+  `InvalidArgumentException` (`TTL array count (N) must match pair count (M)`)
+  before any request is sent.
 
 **Returns:** `void`
 
-**Throws:** [`BatchPartialFailureException`](error-handling.md) if any region's sub-batch fails.
+**Throws:** [`InvalidArgumentException`](error-handling.md) when a TTL array
+does not cover every pair, and
+[`BatchPartialFailureException`](error-handling.md) if any region's sub-batch
+fails.
 
 > **Non-atomic write.** Like `deleteRange`, `batchPut` is not atomic across
 > regions: when the exception is thrown an unknown subset of the key-value
