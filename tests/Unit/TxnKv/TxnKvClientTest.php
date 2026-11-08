@@ -291,7 +291,7 @@ class TxnKvClientTest extends TestCase
         $this->assertSame(7000, $txn->getStartTs());
     }
 
-    public function testBeginOptimisticKeepsTheOtherBeginOptions(): void
+    public function testBeginOptimisticKeepsThePriorityOption(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(8000);
@@ -299,13 +299,13 @@ class TxnKvClientTest extends TestCase
         $grpc = $this->createMock(GrpcClientInterface::class);
 
         $client = new TxnKvClient($pdClient, $grpc);
-        $txn = $client->beginOptimistic(['priority' => 5]);
+        $txn = $client->beginOptimistic(['priority' => CommandPri::High]);
 
         $this->assertFalse($txn->isPessimistic());
-        $this->assertSame(5, $txn->getPriority());
+        $this->assertSame(CommandPri::High, $txn->getPriority());
     }
 
-    public function testBeginPessimisticKeepsTheOtherBeginOptions(): void
+    public function testBeginPessimisticKeepsThePriorityOption(): void
     {
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(9000);
@@ -313,10 +313,10 @@ class TxnKvClientTest extends TestCase
         $grpc = $this->createMock(GrpcClientInterface::class);
 
         $client = new TxnKvClient($pdClient, $grpc);
-        $txn = $client->beginPessimistic(['priority' => 2]);
+        $txn = $client->beginPessimistic(['priority' => CommandPri::Low]);
 
         $this->assertTrue($txn->isPessimistic());
-        $this->assertSame(2, $txn->getPriority());
+        $this->assertSame(CommandPri::Low, $txn->getPriority());
     }
 
     public function testBeginOptimisticAcceptsARedundantPessimisticOption(): void
@@ -642,7 +642,8 @@ class TxnKvClientTest extends TestCase
         // KvCommit is intentional: this is the only test that drives
         // TxnKvClient::begin(), so it proves the option survives the client
         // entry point into the RPC contexts — a break in begin() fails here
-        // and nowhere else (issue #686).
+        // and nowhere else (issue #686). The stored value itself is pinned by
+        // testBeginWithPriorityStoresHighOnTransaction() (issue #778).
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(4000);
         $pdClient->method('getClusterId')->willReturn(null);
@@ -672,8 +673,6 @@ class TxnKvClientTest extends TestCase
         $txn->get('k1');
         $txn->set('k1', 'v1');
         $txn->commit();
-
-        $this->assertSame(CommandPri::High, $txn->getPriority());
 
         $capturedMethods = array_keys($capturedRequests);
         sort($capturedMethods);
@@ -788,6 +787,24 @@ class TxnKvClientTest extends TestCase
         $txn = $client->begin();
 
         $this->assertSame(CommandPri::Normal, $txn->getPriority());
+    }
+
+    public function testBeginWithPriorityStoresHighOnTransaction(): void
+    {
+        // The stored-value counterpart of
+        // testBeginWithoutPriorityStoresNormalOnTransaction(): begin() must
+        // keep a valid CommandPri on the Transaction. The wire-level guarantee
+        // lives in testBeginWithPriorityReachesTheRpcContext(); this test only
+        // pins the constructor round-trip.
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(5500);
+        $pdClient->method('getClusterId')->willReturn(null);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->begin(['priority' => CommandPri::High]);
+
+        $this->assertSame(CommandPri::High, $txn->getPriority());
     }
 
     // ========================================================================
