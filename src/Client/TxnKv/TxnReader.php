@@ -288,6 +288,10 @@ final readonly class TxnReader
      * many rows, so the caller detects a possibly-truncated result by
      * comparing the returned count with the limit.
      *
+     * `$maxScanLimit` must be at least 1 (issue #725): a non-positive cap
+     * cannot bound the scan, so it is rejected before any PD or store RPC
+     * instead of being handed to TiKV as the wire limit `0` ("no limit").
+     *
      * With `$reverse = true` the bounds keep the RawKV reverse-scan meaning:
      * `$startKey` is the exclusive upper bound and `$endKey` the lower bound,
      * so the scan reads `[endKey, startKey)` in descending key order (issue
@@ -1300,10 +1304,25 @@ final readonly class TxnReader
     }
 
     /**
+     * Validate the caller's limit against the per-transaction cap and return
+     * the effective row budget for one region.
+     *
+     * The cap is validated too (issue #725): `limit: 0` used to be normalised
+     * to a `maxScanLimit` of `0`, which the region loop skips (the
+     * `$remaining > 0` guard never fires), so the scan reached TiKV with the
+     * wire limit `0` — "no limit" — and buffered the whole range. `Transaction`
+     * already rejects such a cap in its constructor, but `TxnReader` is a
+     * public class with `$maxScanLimit` as a plain parameter, so the reader
+     * must reject it before any PD or store RPC.
+     *
      * @throws InvalidArgumentException
      */
     private function normalizeScanLimit(int $limit, int $maxScanLimit): int
     {
+        if ($maxScanLimit < 1) {
+            throw new InvalidArgumentException('maxScanLimit must be >= 1');
+        }
+
         if ($limit < 0) {
             throw new InvalidArgumentException('Scan limit must be 0 or greater');
         }
