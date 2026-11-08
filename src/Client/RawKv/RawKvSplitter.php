@@ -7,9 +7,24 @@ namespace CrazyGoat\TiKV\Client\RawKv;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 
+/**
+ * Batch and range helpers shared by the RawKV batch paths and the 2PC
+ * committer.
+ *
+ * The class is internal (see the stability policy in `README.md`). The
+ * batch-splitting methods are marked `@internal`; `calculatePrefixEndKey()`
+ * is the one method the user-facing documentation points callers at.
+ *
+ * `splitPairsIntoBatches()` fails closed: a non-empty `$ttls` array whose
+ * length differs from the pair count throws instead of padding the missing
+ * entries, so every batch keeps its TTLs one-to-one with its pairs (#345).
+ */
 final class RawKvSplitter
 {
     /**
+     * @internal Batch splitting is an implementation detail of the client;
+     *           `calculatePrefixEndKey()` is the helper documented for callers.
+     *
      * @template T
      * @param T[] $items
      * @param callable(T): int $sizeFn
@@ -45,6 +60,9 @@ final class RawKvSplitter
     }
 
     /**
+     * @internal Batch splitting is an implementation detail of the client;
+     *           `calculatePrefixEndKey()` is the helper documented for callers.
+     *
      * @param KvPair[] $pairs
      * @param int[] $ttls
      * @return array<array{pairs: KvPair[], ttls: int[]}>

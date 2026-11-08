@@ -1605,8 +1605,8 @@ context-building call sites. `begin(['priority' => 2])` therefore reaches
 `KvPessimisticLock`, `TxnHeartBeat` and both rollback RPCs; the
 lock-resolution RPCs stay Normal by design, because they resolve other
 transactions' locks. Pinned by
-`TransactionTest::testPriorityIsCarriedOnEveryRequestContext()`,
-`::testPriorityIsCarriedOnEveryReadRequestContext()`,
+`TransactionTest::testPriorityIsCarriedOnGetPrewriteAndCommitContexts()`,
+`::testPriorityIsCarriedOnBatchGetAndScanContexts()`,
 `::testPriorityIsCarriedOnPessimisticLockContext()`,
 `::testPriorityIsCarriedOnRollbackContexts()` and
 `TxnKvClientTest::testBeginWithPriorityReachesTheRpcContext()`, so no source
@@ -1766,17 +1766,25 @@ capture by value. Return `[$txn, static function () use (&$requests): array {
 return $requests; }]` and call the getter after the operation
 (used in `CommitPrewriteKeyCoverageTest`, issue #329).
 
-## Tests pinning a not-yet-merged fail-closed contract — guard with a behavior probe, not an env flag
+## Tests pinning a not-yet-merged contract — a temporary guard, now removed
 
-When an audit issue's tests assert behavior another (open) PR implements
-(e.g. #329's tests assert the fail-closed contract of unmerged #244/PR #531),
-CI must stay green without weakening the pin: probe the contract at runtime
-(call the resolver with an unresolvable key; if it doesn't throw, the fix is
-absent) and `trigger_error(..., E_USER_WARNING)` with a message naming the blocking PR (NOT `markTestSkipped()`: the `unit-tests` CI job runs with `--fail-on-skipped`, so a skip breaks the build; PHPUnit 11 has no add-warning API, and an `E_USER_WARNING` during a test is recorded as a non-failing warning that still names the pending contract). The
-tests then fail against master if the guard is removed (verify once by
-temporarily replacing the warning-early-return with `self::fail()`) and activate
-automatically when the fix merges — no env var to clean up later, and no
-duplicate tests alongside the fix PR's own coverage.
+When an audit issue's tests assert behavior another (open) PR implements, CI
+must stay green without weakening the pin: probe the contract at runtime (call
+the resolver with an unresolvable key; if it doesn't throw, the fix is absent)
+and `trigger_error(..., E_USER_WARNING)` with a message naming the blocking PR
+(NOT `markTestSkipped()`: the `unit-tests` CI job runs with
+`--fail-on-skipped`, so a skip breaks the build; PHPUnit 11 has no add-warning
+API, and an `E_USER_WARNING` during a test is recorded as a non-failing warning
+that still names the pending contract). Verify once by temporarily replacing the
+warning-early-return with `self::fail()`: the tests then fail against master if
+the guard is removed.
+
+This pattern was used by #329 to pin the fail-closed contract of then-unmerged
+#244/PR #531. That contract has since merged and #682 replaced both probes with
+a direct `expectException(TiKvException::class)` assertion, so no such guard
+remains in the suite. The technique is still the fallback for a future
+cross-PR pin, but delete it once the dependency merges rather than leaving a
+dead branch behind.
 
 ## RawKvBatch dispatches through `callAsync()` — tests use a dead endpoint, not a dead channel (issue #273)
 
@@ -2497,11 +2505,12 @@ authorised by the **write permission of the directory that contains it**, not by
 the permissions of the file itself. `unlink()` on a `chmod 0000` file inside a
 writable directory succeeds. The real cause of the leak was a non-recursive
 `glob($dir . '/*')` in `tearDown()`: a nested directory was passed to `unlink()`
-(which fails with "Operation not permitted") and the following `rmdir()` then
-failed with "Directory not empty". Restoring the file mode alone would have
-silenced nothing. When a cleanup leaks a directory, look at the **shape** of the
-tree (nested directories, symlinks) before you look at file modes — and remove
-the tree recursively.
+(which fails with `EISDIR` / "Is a directory" on Linux and `EPERM` / "Operation
+not permitted" on macOS and the BSDs — the wording is platform-specific) and the
+following `rmdir()` then failed with "Directory not empty" (`ENOTEMPTY`).
+Restoring the file mode alone would have silenced nothing. When a cleanup leaks a
+directory, look at the **shape** of the tree (nested directories, symlinks)
+before you look at file modes — and remove the tree recursively.
 
 ## PHPUnit counts a verified mock as one assertion — `expectNotToPerformAssertions()` asserts nothing and back-fires
 
@@ -2574,9 +2583,9 @@ so a new request path that builds its context by hand, or that forgets the
 `priority:` argument, silently drops the transaction's priority again. The
 transaction's *read* path was missing for a long time: the write path has
 carried the priority since #441, the read path only since #336 (issue
-#336). Pinned by `TransactionTest::testPriorityIsCarriedOnEveryRequestContext()`
+#336). Pinned by `TransactionTest::testPriorityIsCarriedOnGetPrewriteAndCommitContexts()`
 (the `KvGet`, `KvPrewrite` and `KvCommit` contexts),
-`::testPriorityIsCarriedOnEveryReadRequestContext()` (the `KvBatchGet` and
+`::testPriorityIsCarriedOnBatchGetAndScanContexts()` (the `KvBatchGet` and
 `KvScan` contexts — the read path has three independent context-building
 call sites, and pinning only one of them would leave the other two free to
 drop the priority again) and
@@ -2767,12 +2776,13 @@ label. Four lessons:
    Overstating a guard in the docs is a docs bug of the same kind as
    understating it.
 4. **A deprecated API can behave differently per call shape.** `withCaCert()`
-   guesses per value, but `withClientCert()` ORs the two guesses
-   (`resolveWithGuess($cert) || resolveWithGuess($key)`), so the client pair is
-   decided for both values together and a mixed pair (inline PEM certificate
-   with a file key) dies with `TLS file has disallowed extension ""`. Copying
-   the single-value description to the pair is wrong — read the whole method,
-   not its helper.
+   guesses per value, but `withClientCert()` requires both values in the same
+   form: it compares the two guesses and rejects a mixed pair (inline PEM
+   certificate with a file key, or the other way round) with one message,
+   `TLS client certificate and key must be given in the same form, both file
+   paths or both inline PEM`, whether or not the path half exists (issue #688).
+   Copying the single-value description to the pair is wrong — read the whole
+   method, not its helper.
 
 ## An audit issue's "this loop is sequential" premise expires — read the tree before re-implementing
 
@@ -2864,10 +2874,33 @@ Two ways out, in order of preference:
 The same mechanism applies to a *failing* test: `stopOnDefect` stops the run
 at the first failure too, and a truncated run does not fail — it reports a
 lower score. So a flaky test makes the mutation score unstable in exactly the
-same way. `tests/Unit/TxnKv/TxnKvFanoutTest.php` asserts a wall-clock bound
-(`assertLessThan(12, $elapsedMs)`) and fails intermittently on a loaded
+same way. `tests/Unit/TxnKv/TxnKvFanoutTest.php` used to assert a wall-clock
+bound (`assertLessThan(12, $elapsedMs)`) and failed intermittently on a loaded
 machine; that is a test-suite defect to fix on its own, not something the
-mutation configuration can absorb.
+mutation configuration can absorb. It now compares the batched path with a
+sequential control measured in the same run (issue #676) — see the next entry
+for the warmup that comparison needs.
+
+## A relative timing control in a unit test needs a warmup, or protobuf autoload lands in the first measured phase
+
+`tests/Unit/TxnKv/TxnKvFanoutTest.php` proves the batchGet fan-out by timing a
+batched call against a sequential control on the same fake, with the same
+latency, in the same test (issue #676). The first version of that control
+measured ~345 ms for three 20 ms calls, so the batched path (correctly fanned
+out) looked fast by comparison and the test would have passed even with the
+fan-out removed.
+
+The cause is one-time class loading: the first `new BatchGetRequest()` /
+`BatchGetResponse()` pulls in the generated protobuf classes and their
+`GPBMetadata`, which costs hundreds of milliseconds on a cold process. Whichever
+phase runs first absorbs it, and with a fake latency of a few tens of
+milliseconds the autoload cost dominates that phase's measurement.
+
+Warm the code path before measuring either phase — one throwaway `batchGet()`
+on a separate fake with `latencyMs: 0.0` is enough — so both measurements pay
+only the fake latency and the comparison stays a true ratio. Do not "fix" it by
+measuring the batched path first: that moves the autoload cost into the phase
+under test and makes a correct implementation fail.
 
 ## A token-scanning guard test must recognise how `token_get_all()` spells a property, an operator and a keyword
 

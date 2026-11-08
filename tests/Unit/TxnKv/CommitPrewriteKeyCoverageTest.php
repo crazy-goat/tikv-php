@@ -8,6 +8,7 @@ use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
@@ -24,12 +25,8 @@ use PHPUnit\Framework\TestCase;
  * was not prewritten, and every write-set key must be prewritten. A key
  * whose region cannot be resolved used to vanish from the prewrite batch
  * while staying in the write set, so the commit phase either referenced a
- * key TiKV never saw, or the write was silently lost.
- *
- * Note: the fail-closed contract is implemented by issue #244 (PR #531),
- * which is not merged yet. The guarded tests below probe whether that fix
- * is present and warn (instead of failing) until it merges; they then
- * permanently pin the contract.
+ * key TiKV never saw, or the write was silently lost. The fail-closed
+ * contract is issue #244.
  */
 final class CommitPrewriteKeyCoverageTest extends TestCase
 {
@@ -202,57 +199,12 @@ final class CommitPrewriteKeyCoverageTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturn([$this->region(1, '', 'm')]);
         $this->regionCache->method('put');
 
-        // Probe whether the fail-closed contract (issue #244) is implemented.
-        try {
-            $this->regionResolver->batchResolveRegions(['z']);
-        } catch (\CrazyGoat\TiKV\Client\Exception\TiKvException) {
-            $failClosed = true;
-        }
-        if (!($failClosed ?? false)) {
-            $this->expectNotToPerformAssertions();
-            trigger_error(
-                'Fail-closed contract not implemented yet (issue #244, PR #531); '
-                . 'this test pins the issue #329 criteria and activates once #244 merges.',
-                E_USER_WARNING,
-            );
-            return;
-        }
-
-        [$txn, $getRequests] = $this->makeTransactionAndCaptureRpcs();
+        [$txn] = $this->makeTransactionAndCaptureRpcs();
         $txn->set('a', 'v1');
         $txn->set('z', 'v2');
 
-        $threw = false;
-        try {
-            $txn->commit();
-        } catch (\Throwable) {
-            $threw = true;
-        }
+        $this->expectException(TiKvException::class);
 
-        if (!$threw) {
-            // commit() returned normally: then every write-set key must have
-            // been prewritten and the committed keys must be a subset of the
-            // prewritten ones.
-            $requests = $getRequests();
-            $prewritten = $this->prewrittenKeys($requests, ['KvPrewrite']);
-            foreach (array_keys($txn->getWriteSet()) as $writeKey) {
-                self::assertContains($writeKey, $prewritten, sprintf(
-                    'write-set key "%s" was never prewritten — silent data loss',
-                    $writeKey,
-                ));
-            }
-            $committed = [];
-            foreach ($requests['KvCommit'] ?? [] as $request) {
-                if ($request instanceof \CrazyGoat\Proto\Kvrpcpb\CommitRequest) {
-                    $committed = [...$committed, ...$request->getKeys()];
-                }
-            }
-            self::assertEqualsCanonicalizing(
-                [],
-                array_diff($committed, $prewritten),
-                'KvCommit must never reference a key absent from KvPrewrite',
-            );
-        }
-        $this->addToAssertionCount(1);
+        $txn->commit();
     }
 }
