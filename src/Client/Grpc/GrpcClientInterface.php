@@ -124,7 +124,9 @@ interface GrpcClientInterface
     /**
      * Close all open channels of this client.
      *
-     * **Ownership.** The transport belongs to whoever created it:
+     * **Ownership.** The transport belongs to whoever created it. A client's
+     * `__destruct()` calls this method through its own `close()`, so
+     * destruction follows the same rule:
      *
      * - a client built by `RawKvClient::create()` / `TxnKvClient::create()`
      *   creates the transport itself and closes it here;
@@ -133,9 +135,14 @@ interface GrpcClientInterface
      *   same transport can be shared by several clients. Close it yourself
      *   when the application is done with it;
      * - a client assembled by hand (`new RawKvClient($pdClient, $grpc)`) is
-     *   given a transport it did not create and does not close it; pass
-     *   `ownsGrpcClient: true` to transfer ownership. `TxnKvClient` has the
-     *   same flag but still defaults to `true`.
+     *   given a transport it did not create. Whether this call closes it is
+     *   controlled by the `ownsGrpcClient` flag, whose default differs between
+     *   the two clients: `RawKvClient` defaults to `false`, so it does **not**
+     *   close the transport and the caller keeps owning it — pass
+     *   `ownsGrpcClient: true` to transfer ownership. `TxnKvClient` still
+     *   defaults to `true` for backward compatibility (#990 tracks
+     *   aligning it), so a hand-assembled `TxnKvClient` **does** close the
+     *   transport — pass `ownsGrpcClient: false` to keep it open.
      *
      * "Close" means this client's handles: ext-grpc keeps the underlying
      * channel in its process-global persistent table, so the TCP connection
@@ -150,16 +157,23 @@ interface GrpcClientInterface
     public function close(): void;
 
     /**
-     * Close a single channel by address.
+     * Close a single channel by address and force a new connection on the
+     * next use.
      *
-     * The cached handle for that address is dropped, so the next call gets a
-     * new `Grpc\Channel` object — but **not** a new connection: ext-grpc
-     * keeps the channel in its process-global persistent table, so the new
-     * handle resolves to the same underlying `grpc_channel` and the same TCP
-     * connection (verified against grpc 1.83.0). Forcing a real reconnect
-     * needs a new persistent entry and is a separate concern.
+     * The cached handle for that address is dropped, and the replacement
+     * channel is created with `'force_new' => true` **and**
+     * `'grpc.use_local_subchannel_pool' => 1`, so it is a new underlying
+     * `grpc_channel` on a new subchannel and a new TCP connection. Both are
+     * needed: `force_new` skips ext-grpc's process-global persistent table,
+     * while the local subchannel pool keeps gRPC core's global pool from
+     * handing the new channel the subchannel it already has for the same
+     * target and arguments — and with it the same TCP connection (verified
+     * against grpc 1.83.0 by counting accepted TCP connections). This is what
+     * the retry path needs after a transport error: the channel it closes is
+     * the one that just failed (issue #717).
      *
-     * No-op if the client has already been closed.
+     * No-op if the client has already been closed, or if no channel is
+     * cached for the address.
      *
      * @param string $address Channel address to close
      */
@@ -170,9 +184,10 @@ interface GrpcClientInterface
      *
      * The transport also sweeps by itself when a request arrives; a
      * long-running worker calls this from its own tick to reclaim channels
-     * while it is quiet. A channel with in-flight calls is skipped. Dropping a
-     * channel drops the cached handle, not necessarily the connection: see
-     * {@see closeChannel()}.
+     * while it is quiet. A channel with in-flight calls is skipped. Unlike
+     * {@see closeChannel()}, an idle eviction keeps using the persistent
+     * entry: the channel was not closed because it is believed broken, so a
+     * new call reuses the warm connection.
      *
      * No-op if the client has already been closed.
      */

@@ -12,6 +12,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [A transactional scan is a read: one timestamp for every returned key](#a-transactional-scan-is-a-read-one-timestamp-for-every-returned-key)
 - [A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep](#a-lock-resolution-deadline-fix-starts-from-the-current-lockresolver-not-from-470s-ttl-sleep)
 - [RetryExecutor unit tests that need zero-sleep retries: use DataIsNotReady or an explicit classifier](#retryexecutor-unit-tests-that-need-zero-sleep-retries-use-dataisnotready-or-an-explicit-classifier)
 - [Sizing a retry-budget regression test under equal jitter: do the min-cumulative-sleep math](#sizing-a-retry-budget-regression-test-under-equal-jitter-do-the-min-cumulative-sleep-math)
@@ -154,6 +155,24 @@ of the file.
 - [The batch deadline is finite by default, and checked only between waits (#275)](#the-batch-deadline-is-finite-by-default-and-checked-only-between-waits-275)
 - [Destructors log best-effort and skip rollback during shutdown (#287)](#destructors-log-best-effort-and-skip-rollback-during-shutdown-287)
 <!-- index:end -->
+
+## A transactional scan is a read: one timestamp for every returned key
+
+`Transaction::scan()` used to record only the **write-set** keys in
+`$readTsByKey`, so a pessimistic `scan()` followed by a `set()` of a scanned
+key minted a fresh TSO as `for_update_ts` and TiKV could not see a commit that
+happened between the scan and the write — the lost update #209 prevents for
+`get()`/`batchGet()` (issue #724). A scan reads every row at the transaction's
+snapshot (`startTs`), so one timestamp taken before the RPC covers the whole
+scan: `Transaction::scan()` assigns it to every returned key after the reader
+returns, and `TxnReader::finalizeScanResults()` records the same rows in the
+tracked read set (skipping a key the transaction also wrote, which returns the
+buffered value, not a snapshot read). The assignment uses `??=`, so an earlier
+`get()` timestamp wins — it is the more conservative one, because any commit
+after it becomes a conflict. Pinned by
+`TransactionTest::testEagerPessimisticWriteAfterScanReusesTheScansTimestamp`
+and `::testScanRecordsTheScannedKeysInTheTrackedReadSet`; both fail when the
+per-row `readTsByKey` assignment or the `setReadValue()` loop is dropped.
 
 ## A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep
 
@@ -1435,7 +1454,16 @@ channel for the target is maxed out bounded"). Measured: two handles
 on one target open a single TCP connection. `Channel::close()` is a
 reference-count decrement (`php_grpc_channel_unref()`), **not** a destroy —
 the channel survives until its last holder releases it, and the persistent
-table is one of those holders. Consequences worth remembering:
+table is one of those holders.
+
+Connection identity has a second layer: gRPC core gives each `ClientChannel`
+a subchannel from a local pool or from its process-global subchannel pool (the
+default, `grpc.use_local_subchannel_pool` false), and the global pool shares
+subchannels — and therefore TCP connections — among channels
+(`client_channel.cc`, `GetSubchannelPool()`). A different `grpc_channel` is
+therefore not automatically a different connection.
+
+Consequences worth remembering:
 
 - closing one `GrpcClient` cannot invalidate a channel another
   `GrpcClient` holds — the audit finding GRPC-24 assumed otherwise, and the
@@ -1445,10 +1473,16 @@ table is one of those holders. Consequences worth remembering:
 - a shared channel is always in the persistent table (a channel that is not
   persisted is never shared), so `close()` is safe even for a channel nobody
   else holds;
-- `GrpcClient::closeChannel()` does **not** force a reconnect: the persistent
-  entry survives and the next `getChannel()` reuses the same underlying
-  channel. The idle and the LRU eviction have the same effect — they drop
-  the cached handle, not the connection;
+- `GrpcClient::closeChannel()` forces a reconnect in both layers: it drops the
+  cached handle and builds the replacement with `'force_new' => true` (keeps
+  it out of ext-grpc's persistent table) and
+  `'grpc.use_local_subchannel_pool' => 1` (keeps its subchannel out of gRPC
+  core's global pool), so the next call gets a new underlying channel on a new
+  subchannel and a new TCP connection (issue #717; measured by counting TCP
+  accepts). The retry path is its caller — it closes the channel after an
+  `UNAVAILABLE` because that connection just failed. The idle and the LRU
+  eviction are different: they drop the cached handle but keep both pools, so
+  a later call reuses the warm connection;
 - `GrpcClient::close()` does **not** release the TCP connection either: the
   persistent entry keeps the channel alive until the process ends (or until
   the per-target bound drops the entry);
@@ -1839,9 +1873,13 @@ growing case list (issue #375). When documenting an enum or constant table,
 copy the cases and values straight from the source file (`baseMs()` /
 `capMs()` values) and link to the file as the source of truth, rather than
 paraphrasing. Related trap: `docs/configuration.md`'s custom-classifier
-example still returns a non-existent `BackoffType::Custom` case — doc
-examples that subclass and override must match the real class signatures
-(`classifyError()` lives on `ErrorClassifier`, not `RawKvClient`).
+example used to return a non-existent `BackoffType::Custom` case and to
+reference a `classifyError()` hook on `RawKvClient`; issue #719 replaced it
+with a working `options['retryClassifier']` example. Doc examples must match
+the real class signatures (`classifyError()` lives on `ErrorClassifier`, not
+`RawKvClient`), and a `create()` snippet must pass the options array through
+the named `options:` argument — the second positional parameter is the
+logger.
 
 ## PHPUnit mock `willReturnCallback` closures on PHP 8.5 must use explicit `use` — implicit capture yields null
 
@@ -2779,8 +2817,10 @@ phase then read the response against a destroyed channel. Rule (issue #278,
 GRPC-19): every cache entry counts the calls dispatched on its channel, and
 the LRU eviction, the idle eviction and `closeChannel()` skip busy channels.
 `closeChannel()` (which `RetryExecutor` calls to force a reconnect) removes the
-entry from the cache right away — the next call gets a fresh channel — but
-defers the actual `close()` until the last in-flight call settles.
+entry from the cache right away — the next call gets a fresh channel on a new
+connection, because the replacement is built with `'force_new' => true` and
+`'grpc.use_local_subchannel_pool' => 1` (both pools bypassed, issue #717) —
+but defers the actual `close()` until the last in-flight call settles.
 `maxChannels` is therefore a **soft** cap: when every cached channel is busy
 the cache grows past it, and the overshoot is logged at warning level.
 
