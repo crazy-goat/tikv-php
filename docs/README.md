@@ -73,8 +73,26 @@ $client->close();
 
 ## Installation
 
+The package is not published on Packagist yet, so Composer has to be told
+where to find it. Add the repository to the `repositories` section of your
+project's `composer.json`:
+
+```json
+{
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/crazy-goat/tikv-php"
+        }
+    ]
+}
+```
+
+Then require the package with the current release constraint (see
+[Which version to require](../README.md#which-version-to-require)):
+
 ```bash
-composer require crazy-goat/tikv-client
+composer require crazy-goat/tikv-client:~0.14.0
 ```
 
 `ext-grpc` is a hard requirement — Composer refuses to install the package on a

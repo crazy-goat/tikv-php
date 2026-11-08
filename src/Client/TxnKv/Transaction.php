@@ -211,6 +211,13 @@ final class Transaction
          * to the two-phase committer.
          */
         private readonly TraceEventInterface $tracer = new NoOpTracer(),
+        /**
+         * Client-level retry classifier (issue #719) applied to this
+         * transaction's RetryExecutor, or null for the built-in classification.
+         *
+         * @var (\Closure(TiKvException): RetryVerdict)|null
+         */
+        private readonly ?\Closure $retryClassifier = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -373,8 +380,9 @@ final class Transaction
      * (issue #261; see {@see getWriteSet()}).
      *
      * Empty unless the transaction was created with `trackReadSet: true`;
-     * only `get()`, `batchGet()` and `getForUpdate()` populate it — `scan()`
-     * does not.
+     * `get()`, `batchGet()`, `getForUpdate()` and `scan()`/`reverseScan()`
+     * populate it. A scanned key the transaction also wrote keeps the buffered
+     * value and is not recorded as a snapshot read (issue #724).
      *
      * @return array<array-key, ?string>
      */
@@ -525,6 +533,14 @@ final class Transaction
      * raw, non-snapshot read, so it does not observe the transaction's own
      * buffered writes.
      *
+     * Every returned row is a read of the transaction's snapshot, so with
+     * `trackReadSet` the scanned keys are recorded in {@see self::getReadSet()}
+     * like a `get()` (issue #724). A whole scan reads at one snapshot
+     * (`startTs`), so one timestamp taken before the RPC is recorded for every
+     * returned key, and a later `set()` of a scanned key reuses it as
+     * `for_update_ts` — the #209 lost-update protection covers a scan-and-write
+     * as well (issue #724).
+     *
      * @param int $limit Maximum rows to return; 0 = the whole range (capped
      *                   at {@see self::MAX_SCAN_LIMIT} rows, a larger range
      *                   throws instead of truncating). A negative value
@@ -562,7 +578,7 @@ final class Transaction
             }
         }
 
-        return $this->reader->scan(
+        $rows = $this->reader->scan(
             $startKey,
             $endKey,
             $limit,
@@ -572,6 +588,21 @@ final class Transaction
             $this->maxScanLimit,
             $reverse,
         );
+
+        if ($this->pessimistic) {
+            // One scan reads every row at the same snapshot, so the single
+            // timestamp taken before the RPC is the read timestamp of every
+            // returned key. Without this, a `set()` after a `scan()` minted a
+            // fresh `for_update_ts` and TiKV could not see a commit that
+            // happened between the scan and the write — the lost update #209
+            // prevents for `get()`/`batchGet()` (issue #724). Keep an earlier
+            // read's timestamp (`??=`): it is the more conservative one.
+            foreach ($rows as $row) {
+                $this->readTsByKey[$row['key']] ??= $timestamp;
+            }
+        }
+
+        return $rows;
     }
 
     /**
@@ -1185,6 +1216,7 @@ final class Transaction
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
+            classifier: $this->retryClassifier,
         );
 
         return $this->retryExecutor;
