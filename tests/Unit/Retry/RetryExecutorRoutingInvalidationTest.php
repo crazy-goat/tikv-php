@@ -13,7 +13,6 @@ use CrazyGoat\Proto\Errorpb\IsWitness;
 use CrazyGoat\Proto\Errorpb\KeyNotInRegion;
 use CrazyGoat\Proto\Errorpb\MaxTimestampNotSynced;
 use CrazyGoat\Proto\Errorpb\MismatchPeerId;
-use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Errorpb\ProposalInMergingMode;
 use CrazyGoat\Proto\Errorpb\ReadIndexNotReady;
 use CrazyGoat\Proto\Errorpb\RecoveryInProgress;
@@ -26,6 +25,7 @@ use CrazyGoat\Proto\Errorpb\UndeterminedResult;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\NotLeaderHint;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -264,8 +264,7 @@ class RetryExecutorRoutingInvalidationTest extends TestCase
 
     public function testNotLeaderWithoutHintInvalidatesTheRegion(): void
     {
-        $notLeader = new NotLeader();
-        $notLeader->setRegionId(self::REGION_ID);
+        $notLeader = new NotLeaderHint(regionId: self::REGION_ID);
         $error = new RegionException(
             operation: 'KvGet',
             message: 'not leader',

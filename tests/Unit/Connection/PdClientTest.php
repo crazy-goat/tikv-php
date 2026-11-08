@@ -68,9 +68,12 @@ class PdClientTest extends TestCase
         $response->setLeader($leader);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())
-            ->method('call')
-            ->willReturn($response);
+        $grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getRegion('my-key');
@@ -118,7 +121,12 @@ class PdClientTest extends TestCase
         $response->setHeader($header);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetPrevRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
 
@@ -219,7 +227,12 @@ class PdClientTest extends TestCase
         $response->setStore($store);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('call')->willReturn($response);
+        $grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetStore' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', new NullLogger());
         for ($i = 0; $i < 100; $i++) {
@@ -241,7 +254,12 @@ class PdClientTest extends TestCase
         $response->setStore($store);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->exactly(2))->method('call')->willReturn($response);
+        $grpc->expects($this->exactly(2))->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetStore' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $client->getStore(1);
@@ -292,9 +310,12 @@ class PdClientTest extends TestCase
         $response = $this->makeGetRegionResponse();
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())
-            ->method('call')
-            ->willReturn($response);
+        $grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd1:2379', $logger);
         $client->getRegion('key');
@@ -310,9 +331,12 @@ class PdClientTest extends TestCase
         $response = $this->makeGetRegionResponse();
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())
-            ->method('call')
-            ->willReturn($response);
+        $grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', $logger);
         $client->getRegion('key');
@@ -382,7 +406,12 @@ class PdClientTest extends TestCase
         $response->setLeader($leader);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getRegion('key');
@@ -402,7 +431,12 @@ class PdClientTest extends TestCase
         $response = $this->makeGetRegionResponse();
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getRegion('key');
@@ -426,7 +460,12 @@ class PdClientTest extends TestCase
         $response->setHeader($header);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
 
@@ -455,7 +494,12 @@ class PdClientTest extends TestCase
         // No leader set.
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getRegion('key');
@@ -532,7 +576,12 @@ class PdClientTest extends TestCase
         $response->setHeader($header);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'ScanRegions' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->scanRegions('', '');
@@ -565,7 +614,12 @@ class PdClientTest extends TestCase
         $response->setLeaders([$leader]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'ScanRegions' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->scanRegions('a', 'b');
@@ -617,7 +671,12 @@ class PdClientTest extends TestCase
         $response->setLeaders([$leader1, $leader2]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'ScanRegions' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->scanRegions('', '');
@@ -662,7 +721,12 @@ class PdClientTest extends TestCase
         $response->setLeaders([$leader]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'ScanRegions' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->scanRegions('', '');
@@ -695,7 +759,12 @@ class PdClientTest extends TestCase
         $response->setLeaders([]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'ScanRegions' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->scanRegions('', '');
@@ -745,7 +814,12 @@ class PdClientTest extends TestCase
         $response->setLeaders([$leader1]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'ScanRegions' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->scanRegions('', '');
@@ -846,7 +920,12 @@ class PdClientTest extends TestCase
         $response->setLeader($this->makePeer(1, 1));
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
         $result = $client->getRegion('my-key');
@@ -868,7 +947,12 @@ class PdClientTest extends TestCase
         $response->setLeader($this->makePeer(1, 1));
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
         $result = $client->getRegion('my-key');
@@ -944,7 +1028,12 @@ class PdClientTest extends TestCase
         $response->setLeaders([$this->makePeer(1, 1)]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'ScanRegions' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
         $result = $client->scanRegions('', '');
@@ -985,7 +1074,12 @@ class PdClientTest extends TestCase
         ]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'ScanRegions' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', codec: new CodecV1(Mode::Txn));
         $result = $client->scanRegions('', '');
@@ -1070,7 +1164,12 @@ class PdClientTest extends TestCase
         $response->setStore($store);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetStore' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', new NullLogger(), $cache);
         $result = $client->getStore(1);
@@ -1092,7 +1191,12 @@ class PdClientTest extends TestCase
         $response->setStore($store);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetStore' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getStore(1);
@@ -1109,7 +1213,12 @@ class PdClientTest extends TestCase
         $response->setHeader($header);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetStore' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getStore(99);
@@ -1130,7 +1239,12 @@ class PdClientTest extends TestCase
         $response->setHeader($header);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetStore' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', new NullLogger(), $cache);
         $result = $client->getStore(1);
@@ -1191,7 +1305,12 @@ class PdClientTest extends TestCase
         $response->setHeader($this->makeResponseHeader());
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetAllStores' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
 
@@ -1212,7 +1331,12 @@ class PdClientTest extends TestCase
         $response->setStores([$this->makeStore(1, 'tikv1:20160'), $tombstone]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetAllStores' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getAllStores();
@@ -1234,7 +1358,12 @@ class PdClientTest extends TestCase
         $response->setStores([$this->makeStore(1, 'tikv1:20160'), $offline]);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetAllStores' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getAllStores();
@@ -1261,7 +1390,12 @@ class PdClientTest extends TestCase
         $response->setHeader($header);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetAllStores' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
 
@@ -1361,7 +1495,12 @@ class PdClientTest extends TestCase
         $response = $this->makeGetRegionResponse();
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('call')->willReturn($response);
+        $grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
         $result = $client->getRegion('key');
@@ -1375,7 +1514,12 @@ class PdClientTest extends TestCase
         $response = $this->makeGetRegionResponse();
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('call')->willReturn($response);
+        $grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 999);
 
@@ -1422,7 +1566,12 @@ class PdClientTest extends TestCase
         $response->setLeader($this->makePeer(1, 1));
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('call')->willReturn($response);
+        $grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379', expectedClusterId: 12345);
 
@@ -1593,9 +1742,12 @@ class PdClientTest extends TestCase
         $response = $this->makeGetRegionResponse();
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->exactly(2))
-            ->method('call')
-            ->willReturn($response);
+        $grpc->expects($this->exactly(2))->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $client->getRegion('key1');
@@ -1613,7 +1765,12 @@ class PdClientTest extends TestCase
         $response->setHeader($header);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->expects($this->once())->method('call')->willReturn($response);
+        $grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $client->getRegion('key');
@@ -1695,7 +1852,12 @@ class PdClientTest extends TestCase
         $response->setLeader($leader);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($response);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $client->getRegion('key');
@@ -1816,7 +1978,12 @@ class PdClientTest extends TestCase
         $tsoResponse->setTimestamp($ts);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($tsoResponse);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'Tso' => $tsoResponse,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $result = $client->getTimestamp();
@@ -1855,7 +2022,13 @@ class PdClientTest extends TestCase
         $tsoResponse->setTimestamp($ts);
 
         $grpc = $this->createMock(GrpcClientInterface::class);
-        $grpc->method('call')->willReturn($getRegionResponse, $tsoResponse);
+        $grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'GetRegion' => $getRegionResponse,
+                'Tso' => $tsoResponse,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $client = new PdClient($grpc, 'pd:2379');
         $client->getRegion('key');

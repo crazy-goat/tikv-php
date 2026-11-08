@@ -30,6 +30,7 @@
             <exclude>tests/Unit/Batch/CheckedGrpcFutureTest.php</exclude>
             <exclude>tests/Unit/RawKv/SstIngestorTest.php</exclude>
             <exclude>tests/Unit/RawKv/RawKvBatchBatchCommandsGrpcTest.php</exclude>
+            <exclude>tests/Unit/E2E/ClusterProbeTest.php</exclude>
         </testsuite>
         <testsuite name="Grpc">
             <!-- The gRPC-dependent classes live here (they mock \Grpc\Call and
@@ -60,6 +61,9 @@
             <file>tests/Unit/Batch/CheckedGrpcFutureTest.php</file>
             <file>tests/Unit/RawKv/RawKvBatchBatchCommandsGrpcTest.php</file>
             <file>tests/Unit/RawKv/SstIngestorTest.php</file>
+            <!-- ClusterProbe builds a real gRPC channel, so its fail-fast
+                 test needs ext-grpc (issue #730). -->
+            <file>tests/Unit/E2E/ClusterProbeTest.php</file>
         </testsuite>
         <testsuite name="Integration">
             <directory>tests/Integration</directory>
