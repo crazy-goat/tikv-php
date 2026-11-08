@@ -309,12 +309,17 @@ final readonly class TwoPhaseCommitter
      */
     private function buildContext(RegionInfo $region): Context
     {
-        return RegionContextFactory::fromRegionInfo(
+        $context = RegionContextFactory::fromRegionInfo(
             $region,
             priority: $this->priority,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
+        // Locks resolved before this request (for example during a prewrite
+        // conflict retry) are safe for TiKV to ignore (issue #432, GAP-18).
+        $this->lockResolver->applyResolvedLocks($context);
+
+        return $context;
     }
 
     private function nowMs(): int

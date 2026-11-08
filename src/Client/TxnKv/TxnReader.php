@@ -143,6 +143,7 @@ final readonly class TxnReader
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
+                $this->lockResolver->applyResolvedLocks($target->context);
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
                 $request = new GetRequest();
@@ -734,6 +735,7 @@ final readonly class TxnReader
             storeAvailable: $this->regionResolver->isStoreAvailable(...),
         );
         $targetStoreId = $target->storeId;
+        $this->lockResolver->applyResolvedLocks($target->context);
         $address = $this->regionResolver->resolveStoreAddress($target->storeId);
 
         $request = new BatchGetRequest();
@@ -935,6 +937,7 @@ final readonly class TxnReader
                 );
                 $excludedStore = null;
                 $targetStoreId = $target->storeId;
+                $this->lockResolver->applyResolvedLocks($target->context);
                 $address = $this->regionResolver->resolveStoreAddress($target->storeId);
                 $freshEndKey = $fresh->endKey;
 

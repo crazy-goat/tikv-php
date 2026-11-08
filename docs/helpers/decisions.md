@@ -1825,3 +1825,27 @@ release; the reusable `changes` workflow classifies files with `git diff` and ne
 scope). `tests/Unit/Ci/WorkflowSupplyChainGuardTest.php` fails the Unit suite on an unpinned
 reference, a missing version comment, a missing top-level read-only block, or a Dependabot
 configuration without the `github-actions` ecosystem.
+
+## Resolved-lock tracking lives on the per-transaction LockResolver (issue #432, GAP-18)
+
+`ResolvedLockTracker` is owned by `LockResolver`, not by `TransactionState` as
+the issue's implementation sketch suggested. `TxnKvClient::begin()` creates one
+`LockResolver` per transaction, so the tracker already has exactly the
+transaction's lifetime, and both collaborators that need it (`TxnReader` and
+`TwoPhaseCommitter`) already hold that resolver. Putting it on
+`TransactionState` would require threading the same object through their
+constructors and through the `begin()` wiring while adding no behaviour.
+
+Do not make the tracker client-wide: `Context.resolved_locks` describes what
+*this* snapshot has resolved, and leaking one transaction's resolutions into
+another would tell TiKV to ignore locks the second transaction has not
+resolved. Both sets are bounded FIFO (2048 entries, oldest evicted first);
+client-go's `TSSet` is unbounded, which is unsuitable for a long-lived PHP
+transaction under sustained contention.
+
+The two sets are disjoint, classified in `LockResolver` against its
+`callerStartTs`: a rolled-back transaction, or one committed after that
+timestamp, goes into `resolved_locks`; a transaction committed at or before it
+goes into `committed_locks`. Do not put a timestamp in both. TiKV checks the
+bypass set first, so a duplicate would be ignored instead of read through and
+could return the value from before the commit — a stale read.

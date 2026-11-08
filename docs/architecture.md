@@ -602,6 +602,22 @@ undetermined status is never cached. `resolveLocks()` takes several locks,
 checks each transaction once, and sends one `ResolveLock` per region and
 transaction with all keys of that transaction in the region.
 
+A resolution is also remembered per transaction (`ResolvedLockTracker`, issue
+#432, GAP-18). The tracker keeps two bounded, **disjoint** FIFO sets of lock
+start timestamps, classified against the snapshot's start ts: a rolled-back
+transaction, or one whose commit ts is greater than the snapshot start ts,
+goes into `resolved_locks` (TiKV can ignore it); a transaction committed at or
+before the snapshot start ts goes into `committed_locks` (TiKV must read
+through it). The sets are disjoint because TiKV checks the bypass set first,
+so a timestamp present in both would be ignored and could hide a commit the
+snapshot must see. `TxnReader` and `TwoPhaseCommitter` copy the sets onto later
+requests as `Context.resolved_locks` and `Context.committed_locks`, so TiKV
+can ignore a lock the client has already resolved instead of making it run the
+full `CheckTxnStatus`/`ResolveLock` cycle again after a retry or a region cache
+invalidation. The resolver instance is created per transaction in
+`TxnKvClient::begin()`, so the tracker has the same lifetime as the snapshot;
+both sets are capped at 2048 entries and evict the oldest timestamp first.
+
 An errored status check is not a status. A region error, a gRPC failure or a
 `KeyError` in the `CheckTxnStatus` response is propagated as a retryable
 failure (`TxnRetryableException` with `BackoffType::TxnLock` for a `KeyError`)

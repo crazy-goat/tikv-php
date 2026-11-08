@@ -209,7 +209,8 @@ of the contract.
   `RawKv\RawKvAtomic`, `RawKv\RawKvBatch`, `RawKv\RawKvScanner`,
   `RawKv\RawKvRangeOps`, `RawKv\SstIngestor`, `TxnKv\TxnReader`,
   `TxnKv\TwoPhaseCommitter`, `TxnKv\LockResolver`, `TxnKv\TransactionState`,
-  `TxnKv\RollbackRegroupSignal`, `TxnKv\ResolvedTxnStatusCache`;
+  `TxnKv\RollbackRegroupSignal`, `TxnKv\ResolvedTxnStatusCache`,
+  `TxnKv\ResolvedLockTracker`;
 - `Retry\` — except `Retry\RetryBudgetExhaustedException` and
   `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
   `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget`,
@@ -1038,7 +1039,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 - ✅ **Pessimistic & Optimistic** — pessimistic locks by default; the primary lock of a pessimistic transaction is kept alive automatically, and `heartbeat()` remains for a transaction that waits without touching TiKV
 - ✅ **Transaction size limits and request batching** — `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` bound the write set and throw `TransactionTooLargeException` before any RPC; `trackReadSet` (default `false`) opts in to the read set, and `maxReadSetEntries` / `maxReadSetTotalSize` bound it; `getWriteSetSize()` / `getWriteSetCount()` and `getReadSetSize()` / `getReadSetCount()` expose their sizes; `maxTxnBatchSize` / `maxTxnBatchCount` split prewrite and commit requests per region
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` is sent automatically when less than half of the lock TTL remains; `optimisticLockTtlMs` / `pessimisticLockTtlMs` set the lock TTLs
-- ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` of final transaction outcomes
+- ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` of final transaction outcomes, and a per-transaction `ResolvedLockTracker` that classifies each resolution against the snapshot start ts and sends the disjoint `Context.resolved_locks` / `Context.committed_locks` sets
 - ✅ **Conflict retry** — typed `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`
 - ✅ **GC safe points** — `holdGcSafePoint()` / `releaseGcSafePoint()` for reads that outlive `gc_life_time`
 - ✅ **Replica reads** — `options['replicaRead']` picks the replica that serves a read — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` — on both clients
@@ -1323,7 +1324,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Per-key TTL in BatchPut**
 - ✅ **Scan limit enforcement** — MAX 10240 rows per RPC; `limit: 0` returns the whole range or throws `ScanLimitExceededException` past `options['maxScanRows']`; a negative limit throws `InvalidArgumentException` before any RPC
 - ✅ **Batch auto-splitting by size/count**
-- ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache`
+- ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` and a bounded per-transaction `ResolvedLockTracker` that feeds the disjoint `Context.resolved_locks` / `Context.committed_locks` sets
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` when less than half of the lock TTL remains, with `optimisticLockTtlMs` / `pessimisticLockTtlMs`
 - ✅ **Transaction size limits and request batching** — write-set limits with `TransactionTooLargeException`, `getWriteSetSize()` / `getWriteSetCount()`, and prewrite/commit splitting by `maxTxnBatchSize` / `maxTxnBatchCount`
 - ✅ **Read-set limits and streaming SST ingest** — opt-in `trackReadSet` with `maxReadSetEntries` / `maxReadSetTotalSize`, `maxIngestSize`, and a generator-based `RawWrite` stream that no longer triple-buffers the payload
