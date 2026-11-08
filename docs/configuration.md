@@ -12,13 +12,18 @@ Complete guide to configuring the TiKV PHP Client for development and production
 6. [Replica Reads](#replica-reads)
 7. [Batch Commands Multiplexing (Experimental)](#batch-commands-multiplexing-experimental)
 8. [Fast Commit Modes (TxnKV)](#fast-commit-modes-txnkv)
-9. [Transaction Priority (TxnKV)](#transaction-priority-txnkv)
-10. [Resource Control (Resource Groups)](#resource-control-resource-groups)
-11. [Request Context Controls (issue #426, GAP-12)](#request-context-controls-issue-426-gap-12)
-12. [Retry and Backoff](#retry-and-backoff)
-13. [Caching](#caching)
-14. [Timeouts](#timeouts)
-15. [Production Configuration](#production-configuration)
+9. [Lock TTLs and the Primary Lock Keepalive (TxnKV)](#lock-ttls-and-the-primary-lock-keepalive-txnkv)
+10. [Pessimistic Lock Wait Timeout (TxnKV)](#pessimistic-lock-wait-timeout-txnkv)
+11. [Transaction Size Limits and Request Batching (TxnKV)](#transaction-size-limits-and-request-batching-txnkv)
+12. [Transaction Priority (TxnKV)](#transaction-priority-txnkv)
+13. [Resource Control (Resource Groups)](#resource-control-resource-groups)
+14. [Request Context Controls (issue #426, GAP-12)](#request-context-controls-issue-426-gap-12)
+15. [Retry and Backoff](#retry-and-backoff)
+16. [Caching](#caching)
+17. [Timeouts](#timeouts)
+18. [Production Configuration](#production-configuration)
+19. [Configuration Checklist](#configuration-checklist)
+20. [See Also](#see-also)
 
 ## Basic Configuration
 
@@ -33,6 +38,11 @@ $client = RawKvClient::create(['127.0.0.1:2379']);
 ```
 
 ### Full Configuration Options
+
+> **Monolog is optional.** This snippet uses Monolog for illustration, but it
+> is a **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ```php
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
@@ -1083,6 +1093,11 @@ Recognised `options['tls']` keys:
 
 ## Logging
 
+> **Monolog is optional.** The snippets in this section use Monolog for
+> illustration, but it is a **dev-only** dependency of this library. Install it
+> with `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
+
 ### PSR-3 Logger Integration
 
 The client supports any PSR-3 compatible logger:
@@ -1681,7 +1696,7 @@ Guidance:
   `writeTimeoutMs`. `pessimisticLockTtlMs` defaults to `30000`, which already
   covers the default write timeout.
 - **Make each request small.** `maxTxnBatchSize` and `maxTxnBatchCount` split
-  a region's prewrite into smaller requests (see
+  a region's prewrite, pessimistic-lock, commit and rollback requests (see
   [Transaction Size Limits and Request Batching](#transaction-size-limits-and-request-batching-txnkv)).
   A smaller request finishes sooner and is less likely to outlive the TTL.
   Batching does **not** create extra heartbeat points: the secondary batches
@@ -1763,7 +1778,7 @@ $txn = $client->begin([
     'trackReadSet'     => true,    // opt in to the read set (default false)
     'maxReadSetEntries' => 100000, // read-set entries, 0 = unlimited
     'maxReadSetTotalSize' => 8388608, // whole read set, 0 = unlimited
-    'maxTxnBatchSize'  => 16384,   // bytes per prewrite/commit request
+    'maxTxnBatchSize'  => 16384,   // bytes per prewrite/lock/commit/rollback request
     'maxTxnBatchCount' => 512,     // mutations/keys per request
 ]);
 ```
@@ -1776,8 +1791,8 @@ $txn = $client->begin([
 | `trackReadSet` | `false` | Opt in to the read set populated by `get()`/`batchGet()`/`getForUpdate()` and by `scan()`/`reverseScan()`. Disabled by default because nothing in the commit path consumes it. Must be a bool. |
 | `maxReadSetEntries` | `0` (unlimited) | Maximum number of tracked read-set entries. Has no effect unless `trackReadSet` is true. |
 | `maxReadSetTotalSize` | `0` (unlimited) | Maximum bytes of the whole tracked read set: key length plus value length per entry. A not-found read contributes the key length only. Has no effect unless `trackReadSet` is true. |
-| `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite, pessimistic-lock or commit request per region: key plus value length for a prewrite mutation, key length for a pessimistic-lock mutation or a commit key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
-| `maxTxnBatchCount` | `512` | Maximum payload items — mutations (prewrite or pessimistic lock) or keys (commit) — of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
+| `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite, pessimistic-lock, commit or rollback request per region: key plus value length for a prewrite mutation, key length for a pessimistic-lock mutation, a commit key, or a `KvBatchRollback` / `KVPessimisticRollback` key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
+| `maxTxnBatchCount` | `512` | Maximum payload items — mutations (prewrite or pessimistic lock) or keys (commit, `KvBatchRollback` or `KVPessimisticRollback`) — of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
 
 The size limits are **opt-in** (`0` = unlimited) because there is no single
 correct value for every application; set them for untrusted or unbounded
@@ -1819,11 +1834,11 @@ long-lived worker that opts in and performs many large reads, set
 transaction to grow until `memory_limit` is exhausted.
 
 Batching is always on. `TwoPhaseCommitter` splits each region's prewrite
-mutations, pessimistic-lock keys and commit keys with
+mutations, pessimistic-lock keys, commit keys and rollback keys with
 `RawKvSplitter::splitIntoBatches()` into requests bounded by both
 `maxTxnBatchSize` and `maxTxnBatchCount` **in payload terms**: key plus value
-bytes for a prewrite mutation, key bytes for a pessimistic-lock mutation or a
-commit key, and item count. The bound does not cover request framing,
+bytes for a prewrite mutation, key bytes for a pessimistic-lock mutation, a
+commit key or a rollback key, and item count. The bound does not cover request framing,
 `Context`, `primary_lock` or the async `secondaries` list, so an async primary
 prewrite can exceed `maxTxnBatchSize`; a single mutation larger than the budget
 still forms its own batch. The primary key's batch is still committed first;
@@ -1831,6 +1846,11 @@ the remaining batches — including other batches of the primary's region — ar
 secondary commits and are fanned out in parallel. Pessimistic-lock requests
 use the same split, and `is_first_lock` is set only on the batch whose
 mutations contain the primary key, not on the first region batch (issue #225).
+Both rollback RPCs use the same split (issue #791): `KvBatchRollback` and
+`KVPessimisticRollback` carry only keys, so each batch is bounded by the key
+bytes and the item count, and the rollback of a transaction that the limits
+allow cannot fail with `RaftEntryTooLarge` because a single request gathered
+a whole region's key list.
 One-phase commit remains limited to a single batch (a transaction split across
 several 1PC prewrites would be partially committed), and async commit carries
 its decision on the batch that holds the primary key. A batch that fails before
@@ -2592,6 +2612,11 @@ Batch methods already send their sub-batches in parallel (default concurrency 16
 ## Production Configuration
 
 ### Recommended Production Setup
+
+> **Monolog is optional.** This snippet uses Monolog for illustration, but it
+> is a **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ```php
 use CrazyGoat\TiKV\Client\RawKv\RawKvClient;

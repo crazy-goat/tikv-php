@@ -95,9 +95,8 @@ class RegionErrorHandlerTest extends TestCase
             $this->fail('Expected RegionException');
         } catch (RegionException $e) {
             $this->assertNotNull($e->notLeader);
-            $this->assertNotNull($e->notLeader->getLeader());
-            $this->assertSame(3, (int) $e->notLeader->getLeader()->getStoreId());
-            $this->assertSame(42, (int) $e->notLeader->getRegionId());
+            $this->assertSame(3, $e->notLeader->leaderStoreId);
+            $this->assertSame(42, $e->notLeader->regionId);
         }
     }
 
@@ -118,7 +117,7 @@ class RegionErrorHandlerTest extends TestCase
             $this->fail('Expected RegionException');
         } catch (RegionException $e) {
             $this->assertNotNull($e->notLeader);
-            $this->assertNull($e->notLeader->getLeader());
+            $this->assertNull($e->notLeader->leaderStoreId);
         }
     }
 
