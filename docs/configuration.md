@@ -2119,13 +2119,19 @@ two bounds binds first; the `ServerIsBusy` error is always available through
 
 ### Custom Retry (Advanced)
 
-`RawKvClient` is `final` and its retry loop cannot be customised by
-subclassing — there is no `classifyError()` hook on the client and no
-`BackoffType::Custom` case. The supported extension point is the optional
-`$classifier` callable accepted by `RetryExecutor::execute()`
-(`src/Client/Retry/RetryExecutor.php`): it receives the caught
-`TiKvException` and returns a `RetryVerdict`
-(`src/Client/Retry/RetryVerdict.php`):
+`RawKvClient` and `TxnKvClient` are `final` and their retry loop cannot be
+customised by subclassing — there is no `classifyError()` hook on the client
+and no `BackoffType::Custom` case. Instead, both clients accept a custom
+error classifier (issue #719):
+
+| Entry point | Seam |
+|---|---|
+| `RawKvClient::create()` / `TxnKvClient::create()` | `options['retryClassifier']` |
+| `RawKvClient` / `TxnKvClient` constructor | `retryClassifier: $callable` |
+| `RetryExecutor` | constructor `classifier:`, or per-call `classifier:` |
+
+The callable receives the caught `TiKvException` and returns a
+`RetryVerdict` (`src/Client/Retry/RetryVerdict.php`):
 
 - `RetryVerdict::retry($backoffType)` retries with that `BackoffType` (see
   `src/Client/Retry/BackoffType.php` for the full case list);
@@ -2139,53 +2145,68 @@ The backoff taxonomy mirrors client-go's set: besides the region-error curves,
 `TxnNotFound` and `CommitTSLag` (2–500 ms each), the equivalents of client-go's
 `BoPDRPC`, `BoTxnLockFast`, `BoTxnNotFound` and `BoCommitTSLag`.
 
-Note that a `NotLeader` error is classified before your classifier is
-consulted.
-
-To use it you must construct the `RetryExecutor` yourself and invoke your
-operation through it, rather than going through `RawKvClient`'s methods:
-
 ```php
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Retry\BackoffType;
-use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 
-$executor = new RetryExecutor(
-    maxBackoffMs: 20000,
-    serverBusyBudgetMs: 60000,
-    regionCache: $regionCache,
-    grpc: $grpc,
-    regionResolver: $regionResolver,
-    logger: $logger,
-);
-
-$result = $executor->execute(
-    $key,
-    function () use ($key): string {
-        // your RawKV RPC call
-        return $value;
-    },
-    classifier: function (TiKvException $e): RetryVerdict {
+$client = RawKvClient::create(['127.0.0.1:2379'], [
+    'retryClassifier' => static function (TiKvException $e): RetryVerdict {
         if (str_contains($e->getMessage(), 'CustomError')) {
             return RetryVerdict::retry(BackoffType::StaleCmd); // pick a real BackoffType case
         }
         return RetryVerdict::pass(); // fall through to the built-in ErrorClassifier
     },
-);
+]);
 ```
 
-For a user-level fan-out that must share one budget, call
-`$executor = $executor->beginOperation()` once and pass the returned
-executor to every `execute()` call of that logical operation; call
-`beginOperation()` again for the next operation. A standalone executor keeps
-the per-call reset described above.
+`TxnKvClient::create()` accepts the same option; the classifier is handed to
+every transaction `begin()` returns, so reads, writes, commit, rollback and
+lock resolution share it:
 
-Note that `maxAttempts` (default 30) and `deadlineMs` (default 30000,
-`0` disables) are constructor parameters of `RetryExecutor` and are **not**
-settable through `RawKvClient::create()` options — `create()` only exposes
-`retryDeadlineMs` (see the [Automatic Retry](#automatic-retry) section
-above); `maxBackoffMs` and `serverBusyBudgetMs` are likewise constructor
-arguments of `RawKvClient`, not `create()` options.
+```php
+$client = TxnKvClient::create(['127.0.0.1:2379'], [
+    'retryClassifier' => static fn (TiKvException $e): RetryVerdict => /* … */,
+]);
+$txn = $client->begin();
+```
+
+The classifier applies to every retry loop the client builds: point
+operations, batch fan-outs, scans, range operations and SST ingest on RawKV,
+and every transaction on TxnKV. A client assembled by hand accepts the same
+callable as the `retryClassifier` constructor argument.
+
+Resolution order:
+
+1. the library's own per-call classifier (for example a transaction's
+   `TxnRetryableException` handling);
+2. your `retryClassifier`;
+3. the built-in `ErrorClassifier`.
+
+A `NotLeader` error is classified before any classifier is consulted, and
+`RetryVerdict::pass()` from your classifier preserves the built-in decision.
+`RetryVerdict::fatal()` runs the executor's full fatal path, so a custom
+classifier cannot skip the region invalidation or the broken-channel cleanup.
+
+If you drive a `RetryExecutor` yourself (a fan-out outside the client, as in
+earlier versions of this section), pass `classifier:` to the constructor for
+the same client-level default, or `classifier:` to one `execute()` call to
+override it for that operation. Per-call classifiers win over the
+constructor-level one, so a library-owned per-call classifier cannot be
+shadowed. For a user-level fan-out that must share one budget, call
+`$executor = $executor->beginOperation()` once and pass the returned executor
+to every `execute()` call of that logical operation; call `beginOperation()`
+again for the next operation. A standalone executor keeps the per-call reset
+described above.
+
+The retry budget stays configurable independently of the classifier:
+`retryDeadlineMs` is a `create()` option (see [Automatic
+Retry](#automatic-retry)), while `maxBackoffMs` and `serverBusyBudgetMs` are
+constructor arguments of the clients, and `maxAttempts` (default 30) and
+`deadlineMs` (default 30000, `0` disables) are constructor parameters of
+`RetryExecutor`. None of them is settable through `create()` except
+`retryDeadlineMs`.
 
 ## Caching
 

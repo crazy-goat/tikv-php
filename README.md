@@ -471,7 +471,9 @@ second `commit()` throws `InvalidStateException`. Start a new one instead.
 `TxnKvClient::create()` accepts the same `tls`, `timeout` and `metrics`
 options as `RawKvClient`, plus `retryDeadlineMs` (the wall-clock bound on one
 transaction's internal retry loop, default
-`Transaction::DEFAULT_RETRY_DEADLINE_MS`), `gcSafePointValidation`,
+`Transaction::DEFAULT_RETRY_DEADLINE_MS`), `retryClassifier` (a callable
+`TiKvException -> RetryVerdict` handed to every transaction's retry loop),
+`gcSafePointValidation`,
 `replicaRead`, `tsoPoolSize` and `lockWaitTimeMs` (the client-wide default
 for the pessimistic-lock wait). The per-transaction options (`pessimistic`,
 `priority`, `enable1Pc`, `enableAsyncCommit`, `eagerPessimisticLocks`,
@@ -1079,6 +1081,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `metrics` | A `MetricsInterface` backend for the RPC, retry and region-cache counters |
 | `tracer` | A `TraceEventInterface` callback for structured trace events (gRPC calls, 2PC phases, lock resolution) |
 | `retryDeadlineMs` | Wall-clock bound on one retry loop |
+| `retryClassifier` | A callable `TiKvException -> RetryVerdict` consulted before the built-in classifier on every retry loop ([Custom Retry](docs/configuration.md#custom-retry-advanced)) |
 | `maxConcurrency` | Maximum number of in-flight requests in the batch and range fan-outs |
 | `maxScanRows` | Row cap for an unbounded (`limit: 0`) scan; exceeding it throws `ScanLimitExceededException` |
 | `replicaRead` | A `ReplicaReadPolicy` object — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` ([Replica Reads](docs/configuration.md#replica-reads)) |
@@ -1130,7 +1133,7 @@ Two settings are methods on the client rather than options:
 - ✅ **Region Cache** — In-memory caching of region metadata; a custom `RegionCacheInterface` can be injected through the constructor. RawKV forward scans/iterators and TxnKV `Transaction::scan()` read the cache first and query PD only for the uncovered ranges, reporting `regionCacheHit()` / `regionCacheMiss()` under the `scan` / `txn_scan` labels; RawKV `reverseScan()` and TxnKV `Transaction::reverseScan()` resolve regions top-down through the region resolver and report `region_resolution`
 - ✅ **Region cache refresh and preload** — opt-in, PHP-process-model friendly (no timers): call `refreshRegionCache()` from a worker tick (throttled by `options['regionCacheRefreshMs']`, default `0` = disabled) and `preloadRegions([['start', 'end'], ...])` at boot to warm the keys the worker will touch without serving a read. Both keep the old entry and only log when PD fails, and are no-ops after `close()` ([Region Cache Refresh and Preload](docs/configuration.md#region-cache-refresh-and-preload))
 - ✅ **Store Cache** — In-memory caching of store addresses
-- ✅ **Retry Logic** — Automatic retry with exponential backoff; the wall-clock bound of one retry loop is `options['retryDeadlineMs']` (see [Retry System](docs/architecture.md#8-retry-system))
+- ✅ **Retry Logic** — Automatic retry with exponential backoff; the wall-clock bound of one retry loop is `options['retryDeadlineMs']` and `options['retryClassifier']` replaces the built-in error classification per client (see [Retry System](docs/architecture.md#8-retry-system) and [Custom Retry](docs/configuration.md#custom-retry-advanced))
 - ✅ **NotLeader Handling** — Automatic leader redirection
 - ✅ **Batch Async Execution** — Parallel execution across regions
 - ✅ **TLS/SSL Support** — Server and mutual TLS authentication

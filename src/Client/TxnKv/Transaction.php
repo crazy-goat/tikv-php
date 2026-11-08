@@ -211,6 +211,13 @@ final class Transaction
          * to the two-phase committer.
          */
         private readonly TraceEventInterface $tracer = new NoOpTracer(),
+        /**
+         * Client-level retry classifier (issue #719) applied to this
+         * transaction's RetryExecutor, or null for the built-in classification.
+         *
+         * @var (\Closure(TiKvException): RetryVerdict)|null
+         */
+        private readonly ?\Closure $retryClassifier = null,
     ) {
         if ($retryDeadlineMs < 0) {
             throw new InvalidArgumentException('retryDeadlineMs must be >= 0');
@@ -1185,6 +1192,7 @@ final class Transaction
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
+            classifier: $this->retryClassifier,
         );
 
         return $this->retryExecutor;

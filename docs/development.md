@@ -133,6 +133,15 @@ classifier can distinguish "no opinion" (`RetryVerdict::pass()`) from an
 explicit fatal verdict (`RetryVerdict::fatal()`); the mapping helpers above
 keep returning `?BackoffType` (issue #534).
 
+`RetryExecutor` also carries an optional constructor-level classifier (issue
+#719). `execute()` consults its per-call classifier first, then the
+executor-level one, then `ErrorClassifier::classify()`; `beginOperation()`
+copies the classifier to the derived executor. The clients expose this as
+`options['retryClassifier']`, so a new entry point that builds an executor
+must forward the classifier to it — including `RawKvScanner`,
+`RawKvRangeOps` and `SstIngestor`, which own their executors instead of
+sharing the client's.
+
 ## Adding New Features
 
 ### Step-by-Step Guide
