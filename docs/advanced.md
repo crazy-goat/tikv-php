@@ -471,19 +471,26 @@ function parallelScan(
     int $limitPerRange = 10000,
     int $workers = 4
 ): array {
-    // Divide key space into ranges
-    $ranges = [];
     $chars = '0123456789abcdef';
-    $step = strlen($chars) / $workers;
-    
+    $buckets = strlen($chars);
+
+    // Clamp instead of dividing by zero or creating empty ranges.
+    $workers = max(1, min($workers, $buckets));
+
+    // Divide the hex keyspace into $workers contiguous, half-open ranges
+    // [start, end): worker $i owns the bucket indices
+    // [intdiv($i * $buckets, $workers), intdiv(($i + 1) * $buckets, $workers)).
+    // Integer arithmetic only, so a worker count that does not divide 16 gets
+    // uneven but complete ranges instead of a float offset.
+    $ranges = [];
     for ($i = 0; $i < $workers; $i++) {
-        $start = $prefix . $chars[$i * $step];
-        $end = ($i === $workers - 1) 
-            ? $prefix . ";"
-            : $prefix . $chars[($i + 1) * $step];
+        $start = $prefix . $chars[intdiv($i * $buckets, $workers)];
+        $end = $i === $workers - 1
+            ? $prefix . 'g' // sorts after the last bucket, 'f'
+            : $prefix . $chars[intdiv(($i + 1) * $buckets, $workers)];
         $ranges[] = [$start, $end];
     }
-    
+
     // Scan ranges in parallel (using batchScan). The ranges are grouped by
     // region and sent as one RawBatchScan per region; requests to distinct
     // regions are dispatched concurrently, capped by
