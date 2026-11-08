@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use Closure;
 use CrazyGoat\Proto\ImportSstpb\IngestRequest;
 use CrazyGoat\Proto\ImportSstpb\IngestResponse;
 use CrazyGoat\Proto\ImportSstpb\Pair;
@@ -89,6 +90,13 @@ final readonly class SstIngestor
         /** Wall-clock deadline (ms) for one region group's retry loop. */
         private int $retryDeadlineMs = RetryExecutor::DEFAULT_RETRY_DEADLINE_MS,
         private MetricsInterface $metrics = new NoOpMetrics(),
+        /**
+         * Client-level retry classifier (issue #719); null keeps the
+         * built-in classification.
+         *
+         * @var (\Closure(TiKvException): \CrazyGoat\TiKV\Client\Retry\RetryVerdict)|null
+         */
+        private ?Closure $retryClassifier = null,
     ) {
         if ($maxIngestSize < 0) {
             throw new InvalidArgumentException('maxIngestSize must be >= 0');
@@ -342,6 +350,7 @@ final readonly class SstIngestor
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
+            classifier: $this->retryClassifier,
         );
     }
 

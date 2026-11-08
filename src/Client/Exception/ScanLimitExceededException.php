@@ -72,7 +72,11 @@ final class ScanLimitExceededException extends TiKvException
     }
 
     /**
-     * The configured maximum number of rows an unbounded scan may collect.
+     * The row cap the scan hit: `options['maxScanRows']` on the RawKV path
+     * (default
+     * {@see \CrazyGoat\TiKV\Client\RawKv\RawKvClient::DEFAULT_MAX_SCAN_ROWS})
+     * or {@see \CrazyGoat\TiKV\Client\TxnKv\Transaction::MAX_SCAN_LIMIT}
+     * (10240) on the transactional path.
      */
     public function getMaxRows(): int
     {
