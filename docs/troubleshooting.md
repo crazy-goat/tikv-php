@@ -931,6 +931,12 @@ echo "Took: {$elapsed}s\n";
 **Solutions:**
 
 1. **Enable logging to see retries:**
+
+   > **Monolog is optional.** This snippet uses Monolog for illustration, but
+   > it is a **dev-only** dependency of this library. Install it with
+   > `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+   > implementation instead — the client itself only depends on `psr/log`.
+
    ```php
    use Monolog\Logger;
    
@@ -1157,6 +1163,11 @@ permanent failure can leave a partial import). See
 
 ### Enable Verbose Logging
 
+> **Monolog is optional.** This snippet uses Monolog for illustration, but it
+> is a **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
+
 ```php
 use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
@@ -1258,6 +1269,11 @@ echo "Peak: " . memory_get_peak_usage(true) / 1024 / 1024 . " MB\n";
 ```
 
 ### Common Debug Script
+
+> **Monolog is optional.** This snippet uses Monolog for illustration, but it
+> is a **dev-only** dependency of this library. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ```php
 <?php
