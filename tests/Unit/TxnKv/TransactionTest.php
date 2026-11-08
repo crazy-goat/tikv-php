@@ -61,6 +61,7 @@ use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use CrazyGoat\TiKV\Client\Util\ShutdownState;
 use CrazyGoat\TiKV\Tests\Unit\Support\ContextRecordingLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\RecordingLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\RegionFixtures;
 use CrazyGoat\TiKV\Tests\Unit\Support\StubRegionCache;
 use CrazyGoat\TiKV\Tests\Unit\Support\ThrowingLogger;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -81,16 +82,7 @@ class TransactionTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->testRegion = new RegionInfo(
-            regionId: 1,
-            leaderPeerId: 1,
-            leaderStoreId: 1,
-            epochConfVer: 1,
-            epochVersion: 1,
-            startKey: '',
-            endKey: '',
-            peers: [],
-        );
+        $this->testRegion = RegionFixtures::region();
 
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
@@ -852,9 +844,7 @@ class TransactionTest extends TestCase
         // empty value, which would write '' instead of a tombstone.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -904,9 +894,7 @@ class TransactionTest extends TestCase
         // Op::Del mutations on prewrite.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -1005,9 +993,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         // Without this the batch grouper previously dropped every key
@@ -1049,9 +1035,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -1324,10 +1308,7 @@ class TransactionTest extends TestCase
 
     private function makeStore(): Store
     {
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
-        return $store;
+        return RegionFixtures::store();
     }
 
     private function makeRegion(
@@ -3262,9 +3243,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -3725,9 +3704,7 @@ class TransactionTest extends TestCase
         // and the proto setter (issue #322).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -3777,9 +3754,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -3810,9 +3785,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -3866,9 +3839,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -3907,9 +3878,7 @@ class TransactionTest extends TestCase
         // returning '' (which would also be cached as the key's value).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -3950,9 +3919,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -4901,9 +4868,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -4965,9 +4930,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         // Without this the batch grouper previously dropped every key
@@ -5002,9 +4965,7 @@ class TransactionTest extends TestCase
         // must receive UndeterminedCommitException.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('getTimestamp')->willReturn(3000);
@@ -5054,9 +5015,7 @@ class TransactionTest extends TestCase
         // the string "12345" on the wire (issue #322).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5111,9 +5070,7 @@ class TransactionTest extends TestCase
         // the prewrite and commit requests (client-go SetPriority semantics).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5380,9 +5337,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5393,9 +5348,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5523,9 +5476,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5567,9 +5518,7 @@ class TransactionTest extends TestCase
         // consistent across the transaction's full RPC surface.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5620,9 +5569,7 @@ class TransactionTest extends TestCase
         // "12345", not the int 12345 (issue #322).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -6016,9 +5963,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -6051,9 +5996,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -6075,9 +6018,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -6114,9 +6055,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 

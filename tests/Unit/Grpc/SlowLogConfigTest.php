@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogOperation;
 use PHPUnit\Framework\TestCase;
 
 class SlowLogConfigTest extends TestCase
@@ -56,21 +57,42 @@ class SlowLogConfigTest extends TestCase
             checksumThresholdMs: 70,
         );
 
-        $this->assertSame(10, $config->getThreshold('read'));
-        $this->assertSame(20, $config->getThreshold('write'));
-        $this->assertSame(30, $config->getThreshold('batch_read'));
-        $this->assertSame(40, $config->getThreshold('batch_write'));
-        $this->assertSame(50, $config->getThreshold('scan'));
-        $this->assertSame(60, $config->getThreshold('delete_range'));
-        $this->assertSame(70, $config->getThreshold('checksum'));
+        $this->assertSame(10, $config->getThreshold(SlowLogOperation::Read));
+        $this->assertSame(20, $config->getThreshold(SlowLogOperation::Write));
+        $this->assertSame(30, $config->getThreshold(SlowLogOperation::BatchRead));
+        $this->assertSame(40, $config->getThreshold(SlowLogOperation::BatchWrite));
+        $this->assertSame(50, $config->getThreshold(SlowLogOperation::Scan));
+        $this->assertSame(60, $config->getThreshold(SlowLogOperation::DeleteRange));
+        $this->assertSame(70, $config->getThreshold(SlowLogOperation::Checksum));
     }
 
-    public function testGetThresholdReturnsZeroForUnknownOperation(): void
+    /**
+     * Every case is classified: `getThreshold()` has no `default` arm, so a
+     * case the `match` forgot would throw `UnhandledMatchError` here
+     * (issue #701).
+     */
+    public function testEveryOperationTypeIsClassified(): void
     {
         $config = new SlowLogConfig();
 
-        $this->assertSame(0, $config->getThreshold('unknown'));
-        $this->assertSame(0, $config->getThreshold(''));
+        foreach (SlowLogOperation::cases() as $operation) {
+            $this->assertGreaterThanOrEqual(0, $config->getThreshold($operation));
+        }
+    }
+
+    /**
+     * The backed values are the documented `operation` context field, so a
+     * rename is a documentation change, not a refactor (issue #701).
+     */
+    public function testOperationValuesAreTheDocumentedVocabulary(): void
+    {
+        $this->assertSame(
+            ['read', 'write', 'batch_read', 'batch_write', 'scan', 'delete_range', 'checksum'],
+            array_map(
+                static fn(SlowLogOperation $operation): string => $operation->value,
+                SlowLogOperation::cases(),
+            ),
+        );
     }
 
     public function testZeroThresholdDisablesLogging(): void
@@ -80,10 +102,10 @@ class SlowLogConfigTest extends TestCase
             writeThresholdMs: 0,
         );
 
-        $this->assertSame(0, $config->getThreshold('read'));
-        $this->assertSame(0, $config->getThreshold('write'));
+        $this->assertSame(0, $config->getThreshold(SlowLogOperation::Read));
+        $this->assertSame(0, $config->getThreshold(SlowLogOperation::Write));
         // Non-zero thresholds still work
-        $this->assertSame(500, $config->getThreshold('batch_read'));
+        $this->assertSame(500, $config->getThreshold(SlowLogOperation::BatchRead));
     }
 
     // ========================================================================
