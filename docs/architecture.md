@@ -1255,10 +1255,10 @@ The roadmap lives in [`README.md`](../README.md#roadmap): its **Completed**
 list records what shipped, and its **Planned** list holds only open feature-gap
 issues, because every planned item has an issue behind it.
 
-The items this section used to advertise have shipped and are recorded there:
+The delivered items this section used to advertise have shipped and are
+recorded there:
 
-- ✅ **Connection Pooling** — persistent, shared gRPC channels per address, with
-  the configurable channel parameters of issue #423 (see
+- ✅ **Connection Pooling** — persistent, shared gRPC channels per address (see
   [Connection Pooling](#1-connection-pooling))
 - ✅ **Circuit Breaker** — per-store health tracking with cooldown, half-open
   probing and `StoreUnavailableException` (issue #424)
@@ -1271,8 +1271,9 @@ The items this section used to advertise have shipped and are recorded there:
 - ✅ **Read Replicas** — `ReplicaReadPolicy` and the replica-read modes read
   from followers for load distribution (issue #421)
 - ✅ **Compression** — the `compression` gRPC channel option compresses requests
+  (issue #423)
 - ✅ **Batching** — batch operations and batch scans split and fan out across
-  regions automatically
+  regions automatically (issue #433 for `RawBatchScan`)
 
 **Async API** and **Streaming** have no tracking issue, so they are not on the
 roadmap and are not planned. Smart routing by node load is not planned either.

@@ -1341,7 +1341,6 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Peer-role awareness** — `PeerInfo` carries the TiKV role and a learner or witness can never be adopted as the leader ([#258](https://github.com/crazy-goat/tikv-php/issues/258))
 - ✅ **Prometheus exporter and tracing hooks** — a dependency-free `PrometheusMetrics` backend, the optional `DetailedMetricsInterface` metric set (backoff, per-store outcomes, lock resolution, 2PC timings) and a `TraceEventInterface` callback for bridging to OpenTelemetry ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ✅ **`RawBatchScan` for multi-range scans** — `batchScan()` groups the ranges by region and sends one `RawBatchScan` per region, with the per-range result shape unchanged ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
-- ✅ **Transactional reverse scan and range deletion** — `Transaction::reverseScan()` walks regions top-down with read-your-writes, and `deleteRange()` deletes a range inside the transaction ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
 - ✅ **Read-through locks for snapshot reads** — locks resolved by a transaction are sent as `resolved_locks`/`committed_locks` on later requests, split by the snapshot's `start_ts` ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 
 ### Planned
