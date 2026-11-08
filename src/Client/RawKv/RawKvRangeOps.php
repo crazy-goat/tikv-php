@@ -18,7 +18,9 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLog;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogOperation;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
@@ -253,7 +255,7 @@ final readonly class RawKvRangeOps
 
                 return CheckedGrpcFuture::fromCallable(
                     fn(): RawDeleteRangeResponse => $this->measure(
-                        'delete_range',
+                        SlowLogOperation::DeleteRange,
                         $startKey,
                         function () use ($response): RawDeleteRangeResponse {
                             /** @var RawDeleteRangeResponse $resolved */
@@ -337,7 +339,7 @@ final readonly class RawKvRangeOps
 
                 return CheckedGrpcFuture::fromCallable(
                     fn(): RawChecksumResponse => $this->measure(
-                        'checksum',
+                        SlowLogOperation::Checksum,
                         $startKey,
                         function () use ($response): RawChecksumResponse {
                             /** @var RawChecksumResponse $resolved */
@@ -422,31 +424,9 @@ final readonly class RawKvRangeOps
      * @param callable(): T $fn
      * @return T
      */
-    private function measure(string $operation, string $key, callable $fn): mixed
+    private function measure(SlowLogOperation $operation, string $key, callable $fn): mixed
     {
-        if (!$this->slowLogConfig instanceof SlowLogConfig) {
-            return $fn();
-        }
-
-        $threshold = $this->slowLogConfig->getThreshold($operation);
-        if ($threshold <= 0) {
-            return $fn();
-        }
-
-        $start = hrtime(true);
-        try {
-            return $fn();
-        } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            if ($durationMs > $threshold) {
-                $this->logger->warning('Slow TiKV operation', [
-                    'operation' => $operation,
-                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
-                    'duration_ms' => round($durationMs, 2),
-                    'threshold_ms' => $threshold,
-                ]);
-            }
-        }
+        return SlowLog::measure($this->slowLogConfig, $this->logger, $operation, $key, $fn);
     }
 
     private function createBatchExecutor(): BatchAsyncExecutor

@@ -21,7 +21,9 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLog;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogOperation;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
@@ -1387,7 +1389,7 @@ final readonly class RawKvScanner
 
         return CheckedGrpcFuture::fromCallable(
             fn(): Message => $this->measure(
-                'scan',
+                SlowLogOperation::Scan,
                 $firstKey,
                 function () use ($future, $regionId): Message {
                     $response = $future->wait();
@@ -1745,14 +1747,18 @@ final readonly class RawKvScanner
                 }
 
                 try {
-                    $response = $this->measure('scan', $cursorStart, fn(): RawScanResponse => $this->grpc->call(
-                        $address,
-                        'tikvpb.Tikv',
-                        'RawScan',
-                        $request,
-                        RawScanResponse::class,
-                        $this->timeoutConfig->scanTimeoutMs,
-                    ));
+                    $response = $this->measure(
+                        SlowLogOperation::Scan,
+                        $cursorStart,
+                        fn(): RawScanResponse => $this->grpc->call(
+                            $address,
+                            'tikvpb.Tikv',
+                            'RawScan',
+                            $request,
+                            RawScanResponse::class,
+                            $this->timeoutConfig->scanTimeoutMs,
+                        ),
+                    );
                     /** @var RawScanResponse $response */
                     RegionErrorHandler::check($response);
                 } catch (RegionException $e) {
@@ -1880,14 +1886,18 @@ final readonly class RawKvScanner
             }
 
             try {
-                $response = $this->measure('scan', $startKey, fn(): RawScanResponse => $this->grpc->call(
-                    $address,
-                    'tikvpb.Tikv',
-                    'RawScan',
-                    $request,
-                    RawScanResponse::class,
-                    $this->timeoutConfig->scanTimeoutMs,
-                ));
+                $response = $this->measure(
+                    SlowLogOperation::Scan,
+                    $startKey,
+                    fn(): RawScanResponse => $this->grpc->call(
+                        $address,
+                        'tikvpb.Tikv',
+                        'RawScan',
+                        $request,
+                        RawScanResponse::class,
+                        $this->timeoutConfig->scanTimeoutMs,
+                    ),
+                );
                 /** @var RawScanResponse $response */
                 RegionErrorHandler::check($response);
             } catch (RegionException $e) {
@@ -1994,7 +2004,7 @@ final readonly class RawKvScanner
                 $lastIndex = -1;
                 foreach ($segments as $index => $segment) {
                     $response = $this->measure(
-                        'scan',
+                        SlowLogOperation::Scan,
                         $segment['start'],
                         fn(): mixed => $segment['future']->waitForExecutor(),
                     );
@@ -2187,7 +2197,7 @@ final readonly class RawKvScanner
 
             return CheckedGrpcFuture::fromCallable(
                 fn(): Message => $this->measure(
-                    'scan',
+                    SlowLogOperation::Scan,
                     $resolutionKey,
                     fn(): Message => $response->wait(),
                 ),
@@ -2279,30 +2289,8 @@ final readonly class RawKvScanner
      * @param callable(): T $fn
      * @return T
      */
-    private function measure(string $operation, string $key, callable $fn): mixed
+    private function measure(SlowLogOperation $operation, string $key, callable $fn): mixed
     {
-        if (!$this->slowLogConfig instanceof SlowLogConfig) {
-            return $fn();
-        }
-
-        $threshold = $this->slowLogConfig->getThreshold($operation);
-        if ($threshold <= 0) {
-            return $fn();
-        }
-
-        $start = hrtime(true);
-        try {
-            return $fn();
-        } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            if ($durationMs > $threshold) {
-                $this->logger->warning('Slow TiKV operation', [
-                    'operation' => $operation,
-                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
-                    'duration_ms' => round($durationMs, 2),
-                    'threshold_ms' => $threshold,
-                ]);
-            }
-        }
+        return SlowLog::measure($this->slowLogConfig, $this->logger, $operation, $key, $fn);
     }
 }

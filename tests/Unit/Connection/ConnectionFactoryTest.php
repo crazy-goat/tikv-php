@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClient;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogOperation;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -720,7 +721,7 @@ class ConnectionFactoryTest extends TestCase
 
         $this->assertNotNull($bundle->slowLogConfig);
         $this->assertSame(0, $bundle->slowLogConfig->readThresholdMs);
-        $this->assertSame(0, $bundle->slowLogConfig->getThreshold('read'));
+        $this->assertSame(0, $bundle->slowLogConfig->getThreshold(SlowLogOperation::Read));
         // The other operations keep their own defaults.
         $this->assertSame(200, $bundle->slowLogConfig->writeThresholdMs);
     }

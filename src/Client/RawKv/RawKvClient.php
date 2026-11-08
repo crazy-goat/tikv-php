@@ -122,16 +122,13 @@ final class RawKvClient
 
     public const MIN_KEY_SIZE = 1;
 
-    public const OP_READ = 'read';
-    public const OP_WRITE = 'write';
-    public const OP_BATCH_READ = 'batch_read';
-    public const OP_BATCH_WRITE = 'batch_write';
-    public const OP_SCAN = 'scan';
-    public const OP_DELETE_RANGE = 'delete_range';
-    public const OP_CHECKSUM = 'checksum';
-    public const OP_INGEST = 'ingest';
-
     public const OPT_TIMEOUT = 'timeout';
+    /**
+     * Slow-operation logging thresholds; see {@see SlowLogConfig}. The
+     * measured operation types are the cases of
+     * {@see \CrazyGoat\TiKV\Client\Grpc\SlowLogOperation}, which is the
+     * single source of truth for the vocabulary (issue #701).
+     */
     public const OPT_SLOW_LOG = 'slowLog';
     public const OPT_METRICS = 'metrics';
 

@@ -12,7 +12,9 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\GrpcStatusCode;
+use CrazyGoat\TiKV\Client\Grpc\SlowLog;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogOperation;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
@@ -113,7 +115,7 @@ final readonly class RawKvAtomic
             }
 
             try {
-                $response = $this->measure('write', $key, fn(): RawCASResponse => $this->grpc->call(
+                $response = $this->measure(SlowLogOperation::Write, $key, fn(): RawCASResponse => $this->grpc->call(
                     $address,
                     'tikvpb.Tikv',
                     'RawCompareAndSwap',
@@ -199,30 +201,8 @@ final readonly class RawKvAtomic
      * @param callable(): T $fn
      * @return T
      */
-    private function measure(string $operation, string $key, callable $fn): mixed
+    private function measure(SlowLogOperation $operation, string $key, callable $fn): mixed
     {
-        if (!$this->slowLogConfig instanceof SlowLogConfig) {
-            return $fn();
-        }
-
-        $threshold = $this->slowLogConfig->getThreshold($operation);
-        if ($threshold <= 0) {
-            return $fn();
-        }
-
-        $start = hrtime(true);
-        try {
-            return $fn();
-        } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            if ($durationMs > $threshold) {
-                $this->logger->warning('Slow TiKV operation', [
-                    'operation' => $operation,
-                    'key' => KeyRedactor::redact($key),
-                    'duration_ms' => round($durationMs, 2),
-                    'threshold_ms' => $threshold,
-                ]);
-            }
-        }
+        return SlowLog::measure($this->slowLogConfig, $this->logger, $operation, $key, $fn);
     }
 }

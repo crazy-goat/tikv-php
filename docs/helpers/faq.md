@@ -2812,26 +2812,33 @@ builds such a layout — it is the cheapest possible check that the layout is a
 layout. This bit `benchmarks/TxnCommitLatencyBenchmark.php` while it was being
 written (issue #431).
 
-## The `slowLog` option is RawKV-only, and its warning is written out five times
+## The `slowLog` option is RawKV-only
 
 `options['slowLog']` (shipped in #31, documented in #396) is parsed by
 `ConnectionFactory::buildSlowLogConfig()` for **both** clients, but only the
 RawKV path is instrumented: nothing under `src/Client/TxnKv/` takes a
 `SlowLogConfig`, so `TxnKvClient::create(['slowLog' => …])` accepts the option
-and never emits a warning. There is also no threshold for SST ingest —
-`SlowLogConfig::getThreshold('ingest')` falls into the `default => 0` arm, and
-`RawKvClient::OP_INGEST` is not wired to any measurement.
+and never emits a warning. There is also no threshold for SST ingest:
+`ingest()` is not measured and has no `SlowLogOperation` case.
 
 The warning itself (`Slow TiKV operation`, context `operation`, `key`,
-`duration_ms`, `threshold_ms`) is written out **five times**: four identical
-`measure()` copies (`RawKvCrud`, `RawKvAtomic`, `RawKvScanner`,
-`RawKvRangeOps`) plus one `wrapWithLogging()` (`RawKvBatch`). Rewording the
-message or the context keys therefore means editing five places — and the
-documentation quotes the message verbatim. The `key` in the context is the
-operation's anchor key: the key itself for a single-key read or write, the
-**first key of the batch** for a batch operation, and the range anchor
-otherwise (the scan cursor, the exclusive upper bound of a reverse scan, the
-per-region sub-range start of a range operation).
+`duration_ms`, `threshold_ms`) used to be written out **five times** — four
+identical `measure()` copies (`RawKvCrud`, `RawKvAtomic`, `RawKvScanner`,
+`RawKvRangeOps`) plus one `wrapWithLogging()` (`RawKvBatch`). Issue #701
+consolidated it into `Grpc\SlowLog`: `measure()` owns the `hrtime()` pair and
+the threshold check, `threshold()` and `warning()` serve the batch wait path,
+and `SlowLog::MESSAGE` is the one copy of the documented message. The
+operation vocabulary is the `Grpc\SlowLogOperation` enum, and
+`SlowLogConfig::getThreshold()` matches over its cases with **no `default`
+arm**, so a new case fails PHPStan until it is classified. The unreferenced
+`RawKvClient::OP_*` constants were removed with it; `OP_INGEST` went too
+because ingest is not measured.
+
+The `key` in the context is the operation's anchor key: the key itself for a
+single-key read or write, the **first key of the batch** for a batch
+operation, and the range anchor otherwise (the scan cursor, the exclusive
+upper bound of a reverse scan, the per-region sub-range start of a range
+operation).
 
 A threshold of `0` disables that operation type. A *negative* threshold is a
 configuration error (`InvalidArgumentException`), and so is an unknown key or
