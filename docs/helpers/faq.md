@@ -2844,8 +2844,9 @@ A threshold of `0` disables that operation type. A *negative* threshold is a
 configuration error (`InvalidArgumentException`), and so is an unknown key or
 a non-int value inside `options['slowLog']` (issue #272) — a non-array
 `slowLog` value fails closed too, like `options['tls']`. The guard itself is
-`if ($threshold <= 0)`, so the negative case would have disabled the warning
-silently; the constructor now rejects it first.
+`SlowLog::threshold()`, which returns `null` for anything `<= 0`, so the
+negative case would have disabled the warning silently; the constructor now
+rejects it first.
 
 ## Infection forces `stopOnDefect="true"` — one PHP warning truncates the whole mutation score
 
