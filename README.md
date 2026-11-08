@@ -24,8 +24,26 @@ make example
 
 ## Installation
 
+The package is not published on Packagist yet, so Composer has to be told
+where to find it. Add the repository to the `repositories` section of your
+project's `composer.json`:
+
+```json
+{
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/crazy-goat/tikv-php"
+        }
+    ]
+}
+```
+
+Then require the package, using the constraint from
+[Which version to require](#which-version-to-require):
+
 ```bash
-composer require crazy-goat/tikv-client
+composer require crazy-goat/tikv-client:~0.14.0
 ```
 
 The client speaks gRPC through the **`ext-grpc`** PHP extension, so the
@@ -128,8 +146,8 @@ migration note and needs no version bump of its own.
 
 ### Which version to require
 
-The current release is **v0.14.0**. Require the exact version, or allow patch
-releases inside the current minor line only:
+The current release is **v0.14.0**. Allow patch releases inside the current
+minor line only:
 
 ```json
 {
@@ -139,9 +157,9 @@ releases inside the current minor line only:
 }
 ```
 
-`~0.14.0` (equivalently `^0.14.0` or `0.14.*`) resolves to `>=0.14.0 <0.15.0`, so
-it never pulls `0.15.0` — and therefore never pulls a breaking change. Use
-`"0.14.0"` instead when you want a reproducible build.
+That constraint resolves to `>=0.14.0 <0.15.0`, so it never pulls `0.15.0` — and
+therefore never pulls a breaking change. Use `"0.14.0"` instead when you want a
+reproducible build.
 
 Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
 `~0.14` all resolve to a range that includes `0.15.0` and every later release.
@@ -166,7 +184,7 @@ that keeps existing, correct code working.
 | `RawKv\CasResult`, `RawKv\ChecksumResult`, `RawKv\KeyTtl` | the result DTOs of `compareAndSwap()`, `checksum()` and `getKeyTTLResult()` |
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
 | `TxnKv\TransactionStatus` | the enum returned by `Transaction::getStatus()` |
-| `Exception\*` | `TiKvException` and every subclass, plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
+| `Exception\*` | `TiKvException` and every subclass, `NotLeaderHint` (the value object behind `RegionException::$notLeader`), plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
 | `TxnKv\Exception\*` | the seven transaction exceptions: `DeadlockException`, `LockWaitTimeoutException`, `TransactionConflictException`, `TransactionTooLargeException`, `TxnAbortedByGcException`, `TxnRetryableException`, `UndeterminedCommitException` |
 | `Retry\RetryBudgetExhaustedException` | thrown when the internal retry budget is exhausted |
 | `Retry\ErrorKind` | the enum behind `RegionException::$errorKind` — the typed variant of a region error |
@@ -180,10 +198,10 @@ that keeps existing, correct code working.
 | `Region\ReplicaReadMode`, `Region\ReplicaReadPolicy` | the values you pass as `options['replicaRead']` |
 | the documented `options[]` keys | every key documented in the [configuration guide](docs/configuration.md) — `tls`, `timeout`, `metrics`, `tracer`, `apiVersion`, `keyspace`, `replicaRead`, `batchCommands`, `maxScanRows`, `maxConcurrency`, `tsoPoolSize`, … |
 
-The namespaces above are relative to `CrazyGoat\TiKV\Client\`. One class
-outside that namespace is part of the promise as well:
-`CrazyGoat\Proto\Errorpb\NotLeader`, the message behind
-`RegionException::$notLeader`.
+The namespaces above are relative to `CrazyGoat\TiKV\Client\`. No generated
+protobuf or gRPC class is part of the promise: a message such as
+`Errorpb\NotLeader` reaches consumers only through a library-owned value
+object (`Exception\NotLeaderHint` for `RegionException::$notLeader`).
 
 ### Internal
 
@@ -215,8 +233,8 @@ of the contract.
   `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
   `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget`,
   `Retry\RetryExecutor` and `Retry\RetryVerdict`;
-- the generated protobuf and gRPC classes under `src/Proto/` — except
-  `Errorpb\NotLeader`, which the promise covers.
+- the generated protobuf and gRPC classes under `src/Proto/` — no generated
+  class is part of the promise.
 
 The advanced extension points — `Retry\RetryExecutor`,
 `Retry\RetryVerdict` and `Retry\BackoffType` in

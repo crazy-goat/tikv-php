@@ -85,7 +85,7 @@ final class ClusterProbe
                 'The TiKV cluster is not reachable at %s (%s). The end-to-end suites need a '
                 . 'running cluster and reach PD through the PD_ENDPOINTS environment variable.' . "\n"
                 . '  - On the host, PD_ENDPOINTS has to point at the published PD port, for '
-                . 'example "PD_ENDPOINTS=localhost:2379": the default "pd:2379" is a Docker '
+                . 'example "PD_ENDPOINTS=localhost:${PD_PORT:-2379}": the default "pd:2379" is a Docker '
                 . 'Compose service name and resolves only inside the compose network.' . "\n"
                 . '  - Inside the compose network, start the cluster the suite needs: "make up" '
                 . '(V1TTL cluster, RawKV suite) or "docker compose -f docker-compose.yml '
