@@ -686,9 +686,10 @@ $results = $client->batchScan($ranges, eachLimit: 50, keyOnly: false);
 **Returns:** `array<array<array{key: string, value: ?string}>>` — one inner
 list per range; a list input keeps its order, while non-sequential keys are
 re-indexed in ascending key order. Each inner list holds at most `eachLimit`
-rows in ascending key order and carries `null` values when `keyOnly` is true.
-An empty `ranges` list returns `[]`, and a range that matches no rows
-contributes an empty inner list.
+rows in ascending key order and carries `null` values when `keyOnly` is true;
+a returned count equal to `eachLimit` may mean the range holds more rows
+(issue #440). An empty `ranges` list returns `[]`, and a range that matches no
+rows contributes an empty inner list.
 
 > **One `RawBatchScan` per region.** `batchScan` groups the requested
 > ranges by the regions that own them, clips every range to each region's

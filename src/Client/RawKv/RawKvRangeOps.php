@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use Closure;
 use CrazyGoat\Proto\Kvrpcpb\ChecksumAlgorithm;
 use CrazyGoat\Proto\Kvrpcpb\KeyRange;
 use CrazyGoat\Proto\Kvrpcpb\RawChecksumRequest;
@@ -53,6 +54,13 @@ final readonly class RawKvRangeOps
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Client-level retry classifier (issue #719); null keeps the
+         * built-in classification.
+         *
+         * @var (\Closure(TiKvException): \CrazyGoat\TiKV\Client\Retry\RetryVerdict)|null
+         */
+        private ?Closure $retryClassifier = null,
     ) {
     }
 
@@ -62,7 +70,7 @@ final readonly class RawKvRangeOps
      * Per-region RawDeleteRange requests are fanned out at the wire layer:
      * all sends inside a concurrency window are issued before any wait
      * begins, so server-side latencies overlap instead of accumulating.
-     * At most {@see self::$maxConcurrency} requests are in flight at any
+     * At most {@see RawKvRangeOps::$maxConcurrency} requests are in flight at any
      * moment (issue #295).
      *
      * Failure semantics differ from a sequential loop: a region whose retry
@@ -411,6 +419,7 @@ final readonly class RawKvRangeOps
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
+            classifier: $this->retryClassifier,
         );
     }
 
