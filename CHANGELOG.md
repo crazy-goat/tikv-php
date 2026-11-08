@@ -25,6 +25,7 @@ policy now classifies as internal.
 
 ### Changed
 
+- `RawKvBatch::batchPut()` and `RawKvSplitter::splitPairsIntoBatches()` now reject a TTL array whose length differs from the pair count with one wording, `TTL array count (N) must match pair count (M)`; the `batchPut()` path used to say "key-value pairs count". The contract is documented for the public entry point in `docs/operations.md` (whose parameter list omitted the array form of `$ttl`) and for the internal helper in `docs/development.md` and its class docblock, and the batch-splitting methods of `RawKvSplitter` are now marked `@internal`; the class stays internal, as the stability policy in `README.md` already classifies it. (#683)
 - `RegionErrorHandler::check()` no longer tests the region cache with `$cache instanceof RegionCacheInterface` before using it: the parameter is already typed `?RegionCacheInterface`, so the cache is now used through `?->` and `$regionId !== null` is the only guard. The behaviour is unchanged — a `null` cache with a region id still skips the capture and the invalidation. The docblock now names `NotLeader` as the exception to the routing-error invalidation rule, matching the ownership paragraph below it. (#680)
 
 ### Tests
