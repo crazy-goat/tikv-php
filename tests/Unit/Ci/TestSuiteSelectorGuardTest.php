@@ -18,7 +18,7 @@ use PHPUnit\Framework\TestCase;
  * suite: the shell scripts, the Makefile, the compose files and the CI
  * workflow.
  *
- * Six rules are pinned here, all of them cheap and cluster-free:
+ * Seven rules are pinned here, all of them cheap and cluster-free:
  *
  *  1. every `--testsuite` selector used in the repository names a suite
  *     that `phpunit.xml` declares;
@@ -41,7 +41,12 @@ use PHPUnit\Framework\TestCase;
  *     plain run request a coverage driver — it exits 1 with
  *     "XDEBUG_MODE=coverage ... has to be set" when Xdebug is in `develop`
  *     mode although every test passed, and writes `coverage.xml` /
- *     `coverage-html/` when a driver is in coverage mode (issue #556).
+ *     `coverage-html/` when a driver is in coverage mode (issue #556);
+ *  7. a risky test fails the run: `phpunit.xml` sets `failOnRisky="true"`
+ *     (PHPUnit's default is `false`), and no runner opts out with
+ *     `--do-not-fail-on-risky`. Without the attribute a test that performs
+ *     no assertion is only *reported* as risky and the suite stays green
+ *     (issue #665).
  *
  * The selectors and the suite names are read out of the files themselves
  * rather than restated here: a copy in this file could agree with a
@@ -339,6 +344,69 @@ class TestSuiteSelectorGuardTest extends TestCase
             $violations,
             "PHPUnit invocations that ask for a coverage driver they do not use:\n"
             . implode("\n", $violations),
+        );
+    }
+
+    /**
+     * A risky test must fail the run (issue #665).
+     *
+     * PHPUnit's default for `failOnRisky` is `false`, so a test that performs
+     * no assertion — or back-fires `expectNotToPerformAssertions()` next to a
+     * verified mock, the shape #664 fixed — was only *reported* as risky and
+     * the suite stayed green. The attribute makes every runner that reads
+     * `phpunit.xml` (the composer scripts, the CI jobs, the E2E scripts and a
+     * bare `vendor/bin/phpunit`) fail instead. A runner that overrides it with
+     * `--do-not-fail-on-risky` would opt out silently, so that flag is a
+     * violation too; the mutation run passes it from `infection.json`, which
+     * this scan does not read, and is the deliberate exception.
+     */
+    public function testRiskyTestsFailTheRun(): void
+    {
+        $xml = $this->readFile($this->repoRoot() . '/phpunit.xml');
+
+        self::assertMatchesRegularExpression(
+            '/<phpunit\b[^>]*\bfailOnRisky="true"/s',
+            $xml,
+            'phpunit.xml must set failOnRisky="true": PHPUnit only reports a risky test by default, '
+            . 'so a test that performs no assertion (or back-fires '
+            . 'expectNotToPerformAssertions() next to a verified mock) stays green in CI (issue #665).',
+        );
+
+        $violations = [];
+        $checked = 0;
+
+        foreach ($this->runnerCommands() as $where => $commands) {
+            foreach ($commands as $line => $command) {
+                if (!$this->runsPhpunit($command)) {
+                    continue;
+                }
+
+                $checked++;
+
+                if (str_contains($command, '--do-not-fail-on-risky')) {
+                    $violations[] = sprintf(
+                        '%s:%d runs PHPUnit with --do-not-fail-on-risky, which overrides '
+                        . 'phpunit.xml and lets a risky test pass (issue #665).',
+                        $where,
+                        $line,
+                    );
+                }
+            }
+        }
+
+        // Without this witness the rule would pass vacuously if no runner
+        // invoked PHPUnit at all.
+        self::assertGreaterThan(
+            0,
+            $checked,
+            'No PHPUnit invocation was found in composer.json, the scripts, the '
+            . 'Makefile, the compose files or the CI workflow, so this guard no longer guards anything.',
+        );
+
+        self::assertSame(
+            [],
+            $violations,
+            "PHPUnit invocations that opt out of failing on risky tests:\n" . implode("\n", $violations),
         );
     }
 

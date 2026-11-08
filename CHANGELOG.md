@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- `phpunit.xml` now sets `failOnRisky="true"`, so a test PHPUnit classifies as risky fails the run instead of being reported while the suite stays green (issue #665). The two `GrpcFutureTest` tests that back-fired `expectNotToPerformAssertions()` next to a verified mock were fixed first (#664); the `Unit` and `Integration` suites report none. `TestSuiteSelectorGuardTest::testRiskyTestsFailTheRun()` pins the attribute and fails when a runner overrides it with `--do-not-fail-on-risky`; the mutation run keeps that flag on purpose because Infection reads a non-zero exit code as a killed mutant. (#665)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added

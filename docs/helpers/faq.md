@@ -2533,6 +2533,13 @@ assertions). Three consequences for the test suite:
    are both passed to `check()` — with `$regionId === null` the handler cannot
    invalidate anything and the expectation would be vacuous.
 
+Since #665 `phpunit.xml` sets `failOnRisky="true"`, so a risky test fails the
+run instead of being reported and staying green. A runner that passes
+`--do-not-fail-on-risky` overrides the attribute;
+`TestSuiteSelectorGuardTest::testRiskyTestsFailTheRun()` fails when the
+attribute disappears or a runner opts out (the mutation run in
+`infection.json` is the deliberate exception).
+
 ## A TTL array shorter than the pair list breaks the `int[]` contract — the count check belongs in the public helper
 
 `RawKvSplitter::splitPairsIntoBatches()` used to pad a short TTL array with
