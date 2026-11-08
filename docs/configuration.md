@@ -620,12 +620,14 @@ factory does not build, so they are rejected with an
 on the `GrpcClient` you pass in.
 
 One caveat of sharing: on a retryable transport error the client closes the
-channel of the affected address. With a shared transport that affects every
-client using the same address — the channel is dropped from the cache and
-reopened on the next request, but a request in flight on it can be
-interrupted. The close does **not** force a reconnect, though: ext-grpc keeps
-the channel in its process-global persistent table, so the reopened channel is
-the same underlying channel and the same TCP connection (see below).
+channel of the affected address. With a shared transport that touches only
+this client's cached handle: ext-grpc reference-counts the channel, so a call
+another client has in flight on its own handle is not interrupted, and the
+other clients keep using the shared persistent channel. The replacement built
+by the transport that closed the channel is private to it, however: it is
+created with `'force_new' => true`, so it is a new underlying channel and a
+new TCP connection instead of the persistent entry for the same key (see
+below, issue #717).
 
 Sharing the transport shares the **channels** only. Every client keeps its own
 region cache and its own store-address cache, so the two clients do not warm
@@ -671,10 +673,12 @@ The practical consequences for the API:
 - `close()` releases this client's handles; the TCP connection stays warm in
   the process (until the process ends or the per-target persist bound drops
   the entry). It does not tear the connection down.
-- `closeChannel()` drops the cached handle but does **not** force a
-  reconnect: the persistent entry survives, so the next call reuses the same
-  underlying channel and the same TCP connection. Forcing a real reconnect
-  needs a new persistent entry.
+- `closeChannel()` drops the cached handle and forces a new connection: the
+  replacement channel is created with `'force_new' => true`, so it is a new
+  underlying `grpc_channel` and a new TCP connection, not the persistent
+  entry for the same key (issue #717). The retry path is its caller. The idle
+  and the LRU evictions keep the persistent entry and reuse the warm
+  connection.
 
 Two clients with **different** channel arguments (`options['grpc']`) or
 different credentials for the same store address do not share a channel: the

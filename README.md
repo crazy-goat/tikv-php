@@ -874,10 +874,13 @@ Two consequences for the API:
 - `close()` releases this client's handles; the TCP connection stays warm in
   the process (until the process ends or the per-target persist bound drops
   the entry). It does not tear the connection down.
-- `closeChannel()` drops the cached handle but does **not** force a
-  reconnect: the persistent entry survives, so the next call reuses the same
-  underlying channel and the same TCP connection. Forcing a real reconnect
-  needs a new persistent entry.
+- `closeChannel()` drops the cached handle and forces a new connection: the
+  replacement channel is built with `'force_new' => true`, so it is a new
+  underlying `grpc_channel` and a new TCP connection rather than the
+  persistent entry for the same key (issue #717). The retry path is its
+  caller — it closes the channel after a transport error. The idle and the
+  LRU evictions are different: they keep the persistent entry, so a later
+  call reuses the warm connection.
 
 ### PSR-3 Logging
 

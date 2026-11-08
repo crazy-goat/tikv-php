@@ -76,6 +76,14 @@ use Psr\Log\NullLogger;
  * the channel out of the cache and defer its close until the last call
  * settles. `close()` is the exception — it closes the channels it deferred,
  * so shutting a client down ends the calls that were still running on them.
+ *
+ * `closeChannel()` is the one path that also opts out of the persistent
+ * table: the channel it closes was closed because it is expected to be dead
+ * (the retry path closes one after a transport error), so the replacement is
+ * created with `'force_new' => true` and gets its own connection instead of
+ * the persistent entry for the same key (issue #717). The idle and LRU
+ * evictions keep reusing the persistent entry, which is the point of the
+ * table.
  */
 final class GrpcClient implements GrpcClientInterface
 {
@@ -112,6 +120,20 @@ final class GrpcClient implements GrpcClientInterface
 
     /** Whether the soft-cap overshoot of the current episode was logged. */
     private bool $softCapWarned = false;
+
+    /**
+     * Addresses whose next channel must be a new connection instead of the
+     * persistent entry ext-grpc would otherwise hand back.
+     *
+     * Set by {@see closeChannel()} and consumed by {@see createChannel()}.
+     * A closed channel is closed because it is expected to be dead — the
+     * retry path closes one after a transport error — so recreating it from
+     * the same persistent entry would reuse the broken connection (issue
+     * #717).
+     *
+     * @var array<string, true>
+     */
+    private array $forceNewChannels = [];
 
     /**
      * Maximum number of channels kept open at the same time.
@@ -274,6 +296,16 @@ final class GrpcClient implements GrpcClientInterface
          * event per call; the application bridges them to its tracing SDK.
          */
         private readonly TraceEventInterface $tracer = new NoOpTracer(),
+        /**
+         * Factory for `Grpc\Channel` objects (default
+         * `new Channel($address, $options)`). Internal testing seam: it
+         * exposes the options a channel is created with, so a test can pin
+         * that the channel replacing a closed one carries `force_new` and
+         * therefore gets a new connection (issue #717).
+         *
+         * @var (\Closure(string, array<string, mixed>): Channel)|null
+         */
+        private readonly ?\Closure $channelFactory = null,
     ) {
         if ($this->maxChannels < 1) {
             throw new \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException(
@@ -690,25 +722,31 @@ final class GrpcClient implements GrpcClientInterface
             $this->closeChannelObject($entry['address'], $entry['channel']);
         }
         $this->pendingCloses = [];
+        $this->forceNewChannels = [];
     }
 
     /**
-     * Close the channel cached for an address.
+     * Close the channel cached for an address and force a new connection on
+     * the next use.
+     *
+     * The next `getChannel()` returns a handle built with
+     * `'force_new' => true`, so it is a **new** underlying `grpc_channel` and
+     * a new TCP connection rather than the process-global persistent entry
+     * for the same target and channel arguments (ext-grpc would otherwise
+     * hand the same channel back — verified against grpc 1.83.0; see the
+     * class docblock). This is what the retry path needs after a transport
+     * error: a fresh `Grpc\Channel` object alone would still be the broken
+     * connection (issue #717).
      *
      * A channel that still has in-flight calls is not closed (issue #278):
-     * it leaves the cache — so the next call for that address gets a
-     * fresh handle — and the close is deferred until its last in-flight
-     * call settles.
+     * it leaves the cache and the close is deferred until its last in-flight
+     * call settles. The forced new connection is still armed, because the
+     * retry that follows the failure runs before that channel settles. The
+     * deferred close releases this client's reference to the old channel; it
+     * cannot affect a persistent entry another client holds.
      *
-     * A fresh **handle** is not a fresh connection: ext-grpc keeps the
-     * channel in its process-global persistent table, so the next
-     * `getChannel()` resolves to the same underlying `grpc_channel` and
-     * the same TCP connection (verified against grpc 1.83.0). The table is
-     * bounded per target, so a channel that was created beyond that bound is
-     * private to its handle — closing it really does release it. gRPC's own
-     * reconnection after a broken connection is unaffected by this.
-     *
-     * No-op if the client has already been closed.
+     * No-op if the client has already been closed, or if no channel is
+     * cached for the address.
      *
      * @param string $address Channel address to close
      */
@@ -724,6 +762,11 @@ final class GrpcClient implements GrpcClientInterface
 
         $entry = $this->channels[$address];
         unset($this->channels[$address]);
+
+        // Arm the forced reconnect before either branch: a deferred close
+        // means a call is still running, and the retry that sent us here
+        // needs a new connection right away (issue #717).
+        $this->forceNewChannels[$address] = true;
 
         if ($entry['inFlight'] > 0) {
             $this->deferChannelClose($address, $entry);
@@ -1090,10 +1133,32 @@ final class GrpcClient implements GrpcClientInterface
             $credentials = ChannelCredentials::createInsecure();
         }
 
-        $channel = new Channel($address, [
+        /** @var array<string, mixed> $options */
+        $options = [
             'credentials' => $credentials,
             ...$this->channelArgs(),
-        ]);
+        ];
+
+        if (isset($this->forceNewChannels[$address])) {
+            unset($this->forceNewChannels[$address]);
+
+            // ext-grpc resolves a channel from its process-global persistent
+            // table unless `force_new` is set; without it the replacement
+            // handle would be the connection that just failed (verified
+            // against grpc 1.83.0: `force_new` is one of the option keys the
+            // extension treats as "not a channel argument", so it does not
+            // change the persistent key). (issue #717)
+            $options['force_new'] = true;
+
+            $this->logger->debug('Forcing a new gRPC connection', [
+                'address' => $address,
+            ]);
+        }
+
+        $factory = $this->channelFactory;
+        $channel = $factory instanceof \Closure
+            ? $factory($address, $options)
+            : new Channel($address, $options);
 
         $this->channels[$address] = [
             'channel' => $channel,

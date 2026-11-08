@@ -948,18 +948,59 @@ The decisions that follow:
    (`tests/Unit/Grpc/GrpcClientChannelIsolationTest.php`), so a future
    extension that turns `close()` into a destroy fails the suite instead of
    silently breaking a second client.
-3. **Document what the API does, not what it promises.** `closeChannel()`
-   drops the cached handle but does not force a reconnect (the persistent
-   entry survives, so the next call reuses the same underlying channel and
-   the same TCP connection), and `close()` does not release the TCP
-   connection (the persistent entry keeps it warm until the process ends).
-   Both are now stated as they are.
+3. **Document what the API does, not what it promises.** `close()` does not
+   release the TCP connection (the persistent entry keeps it warm until the
+   process ends). `closeChannel()` first documented the same non-effect, but
+   the retry path closed a channel after a transport error *expecting* a
+   reconnect, so the transport now creates the replacement channel with
+   `'force_new' => true` (issue #717 — see the next section). The idle and
+   LRU evictions still reuse the persistent entry.
 
 The ownership model that answers "who closes what" — a transport belongs to
 whoever created it, `options['grpcClient']` injects a borrowed one, and the
 transport options are rejected next to it — was decided in issue #407 and is
 documented in `README.md` and `docs/configuration.md`; it is not repeated
 here.
+
+## `closeChannel()` forces a new connection; eviction does not (issue #717)
+
+`RetryExecutor::closeBrokenChannel()` calls `GrpcClient::closeChannel()` after
+an `UNAVAILABLE` transport error, with the expectation that the retry runs on
+a fresh connection. It did not: `closeChannel()` only dropped the PHP handle,
+and the next `getChannel()` resolved to the same persistent entry — the same
+`grpc_channel` and the same TCP connection that had just failed.
+
+The fix is `'force_new' => true` on the replacement channel, not a new retry
+path. Verified against grpc 1.83.0, `src/php/ext/grpc/channel.c`:
+
+- `force_new` is read from the same options array as `credentials`, before the
+  channel-arguments hash is built. It is one of the three keys the extension
+  excludes from that hash (`credentials`, `force_new`,
+  `grpc_target_persist_bound`), so setting it does not change the persistent
+  key.
+- with `force_new` the extension calls `grpc_channel_create()` directly and
+  never inserts the channel into the persistent table. The forced channel is
+  private to its handle (destroyed when the last reference goes) and existing
+  channels are untouched — the extension's own docblock says "This will not
+  affect existing channels".
+
+Why not use `force_new` everywhere: the persistent table is the cross-request
+connection reuse the long-lived transport exists for. An idle or LRU eviction
+drops a *healthy* handle and should keep resolving to the warm persistent
+channel; only `closeChannel()` carries the "this connection is broken"
+meaning, and it is the retry path's only caller. The distinction is stated on
+`GrpcClientInterface::closeChannel()` / `::reapIdleChannels()`.
+
+Testing it without a server: the `channelFactory` constructor seam (same style
+as `callFactory` and `credentialsFactory`) receives the options array the
+channel would be built from, so
+`tests/Unit/Grpc/GrpcClientForceReconnectTest.php` asserts that the
+replacement carries `force_new` while an idle/LRU replacement does not.
+
+This slightly narrows the earlier #283 decision ("`force_new` was rejected"):
+that rejection was about isolating two clients, a hazard that does not exist.
+Using it to replace a *known-broken* connection is a different question with
+the opposite answer.
 
 ## The four Percolator invariants of the TxnKV path (issue #182)
 
