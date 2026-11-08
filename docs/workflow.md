@@ -137,17 +137,21 @@ A finding entry has: role, `file:line`, what is wrong, severity, and a suggested
 ## 5. Rebase, push, open the pull request, wait for CI
 
 Only after the review accepts. First rebase onto the default branch as it is
-**now**, not as it was when the worktree was created, so the branch and the
-documentation it changes are reviewed and tested against the code that will
-land:
+**now**, not as it was when the worktree was created, so the branch is tested
+against the code that will land:
 
 ```bash
 git fetch origin
+git log --oneline HEAD..origin/<default>
 git rebase origin/<default>
 ```
 
-Resolve any conflict now — the `CHANGELOG.md` entry is the common one — run the
-checks again, then push and open the pull request:
+Read that list before the rebase. A clean rebase does not refresh prose that
+described the old code: when a commit adds an option key or an entry point, the
+documentation written on the previous base stays wrong even though the checks
+stay green. Update anything the list contradicts, resolve any conflict — the
+`CHANGELOG.md` entry is the common one — run the checks again, then push and
+open the pull request:
 
 ```bash
 git push -u origin HEAD

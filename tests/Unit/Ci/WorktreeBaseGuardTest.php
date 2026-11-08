@@ -38,7 +38,15 @@ final class WorktreeBaseGuardTest extends TestCase
             . '(issue #723).',
         );
 
-        $add = strpos($script, 'git -C "$root" worktree add -b "$branch"');
+        $creation = 'git -C "$root" worktree add -b "$branch" "$dir" "origin/$default"';
+        self::assertStringContainsString(
+            $creation,
+            $script,
+            'bin/worktree.sh must create the worktree branch from "origin/$default", not from a '
+            . 'moving ref such as HEAD; otherwise the branch starts from a stale base (issue #723).',
+        );
+
+        $add = strpos($script, $creation);
         self::assertNotFalse(
             $add,
             'bin/worktree.sh must create the worktree branch from origin/<default> (issue #723).',
@@ -63,11 +71,35 @@ final class WorktreeBaseGuardTest extends TestCase
             . '(issue #723).',
         );
 
-        $rebase = strpos($step, 'git rebase origin/');
+        $rebase = strpos($step, 'git rebase origin/<default>');
         self::assertNotFalse(
             $rebase,
-            'The pull-request step of docs/workflow.md must rebase the branch onto origin/<default> '
-            . 'right before the pull request is opened (issue #723).',
+            'The pull-request step of docs/workflow.md must rebase the branch onto exactly '
+            . 'origin/<default>, not another branch, right before the pull request is opened '
+            . '(issue #723).',
+        );
+
+        self::assertLessThan(
+            $rebase,
+            $fetch,
+            'docs/workflow.md must fetch before it rebases; a rebase that runs first uses whatever '
+            . 'stale remote-tracking ref the previous fetch left and starts from a stale base '
+            . '(issue #723).',
+        );
+
+        $reRead = strpos($step, 'git log --oneline HEAD..origin/<default>');
+        self::assertNotFalse(
+            $reRead,
+            'The pull-request step of docs/workflow.md must list the commits that landed since '
+            . 'the worktree was created, so the documentation they may contradict is refreshed '
+            . 'before the rebase (issue #723).',
+        );
+
+        self::assertLessThan(
+            $rebase,
+            $reRead,
+            'docs/workflow.md must read "HEAD..origin/<default>" before the rebase; after it the '
+            . 'range is empty and the commits that landed are no longer visible (issue #723).',
         );
 
         $push = strpos($step, 'git push -u origin HEAD');
