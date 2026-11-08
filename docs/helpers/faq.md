@@ -12,6 +12,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [A test that reads a value out of the file under test pins the relation, not the value (issue #731)](#a-test-that-reads-a-value-out-of-the-file-under-test-pins-the-relation-not-the-value-issue-731)
 - [A transactional scan is a read: one timestamp for every returned key](#a-transactional-scan-is-a-read-one-timestamp-for-every-returned-key)
 - [A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep](#a-lock-resolution-deadline-fix-starts-from-the-current-lockresolver-not-from-470s-ttl-sleep)
 - [RetryExecutor unit tests that need zero-sleep retries: use DataIsNotReady or an explicit classifier](#retryexecutor-unit-tests-that-need-zero-sleep-retries-use-dataisnotready-or-an-explicit-classifier)
@@ -155,6 +156,29 @@ of the file.
 - [The batch deadline is finite by default, and checked only between waits (#275)](#the-batch-deadline-is-finite-by-default-and-checked-only-between-waits-275)
 - [Destructors log best-effort and skip rollback during shutdown (#287)](#destructors-log-best-effort-and-skip-rollback-during-shutdown-287)
 <!-- index:end -->
+
+## A test that reads a value out of the file under test pins the relation, not the value (issue #731)
+
+`tests/Unit/Bin/CoverageFloorCheckTest.php` greps `DEFAULT_COVERAGE_FLOOR` out of
+`bin/check-coverage.php` and drives the check with it. That is the right shape — the
+script owns the value and the test cannot drift from it — but it does **not** guard the
+value: a scratch copy of the script with the constant set to 86.5, 88.2 (or 100.0) passes
+the whole suite, because every fixture is derived from whatever the constant says. What
+the test pins is the comparison (below the floor fails, at or above it passes, a report a
+tenth of a point below it fails, `--floor` overrides the default).
+
+Two consequences worth remembering:
+
+1. **Do not describe such a test as pinning the constant.** The coverage floor is a ratchet
+   by convention: raising it is a deliberate edit in `bin/check-coverage.php` and the diff
+   is the review. A prose claim that the suite "pins the floor value" is wrong, and the
+   changelog carried exactly that claim until issue #731.
+2. **Do not confuse the two directions.** A guard that derives a list from `src/` (option
+   keys, subclasses, table rows) catches drift, because the source changes without the
+   docs. A test that reads the value under test and asserts *with* it pins only the
+   relation — so the value must not be restated in prose either, or the copy becomes
+   another place to keep in step. The coverage floor is now named only as
+   `DEFAULT_COVERAGE_FLOOR`, and `bin/check-coverage.php` prints the value it applied.
 
 ## A transactional scan is a read: one timestamp for every returned key
 
@@ -561,15 +585,16 @@ docker-compose.txnkv.yml up`.
 
 CI runs the `Unit` and `Grpc` suites together under PCOV in the `grpc-unit-tests` job, uploads the
 Clover report as the `coverage-clover` artifact and fails the build when the line coverage drops
-below the floor. The floor is `DEFAULT_COVERAGE_FLOOR` in `bin/check-coverage.php` (87.0 %) and it
-is a ratchet — it only moves up. `composer test:coverage` runs the same suites and the same
-check, so a red build is reproducible locally.
+below the floor. The floor is `DEFAULT_COVERAGE_FLOOR` in `bin/check-coverage.php` and it
+is a ratchet — it only moves up. The value is not repeated here: the script prints the
+floor it applied, so there is nothing to keep in step. `composer test:coverage` runs the
+same suites and the same check, so a red build is reproducible locally.
 
 Two traps when measuring coverage:
 
 1. **The metric excludes the generated `src/Proto` classes.** `phpunit.xml` excludes them from the
    `<source>` set; they are ~62 % of the executable lines of `src/` and are not hand-written, so
-   counting them would report 42 % instead of 87 % for the same run.
+   counting them would report 42 % for the same run.
 2. **A local run needs a coverage driver.** PCOV wins over Xdebug when both are installed
    (`SebastianBergmann\CodeCoverage\Driver\Selector` checks PCOV first), and the two measure the
    same metric within a few tenths of a point — but only with Xdebug in coverage mode
