@@ -250,14 +250,15 @@ the tables below.
 | `Invalid TLS base directory: directory does not exist` | The `$baseDir` argument or the `caCertBaseDir` / `clientCertBaseDir` option does not resolve to an existing directory. Use an absolute path to a directory that exists. |
 | `TLS file path is outside the allowed base directory` | The canonicalized certificate path is neither the base directory itself nor beneath it. Move the file under the base directory, or point the base option at the directory that contains it. |
 | `Cannot read TLS file: read failed` | The file passed the existence, readability and containment checks, but `file_get_contents()` still failed — typically a permission or I/O error, or the file was replaced between the check and the read. Verify that it is a regular, readable file. |
+| `TLS client certificate and key must be given in the same form, both file paths or both inline PEM; got …` | Only the deprecated `clientCert` + `clientKey` pair guesses the form, and it must guess the same form for both halves. Give both as file paths or both as inline PEM, or use `clientCertFile` + `clientKeyFile` / `clientCertPem` + `clientKeyPem`. The message says which half was read as which. |
 
 **Building the `TlsConfig`**
 
 | Message | What it means and how to fix it |
 | --- | --- |
-| `Both clientCert and clientKey must be provided together; got clientCert=…, clientKey=…` | Exactly one half of the client pair is set. The message names the fields, which match the deprecated option keys; provide both halves or neither. The `options['tls']` factory reports the same mistake earlier as `Incomplete client certificate pair`. |
-| `%s does not contain PEM data` | A value passed to `withCaCertPem()` / `withClientCertPem()` (or to the `TlsConfig` constructor) has no `-----BEGIN` header, so it is not PEM — often a file path passed where content is expected. Pass the file to `withCaCertFile()` / `withClientCertFile()` instead. |
-| `Partial TLS configuration: client certificate and key are provided but no CA certificate is set…` | A client certificate and key are configured without a CA certificate. A CA is required to verify the server: add `caCertFile` / `caCertPem`, or remove the client pair if you intend to use an insecure connection. |
+| `TlsConfig requires $clientCert and $clientKey together; got $clientCert=true, $clientKey=false` | Exactly one of the two properties is set. The values after `got` are presence flags (`true` = set, `false` = missing), not certificate material. Provide both or neither; the `options['tls']` factory reports the same mistake earlier as `Incomplete client certificate pair`. The `$`-prefixed names are the `TlsConfig` properties, not the deprecated `options['tls']` keys of the same bare name. |
+| `$caCert does not contain PEM data` (also `$clientCert` and `$clientKey`) | The named property has no `-----BEGIN` header, so it is not PEM — often a file path passed where content is expected. Pass the file to `withCaCertFile()` / `withClientCertFile()` instead. The leading `$` is the property name, not the deprecated option key of the same bare name. |
+| `Partial TLS configuration: $clientCert and $clientKey are set but $caCert is not…` | A client certificate and key are configured without a CA certificate. A CA is required to verify the server: add `caCertFile` / `caCertPem`, or remove the client pair if you intend to use an insecure connection. |
 
 The remaining `options['tls']` validation errors — a non-array `tls` value, an
 unrecognised key, a non-string value and an incomplete client pair — are

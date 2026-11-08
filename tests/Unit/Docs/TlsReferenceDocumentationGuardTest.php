@@ -33,46 +33,66 @@ final class TlsReferenceDocumentationGuardTest extends TestCase
     private const TROUBLESHOOTING = 'docs/troubleshooting.md';
 
     /**
-     * Every pre-connection TLS error message, and the class that throws it.
+     * Every pre-connection TLS error message: the class that throws it, the
+     * fragment to find in that class, and the fragment to find in the
+     * troubleshooting table.
      *
-     * @var list<array{string, string}>
+     * The two fragments differ where the thrown message is a `sprintf()`
+     * template (`$%s does not contain PEM data`) but the documentation shows
+     * the rendered form (`$caCert does not contain PEM data`).
+     *
+     * @var list<array{string, string, string}>
      */
     private const ERROR_MESSAGES = [
         [
             'src/Client/Tls/TlsConfigBuilder.php',
             'TLS value looks like a file path but the file does not exist or is not readable',
+            'TLS value looks like a file path but the file does not exist or is not readable',
         ],
         [
             'src/Client/Tls/TlsConfigBuilder.php',
+            'TLS file has disallowed extension "%s"',
             'TLS file has disallowed extension "%s"',
         ],
         [
             'src/Client/Tls/TlsConfigBuilder.php',
             'Cannot read TLS file: file does not exist or is not readable',
+            'Cannot read TLS file: file does not exist or is not readable',
         ],
         [
             'src/Client/Tls/TlsConfigBuilder.php',
+            'Invalid TLS base directory: directory does not exist',
             'Invalid TLS base directory: directory does not exist',
         ],
         [
             'src/Client/Tls/TlsConfigBuilder.php',
             'TLS file path is outside the allowed base directory',
+            'TLS file path is outside the allowed base directory',
         ],
         [
             'src/Client/Tls/TlsConfigBuilder.php',
             'Cannot read TLS file: read failed',
+            'Cannot read TLS file: read failed',
+        ],
+        [
+            'src/Client/Tls/TlsConfigBuilder.php',
+            'TLS client certificate and key must be given in the same form',
+            'TLS client certificate and key must be given in the same form',
         ],
         [
             'src/Client/Tls/TlsConfig.php',
-            'Both clientCert and clientKey must be provided together',
+            'TlsConfig requires $clientCert and $clientKey together',
+            'TlsConfig requires $clientCert and $clientKey together',
         ],
         [
             'src/Client/Tls/TlsConfig.php',
-            '%s does not contain PEM data',
+            '$%s does not contain PEM data',
+            '$caCert does not contain PEM data',
         ],
         [
             'src/Client/Tls/TlsConfig.php',
-            'Partial TLS configuration:',
+            'Partial TLS configuration: $clientCert and $clientKey are set but',
+            'Partial TLS configuration: $clientCert and $clientKey are set but',
         ],
     ];
 
@@ -130,15 +150,15 @@ final class TlsReferenceDocumentationGuardTest extends TestCase
 
         $violations = [];
 
-        foreach (self::ERROR_MESSAGES as [$source, $message]) {
-            if (!str_contains($this->read($source), $message)) {
-                $violations[] = sprintf('%s no longer contains the message "%s"', $source, $message);
+        foreach (self::ERROR_MESSAGES as [$source, $sourceFragment, $documentedFragment]) {
+            if (!str_contains($this->read($source), $sourceFragment)) {
+                $violations[] = sprintf('%s no longer contains the message "%s"', $source, $sourceFragment);
             }
-            if (!str_contains($troubleshooting, $message)) {
+            if (!str_contains($troubleshooting, $documentedFragment)) {
                 $violations[] = sprintf(
                     '%s does not explain the message "%s"',
                     self::TROUBLESHOOTING,
-                    $message,
+                    $documentedFragment,
                 );
             }
         }
