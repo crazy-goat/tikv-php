@@ -13,6 +13,7 @@ of the file.
 
 <!-- index:start -->
 - [Detect the cluster mode with a V2 RawKV read — the error names the storage mode](#detect-the-cluster-mode-with-a-v2-rawkv-read--the-error-names-the-storage-mode)
+- [A fresh TiKV cluster bumps region epochs for ~10 s after the stores register (issue #713)](#a-fresh-tikv-cluster-bumps-region-epochs-for-10-s-after-the-stores-register-issue-713)
 - [A test that reads a value out of the file under test pins the relation, not the value (issue #731)](#a-test-that-reads-a-value-out-of-the-file-under-test-pins-the-relation-not-the-value-issue-731)
 - [A transactional scan is a read: one timestamp for every returned key](#a-transactional-scan-is-a-read-one-timestamp-for-every-returned-key)
 - [A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep](#a-lock-resolution-deadline-fix-starts-from-the-current-lockresolver-not-from-470s-ttl-sleep)
@@ -180,6 +181,41 @@ best-effort by design: when it cannot reach a store (for example a host run
 where PD advertises `tikv1:20160`, which resolves only inside the compose
 network) it warns and lets the suite run, and `tests/E2E/ClusterProbe.php`
 reports the unreachable cluster with a better message.
+
+## A fresh TiKV cluster bumps region epochs for ~10 s after the stores register (issue #713)
+
+The end-to-end readiness gate used to accept the cluster as soon as PD listed
+all three stores as `Up`, and the TxnKV suite then flaked roughly every third
+or fourth run with `RegionException: RegionError failed: EpochNotMatch current
+epoch of region N is conf_ver: 1 version: 5` in a test that had done nothing
+unusual. A fresh TiKV 8.5.5 cluster reports its bootstrap state in three
+stages (measured with `/pd/api/v1/regions`, counting from the moment the
+third store appears):
+
+| time | regions | epoch | peers per region |
+|---|---|---|---|
+| 0 s | 1 | `version 1`, `conf_ver 1` | 1 |
+| ~3 s | 5 (split into the TiKV table regions) | `version 5`, `conf_ver 1` | 1 |
+| ~10 s | 5 | `version 5`, `conf_ver 5` | 3 |
+
+Both later steps bump the region epoch. A client that cached a region before a
+step sends a stale epoch afterwards and gets `EpochNotMatch`; the retry path
+refreshes the cache, so ordinary reads and the prewrite recover — but the
+**primary commit is deliberately not retried** (a transport failure there
+leaves the outcome undetermined, and the response-borne check has no retry
+loop either), so a transaction whose prewrite runs before a bump and whose
+commit runs after it fails outright. That is the exact shape of the CI
+failure: the suite started 0.5 s after the stores were Up and one commit
+straddled the ~3 s split.
+
+Do not "fix" this in the client by retrying the primary commit blindly, and do
+not make the gate wait for a fixed number of seconds. Readiness now means
+"every region carries its full replica set" (`TIKV_REGION_PEER_COUNT`, three
+on the default topology), which is exactly the point after which a fresh
+cluster stops changing the layout on its own; the check lives in
+`scripts/lib/wait-for-cluster.sh` (shared by `scripts/test-e2e.sh`) and in the
+two inline waits of the `e2e-tests` job in `.github/workflows/ci.yml`, which
+cannot source the library.
 
 ## A test that reads a value out of the file under test pins the relation, not the value (issue #731)
 

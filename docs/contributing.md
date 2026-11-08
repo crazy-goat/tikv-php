@@ -666,10 +666,14 @@ public function getKeyTTL(string $key): ?int;
 The full issue-to-merge process lives in [`workflow.md`](workflow.md); this
 section is the short version for contributors.
 
-1. **Push your branch**:
+1. **Rebase and push your branch**:
    ```bash
+   git fetch origin
+   git rebase origin/master
    git push origin feature/my-feature
    ```
+   Rebase right before you push, not only when there is a conflict: the branch has to
+   be based on `master` as it is when the pull request is opened.
 
 2. **Create Pull Request** on GitHub:
    - Use clear title following commit convention
@@ -687,7 +691,8 @@ section is the short version for contributors.
 4. **Code Review**:
    - Address reviewer comments
    - Keep commits clean (squash if needed)
-   - Merge or rebase `master` into your branch if there are conflicts
+   - Keep the branch rebased on `master`; resolve any conflict, run the checks again,
+     and update the pull request
 
 5. **Merge**:
    - Maintainers merge once `ci-ok` is green and the branch is up to date with

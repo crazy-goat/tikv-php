@@ -71,6 +71,9 @@ fi
 # A relative path is relative to the current directory, not to the main checkout.
 case "$dir" in /*) ;; *) dir="$PWD/$dir" ;; esac
 
+# Fetch first, so the new branch starts from the current origin/<default>.
+# That base is fresh only at creation: the branch ages while it is reviewed,
+# so step 5 of docs/workflow.md rebases it again right before the pull request.
 git -C "$root" fetch origin "$default"
 git -C "$root" worktree add -b "$branch" "$dir" "origin/$default"
 
