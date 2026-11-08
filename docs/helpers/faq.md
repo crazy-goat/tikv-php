@@ -383,8 +383,8 @@ extension-free (see the section above). Two consequences:
   `extensions: grpc` to that job**: the obvious "fix" for a red unit job
   would silently delete the guarantee that the Unit suite runs without the
   extension. Every other job (lint, `grpc-unit-tests`, `integration-tests`,
-  the two E2E jobs) installs the extension and therefore enforces the
-  requirement.
+  the two E2E jobs, and the mutation job) installs the extension and
+  therefore enforces the requirement.
 - The flag has a second effect: Composer drops the ignored requirement from
   the generated `vendor/composer/platform_check.php`, so the autoloader still
   boots on a machine without the extension. Without the flag the generated
@@ -1205,8 +1205,11 @@ Facts verified empirically (PHPUnit 11.5.55, PR #484 for #323/#358/#359):
    though every test passed. `ParallelRangeOpsCapTest` and
    `CheckedGrpcFutureRetryableDispatchTest` were listed in both suites until
    issue #362; they now live in `Unit` only, which the coverage job runs too.
-5. `php -n vendor/bin/phpunit --testsuite Unit --fail-on-skipped` is the
-   faithful local simulation of CI's unit job (php -n = no extensions).
+5. `php -n vendor/bin/phpunit --testsuite Unit --fail-on-skipped` is a
+   **stricter** local simulation than CI's unit job: `php -n` ignores
+   `php.ini`, so none of the extensions configured there are loaded, while
+   CI runs `shivammathur/setup-php` with its default extension set and lacks
+   only `ext-grpc`.
 6. XML comment gotcha hit while documenting this: XML comments cannot
    contain `--` — the phrase `--testsuite` inside an XML comment breaks
    parsing with "Double hyphen within comment". Use "testsuite selector".
