@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
+namespace CrazyGoat\TiKV\Tests\Unit\Region;
 
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
@@ -274,6 +274,24 @@ class RegionErrorHandlerTest extends TestCase
         $this->expectExceptionMessage('epoch not match');
 
         RegionErrorHandler::check($response, null, 42);
+    }
+
+    public function testNotLeaderWithoutCacheDoesNotThrowFromInvalidation(): void
+    {
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(42);
+
+        $error = new Error();
+        $error->setMessage('not leader');
+        $error->setNotLeader($notLeader);
+
+        $response = new RawGetResponse();
+        $response->setRegionError($error);
+
+        $this->expectException(RegionException::class);
+        $this->expectExceptionMessage('not leader');
+
+        RegionErrorHandler::check($response, null, 42, notLeaderOwnedByRetryExecutor: false);
     }
 
     // ========================================================================
