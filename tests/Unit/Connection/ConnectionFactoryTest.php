@@ -12,6 +12,7 @@ use CrazyGoat\TiKV\Client\Connection\ConnectionBundle;
 use CrazyGoat\TiKV\Client\Connection\ConnectionFactory;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Connection\TimestampOracle;
+use CrazyGoat\TiKV\Client\Connection\TlsState;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
@@ -1176,6 +1177,88 @@ class ConnectionFactoryTest extends TestCase
         );
 
         $this->assertTrue($bundle->ownsGrpcClient);
+    }
+
+    /**
+     * `'tls' => null` means "no TLS configuration" everywhere else
+     * ({@see ConnectionFactory::buildTlsConfig()}), so it is not a transport
+     * option that conflicts with a supplied transport (issue #695).
+     */
+    public function testSuppliedGrpcClientAcceptsExplicitNullTlsOption(): void
+    {
+        $grpc = new GrpcClient();
+
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpcClient' => $grpc, 'tls' => null],
+        );
+
+        $this->assertSame($grpc, $bundle->grpc);
+        $this->assertFalse($bundle->ownsGrpcClient);
+    }
+
+    /**
+     * A supplied transport may well use TLS, so the bundle must not report
+     * its state as plaintext (issue #695).
+     */
+    public function testSuppliedGrpcClientReportsUnknownTlsState(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['grpcClient' => new GrpcClient()],
+        );
+
+        $this->assertSame(TlsState::Unknown, $bundle->tlsState);
+        $this->assertNull($bundle->tlsConfig);
+    }
+
+    public function testFactoryBuiltPlaintextTransportReportsPlaintextTlsState(): void
+    {
+        $bundle = ConnectionFactory::create(['127.0.0.1:2379']);
+
+        $this->assertSame(TlsState::Plaintext, $bundle->tlsState);
+        $this->assertNull($bundle->tlsConfig);
+    }
+
+    public function testFactoryBuiltTlsTransportReportsTlsState(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => ['caCertPem' => self::CA_PEM]],
+        );
+
+        $this->assertSame(TlsState::Tls, $bundle->tlsState);
+        $this->assertNotNull($bundle->tlsConfig);
+    }
+
+    /**
+     * `'tls' => []` and a base-dir-only config build a `TlsConfig` with no
+     * material, and `GrpcClient::createChannel()` opens an insecure channel
+     * for it. Reporting `TlsState::Tls` on object presence alone would be
+     * the same fail-open signal #304 removed (issue #695).
+     */
+    public function testEmptyTlsConfigReportsPlaintextTlsState(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => []],
+        );
+
+        $this->assertSame(TlsState::Plaintext, $bundle->tlsState);
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertFalse($bundle->tlsConfig->isEnabled());
+    }
+
+    public function testBaseDirOnlyTlsConfigReportsPlaintextTlsState(): void
+    {
+        $bundle = ConnectionFactory::create(
+            ['127.0.0.1:2379'],
+            options: ['tls' => ['caCertBaseDir' => $this->tempDir]],
+        );
+
+        $this->assertSame(TlsState::Plaintext, $bundle->tlsState);
+        $this->assertNotNull($bundle->tlsConfig);
+        $this->assertFalse($bundle->tlsConfig->isEnabled());
     }
 
     public function testTlsNonArrayStringThrowsInsteadOfSilentPlaintext(): void
