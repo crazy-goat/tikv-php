@@ -653,7 +653,7 @@ final readonly class TwoPhaseCommitter
                     $labels,
                 );
             } catch (BatchPartialFailureException $e) {
-                $this->logPrewritePartialFailure($e);
+                $this->logFanOutPartialFailure($e, 'Prewrite');
 
                 throw $e->getFirstRegionError();
             }
@@ -1483,31 +1483,40 @@ final readonly class TwoPhaseCommitter
     }
 
     /**
-     * Report the aggregated failures of a parallel prewrite fan-out
-     * (issue #431, GAP-17).
+     * Report the aggregated failures of a parallel fan-out
+     * (issues #431, #691).
      *
      * `BatchPartialFailureException` carries a descriptor for every failed
      * call (issue #285, GRPC-26): the real TiKV region ID and the sub-batch
      * index, so several failures from one region are reported separately
      * instead of being mapped through a bare array index.
+     *
+     * The message keeps the operation as its prefix (`Prewrite`,
+     * `Rollback`, `Pessimistic rollback`) so an operator can tell which
+     * phase lost regions; the context is identical for every caller.
+     *
+     * @param string $operation Human-readable phase name used as the
+     *        message prefix
      */
-    private function logPrewritePartialFailure(BatchPartialFailureException $failure): void
-    {
+    private function logFanOutPartialFailure(
+        BatchPartialFailureException $failure,
+        string $operation,
+    ): void {
         $regionErrors = $failure->getRegionErrors();
-        $failedRegions = [];
+        $failedCalls = [];
         foreach ($failure->getFailedCallIds() as $index => $callId) {
             $error = $regionErrors[$index] ?? null;
-            $failedRegions[] = [
+            $failedCalls[] = [
                 'regionId' => $callId->regionId,
                 'subBatchIndex' => $callId->subBatchIndex,
                 'error' => $error instanceof TiKvException ? $error->getMessage() : 'Unknown',
             ];
         }
 
-        $this->logger->warning('Prewrite fan-out failed for some regions', [
+        $this->logger->warning(sprintf('%s fan-out failed for some regions', $operation), [
             'failedRegions' => count($regionErrors),
             'totalRegions' => $failure->getTotalRegions(),
-            'errors' => $failedRegions,
+            'errors' => $failedCalls,
         ]);
     }
 
@@ -1742,22 +1751,46 @@ final readonly class TwoPhaseCommitter
         $regionCalls = [];
         /** @var array<int, BatchCallId> $labels */
         $labels = [];
+        /**
+         * Failures swallowed by the wait phase, in dispatch order. Shared
+         * with every secondary call so the fan-out can report one aggregate
+         * summary after awaiting its peers (issue #691).
+         *
+         * @var list<array{regionId: int, subBatchIndex: int, error: string}> $swallowedFailures
+         */
+        $swallowedFailures = [];
         foreach ($keysByRegion as $batchIndex => $batch) {
             $region = $batch['region'];
             $regionKeys = $batch['keys'];
             $firstKey = $regionKeys[0] ?? '';
 
             $slot = count($regionCalls);
-            $regionCalls[] = fn(): CheckedGrpcFuture => $this->secondaryCommitSwallowing(
+            $callId = $callIdsByBatchIndex[$batchIndex];
+            $labels[$slot] = $callId;
+            // A plain closure (not an arrow function) so the shared failure
+            // collector is captured by reference: arrow functions capture by
+            // value, which would silently drop every recorded failure.
+            $regionCalls[] = function () use (
                 $region,
                 $regionKeys,
                 $firstKey,
                 $state,
                 $retryExecutor,
                 $classifier,
-                $region->regionId,
-            );
-            $labels[$slot] = $callIdsByBatchIndex[$batchIndex];
+                $callId,
+                &$swallowedFailures,
+            ): CheckedGrpcFuture {
+                return $this->secondaryCommitSwallowing(
+                    $region,
+                    $regionKeys,
+                    $firstKey,
+                    $state,
+                    $retryExecutor,
+                    $classifier,
+                    $callId,
+                    $swallowedFailures,
+                );
+            };
         }
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
@@ -1781,6 +1814,22 @@ final readonly class TwoPhaseCommitter
                 ['exception' => $e],
             );
         }
+
+        if ($swallowedFailures !== []) {
+            // One aggregate for the whole fan-out (issue #691): the
+            // per-region warnings keep the individual exceptions, but a
+            // commit that failed in several regions must also be visible as
+            // a single event naming all of them. The transaction stays
+            // Committed either way — the primary is already durable.
+            $this->logger->warning(
+                'Secondary commit fan-out failed for some regions; locks will be resolved by readers',
+                [
+                    'failedRegions' => count($swallowedFailures),
+                    'totalRegions' => count($regionCalls),
+                    'errors' => $swallowedFailures,
+                ],
+            );
+        }
     }
 
     /**
@@ -1800,6 +1849,12 @@ final readonly class TwoPhaseCommitter
      * commits nor change their outcome (issue #291).
      *
      * @param string[] $regionKeys
+     * @param BatchCallId $callId The call's region/sub-batch identity, used
+     *        in the per-region warning and the aggregate summary
+     * @param list<array{regionId: int, subBatchIndex: int, error: string}> $swallowedFailures
+     *        Fan-out-wide collector: every swallowed failure is appended so
+     *        {@see self::commitKeys()} can log one aggregate summary once
+     *        all peers have been awaited (issue #691)
      */
     private function secondaryCommitSwallowing(
         RegionInfo $region,
@@ -1808,7 +1863,8 @@ final readonly class TwoPhaseCommitter
         TransactionState $state,
         RetryExecutor $retryExecutor,
         callable $classifier,
-        int $regionId,
+        BatchCallId $callId,
+        array &$swallowedFailures,
     ): CheckedGrpcFuture {
         $future = $this->commitWithRetry(
             $region,
@@ -1819,14 +1875,19 @@ final readonly class TwoPhaseCommitter
             $classifier,
         );
 
-        return CheckedGrpcFuture::fromCallable(function () use ($future, $regionId) {
+        return CheckedGrpcFuture::fromCallable(function () use ($future, $callId, &$swallowedFailures) {
             try {
                 return $future->waitForExecutor();
             } catch (\Exception $e) {
                 $this->logger->warning('Secondary commit failed; locks will be resolved by readers', [
-                    'regionId' => $regionId,
+                    'regionId' => $callId->regionId,
                     'exception' => $e,
                 ]);
+                $swallowedFailures[] = [
+                    'regionId' => $callId->regionId,
+                    'subBatchIndex' => $callId->subBatchIndex,
+                    'error' => $e->getMessage(),
+                ];
 
                 return null;
             }
@@ -2024,6 +2085,12 @@ final readonly class TwoPhaseCommitter
                 );
                 continue;
             } catch (BatchPartialFailureException $e) {
+                // Report every failed region before surfacing only the first
+                // one (issue #691): the rethrow below preserves the
+                // sequential first-abort contract, so the aggregate is the
+                // sole record of the other regions' errors.
+                $this->logFanOutPartialFailure($e, 'Rollback');
+
                 // Preserve the sequential first-abort exception semantics
                 // (issue #291): rethrow the first failing group's original
                 // exception instead of the aggregate.
@@ -3001,6 +3068,10 @@ final readonly class TwoPhaseCommitter
                 );
                 continue;
             } catch (BatchPartialFailureException $e) {
+                // Report every failed region before surfacing only the first
+                // one (issue #691) — same contract as batchRollback().
+                $this->logFanOutPartialFailure($e, 'Pessimistic rollback');
+
                 // Preserve the sequential first-abort exception semantics.
                 throw $e->getFirstRegionError();
             } catch (\RuntimeException $e) {

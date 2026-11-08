@@ -232,6 +232,38 @@ GrpcException: Handshake failed
    $client = RawKvClient::create(['192.168.1.100:2379'], options: $options);
    ```
 
+#### TLS Configuration Errors
+
+These `InvalidArgumentException`s are raised while the TLS configuration is
+built — by `RawKvClient::create()` / `TxnKvClient::create()` or by
+`TlsConfigBuilder` — before any gRPC channel is opened, so they never reach
+the `Handshake failed` error above. The message names the problem; find it in
+the tables below.
+
+**Reading a certificate file (`TlsConfigBuilder`)**
+
+| Message | What it means and how to fix it |
+| --- | --- |
+| `TLS value looks like a file path but the file does not exist or is not readable` | Only the deprecated `caCert` / `clientCert` / `clientKey` keys guess the input type: a value without a `-----BEGIN` header is treated as a path, and that path is missing or unreadable. Use `caCertFile` (or `caCertPem` for inline content) instead. |
+| `TLS file has disallowed extension "%s"` | The path's extension is not `.pem`, `.crt` or `.key`; `%s` is the lowercase extension it found (`""` when there is none). Rename the file, or use a `.pem` / `.crt` / `.key` copy. |
+| `Cannot read TLS file: file does not exist or is not readable` | `realpath()` failed or the resolved file is not readable: a typo, a missing file, a dangling symlink or insufficient permissions. Check the path and the permissions of every directory on it. |
+| `Invalid TLS base directory: directory does not exist` | The `$baseDir` argument or the `caCertBaseDir` / `clientCertBaseDir` option does not resolve to an existing directory. Use an absolute path to a directory that exists. |
+| `TLS file path is outside the allowed base directory` | The canonicalized certificate path is neither the base directory itself nor beneath it. Move the file under the base directory, or point the base option at the directory that contains it. |
+| `Cannot read TLS file: read failed` | The file passed the existence, readability and containment checks, but `file_get_contents()` still failed — typically a permission or I/O error, or the file was replaced between the check and the read. Verify that it is a regular, readable file. |
+| `TLS client certificate and key must be given in the same form, both file paths or both inline PEM; got …` | Only the deprecated `clientCert` + `clientKey` pair guesses the form, and it must guess the same form for both halves. Give both as file paths or both as inline PEM, or use `clientCertFile` + `clientKeyFile` / `clientCertPem` + `clientKeyPem`. The message says which half was read as which. |
+
+**Building the `TlsConfig`**
+
+| Message | What it means and how to fix it |
+| --- | --- |
+| `TlsConfig requires $clientCert and $clientKey together; got $clientCert=true, $clientKey=false` | Exactly one of the two properties is set. The values after `got` are presence flags (`true` = set, `false` = missing), not certificate material. Provide both or neither; the `options['tls']` factory reports the same mistake earlier as `Incomplete client certificate pair`. The `$`-prefixed names are the `TlsConfig` properties, not the deprecated `options['tls']` keys of the same bare name. |
+| `$caCert does not contain PEM data` (also `$clientCert` and `$clientKey`) | The named property has no `-----BEGIN` header, so it is not PEM — often a file path passed where content is expected. Pass the file to `withCaCertFile()` / `withClientCertFile()` instead. The leading `$` is the property name, not the deprecated option key of the same bare name. |
+| `Partial TLS configuration: $clientCert and $clientKey are set but $caCert is not…` | A client certificate and key are configured without a CA certificate. A CA is required to verify the server: add `caCertFile` / `caCertPem`, or remove the client pair if you intend to use an insecure connection. |
+
+The remaining `options['tls']` validation errors — a non-array `tls` value, an
+unrecognised key, a non-string value and an incomplete client pair — are
+listed in [TLS/SSL Configuration](configuration.md#tlsssl-configuration).
+
 ### Timeout Issues
 
 **Error:**
