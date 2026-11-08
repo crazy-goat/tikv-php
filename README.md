@@ -24,8 +24,26 @@ make example
 
 ## Installation
 
+The package is not published on Packagist yet, so Composer has to be told
+where to find it. Add the repository to the `repositories` section of your
+project's `composer.json`:
+
+```json
+{
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/crazy-goat/tikv-php"
+        }
+    ]
+}
+```
+
+Then require the package, using the constraint from
+[Which version to require](#which-version-to-require):
+
 ```bash
-composer require crazy-goat/tikv-client
+composer require crazy-goat/tikv-client:~0.14.0
 ```
 
 The client speaks gRPC through the **`ext-grpc`** PHP extension, so the
