@@ -2483,6 +2483,11 @@ of #309 (SEC-06):
    constructors. Any future source-scanning guard should follow the same
    "inspect the call, not the file text" rule.
 
+The 16-byte salt floor added in #810 is a **length** check, not an entropy
+guarantee: `setSalt()` rejects a shorter value, but a low-entropy 16-byte
+string is still guessable. Use `KeyRedactor::generateSalt()` (32 random bytes
+as 64 hex characters) or another high-entropy secret.
+
 ## The pessimistic-lock error loop is also exhaustive/fail-closed (TXN-25, issue #454)
 
 `TwoPhaseCommitter::pessimisticLockBatch()` is the second `KeyError`

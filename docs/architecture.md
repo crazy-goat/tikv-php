@@ -227,8 +227,10 @@ Optimistic Transaction                   Pessimistic Transaction
 ```
 
 Pessimistic-lock requests are split by the same `maxTxnBatchSize` /
-`maxTxnBatchCount` limits as prewrite and commit (issue #430), so one region
-can require several lock requests. `PessimisticLockRequest.is_first_lock` is
+`maxTxnBatchCount` limits as prewrite and commit (issue #430), and both
+rollback requests (`KvBatchRollback` and `KVPessimisticRollback`) use that
+split too (issue #791), so one region
+can require several lock or rollback requests. `PessimisticLockRequest.is_first_lock` is
 carried only by the batch whose mutations contain the transaction's primary
 key (issue #225); it is not tied to the first region or the first request, and
 a retry of that batch keeps the flag. TiKV uses it to decide whether the
@@ -243,7 +245,9 @@ rollback because the transaction or its lock is already gone (even when
 `retryable` is co-set), and a structured `conflict` is a fatal
 `TransactionConflictException` rather than a retry. A bare `retryable` string
 is retried; every other `KeyError` (including an empty payload) throws the
-base `TiKvException`. Whatever the outcome, the attempted rollback is
+base `TiKvException`. Both rollback requests are size-batched per region like
+prewrite and commit (issue #791), so cleaning up a large transaction cannot be
+rejected with `RaftEntryTooLarge` and leave its locks to expire. Whatever the outcome, the attempted rollback is
 terminal for the client (issue #231, TXN-26): a `finally` block clears the
 write and read sets, sets the status to `RolledBack` and closes the state
 before the exception propagates, so `getStatus()` never reports a dead
@@ -255,8 +259,9 @@ and are the lock resolvers' responsibility.
 transaction and is opt-in bounded on `begin()` (`0` = unlimited) by
 `maxTxnEntryCount` / `maxTxnEntrySize` / `maxTxnTotalSize`. Exceeding a limit
 throws `TransactionTooLargeException` before the write is buffered. The
-prewrite and commit requests are independently split per region by
-`maxTxnBatchSize` and `maxTxnBatchCount` (issue #430).
+prewrite, pessimistic-lock, commit and rollback requests are independently
+split per region by `maxTxnBatchSize` and `maxTxnBatchCount` (issues #430 and
+#791).
 
 Read-set tracking is **off by default** (`trackReadSet`): `get()`, `batchGet()`,
 `getForUpdate()` and `scan()`/`reverseScan()` populate it, and nothing in the
