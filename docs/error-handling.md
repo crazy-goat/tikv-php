@@ -206,22 +206,7 @@ Verdict legend:
 
 `BatchDeadlineExceededException` cannot cause a double apply. The secondary-commit fan-out runs after the commit point, so `commit()` logs a batch deadline there and returns normally. The leftover secondary locks are resolved by readers. The prewrite fan-out still throws it, because the transaction is not committed yet. A rollback fan-out throws it like a partial failure; the transaction is still marked `RolledBack` and closed (issue #231), so there is no second rollback to call — any locks the interrupted fan-out left behind expire with their TTL.
 
-When the prewrite fan-out fails in more than one region, `commit()` throws
-only the **first** failing region's error — the failing group with the lowest
-dispatch index, the one the sequential loop would have aborted with (#291).
-The fan-out waits for every in-flight region before it throws, so the other
-failures are not lost, but they reach the caller only through the log: a
-`warning` record `Prewrite fan-out failed for some regions` with
-`failedRegions` (the number of failed fan-out calls, so a region with several
-sub-batches can contribute more than one), `totalRegions` (the number of
-calls in the fan-out), and `errors`, one entry per failed call carrying
-`regionId`, `subBatchIndex` and the error message
-(#431). The exception itself keeps the pre-#291 first-error contract, so a
-caller that needs every failure (to decide which regions to re-read, for
-example) must read that log record. The primary region's prewrite is awaited
-on its own before the secondary fan-out starts, so a primary failure
-surfaces directly; the secondary-commit fan-out after the commit point does
-not throw at all (see above).
+When the prewrite fan-out fails in more than one region, `commit()` throws only the **first** failing region's error — the failing group with the lowest dispatch index, the one the sequential loop would have aborted with (#291). Absent the batch deadline, the fan-out waits for every in-flight region before it throws, so no failure is lost, but the ones after the first reach the caller only through the log: a `warning` record `Prewrite fan-out failed for some regions` with `failedRegions` (the number of failed fan-out calls, so a region with several sub-batches can contribute more than one), `totalRegions` (the number of calls in the fan-out), and `errors`, one entry per failed call carrying `regionId`, `subBatchIndex` and the error message (#431). A `batchDeadlineMs` expiry during the wait phase takes precedence: the executor cancels the remaining futures, discards the errors it has already collected and throws `BatchDeadlineExceededException` instead, so that path writes no summary (see the previous paragraph). The exception itself keeps the pre-#291 first-error contract, so a caller that needs every failure (to decide which regions to re-read, for example) must read that log record. In the default two-phase path the primary region's prewrite is awaited on its own before the secondary fan-out starts, so a primary failure surfaces directly; a multi-region async commit deliberately prewrites the primary **last** (the primary lock is the commit-decision barrier — see [Fast Commit Modes](configuration.md#fast-commit-modes-txnkv)), so the fan-out runs first and a primary failure surfaces after it. The secondary-commit fan-out after the commit point does not throw at all (see above).
 
 `commit()` deserves special care because a network failure at exactly the
 wrong moment leaves the outcome *unknown*: the commit may have taken effect
