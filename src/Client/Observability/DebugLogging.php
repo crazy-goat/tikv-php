@@ -34,9 +34,11 @@ use Throwable;
  *    "no" for `debug` (a Monolog logger at `INFO`, or one whose handler
  *    does not take the level) is asked explicitly. The probe is tolerant:
  *    the level is passed in the shapes the signature accepts (Monolog 2
- *    takes an `int`, Monolog 3 an `int|string|Level`), and a logger whose
- *    `isHandling()` throws is reported as "cannot tell" instead of
- *    breaking the client.
+ *    takes an `int`, Monolog 3 an `int|string|Level`) and **by reference**,
+ *    because a logger that declares the parameter by reference would
+ *    otherwise make PHP emit a "must be passed by reference" warning before
+ *    the call fails. A logger whose `isHandling()` throws is reported as
+ *    "cannot tell" instead of breaking the client.
  * 2. **The class, when there is no level API.** A `NullLogger` discards
  *    every record — but only the logger that keeps psr/log's own `log()`
  *    *and* `debug()` implementations is known to do so. psr/log does not
@@ -100,7 +102,12 @@ final class DebugLogging
 
         foreach (self::levelArguments() as $argument) {
             try {
-                $answer = $method->invoke($target, $argument);
+                // Invoke with a reference: a logger whose `isHandling()`
+                // declares the level by reference would otherwise emit a
+                // "must be passed by reference" warning before the call
+                // fails (issue #716). A by-value parameter accepts a
+                // reference as well, so one call shape covers both.
+                $answer = $method->invokeArgs($target, [&$argument]);
             } catch (Throwable) {
                 // The signature does not accept this shape of the level
                 // (Monolog 2 takes an int, a Monolog 3 enum takes a Level);

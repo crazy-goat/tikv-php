@@ -3170,6 +3170,20 @@ the client is built, and build a new client after changing them. A
 limitation that is only described in the commit message is a limitation
 that the next integrator re-discovers the hard way.
 
+## A reflective probe cannot pass an argument by reference with `invoke()`
+
+`ReflectionMethod::invoke($target, $argument)` always passes `$argument` by
+value. A method that declares the parameter by reference (`isHandling(int|string &$level)`)
+therefore emits `Argument #1 ($level) must be passed by reference, value
+given` **before** the call throws, and the warning escapes to the user even
+though the probe catches the `TypeError` and falls back (issue #716).
+
+Use `ReflectionMethod::invokeArgs($target, [&$argument])` instead: the array
+element is a reference, so a by-reference parameter is satisfied, and a
+by-value parameter accepts a reference just as well. One call shape covers
+both signatures, with no warning and no need to inspect
+`getParameters()`.
+
 ## `0` means "disabled" in one knob and "invalid" in another — the knob decides
 
 `0` is overloaded across the configuration surface, and the two meanings

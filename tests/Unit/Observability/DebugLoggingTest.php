@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Tests\Unit\Observability;
 
 use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Tests\Unit\Support\BrokenLevelLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\ByReferenceLevelLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\DebugRecordingNullLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\DiscardingNullLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\IntLevelLogger;
@@ -59,6 +60,29 @@ class DebugLoggingTest extends TestCase
     public function testLoggerWithTheIntLevelSignatureDoesNotHandleDebug(): void
     {
         self::assertFalse(DebugLogging::handlesDebug(new IntLevelLogger()));
+    }
+
+    /**
+     * Issue #716: a by-reference level parameter made the probe emit
+     * "Argument #1 ($level) must be passed by reference, value given".
+     */
+    public function testByReferenceLevelApiIsProbedWithoutAWarning(): void
+    {
+        $warnings = [];
+        set_error_handler(static function (int $severity, string $message) use (&$warnings): bool {
+            $warnings[] = $message;
+
+            return true;
+        });
+
+        try {
+            $handlesDebug = DebugLogging::handlesDebug(new ByReferenceLevelLogger());
+        } finally {
+            restore_error_handler();
+        }
+
+        self::assertSame([], $warnings);
+        self::assertFalse($handlesDebug);
     }
 
     public function testVagueLevelApiFallsBackToTheClass(): void
