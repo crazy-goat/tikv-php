@@ -125,6 +125,10 @@ final class ConnectionFactory
             self::rejectTransportOptions($options);
             $grpc = $suppliedGrpc;
             $tlsConfig = null;
+            // The application built this transport, so the factory cannot
+            // know whether it uses TLS. Report "unknown" instead of letting
+            // the null $tlsConfig read as plaintext (issue #695).
+            $tlsState = TlsState::Unknown;
             $ownsGrpcClient = false;
 
             // options['metrics'] is a client-side option: it always backs
@@ -147,6 +151,7 @@ final class ConnectionFactory
             }
         } else {
             $tlsConfig = self::buildTlsConfig($options);
+            $tlsState = TlsState::forFactoryBuiltTransport($tlsConfig);
 
             $grpcArgs = self::resolveGrpcChannelArgs($options);
             $allowInsecure = self::resolveAllowInsecure($options);
@@ -238,6 +243,7 @@ final class ConnectionFactory
             codec: $resolvedCodec,
             ownsGrpcClient: $ownsGrpcClient,
             tracer: $tracer,
+            tlsState: $tlsState,
         );
     }
 
@@ -666,11 +672,24 @@ final class ConnectionFactory
      * honouring them is impossible and ignoring them silently would leave
      * the caller believing (for example) that TLS is enforced.
      *
+     * `'tls' => null` is not a transport configuration: it means "no TLS
+     * configuration" everywhere else ({@see buildTlsConfig()}), so it is
+     * treated as absent here too and does not conflict with a supplied
+     * transport (issue #695).
+     *
      * @param array<string, mixed> $options
      */
     private static function rejectTransportOptions(array $options): void
     {
-        $conflicts = array_values(array_intersect(self::TRANSPORT_OPTION_KEYS, array_keys($options)));
+        $conflicts = [];
+        foreach (self::TRANSPORT_OPTION_KEYS as $key) {
+            if (
+                array_key_exists($key, $options)
+                && ($key !== 'tls' || $options[$key] !== null)
+            ) {
+                $conflicts[] = $key;
+            }
+        }
         if ($conflicts === []) {
             return;
         }
