@@ -22,6 +22,7 @@ use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogOperation;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\RawKv\RawKvBatch;
 use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
@@ -602,7 +603,7 @@ class RawKvBatchTest extends TestCase
             3 => fn(): CheckedGrpcFuture => $this->wrapWithLogging(
                 $batch,
                 CheckedGrpcFuture::fromGrpcFuture($region3),
-                'batch_read',
+                SlowLogOperation::BatchRead,
                 'k3',
             ),
         ];
@@ -637,7 +638,7 @@ class RawKvBatchTest extends TestCase
 
                 return new RawBatchGetResponse();
             }),
-            'batch_read',
+            SlowLogOperation::BatchRead,
             'k1',
         );
 
@@ -664,7 +665,7 @@ class RawKvBatchTest extends TestCase
         $future = $this->wrapWithLogging(
             $batch,
             CheckedGrpcFuture::fromCallable(static fn(): RawBatchGetResponse => new RawBatchGetResponse()),
-            'batch_read',
+            SlowLogOperation::BatchRead,
             'k1',
         );
 
@@ -690,7 +691,7 @@ class RawKvBatchTest extends TestCase
 
                 return new RawBatchGetResponse();
             }),
-            'batch_read',
+            SlowLogOperation::BatchRead,
             $rawKey,
         );
 
@@ -736,7 +737,7 @@ class RawKvBatchTest extends TestCase
     private function wrapWithLogging(
         RawKvBatch $batch,
         CheckedGrpcFuture $inner,
-        string $operation,
+        SlowLogOperation $operation,
         string $key,
     ): CheckedGrpcFuture {
         $method = new \ReflectionMethod(RawKvBatch::class, 'wrapWithLogging');
