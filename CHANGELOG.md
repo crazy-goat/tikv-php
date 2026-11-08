@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- `RegionErrorHandlerTest` moved from `tests/Unit/RawKv/` to `tests/Unit/Region/` and its namespace from `CrazyGoat\TiKV\Tests\Unit\RawKv` to `CrazyGoat\TiKV\Tests\Unit\Region`, so the test mirrors the location of `src/Client/Region/RegionErrorHandler.php` (the class moved in #153). No test behaviour change. (#681)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
