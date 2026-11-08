@@ -190,7 +190,7 @@ final readonly class RawKvBatch
             $count = count($keyValuePairs);
             if (count($ttl) !== $count) {
                 throw new InvalidArgumentException(sprintf(
-                    'TTL array count (%d) must match key-value pairs count (%d)',
+                    'TTL array count (%d) must match pair count (%d)',
                     count($ttl),
                     $count,
                 ));

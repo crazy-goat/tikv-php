@@ -3537,8 +3537,8 @@ class RawKvE2ETest extends TestCase
             try {
                 $client->get('key-' . $i);
                 $this->fail('Expected ClientClosedException on iteration ' . $i);
-            } catch (ClientClosedException) {
-                // Expected
+            } catch (ClientClosedException $e) {
+                $this->assertSame('Client is closed', $e->getMessage());
             }
         }
     }

@@ -93,26 +93,82 @@ class TlsConfigTest extends TestCase
 
     public function testConstructionWithClientCertOnlyThrows(): void
     {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Both clientCert and clientKey must be provided together');
-
-        new TlsConfig(clientCert: 'cert-only');
+        try {
+            new TlsConfig(clientCert: 'cert-only');
+            $this->fail('Expected InvalidArgumentException was not thrown');
+        } catch (InvalidArgumentException $e) {
+            $this->assertSame(
+                'TlsConfig requires $clientCert and $clientKey together; '
+                . 'got $clientCert=true, $clientKey=false',
+                $e->getMessage(),
+            );
+        }
     }
 
     public function testConstructionWithClientKeyOnlyThrows(): void
     {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Both clientCert and clientKey must be provided together');
-
-        new TlsConfig(clientKey: 'key-only');
+        try {
+            new TlsConfig(clientKey: 'key-only');
+            $this->fail('Expected InvalidArgumentException was not thrown');
+        } catch (InvalidArgumentException $e) {
+            $this->assertSame(
+                'TlsConfig requires $clientCert and $clientKey together; '
+                . 'got $clientCert=false, $clientKey=true',
+                $e->getMessage(),
+            );
+        }
     }
 
     public function testConstructionWithClientCertAndKeyWithoutCaThrows(): void
     {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Partial TLS configuration');
+        try {
+            new TlsConfig(clientCert: self::CERT_PEM, clientKey: self::KEY_PEM);
+            $this->fail('Expected InvalidArgumentException was not thrown');
+        } catch (InvalidArgumentException $e) {
+            $this->assertSame(
+                'Partial TLS configuration: $clientCert and $clientKey are set but '
+                . '$caCert is not. A CA certificate is required to verify the server '
+                . 'certificate. Provide one with caCertFile (or caCertPem), or remove '
+                . 'the client certificate and key ($clientCert and $clientKey) if you '
+                . 'intend to use an insecure connection.',
+                $e->getMessage(),
+            );
+        }
+    }
 
-        new TlsConfig(clientCert: self::CERT_PEM, clientKey: self::KEY_PEM);
+    /**
+     * Issue #688: the messages must not name a bare deprecated option key.
+     *
+     * `caCert`, `clientCert` and `clientKey` are both the TlsConfig property
+     * names and the deprecated `options['tls']` keys, so a message that names
+     * one bare leaves the reader guessing which it means. The properties carry
+     * a `$`, and the only option key a message names is a supported one.
+     */
+    public function testMessagesDoNotNameBareDeprecatedOptionKeys(): void
+    {
+        $messages = [];
+
+        try {
+            new TlsConfig(clientCert: self::CERT_PEM);
+            $this->fail('Expected InvalidArgumentException was not thrown');
+        } catch (InvalidArgumentException $e) {
+            $messages[] = $e->getMessage();
+        }
+
+        try {
+            new TlsConfig(clientCert: self::CERT_PEM, clientKey: self::KEY_PEM);
+            $this->fail('Expected InvalidArgumentException was not thrown');
+        } catch (InvalidArgumentException $e) {
+            $messages[] = $e->getMessage();
+        }
+
+        $this->assertCount(2, $messages);
+
+        foreach ($messages as $message) {
+            $this->assertDoesNotMatchRegularExpression('/(?<![$\w])(caCert|clientCert|clientKey)\b/', $message);
+        }
+
+        $this->assertStringContainsString('caCertFile', implode("\n", $messages));
     }
 
     // ========================================================================
@@ -143,7 +199,7 @@ class TlsConfigTest extends TestCase
     public function testNonPemCaCertThrows(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('caCert does not contain PEM data');
+        $this->expectExceptionMessage('$caCert does not contain PEM data');
 
         new TlsConfig(caCert: '/path/to/ca.crt');
     }
@@ -151,7 +207,7 @@ class TlsConfigTest extends TestCase
     public function testNonPemClientCertThrows(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('clientCert does not contain PEM data');
+        $this->expectExceptionMessage('$clientCert does not contain PEM data');
 
         new TlsConfig(caCert: self::SHORT_CA_PEM, clientCert: 'not-pem', clientKey: self::SHORT_KEY_PEM);
     }
@@ -159,7 +215,7 @@ class TlsConfigTest extends TestCase
     public function testNonPemClientKeyThrows(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('clientKey does not contain PEM data');
+        $this->expectExceptionMessage('$clientKey does not contain PEM data');
 
         new TlsConfig(caCert: self::SHORT_CA_PEM, clientCert: self::SHORT_CERT_PEM, clientKey: 'not-pem');
     }

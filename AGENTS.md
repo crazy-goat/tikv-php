@@ -24,7 +24,8 @@ Everything is written in English (code, comments, docs, commits, issues).
 | `benchmarks/`, `examples/` | Benchmarks and runnable examples |
 
 Read `docs/helpers/faq.md` and `docs/helpers/decisions.md` before changing behavior: they record
-recurring pitfalls and project decisions. Add a short entry when you learn something non-obvious.
+recurring pitfalls and project decisions. Add a short entry when you learn something non-obvious;
+it goes directly below the index at the top of the file (newest first), never at the end.
 
 ## Commands
 
