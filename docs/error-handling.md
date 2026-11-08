@@ -206,6 +206,23 @@ Verdict legend:
 
 `BatchDeadlineExceededException` cannot cause a double apply. The secondary-commit fan-out runs after the commit point, so `commit()` logs a batch deadline there and returns normally. The leftover secondary locks are resolved by readers. The prewrite fan-out still throws it, because the transaction is not committed yet. A rollback fan-out throws it like a partial failure; the transaction is still marked `RolledBack` and closed (issue #231), so there is no second rollback to call — any locks the interrupted fan-out left behind expire with their TTL.
 
+When the prewrite fan-out fails in more than one region, `commit()` throws
+only the **first** failing region's error — the failing group with the lowest
+dispatch index, the one the sequential loop would have aborted with (#291).
+The fan-out waits for every in-flight region before it throws, so the other
+failures are not lost, but they reach the caller only through the log: a
+`warning` record `Prewrite fan-out failed for some regions` with
+`failedRegions` (the number of failed fan-out calls, so a region with several
+sub-batches can contribute more than one), `totalRegions` (the number of
+calls in the fan-out), and `errors`, one entry per failed call carrying
+`regionId`, `subBatchIndex` and the error message
+(#431). The exception itself keeps the pre-#291 first-error contract, so a
+caller that needs every failure (to decide which regions to re-read, for
+example) must read that log record. The primary region's prewrite is awaited
+on its own before the secondary fan-out starts, so a primary failure
+surfaces directly; the secondary-commit fan-out after the commit point does
+not throw at all (see above).
+
 `commit()` deserves special care because a network failure at exactly the
 wrong moment leaves the outcome *unknown*: the commit may have taken effect
 even though the RPC returned an error. Two facts about the implementation
@@ -581,7 +598,7 @@ addresses on the RPC path just the same.
 | `scan(string, string, int $limit = 0)` | `InvalidArgumentException`, `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `RegionException`, `GrpcException`, `ScanLimitExceededException` | Limit normalized/rejected ('Scan limit must be 0 or greater', max 10240). `limit: 0` reads the whole range up to `Transaction::MAX_SCAN_LIMIT` (10240) rows; a range with more rows throws `ScanLimitExceededException` instead of returning a truncated result (issue #440). A bounded scan returns at most `limit` rows, so a result whose count equals the limit may be truncated |
 | `set(string, string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `TransactionTooLargeException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Buffers the value locally; default pessimistic mode acquires the physical lock before returning, so lock errors surface here. A failed eager lock triggers best-effort cleanup rollback; whether that cleanup succeeds or fails, the transaction ends terminal (issue #231), so a retry needs a new transaction. Set `eagerPessimisticLocks => false` to defer locking to `commit()`. A write that exceeds `maxTxnEntryCount`/`maxTxnEntrySize`/`maxTxnTotalSize` throws before the lock RPC (issue #430) |
 | `delete(string)` | `InvalidStateException`, `TiKvException`, `TransactionConflictException`, `TransactionTooLargeException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | Same eager pessimistic-lock behavior and failure cleanup as `set()`; the tombstone remains buffered until commit. The same write-set limits apply, counting the key bytes only |
-| `commit()` | `InvalidStateException`, `TiKvException` (incl. [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php)), `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | See [double-apply section](#transactioncommit-and-double-apply); since issue #213 prewrite runs inside the shared retry executor, so region errors and resolved `locked` conflicts are auto-retried while deadlocks/conflicts still escape |
+| `commit()` | `InvalidStateException`, `TiKvException` (incl. [`UndeterminedCommitException`](../src/Client/TxnKv/Exception/UndeterminedCommitException.php)), `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`, `RegionException`, `GrpcException` | See [double-apply section](#transactioncommit-and-double-apply); since issue #213 prewrite runs inside the shared retry executor, so region errors and resolved `locked` conflicts are auto-retried while deadlocks/conflicts still escape. A multi-region prewrite failure throws **only the first failing region's error** (lowest dispatch index); the other regions' errors are logged in the `Prewrite fan-out failed for some regions` warning and never reach the caller — see [the prewrite fan-out paragraph](#transactioncommit-and-double-apply) |
 | `rollback()` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Only an `Active` transaction may be rolled back; a failed RPC still marks it `RolledBack` and closes it (issue #231), so the exception propagates but there is no retry — remaining locks expire with their TTL |
 | `heartbeat(?int $adviseLockTtlMs = null): int` | `InvalidStateException`, `TiKvException`, `RegionException`, `GrpcException` | Extends the primary lock TTL |
 

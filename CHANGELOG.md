@@ -36,6 +36,7 @@ policy now classifies as internal.
 ### Docs
 
 - The `docs/helpers/faq.md` entry on `unlink()` and directory permissions now quotes the errno and both platform messages: `unlink()` on a directory fails with `EISDIR` / "Is a directory" on Linux (where CI runs) and with `EPERM` / "Operation not permitted" on macOS and the BSDs, and the following `rmdir()` fails with `ENOTEMPTY` / "Directory not empty". The entry previously quoted only the macOS wording. (#666)
+- `docs/error-handling.md` now states the multi-region prewrite contract of `Transaction::commit()`: only the **first** failing region's error (the failing group with the lowest dispatch index, #291) is thrown, while the other regions' errors reach the caller only through the `Prewrite fan-out failed for some regions` warning (#431) and its `failedRegions` / `totalRegions` / `errors` context. The "Transaction::commit() and double-apply" section gains the paragraph, and the `commit()` row of the Transaction Operations table points at it. This closes the gap between the #431 changelog claim — which named this file as the place that documents the contract — and the reference, which did not. (#694)
 
 ## [v0.14.0] - 2026-11-08
 
