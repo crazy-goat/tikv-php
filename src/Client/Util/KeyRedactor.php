@@ -19,9 +19,11 @@ use LogicException;
  * `hash_hmac('sha256', $key, $salt)`. The salt is 32 random bytes generated
  * on first use unless {@see setSalt()} configures one, so the same key keeps
  * the same token within a process while different processes (or different
- * salts) produce different tokens. The token contains no part of the key,
- * including for keys of 8 bytes or fewer: recovering a key requires guessing
- * it against the secret salt.
+ * salts) produce different tokens. A configured salt must be at least
+ * {@see MIN_SALT_BYTES} bytes; 32 random bytes (for example the 64 hex
+ * characters returned by {@see generateSalt()}) are recommended. The token
+ * contains no part of the key, including for keys of 8 bytes or fewer:
+ * recovering a key requires guessing it against the secret salt.
  *
  * Integrators can replace this redactor with a custom implementation by
  * calling {@see setRedactor()} before the first key is redacted.
@@ -45,6 +47,16 @@ use LogicException;
  */
 final class KeyRedactor
 {
+    /**
+     * Minimum length, in bytes, of a caller-supplied salt.
+     *
+     * A shorter salt makes the keyed hash cheap to attack: an attacker who can
+     * try every possible short salt recovers the key. A one-byte salt has only
+     * 256 candidates, which is no protection at all for the short tenant, user
+     * and session identifiers this redactor protects.
+     */
+    public const MIN_SALT_BYTES = 16;
+
     private const DIGEST_HEX_LENGTH = 16;
 
     private const SALT_BYTES = 32;
@@ -85,13 +97,20 @@ final class KeyRedactor
      * A `null` salt (the default) makes the redactor generate 32 random bytes
      * on first use, so tokens are stable within the process but differ between
      * processes. Configure a high-entropy fixed salt when tokens must be
-     * comparable across processes or restarts. An empty salt is rejected
-     * because it would turn the keyed hash into an unkeyed one.
+     * comparable across processes or restarts; {@see generateSalt()} returns a
+     * suitable random value. A configured salt must be at least
+     * {@see MIN_SALT_BYTES} bytes: a shorter one is rejected with
+     * {@see InvalidArgumentException}, because it makes the keyed hash cheap to
+     * attack — the empty string would turn it into an unkeyed one. 32 random
+     * bytes remain the recommendation.
      *
      * Like {@see setRedactor()}, this method is one-shot: it throws a
      * {@see LogicException} once a key has been redacted, because changing
      * the salt afterwards would break the in-process correlation the token
      * exists for.
+     *
+     * @throws InvalidArgumentException when the salt is shorter than
+     *                                  {@see MIN_SALT_BYTES} bytes
      */
     public static function setSalt(?string $salt): void
     {
@@ -101,11 +120,36 @@ final class KeyRedactor
             );
         }
 
-        if ($salt === '') {
-            throw new InvalidArgumentException('The key redaction salt must not be empty');
+        if ($salt === null) {
+            self::$salt = null;
+
+            return;
+        }
+
+        if (strlen($salt) < self::MIN_SALT_BYTES) {
+            throw new InvalidArgumentException(sprintf(
+                'The key redaction salt must be at least %d bytes (128 bits), got %d',
+                self::MIN_SALT_BYTES,
+                strlen($salt),
+            ));
         }
 
         self::$salt = $salt;
+    }
+
+    /**
+     * Generate a random salt suitable for {@see setSalt()}.
+     *
+     * Returns {@see SALT_BYTES} random bytes encoded as hex — a 64-character
+     * string, above the {@see MIN_SALT_BYTES} minimum. Store the value in an
+     * environment variable or a secret store and pass it to {@see setSalt()}
+     * at bootstrap so tokens stay comparable across processes.
+     *
+     * @throws \Random\RandomException when the platform CSPRNG fails
+     */
+    public static function generateSalt(): string
+    {
+        return bin2hex(random_bytes(self::SALT_BYTES));
     }
 
     /**

@@ -56,11 +56,13 @@ use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
+use CrazyGoat\TiKV\Client\TxnKv\TwoPhaseCommitter;
 use CrazyGoat\TiKV\Client\Util\KeyOrder;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 use CrazyGoat\TiKV\Client\Util\ShutdownState;
 use CrazyGoat\TiKV\Tests\Unit\Support\ContextRecordingLogger;
 use CrazyGoat\TiKV\Tests\Unit\Support\RecordingLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\RegionFixtures;
 use CrazyGoat\TiKV\Tests\Unit\Support\StubRegionCache;
 use CrazyGoat\TiKV\Tests\Unit\Support\ThrowingLogger;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -81,16 +83,7 @@ class TransactionTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->testRegion = new RegionInfo(
-            regionId: 1,
-            leaderPeerId: 1,
-            leaderStoreId: 1,
-            epochConfVer: 1,
-            epochVersion: 1,
-            startKey: '',
-            endKey: '',
-            peers: [],
-        );
+        $this->testRegion = RegionFixtures::region();
 
         $this->pdClient = $this->createMock(PdClientInterface::class);
         $this->grpc = $this->createMock(GrpcClientInterface::class);
@@ -124,6 +117,8 @@ class TransactionTest extends TestCase
      *     trackReadSet?: bool,
      *     resourceControl?: ResourceControl,
      *     logger?: LoggerInterface,
+     *     maxTxnBatchSize?: int,
+     *     maxTxnBatchCount?: int,
      * } $options
      */
     private function createTransaction(array $options = []): Transaction
@@ -143,6 +138,8 @@ class TransactionTest extends TestCase
             // Existing tests cover the legacy commit-time pass; eager-lock
             // regressions opt in explicitly below.
             eagerPessimisticLocks: $options['eagerPessimisticLocks'] ?? false,
+            maxTxnBatchSize: $options['maxTxnBatchSize'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
+            maxTxnBatchCount: $options['maxTxnBatchCount'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
             trackReadSet: $options['trackReadSet'] ?? false,
             resourceControl: $options['resourceControl'] ?? new ResourceControl(),
         );
@@ -852,9 +849,7 @@ class TransactionTest extends TestCase
         // empty value, which would write '' instead of a tombstone.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -904,9 +899,7 @@ class TransactionTest extends TestCase
         // Op::Del mutations on prewrite.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -1005,9 +998,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         // Without this the batch grouper previously dropped every key
@@ -1049,9 +1040,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -1324,10 +1313,7 @@ class TransactionTest extends TestCase
 
     private function makeStore(): Store
     {
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
-        return $store;
+        return RegionFixtures::store();
     }
 
     private function makeRegion(
@@ -1344,6 +1330,48 @@ class TransactionTest extends TestCase
             startKey: $startKey,
             endKey: $endKey,
         );
+    }
+
+    /**
+     * A pre-split region covering every key plus the two regions after a split
+     * at "k4": region 1 ["", "k4"), region 2 ["k4", "").
+     *
+     * @return array{0: RegionInfo, 1: RegionInfo, 2: RegionInfo}
+     */
+    private function splitAtK4Regions(): array
+    {
+        return [
+            new RegionInfo(
+                regionId: 1,
+                leaderPeerId: 1,
+                leaderStoreId: 1,
+                epochConfVer: 1,
+                epochVersion: 1,
+                startKey: '',
+                endKey: '',
+                peers: [],
+            ),
+            new RegionInfo(
+                regionId: 1,
+                leaderPeerId: 1,
+                leaderStoreId: 1,
+                epochConfVer: 1,
+                epochVersion: 5,
+                startKey: '',
+                endKey: 'k4',
+                peers: [],
+            ),
+            new RegionInfo(
+                regionId: 2,
+                leaderPeerId: 2,
+                leaderStoreId: 2,
+                epochConfVer: 1,
+                epochVersion: 5,
+                startKey: 'k4',
+                endKey: '',
+                peers: [],
+            ),
+        ];
     }
 
     /**
@@ -3262,9 +3290,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -3695,9 +3721,7 @@ class TransactionTest extends TestCase
         // and the proto setter (issue #322).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -3747,9 +3771,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -3780,9 +3802,7 @@ class TransactionTest extends TestCase
         $this->regionCache->method('put');
         $this->regionCache->method('invalidate');
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -3836,9 +3856,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -3877,9 +3895,7 @@ class TransactionTest extends TestCase
         // returning '' (which would also be cached as the key's value).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -3920,9 +3936,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -4871,9 +4885,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -4935,9 +4947,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         // Without this the batch grouper previously dropped every key
@@ -4972,9 +4982,7 @@ class TransactionTest extends TestCase
         // must receive UndeterminedCommitException.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('getTimestamp')->willReturn(3000);
@@ -5024,9 +5032,7 @@ class TransactionTest extends TestCase
         // the string "12345" on the wire (issue #322).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5081,9 +5087,7 @@ class TransactionTest extends TestCase
         // the prewrite and commit requests (client-go SetPriority semantics).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5350,9 +5354,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5363,9 +5365,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5493,9 +5493,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5537,9 +5535,7 @@ class TransactionTest extends TestCase
         // consistent across the transaction's full RPC surface.
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5590,9 +5586,7 @@ class TransactionTest extends TestCase
         // "12345", not the int 12345 (issue #322).
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
         $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
@@ -5986,9 +5980,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -6021,9 +6013,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -6045,9 +6035,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -6084,9 +6072,7 @@ class TransactionTest extends TestCase
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
 
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $store = RegionFixtures::store();
         $this->pdClient->method('getStore')->willReturn($store);
         $this->pdClient->method('getRegion')->willReturn($this->testRegion);
 
@@ -6130,12 +6116,28 @@ class TransactionTest extends TestCase
         $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
         $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
 
+        $lockRequests = [];
         $this->grpc->method('call')
-            ->willReturnCallback(fn(string $addr, string $svc, string $method): object => match ($method) {
-                'KvPessimisticLock' => $lockResponse,
-                'KvPrewrite' => $prewriteResponse,
-                'KvCommit' => $commitResponse,
-                default => throw new \RuntimeException("Unexpected method: $method"),
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                $lockResponse,
+                $prewriteResponse,
+                $commitResponse,
+                &$lockRequests,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $lockRequests[] = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => true]);
@@ -6145,6 +6147,13 @@ class TransactionTest extends TestCase
         $txn->commit();
 
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+        $this->assertCount(1, $lockRequests);
+        $this->assertInstanceOf(PessimisticLockRequest::class, $lockRequests[0]);
+        $keys = [];
+        foreach ($lockRequests[0]->getMutations() as $mutation) {
+            $keys[] = $mutation->getKey();
+        }
+        $this->assertSame(['k1', 'k2', 'k3'], $keys);
     }
 
     public function testPessimisticLockSendsSingleRpcPerRegion(): void
@@ -6167,12 +6176,28 @@ class TransactionTest extends TestCase
         $prewriteResponse = new \CrazyGoat\Proto\Kvrpcpb\PrewriteResponse();
         $commitResponse = new \CrazyGoat\Proto\Kvrpcpb\CommitResponse();
 
+        $lockRequests = [];
         $this->grpc->method('call')
-            ->willReturnCallback(fn(string $addr, string $svc, string $method): object => match ($method) {
-                'KvPessimisticLock' => $lockResponse,
-                'KvPrewrite' => $prewriteResponse,
-                'KvCommit' => $commitResponse,
-                default => throw new \RuntimeException("Unexpected method: $method"),
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                mixed $request,
+            ) use (
+                $lockResponse,
+                $prewriteResponse,
+                $commitResponse,
+                &$lockRequests,
+            ): object {
+                if ($method === 'KvPessimisticLock') {
+                    $lockRequests[] = $request;
+                }
+                return match ($method) {
+                    'KvPessimisticLock' => $lockResponse,
+                    'KvPrewrite' => $prewriteResponse,
+                    'KvCommit' => $commitResponse,
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
             });
 
         $txn = $this->createTransaction(['pessimistic' => true]);
@@ -6182,6 +6207,24 @@ class TransactionTest extends TestCase
         $txn->commit();
 
         $this->assertSame(TransactionStatus::Committed, $txn->getStatus());
+
+        // One lock RPC per region, each carrying only its own region's keys:
+        // k1/k2 sit in region 1 and k4 in region 2.
+        $this->assertCount(2, $lockRequests);
+        $keysByRegion = [];
+        foreach ($lockRequests as $lockRequest) {
+            $this->assertInstanceOf(PessimisticLockRequest::class, $lockRequest);
+            $context = $lockRequest->getContext();
+            $this->assertNotNull($context);
+            $keys = [];
+            foreach ($lockRequest->getMutations() as $mutation) {
+                $keys[] = $mutation->getKey();
+            }
+            sort($keys);
+            $keysByRegion[$context->getRegionId()] = $keys;
+        }
+        ksort($keysByRegion);
+        $this->assertSame([1 => ['k1', 'k2'], 2 => ['k4']], $keysByRegion);
     }
 
     public function testPessimisticLockSetsIsFirstLockTrueOnFirstBatchOnly(): void
@@ -7696,6 +7739,164 @@ class TransactionTest extends TestCase
         $this->assertSame(2, $rollbackRequests[1]->getContext()?->getRegionId());
         $this->assertCount(1, $rollbackRequests[1]->getKeys());
         $this->assertSame('k2', $rollbackRequests[1]->getKeys()[0]);
+    }
+
+    public function testBatchRollbackRegroupsOnlyTheSignallingSubBatchAndLaterOnes(): void
+    {
+        // Issue #791: with several sub-batches per region the re-group must
+        // re-send only the signalling sub-batch and the calls dispatched after
+        // it. The earlier, already-sent sub-batch of the same region must not
+        // be duplicated, and the lookup must use dispatch order rather than
+        // the old region-ID key.
+        [$staleRegion, $splitRegion1, $splitRegion2] = $this->splitAtK4Regions();
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::gte($key, 'k4') ? $splitRegion2 : $splitRegion1,
+        );
+        // The initial grouping resolves the pre-split region; every later
+        // grouping (the re-group) sees the two split regions.
+        $scanCalls = 0;
+        $this->pdClient->method('scanRegions')->willReturnCallback(
+            static function () use (&$scanCalls, $staleRegion, $splitRegion1, $splitRegion2): array {
+                $scanCalls++;
+                return $scanCalls === 1 ? [$staleRegion] : [$splitRegion1, $splitRegion2];
+            },
+        );
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $rollbackRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                object $request,
+            ) use (
+                &$rollbackRequests,
+            ): object {
+                if ($method === 'KvBatchRollback') {
+                    $rollbackRequests[] = $request;
+                }
+                return match ($method) {
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => false, 'maxTxnBatchCount' => 2]);
+        foreach (['k1', 'k2', 'k3', 'k4'] as $index => $key) {
+            $txn->set($key, 'v' . $index);
+        }
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        // Fan-out 1 sends [k1, k2] and the [k3, k4] call signals the split.
+        // The re-group sends [k3] (region 1) and [k4] (region 2), so the
+        // already-sent [k1, k2] is not repeated.
+        $this->assertCount(3, $rollbackRequests);
+
+        $sentKeys = [];
+        foreach ($rollbackRequests as $request) {
+            $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest::class, $request);
+            foreach ($request->getKeys() as $key) {
+                $sentKeys[] = $key;
+            }
+        }
+        $this->assertSame(['k1', 'k2', 'k3', 'k4'], $sentKeys);
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest::class, $rollbackRequests[0]);
+        $this->assertSame(1, $rollbackRequests[0]->getContext()?->getRegionId());
+        $this->assertSame(['k1', 'k2'], iterator_to_array($rollbackRequests[0]->getKeys()));
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest::class, $rollbackRequests[1]);
+        $this->assertSame(1, $rollbackRequests[1]->getContext()?->getRegionId());
+        $this->assertSame(['k3'], iterator_to_array($rollbackRequests[1]->getKeys()));
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest::class, $rollbackRequests[2]);
+        $this->assertSame(2, $rollbackRequests[2]->getContext()?->getRegionId());
+        $this->assertSame(['k4'], iterator_to_array($rollbackRequests[2]->getKeys()));
+    }
+
+    public function testPessimisticRollbackRegroupsOnlyTheSignallingSubBatchAndLaterOnes(): void
+    {
+        // Issue #791: the same sub-batch-scoped re-group through
+        // pessimisticRollbackAll().
+        [$staleRegion, $splitRegion1, $splitRegion2] = $this->splitAtK4Regions();
+
+        $this->regionCache->method('getByKey')->willReturn(null);
+        $this->regionCache->method('put');
+        $this->regionCache->method('invalidate');
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $this->pdClient->method('getRegion')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::gte($key, 'k4') ? $splitRegion2 : $splitRegion1,
+        );
+        $scanCalls = 0;
+        $this->pdClient->method('scanRegions')->willReturnCallback(
+            static function () use (&$scanCalls, $staleRegion, $splitRegion1, $splitRegion2): array {
+                $scanCalls++;
+                return $scanCalls === 1 ? [$staleRegion] : [$splitRegion1, $splitRegion2];
+            },
+        );
+        $this->pdClient->method('getTimestamp')->willReturn(3000);
+
+        $rollbackRequests = [];
+        $this->grpc->method('call')
+            ->willReturnCallback(function (
+                string $addr,
+                string $svc,
+                string $method,
+                object $request,
+            ) use (
+                &$rollbackRequests,
+            ): object {
+                if ($method === 'KVPessimisticRollback') {
+                    $rollbackRequests[] = $request;
+                }
+                return match ($method) {
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            });
+
+        $txn = $this->createTransaction(['pessimistic' => true, 'maxTxnBatchCount' => 2]);
+        foreach (['k1', 'k2', 'k3', 'k4'] as $index => $key) {
+            $txn->set($key, 'v' . $index);
+        }
+        $txn->rollback();
+
+        $this->assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        // Same partition as the batch-rollback test: [k1, k2] then the
+        // re-grouped [k3] and [k4].
+        $this->assertCount(3, $rollbackRequests);
+
+        $sentKeys = [];
+        foreach ($rollbackRequests as $request) {
+            $this->assertInstanceOf(
+                \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest::class,
+                $request,
+            );
+            foreach ($request->getKeys() as $key) {
+                $sentKeys[] = $key;
+            }
+        }
+        $this->assertSame(['k1', 'k2', 'k3', 'k4'], $sentKeys);
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest::class, $rollbackRequests[0]);
+        $this->assertSame(1, $rollbackRequests[0]->getContext()?->getRegionId());
+        $this->assertSame(['k1', 'k2'], iterator_to_array($rollbackRequests[0]->getKeys()));
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest::class, $rollbackRequests[1]);
+        $this->assertSame(1, $rollbackRequests[1]->getContext()?->getRegionId());
+        $this->assertSame(['k3'], iterator_to_array($rollbackRequests[1]->getKeys()));
+
+        $this->assertInstanceOf(\CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest::class, $rollbackRequests[2]);
+        $this->assertSame(2, $rollbackRequests[2]->getContext()?->getRegionId());
+        $this->assertSame(['k4'], iterator_to_array($rollbackRequests[2]->getKeys()));
     }
 
     public function testPessimisticRollbackGivesUpAfterTooManyRegroups(): void

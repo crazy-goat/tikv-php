@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\Region;
 
-use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
 use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\CheckSecondaryLocksResponse;
@@ -33,6 +32,7 @@ use CrazyGoat\Proto\Kvrpcpb\ScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\TxnHeartBeatResponse;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Exception\KeyErrorException;
+use CrazyGoat\TiKV\Client\Exception\NotLeaderHint;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
@@ -152,7 +152,7 @@ final class RegionErrorHandler
                 $cachedRegion = $cache?->getById($regionId);
             }
             $exception = RegionException::fromRegionError($regionError, $cachedRegion);
-            $isNotLeader = $exception->notLeader instanceof NotLeader;
+            $isNotLeader = $exception->notLeader instanceof NotLeaderHint;
 
             if ($regionId !== null) {
                 if ($isNotLeader) {

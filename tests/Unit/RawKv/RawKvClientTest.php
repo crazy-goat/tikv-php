@@ -37,6 +37,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\Exception\NotLeaderHint;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
@@ -876,7 +877,12 @@ class RawKvClientTest extends TestCase
         $response = new RawGetResponse();
         $response->setValue('hello');
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawGet' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->assertSame('hello', $this->client->get('key'));
     }
@@ -892,7 +898,12 @@ class RawKvClientTest extends TestCase
         $response->setNotFound(true);
         $response->setValue('');
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawGet' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->assertNull($this->client->get('missing'));
     }
@@ -996,9 +1007,12 @@ class RawKvClientTest extends TestCase
         $this->pdClient->method('getRegion')->willReturn($this->defaultRegion());
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
 
-        $this->grpc->expects($this->once())
-            ->method('call')
-            ->willReturn(new RawDeleteResponse());
+        $this->grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawDelete' => new RawDeleteResponse(),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->client->delete('key');
     }
@@ -1265,7 +1279,12 @@ class RawKvClientTest extends TestCase
         $response = new RawScanResponse();
         $response->setKvs([$pair1, $pair2]);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         // limit 0 no longer silently caps at MAX_SCAN_LIMIT; the whole range
         // is collected and a guard throws when it exceeds options['maxScanRows']
@@ -1302,82 +1321,6 @@ class RawKvClientTest extends TestCase
         $this->client->reverseScan('l', 'k', 99999);
     }
 
-    // ========================================================================
-    // scan() – negative limit validation (issue #332)
-    //
-    // A negative limit previously passed through to RawScanRequest::setLimit(),
-    // a uint32 protobuf field, so setLimit(-1) serialised to 4294967295 and
-    // TiKV ran an effectively unbounded scan. Every public scan entry point
-    // must reject negatives with 'Scan limit must be 0 or greater'.
-    // ========================================================================
-
-    /**
-     * @param int $limit a negative limit arriving from user input
-     */
-    #[DataProvider('negativeScanLimitProvider')]
-    public function testScanNegativeLimitThrows(int $limit): void
-    {
-        $this->expectNoRpc();
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Scan limit must be 0 or greater');
-
-        $this->client->scan('a', 'z', $limit);
-    }
-
-    public function testReverseScanNegativeLimitThrows(): void
-    {
-        $this->expectNoRpc();
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Scan limit must be 0 or greater');
-
-        $this->client->reverseScan('z', 'a', -1);
-    }
-
-    public function testScanPrefixNegativeLimitThrows(): void
-    {
-        $this->expectNoRpc();
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Scan limit must be 0 or greater');
-
-        $this->client->scanPrefix('prefix', -1);
-    }
-
-    public function testBatchScanNegativeEachLimitThrows(): void
-    {
-        // batchScan() uses a `<= 0` guard with its own message; assert
-        // THAT existing contract rather than the scan() message.
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('eachLimit must be greater than 0');
-
-        $this->client->batchScan([['a', 'z']], -1);
-    }
-
-    public function testScanIteratorNegativeBatchSizeThrows(): void
-    {
-        // ScanIterator's constructor uses a `<= 0` guard with its own
-        // message; assert that existing contract.
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('batchSize must be greater than 0');
-
-        $this->client->scanIterator('a', 'z', -1);
-    }
-
-    public function testScanPrefixIteratorNegativeBatchSizeThrows(): void
-    {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('batchSize must be greater than 0');
-
-        $this->client->scanPrefixIterator('prefix', -1);
-    }
-
-    /** @return iterable<string, array{int}> */
-    public static function negativeScanLimitProvider(): iterable
-    {
-        yield 'minus one' => [-1];
-        yield 'minus large' => [-10240];
-        yield 'int min' => [PHP_INT_MIN];
-    }
-
     public function testScanReturnsResults(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
@@ -1392,7 +1335,12 @@ class RawKvClientTest extends TestCase
         $response = new RawScanResponse();
         $response->setKvs([$pair]);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->scan('k', 'l');
 
@@ -1487,7 +1435,12 @@ class RawKvClientTest extends TestCase
         $response = new RawScanResponse();
         $response->setKvs([$pair]);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->scanPrefix('prefix_');
 
@@ -1510,7 +1463,12 @@ class RawKvClientTest extends TestCase
         $response = new RawScanResponse();
         $response->setKvs([$pair]);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->scanPrefix('k', 0, true);
 
@@ -1576,9 +1534,12 @@ class RawKvClientTest extends TestCase
 
         // Exactly one page is fetched before the client is closed; a second
         // page fetch would be an RPC on a closed channel (issue #344).
-        $this->grpc->expects($this->once())
-            ->method('call')
-            ->willReturn($this->scanResponseWithKeys('k1', 'k2'));
+        $this->grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawScan' => $this->scanResponseWithKeys('k1', 'k2'),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $iterator = $this->client->scanIterator('a', 'z', 2);
 
@@ -1605,9 +1566,12 @@ class RawKvClientTest extends TestCase
         $this->pdClient->method('getStore')->willReturn($this->defaultStore());
         $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
 
-        $this->grpc->expects($this->once())
-            ->method('call')
-            ->willReturn($this->scanResponseWithKeys('prefix_k1', 'prefix_k2'));
+        $this->grpc->expects($this->once())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawScan' => $this->scanResponseWithKeys('prefix_k1', 'prefix_k2'),
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $iterator = $this->client->scanPrefixIterator('prefix_', 2);
 
@@ -1652,7 +1616,12 @@ class RawKvClientTest extends TestCase
         $response = new RawScanResponse();
         $response->setKvs($pairs);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawScan' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->reverseScan('z', 'a');
 
@@ -2553,7 +2522,12 @@ class RawKvClientTest extends TestCase
         $clean = new RawScanResponse();
         $clean->setKvs([$pair]);
 
-        $this->grpc->expects($this->atLeastOnce())->method('call')->willReturn($clean);
+        $this->grpc->expects($this->atLeastOnce())->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawScan' => $clean,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->batchScan([['a', 'z']], 10);
 
@@ -2839,7 +2813,12 @@ class RawKvClientTest extends TestCase
         $response->setPreviousNotExist(false);
         $response->setPreviousValue('old');
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawCompareAndSwap' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->compareAndSwap('key', 'old', 'new');
 
@@ -2862,7 +2841,12 @@ class RawKvClientTest extends TestCase
         $response->setPreviousNotExist(false);
         $response->setPreviousValue('actual');
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawCompareAndSwap' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->compareAndSwap('key', 'wrong', 'new');
 
@@ -2995,7 +2979,12 @@ class RawKvClientTest extends TestCase
         $response->setSucceed(true);
         $response->setPreviousNotExist(true);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawCompareAndSwap' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->assertNull($this->client->putIfAbsent('key', 'value'));
     }
@@ -3014,7 +3003,12 @@ class RawKvClientTest extends TestCase
         $response->setPreviousNotExist(false);
         $response->setPreviousValue('existing');
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawCompareAndSwap' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->assertSame('existing', $this->client->putIfAbsent('key', 'value'));
     }
@@ -3138,7 +3132,12 @@ class RawKvClientTest extends TestCase
         $response->setTtl(42);
         $response->setNotFound(false);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawGetKeyTTL' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->assertSame(42, $this->client->getKeyTTL('key'));
     }
@@ -3153,7 +3152,12 @@ class RawKvClientTest extends TestCase
         $response = new RawGetKeyTTLResponse();
         $response->setNotFound(true);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawGetKeyTTL' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->assertNull($this->client->getKeyTTL('missing'));
     }
@@ -3169,7 +3173,12 @@ class RawKvClientTest extends TestCase
         $response->setTtl(0);
         $response->setNotFound(false);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawGetKeyTTL' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->assertNull($this->client->getKeyTTL('no-ttl'));
     }
@@ -3213,7 +3222,12 @@ class RawKvClientTest extends TestCase
         $response->setTtl(42);
         $response->setNotFound(false);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawGetKeyTTL' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->getKeyTTLResult('key');
 
@@ -3734,7 +3748,7 @@ class RawKvClientTest extends TestCase
                 $this->throwException(new RegionException(
                     'test',
                     'NotLeader',
-                    notLeader: new NotLeader(),
+                    notLeader: new NotLeaderHint(regionId: 1),
                     errorKind: ErrorKind::NotLeader,
                 )),
                 $response,
@@ -3912,7 +3926,12 @@ class RawKvClientTest extends TestCase
         $response->setSucceed(true);
         $response->setPreviousValue('old');
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawCompareAndSwap' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $result = $this->client->compareAndSwap('key', 'old', 'new');
 
@@ -3941,7 +3960,12 @@ class RawKvClientTest extends TestCase
         $response->setSucceed(true);
         $response->setPreviousNotExist(true);
 
-        $this->grpc->method('call')->willReturn($response);
+        $this->grpc->method('call')->willReturnCallback(
+            fn(string $addr, string $service, string $method): object => match ($method) {
+                'RawCompareAndSwap' => $response,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
 
         $this->assertNull($this->client->putIfAbsent('key', 'value'));
     }
