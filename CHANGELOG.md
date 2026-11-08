@@ -49,6 +49,10 @@ policy now classifies as internal.
 
 - The `docs/helpers/faq.md` entry on `unlink()` and directory permissions now quotes the errno and both platform messages: `unlink()` on a directory fails with `EISDIR` / "Is a directory" on Linux (where CI runs) and with `EPERM` / "Operation not permitted" on macOS and the BSDs, and the following `rmdir()` fails with `ENOTEMPTY` / "Directory not empty". The entry previously quoted only the macOS wording. (#666)
 
+### Performance
+
+- The debug-logging guard now covers every hot path, not only the region cache (issue #715). `LockResolver`, `TwoPhaseCommitter`, `TxnReader`, `StoreCache`, `PdClient`, `SafePointCache`, `BatchAsyncExecutor`, `GrpcClient`, `TimestampOracle` and `SstIngestor` ask the logger once, at construction, whether it handles the `debug` level, and skip the log context — including the `KeyRedactor::redact()` call on the lock-resolution and transaction-commit paths — when the answer is no. A `NullLogger`, a Monolog logger above `DEBUG`, or any logger that answers "no" to `isHandling()` therefore costs nothing on those paths, exactly as the region cache has since #300. The answer is still frozen at construction: configure the logger before building the client, as `docs/configuration.md` describes. `tests/Unit/Observability/DebugGuardTest.php` fails the build when a debug call that redacts a key is added outside a guard. (#715)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added

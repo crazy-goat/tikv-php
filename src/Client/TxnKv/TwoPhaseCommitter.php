@@ -37,6 +37,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Client\Observability\DetailedMetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
@@ -236,6 +237,20 @@ final readonly class TwoPhaseCommitter
      */
     public const DEFAULT_TXN_BATCH_COUNT = 512;
 
+    /**
+     * Whether this committer emits its debug records at all.
+     *
+     * The comment, prewrite and lock records of the transaction carry a
+     * redacted key (`KeyRedactor::redact()` is a `hash_hmac` + `substr` +
+     * `sprintf`, plus the lazy salt on first use), and the retry paths log
+     * on every attempt. A logger that discards the record makes that work
+     * pointless, so {@see DebugLogging} asks the logger once, at
+     * construction (issue #715). The answer is frozen with the flag:
+     * reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private bool $debugEnabled;
+
     public function __construct(
         private int $startTs,
         private bool $pessimistic,
@@ -286,6 +301,7 @@ final readonly class TwoPhaseCommitter
         /** Optional structured tracing callback (issue #434, GAP-20). */
         private TraceEventInterface $tracer = new NoOpTracer(),
     ) {
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     public function isPessimistic(): bool
@@ -780,7 +796,9 @@ final readonly class TwoPhaseCommitter
         if ($onePc && $onePcCommitTs > 0) {
             $state->setCommitTs($onePcCommitTs);
             $state->setStatus(TransactionStatus::Committed);
-            $this->logger->debug('One-phase commit done', ['commitTs' => $onePcCommitTs]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('One-phase commit done', ['commitTs' => $onePcCommitTs]);
+            }
             $this->trace(TraceCategory::TXN_2PC, 'one_pc_completed', [
                 'eventId' => (string) $prewritePhaseStartNs,
                 'commitTs' => $onePcCommitTs,
@@ -806,7 +824,9 @@ final readonly class TwoPhaseCommitter
             $commitTs = max($primaryMinCommitTs, $maxMinCommitTs);
             $state->setCommitTs($commitTs);
             $state->setStatus(TransactionStatus::Committed);
-            $this->logger->debug('Async commit done', ['commitTs' => $commitTs]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Async commit done', ['commitTs' => $commitTs]);
+            }
             $this->trace(TraceCategory::TXN_2PC, 'async_commit_completed', [
                 'eventId' => (string) $prewritePhaseStartNs,
                 'commitTs' => $commitTs,
@@ -966,10 +986,12 @@ final readonly class TwoPhaseCommitter
                 $request->setStartVersion($this->startTs);
                 $request->setAdviseLockTtl($adviseLockTtlMs);
 
-                $this->logger->debug('TxnHeartBeat', [
-                    'primary' => KeyRedactor::redact($primary),
-                    'adviseLockTtlMs' => $adviseLockTtlMs,
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('TxnHeartBeat', [
+                        'primary' => KeyRedactor::redact($primary),
+                        'adviseLockTtlMs' => $adviseLockTtlMs,
+                    ]);
+                }
 
                 /** @var TxnHeartBeatResponse $response */
                 $response = $this->grpc->call(
@@ -1201,11 +1223,13 @@ final readonly class TwoPhaseCommitter
             $secondaries,
         );
 
-        $this->logger->debug('Prewrite', [
-            'regionId' => $region->regionId,
-            'keyCount' => count($mutations),
-            'pessimistic' => $this->pessimistic,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Prewrite', [
+                'regionId' => $region->regionId,
+                'keyCount' => count($mutations),
+                'pessimistic' => $this->pessimistic,
+            ]);
+        }
 
         $future = $this->grpc->callAsync(
             $address,
@@ -1916,11 +1940,13 @@ final readonly class TwoPhaseCommitter
         $request->setKeys($keys);
         $request->setCommitVersion($commitTs);
 
-        $this->logger->debug('Commit', [
-            'regionId' => $region->regionId,
-            'keyCount' => count($keys),
-            'commitTs' => $commitTs,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Commit', [
+                'regionId' => $region->regionId,
+                'keyCount' => count($keys),
+                'commitTs' => $commitTs,
+            ]);
+        }
 
         $future = $this->grpc->callAsync(
             $address,
@@ -2081,10 +2107,12 @@ final readonly class TwoPhaseCommitter
                     }
                 }
                 $pendingKeys = array_values(array_unique($regroupKeys));
-                $this->logger->debug('Rollback re-grouping keys after region split', [
-                    'regionId' => $signalledRegion->regionId,
-                    'keyCount' => count($pendingKeys),
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('Rollback re-grouping keys after region split', [
+                        'regionId' => $signalledRegion->regionId,
+                        'keyCount' => count($pendingKeys),
+                    ]);
+                }
             }
         }
     }
@@ -2141,10 +2169,12 @@ final readonly class TwoPhaseCommitter
                 $request->setStartVersion($this->startTs);
                 $request->setKeys($regionKeys);
 
-                $this->logger->debug('BatchRollback', [
-                    'regionId' => $region->regionId,
-                    'keyCount' => count($regionKeys),
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('BatchRollback', [
+                        'regionId' => $region->regionId,
+                        'keyCount' => count($regionKeys),
+                    ]);
+                }
 
                 $future = $this->grpc->callAsync(
                     $address,
@@ -2409,12 +2439,14 @@ final readonly class TwoPhaseCommitter
                 $returnValues,
             );
 
-            $this->logger->debug('PessimisticLock', [
-                'regionId' => $groupRegion->regionId,
-                'keyCount' => count($groupKeys),
-                'attempt' => 1,
-                'forUpdateTs' => $forUpdateTs,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('PessimisticLock', [
+                    'regionId' => $groupRegion->regionId,
+                    'keyCount' => count($groupKeys),
+                    'attempt' => 1,
+                    'forUpdateTs' => $forUpdateTs,
+                ]);
+            }
 
             $firstAttempts[$groupIndex] = $this->grpc->callAsync(
                 $address,
@@ -2655,12 +2687,14 @@ final readonly class TwoPhaseCommitter
                                     $returnValues,
                                 );
 
-                                $this->logger->debug('PessimisticLock', [
-                                    'regionId' => $region->regionId,
-                                    'keyCount' => count($regionKeys),
-                                    'attempt' => $attempt,
-                                    'forUpdateTs' => $forUpdateTs,
-                                ]);
+                                if ($this->debugEnabled) {
+                                    $this->logger->debug('PessimisticLock', [
+                                        'regionId' => $region->regionId,
+                                        'keyCount' => count($regionKeys),
+                                        'attempt' => $attempt,
+                                        'forUpdateTs' => $forUpdateTs,
+                                    ]);
+                                }
 
                                 /** @var PessimisticLockResponse $response */
                                 $response = $this->grpc->call(
@@ -2798,11 +2832,13 @@ final readonly class TwoPhaseCommitter
                         }
                         $delayMs = min($delayMs, $remainingMs);
 
-                        $this->logger->debug('Pessimistic lock conflict, retrying', [
-                            'attempt' => $attempt,
-                            'delayMs' => $delayMs,
-                            'elapsedMs' => $elapsedMs,
-                        ]);
+                        if ($this->debugEnabled) {
+                            $this->logger->debug('Pessimistic lock conflict, retrying', [
+                                'attempt' => $attempt,
+                                'delayMs' => $delayMs,
+                                'elapsedMs' => $elapsedMs,
+                            ]);
+                        }
                         usleep($delayMs * 1000);
                         $elapsedMs += $delayMs;
 
@@ -2831,10 +2867,12 @@ final readonly class TwoPhaseCommitter
                             }
                         }
                         $pendingKeys = array_values(array_unique($regroupKeys));
-                        $this->logger->debug('Pessimistic lock re-grouping keys after region split', [
-                            'regionId' => $region->regionId,
-                            'keyCount' => count($pendingKeys),
-                        ]);
+                        if ($this->debugEnabled) {
+                            $this->logger->debug('Pessimistic lock re-grouping keys after region split', [
+                                'regionId' => $region->regionId,
+                                'keyCount' => count($pendingKeys),
+                            ]);
+                        }
                         // The regroup abandons the not-yet-awaited
                         // first-attempt futures of the later groups; cancel
                         // them before the re-dispatch below (same rationale
@@ -3045,10 +3083,12 @@ final readonly class TwoPhaseCommitter
                     }
                 }
                 $pendingKeys = array_values(array_unique($regroupKeys));
-                $this->logger->debug('Pessimistic rollback re-grouping keys after region split', [
-                    'regionId' => $signalledRegion->regionId,
-                    'keyCount' => count($pendingKeys),
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('Pessimistic rollback re-grouping keys after region split', [
+                        'regionId' => $signalledRegion->regionId,
+                        'keyCount' => count($pendingKeys),
+                    ]);
+                }
             }
         }
     }
@@ -3095,9 +3135,11 @@ final readonly class TwoPhaseCommitter
                 $request->setForUpdateTs($forUpdateTs);
                 $request->setKeys($regionKeys);
 
-                $this->logger->debug('PessimisticRollback', [
-                    'regionId' => $region->regionId,
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('PessimisticRollback', [
+                        'regionId' => $region->regionId,
+                    ]);
+                }
 
                 $future = $this->grpc->callAsync(
                     $address,

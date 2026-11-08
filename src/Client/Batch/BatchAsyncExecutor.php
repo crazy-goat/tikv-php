@@ -8,6 +8,7 @@ use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -22,11 +23,24 @@ final readonly class BatchAsyncExecutor
     public const DEFAULT_MAX_CONCURRENCY = 16;
 
     /**
+     * Whether this executor emits its debug records at all.
+     *
+     * A batch logs its start, every completed region and its end; the
+     * context of a completed region is built by `logContext()` for every
+     * slot. A logger that discards the record makes that work pointless, so
+     * {@see DebugLogging} asks the logger once, at construction (issue
+     * #715). Reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private bool $debugEnabled;
+
+    /**
      * @param LoggerInterface $logger PSR-3 logger
      */
     public function __construct(
         private LoggerInterface $logger = new NullLogger(),
     ) {
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     /**
@@ -109,10 +123,12 @@ final readonly class BatchAsyncExecutor
     ): array {
         $totalRegions = count($regionCalls);
 
-        $this->logger->debug('Starting parallel batch execution', [
-            'totalRegions' => $totalRegions,
-            'deadlineMs' => $deadlineMs,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Starting parallel batch execution', [
+                'totalRegions' => $totalRegions,
+                'deadlineMs' => $deadlineMs,
+            ]);
+        }
 
         $startTimeMs = $deadlineMs > 0 ? (int) (microtime(true) * 1000) : 0;
 
@@ -186,7 +202,9 @@ final readonly class BatchAsyncExecutor
 
                 try {
                     $results[$slot] = $this->awaitValue($future);
-                    $this->logger->debug('Region completed successfully', $this->logContext($slot, $labels));
+                    if ($this->debugEnabled) {
+                        $this->logger->debug('Region completed successfully', $this->logContext($slot, $labels));
+                    }
                 } catch (TiKvException $e) {
                     $errors[$slot] = $e;
                     $this->logger->warning('Region failed', $this->logContext($slot, $labels) + [
@@ -211,10 +229,12 @@ final readonly class BatchAsyncExecutor
             throw new BatchPartialFailureException($errors, $totalRegions, $results, $labels);
         }
 
-        $this->logger->debug('Parallel batch execution completed', [
-            'totalRegions' => $totalRegions,
-            'deadlineMs' => $deadlineMs,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Parallel batch execution completed', [
+                'totalRegions' => $totalRegions,
+                'deadlineMs' => $deadlineMs,
+            ]);
+        }
 
         return $results;
     }

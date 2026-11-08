@@ -24,6 +24,7 @@ use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
@@ -71,6 +72,20 @@ final readonly class TxnReader
     private const MAX_EMPTY_SCAN_REATTEMPTS = 1;
 
     /**
+     * Whether this reader emits its debug records at all.
+     *
+     * The scan records of an empty re-attempted batch carry redacted start
+     * and end keys (`KeyRedactor::redact()` is a `hash_hmac` + `substr` +
+     * `sprintf`, plus the lazy salt on first use), and the scan path reaches
+     * them on every empty answer. A logger that discards the record makes
+     * that work pointless, so {@see DebugLogging} asks the logger once, at
+     * construction (issue #715). The answer is frozen with the flag:
+     * reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private bool $debugEnabled;
+
+    /**
      * @param int $startTs Transaction start timestamp (constant for the lifetime of the reader)
      */
     public function __construct(
@@ -98,6 +113,7 @@ final readonly class TxnReader
         /** Resource-control metadata carried on every read request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
     ) {
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     /**
@@ -1048,11 +1064,13 @@ final readonly class TxnReader
                         continue;
                     }
 
-                    $this->logger->debug('TxnKV scan accepted an empty batch after re-attempts', [
-                        'startKey' => KeyRedactor::redact($cursorStart),
-                        'pending' => $pending,
-                        'reattempts' => $emptyReattempts,
-                    ]);
+                    if ($this->debugEnabled) {
+                        $this->logger->debug('TxnKV scan accepted an empty batch after re-attempts', [
+                            'startKey' => KeyRedactor::redact($cursorStart),
+                            'pending' => $pending,
+                            'reattempts' => $emptyReattempts,
+                        ]);
+                    }
                 }
                 break;
             }
@@ -1210,11 +1228,13 @@ final readonly class TxnReader
                 $emptyReattempts++;
                 continue;
             }
-            $this->logger->debug('TxnKV reverse scan accepted an empty batch after re-attempts', [
-                'startKey' => KeyRedactor::redact($startKey),
-                'endKey' => KeyRedactor::redact($endKey),
-                'reattempts' => $emptyReattempts,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('TxnKV reverse scan accepted an empty batch after re-attempts', [
+                    'startKey' => KeyRedactor::redact($startKey),
+                    'endKey' => KeyRedactor::redact($endKey),
+                    'reattempts' => $emptyReattempts,
+                ]);
+            }
             break;
         }
 

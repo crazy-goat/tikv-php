@@ -11,6 +11,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -97,6 +98,17 @@ final class TimestampOracle
     private ?int $poolClusterId = null;
     /** PID that fetched the pool; a fork invalidates the pool. */
     private ?int $poolPid = null;
+
+    /**
+     * Whether this oracle emits its debug records at all.
+     *
+     * A pooled-timestamp read checks the pool on every call, and every
+     * discard builds a context array a level-filtered logger throws away.
+     * {@see DebugLogging} asks the logger once, at construction (issue
+     * #715); reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private readonly bool $debugEnabled;
 
     /** Shared cluster-ID learning/verification rules (issue #250, REG-19). */
     private readonly ClusterIdGuard $clusterIdGuard;
@@ -190,6 +202,7 @@ final class TimestampOracle
         $this->poolMaxAgeMs = $resolvedPoolMaxAgeMs;
 
         $this->pid = $pid ?? static fn (): int => (int) getmypid();
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
 
         $this->clusterIdGuard = new ClusterIdGuard(
             $this->getClusterId,
@@ -413,19 +426,25 @@ final class TimestampOracle
 
         $ageMs = ($this->clock)() - $fetchedAtMs;
         if ($ageMs < 0 || $ageMs > $this->poolMaxAgeMs) {
-            $this->logger->debug('Discarding TSO pool outside its physical window', ['ageMs' => $ageMs]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Discarding TSO pool outside its physical window', ['ageMs' => $ageMs]);
+            }
             $this->resetPool();
             return;
         }
 
         if ($this->poolPid !== ($this->pid)()) {
-            $this->logger->debug('Discarding TSO pool after process change');
+            if ($this->debugEnabled) {
+                $this->logger->debug('Discarding TSO pool after process change');
+            }
             $this->resetPool();
             return;
         }
 
         if ($this->poolClusterId !== ($this->getClusterId)()) {
-            $this->logger->debug('Discarding TSO pool after cluster ID change');
+            if ($this->debugEnabled) {
+                $this->logger->debug('Discarding TSO pool after cluster ID change');
+            }
             $this->resetPool();
         }
     }

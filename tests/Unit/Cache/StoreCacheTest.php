@@ -6,10 +6,32 @@ namespace CrazyGoat\TiKV\Tests\Unit\Cache;
 
 use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Cache\StoreCache;
+use CrazyGoat\TiKV\Tests\Unit\Support\LevelFilteredLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\PlainLogger;
 use PHPUnit\Framework\TestCase;
 
 class StoreCacheTest extends TestCase
 {
+    public function testLevelFilteredLoggerReceivesNoDebugRecords(): void
+    {
+        $logger = new LevelFilteredLogger();
+        $cache = new StoreCache(logger: $logger);
+
+        $cache->get(1);
+
+        self::assertSame(0, $logger->records, 'A logger that filters debug out must not build the context');
+    }
+
+    public function testLoggerThatHandlesDebugStillReceivesTheRecord(): void
+    {
+        $logger = new PlainLogger();
+        $cache = new StoreCache(logger: $logger);
+
+        $cache->get(1);
+
+        self::assertSame(1, $logger->records, 'A logger that may record debug must still get the record');
+    }
+
     public function testGetCacheMiss(): void
     {
         $cache = new StoreCache();
