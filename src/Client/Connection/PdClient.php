@@ -586,14 +586,19 @@ final class PdClient implements PdClientInterface
      *    application-level error carried in the response header — on *every*
      *    response it obtains, so a returned response is always
      *    header-checked;
-     *  - outer: on any remaining transport failure, or on a *not leader*
-     *    header error, the current address is marked bad, the PD leader is
+     *  - outer: on any remaining transport failure, on a *not leader* header
+     *    error, or on a cluster-ID mismatch (header or surviving error
+     *    string), the current address is marked bad, the PD leader is
      *    re-discovered via GetMembers against the remaining configured
      *    endpoints, and the call is retried against the new address — at
      *    most once per configured endpoint. A not-leader rejection is the one
      *    header error another endpoint can satisfy, so it rotates instead of
      *    failing; every other header error (`NOT_BOOTSTRAPPED`,
      *    `INVALID_VALUE`, …) is fatal here, because retrying cannot help.
+     *    A cluster-ID mismatch is endpoint-specific too: another configured
+     *    PD may serve the expected cluster (issue #819). The expected-ID and
+     *    established-ID checks still run on every attempt, and the mismatch
+     *    is rethrown once no endpoint remains.
      *
      * @template T of Message
      * @param class-string<T> $responseClass
@@ -634,14 +639,25 @@ final class PdClient implements PdClientInterface
                 }
                 $this->currentAddress = $next;
             } catch (GrpcException $e) {
-                if (ClusterIdGuard::extractFromError($e->getMessage()) !== null) {
-                    // The inner layer already retried the mismatch; a mismatch
-                    // that survives it is not a transport failure and must not
-                    // trigger failover.
+                // A mismatch error string that survived the inner retry means
+                // this endpoint still serves another cluster. It is as
+                // unusable as a dead one, so it takes the same rotation path
+                // (issue #819); the transport branch handles everything else.
+                $next = ClusterIdGuard::extractFromError($e->getMessage()) !== null
+                    ? $this->failoverAfterClusterIdMismatch($e, $method, $attempted)
+                    : $this->failoverAfterTransportFailure($e, $method, $attempted);
+                if ($next === null) {
                     throw $e;
                 }
-
-                $next = $this->failoverAfterTransportFailure($e, $method, $attempted);
+                $this->currentAddress = $next;
+            } catch (TiKvException $e) {
+                // A response header naming another cluster (or carrying none
+                // while an expected ID is configured) escapes the inner
+                // layer as a TiKvException. The endpoint cannot serve this
+                // call, but another configured one may (issue #819). Only
+                // cluster-ID failures reach here: the inner layer's other
+                // throws are PdException and GrpcException, caught above.
+                $next = $this->failoverAfterClusterIdMismatch($e, $method, $attempted);
                 if ($next === null) {
                     throw $e;
                 }
@@ -714,10 +730,30 @@ final class PdClient implements PdClientInterface
     }
 
     /**
+     * A cluster-ID mismatch (a response header naming another cluster, or an
+     * error string that survived the inner retry) makes the endpoint unable
+     * to serve this call, exactly like a dead one. It takes the same
+     * re-discovery path, the same "retry once per remaining configured
+     * endpoint" rule and the same budget (issue #819). The identity check
+     * still runs on every retry; only a *different* endpoint can satisfy it.
+     *
+     * @param list<string> $attempted
+     */
+    private function failoverAfterClusterIdMismatch(TiKvException $e, string $method, array $attempted): ?string
+    {
+        return $this->failoverToAnotherEndpoint(
+            $e,
+            'PD endpoint reported a different cluster ID, rotating to another endpoint',
+            $method,
+            $attempted,
+        );
+    }
+
+    /**
      * @param list<string> $attempted addresses already tried for this call
      */
     private function failoverToAnotherEndpoint(
-        GrpcException | PdException $e,
+        TiKvException $e,
         string $logMessage,
         string $method,
         array $attempted,
@@ -888,8 +924,8 @@ final class PdClient implements PdClientInterface
 
     /**
      * Called by TimestampOracle (via the onTransportFailure callback) when a
-     * TSO RPC fails on a transport level so the next call — PD's or TSO's —
-     * targets another endpoint.
+     * TSO RPC fails at transport level or reports another cluster ID, so the
+     * next call — PD's or TSO's — targets another endpoint (issue #819).
      */
     private function markAddressBad(): void
     {

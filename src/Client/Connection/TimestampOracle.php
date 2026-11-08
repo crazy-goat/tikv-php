@@ -128,8 +128,10 @@ final class TimestampOracle
      *        address so TSO follows the same leader (issue #416, GAP-02);
      *         a plain string is accepted for standalone/test use.
      * @param (\Closure(): void)|null $onTransportFailure invoked when a TSO
-     *        RPC fails on transport level (after cluster-id handling), so
-     *        the owning PdClient can fail over before the failure propagates
+     *        RPC fails at transport level or when its cluster ID does not
+     *        match this client's cluster (issue #819), after cluster-id
+     *        handling and before the failure propagates, so the owning
+     *        PdClient can fail over
      * @param int $tsoTimeoutMs deadline for every `Tso` RPC this oracle
      *        issues when the caller does not pass one explicitly (issue
      *        #260). Added last so the #292 positional signature stays
@@ -331,19 +333,16 @@ final class TimestampOracle
 
         try {
             $response = $this->callTso($request, $timeoutMs ?? $this->tsoTimeoutMs);
-
-            return $this->extractTimestampRange($response, $count);
         } catch (GrpcException $e) {
-            if (ClusterIdGuard::extractFromError($e->getMessage()) === null) {
-                // Transport-level failure: let the owning PdClient fail over
-                // to another endpoint before this failure propagates. The
-                // closure is bound to its owning PdClient already — do NOT
-                // rebind it to $this (a TimestampOracle) via ->call($this):
-                // that is a PHP warning now and a fatal error in PHP 9.
-                if ($this->onTransportFailure instanceof \Closure) {
-                    ($this->onTransportFailure)();
-                }
-            }
+            // Let the owning PdClient fail over to another endpoint before
+            // this failure propagates: the endpoint is unusable whether the
+            // gRPC call failed at transport level or the failure is a
+            // cluster-ID mismatch error string that survived callTso()'s one
+            // retry (issue #819). The closure is bound to its owning PdClient
+            // already — do NOT rebind it to $this (a TimestampOracle) via
+            // ->call($this): that is a PHP warning now and a fatal error in
+            // PHP 9.
+            $this->notifyEndpointUnusable();
 
             $this->logger->error('TSO request failed; refusing to fabricate a local timestamp', [
                 'error' => $e->getMessage(),
@@ -355,6 +354,31 @@ final class TimestampOracle
                 $e->grpcStatusCode,
                 $e,
             );
+        } catch (TiKvException $e) {
+            // A TSO response header naming another cluster (or carrying none
+            // while an expected ID is configured) is a cluster-ID failure,
+            // not a transport one, so it reaches this branch. The endpoint
+            // cannot serve this oracle; rotate before failing the request
+            // closed (issue #819). Deliberately only around the RPC: an
+            // invalid payload detected by extractTimestampRange() below is a
+            // server bug, not a reason to mark the endpoint bad.
+            $this->notifyEndpointUnusable();
+
+            throw $e;
+        }
+
+        return $this->extractTimestampRange($response, $count);
+    }
+
+    /**
+     * Tell the owning PdClient that the endpoint used by this oracle is
+     * unusable, so the next PD or TSO call targets another configured
+     * endpoint.
+     */
+    private function notifyEndpointUnusable(): void
+    {
+        if ($this->onTransportFailure instanceof \Closure) {
+            ($this->onTransportFailure)();
         }
     }
 

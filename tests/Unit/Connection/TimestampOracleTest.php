@@ -1353,6 +1353,151 @@ class TimestampOracleTest extends TestCase
         $this->assertSame([], $setCalls);
     }
 
+    /**
+     * A TSO response header naming another cluster must notify the owning
+     * PdClient before the request fails, so the next timestamp request
+     * targets a different endpoint (issue #819).
+     */
+    public function testHeaderClusterIdMismatchInvokesTheRotationCallback(): void
+    {
+        $mismatching = $this->makeTsoResponse(1715000000000, 5, 1);
+        $mismatchingHeader = new ResponseHeader();
+        $mismatchingHeader->setClusterId(999);
+        $mismatching->setHeader($mismatchingHeader);
+
+        $matching = $this->makeTsoResponse(1715000000001, 6, 1);
+        $matchingHeader = new ResponseHeader();
+        $matchingHeader->setClusterId(100);
+        $matching->setHeader($matchingHeader);
+
+        $address = 'pd1:2379';
+        $calledAddresses = [];
+        $rotations = 0;
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willReturnCallback(
+                function (string $calledAddress) use (&$calledAddresses, $mismatching, $matching): TsoResponse {
+                    $calledAddresses[] = $calledAddress;
+
+                    return $calledAddress === 'pd1:2379' ? $mismatching : $matching;
+                },
+            );
+
+        $oracle = new TimestampOracle(
+            $grpc,
+            function () use (&$address): string {
+                return $address;
+            },
+            static fn (): ?int => null,
+            static function (int $id): void {
+            },
+            new NullLogger(),
+            poolSize: 1,
+            onTransportFailure: function () use (&$address, &$rotations): void {
+                $rotations++;
+                $address = 'pd2:2379';
+            },
+            expectedClusterId: 100,
+        );
+
+        try {
+            $oracle->getTimestamp();
+            $this->fail('Expected TiKvException for a mismatching TSO header');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 100, server reported 999',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame(1, $rotations, 'a header mismatch must invoke the rotation callback');
+        $this->assertSame('pd2:2379', $address);
+
+        $oracle->getTimestamp();
+        $this->assertSame(['pd1:2379', 'pd2:2379'], $calledAddresses);
+    }
+
+    /**
+     * A mismatch error string that survives callTso()'s one retry is still an
+     * endpoint-level failure: the rotation callback must run (issue #819).
+     */
+    public function testSurvivingErrorStringClusterIdMismatchInvokesTheRotationCallback(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->exactly(2))
+            ->method('call')
+            ->willThrowException(new GrpcException('mismatch cluster id, need 100 but got 0', 14));
+
+        $clusterId = null;
+        $rotations = 0;
+
+        $oracle = new TimestampOracle(
+            $grpc,
+            'pd1:2379',
+            function () use (&$clusterId): ?int {
+                return $clusterId;
+            },
+            function (int $id) use (&$clusterId): void {
+                $clusterId = $id;
+            },
+            new NullLogger(),
+            onTransportFailure: function () use (&$rotations): void {
+                $rotations++;
+            },
+        );
+
+        try {
+            $oracle->getTimestamp();
+            $this->fail('Expected TiKvException when the mismatch survives the inner retry');
+        } catch (TiKvException $e) {
+            $this->assertStringContainsString('TSO request failed', $e->getMessage());
+            $this->assertStringContainsString('mismatch cluster id', $e->getMessage());
+        }
+
+        $this->assertSame(1, $rotations);
+        $this->assertSame(100, $clusterId);
+    }
+
+    /**
+     * An invalid payload is a server bug, not a reason to mark the endpoint
+     * bad: only the RPC/cluster-ID failure path invokes the rotation
+     * callback (issue #819).
+     */
+    public function testInvalidTsoPayloadDoesNotInvokeTheRotationCallback(): void
+    {
+        $response = new TsoResponse();
+        $header = new ResponseHeader();
+        $header->setClusterId(100);
+        $response->setHeader($header);
+
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->expects($this->once())->method('call')->willReturn($response);
+
+        $rotations = 0;
+        $oracle = new TimestampOracle(
+            $grpc,
+            '127.0.0.1:2379',
+            static fn (): ?int => null,
+            static function (int $id): void {
+            },
+            new NullLogger(),
+            onTransportFailure: function () use (&$rotations): void {
+                $rotations++;
+            },
+        );
+
+        try {
+            $oracle->getTimestamp();
+            $this->fail('Expected TiKvException for a TSO response without a timestamp');
+        } catch (TiKvException $e) {
+            $this->assertSame('TSO response missing timestamp', $e->getMessage());
+        }
+
+        $this->assertSame(0, $rotations);
+    }
+
     public function testExpectedClusterIdRejectsZero(): void
     {
         $this->expectException(InvalidArgumentException::class);

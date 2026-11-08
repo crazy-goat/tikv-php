@@ -120,9 +120,11 @@ $options = [
     // Expected PD cluster ID (issue #308, SEC-05). When set, every PD/TSO
     // response must carry a cluster ID equal to this value; a mismatch or a
     // missing cluster-ID header throws TiKvException before any data-path
-    // request. Independently of this option, an established cluster ID can
-    // never be overwritten by a value parsed out of an error string. Default:
-    // unset = learn and adopt the first ID PD reports. Must be a positive int.
+    // request (with several PD endpoints, the client first rotates through
+    // the remaining ones, issue #819). Independently of this option, an
+    // established cluster ID can never be overwritten by a value parsed out
+    // of an error string. Default: unset = learn and adopt the first ID PD
+    // reports. Must be a positive int.
     // See "Cluster Identity Verification" below.
     'expectedClusterId' => 123456789,
     // Replica read preference (issue #421): an instance of
@@ -243,14 +245,17 @@ one fails on transport level (issue #416). Since issue #234 it also rotates on
 a **not-leader** answer from PD — including the application-level form, where
 PD replies with a gRPC `OK` status and an error inside
 `pdpb.ResponseHeader.error` — retrying at most once per configured endpoint.
-Every PD response header is checked at a single choke point, so a PD
-application-level error (`NOT_BOOTSTRAPPED`, `INVALID_VALUE`, `ErrNotLeader`,
-…) raises `PdException` (carrying `getErrorType()`) instead of degrading into
-an empty result: `scanRegions()` can no longer answer `[]` for a failed
-`ScanRegions`, so a `deleteRange()` that reports success now means the range
-really was deleted. A leader URL PD advertises that is not one of the
-configured endpoints is ignored, so a rogue or rewritten PD member list cannot
-redirect traffic.
+Since issue #819 it rotates the same way when an endpoint reports a different
+cluster ID (see [Cluster Identity Verification](#cluster-identity-verification-issue-308-sec-05)),
+so one stale or misconfigured PD cannot take down a multi-endpoint
+deployment. Every PD response header is checked at a single choke point, so a
+PD application-level error (`NOT_BOOTSTRAPPED`, `INVALID_VALUE`,
+`ErrNotLeader`, …) raises `PdException` (carrying `getErrorType()`) instead of
+degrading into an empty result: `scanRegions()` can no longer answer `[]` for
+a failed `ScanRegions`, so a `deleteRange()` that reports success now means
+the range really was deleted. A leader URL PD advertises that is not one of
+the configured endpoints is ignored, so a rogue or rewritten PD member list
+cannot redirect traffic.
 
 ### Cluster Identity Verification (issue #308, SEC-05)
 
@@ -285,6 +290,16 @@ example from `pd-ctl cluster` or a trusted client. When it is set:
 - `TimestampOracle` applies the same checks to TSO response headers and TSO
   cluster-id mismatch errors, so the timestamp path cannot be redirected
   either.
+
+A mismatch is endpoint-specific, not call-fatal: when several PD endpoints are
+configured, the client marks the offending endpoint bad, re-discovers the
+leader among the remaining endpoints and retries the call there, at most once
+per endpoint (issue #819). The checks above run on every attempt, so only an
+endpoint that really serves the expected cluster can answer; when none does,
+the call throws the mismatch. TSO follows the same rule — a mismatching header
+or a mismatch error string that survives its one retry invokes the same
+rotation, so the next timestamp request targets another endpoint. A
+single-endpoint client still fails closed with the mismatch.
 
 Independently of the option, once a cluster ID has been established, every
 later PD response header must report the same ID; a different ID throws

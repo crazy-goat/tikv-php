@@ -10,8 +10,10 @@ use CrazyGoat\Proto\Pdpb\GetMembersResponse;
 use CrazyGoat\Proto\Pdpb\GetRegionResponse;
 use CrazyGoat\Proto\Pdpb\Member;
 use CrazyGoat\Proto\Pdpb\ResponseHeader;
+use CrazyGoat\Proto\Pdpb\TsoResponse;
 use CrazyGoat\TiKV\Client\Connection\PdClient;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use Google\Protobuf\Internal\Message;
 use PHPUnit\Framework\TestCase;
@@ -291,10 +293,167 @@ class PdClientFailoverTest extends TestCase
         $this->assertSame(['pd2:2379'], $this->rpcCalls('GetRegion'));
     }
 
+    // ==================================================================
+    //  Cluster-ID mismatch rotation (issue #819)
+    // ==================================================================
+
+    public function testClusterIdMismatchOnFirstEndpointRotatesToMatchingOne(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturnCallback(function (string $address, string $service, string $method): Message {
+            $this->rpcLog[] = ['address' => $address, 'method' => $method];
+
+            if ($method === 'GetMembers') {
+                return $this->membersResponse(
+                    leaderId: 1,
+                    members: [[1, ['pd1:2379']], [2, ['pd2:2379']]],
+                );
+            }
+
+            // pd1 belongs to another cluster; pd2 serves the expected one.
+            return $address === 'pd1:2379'
+                ? $this->regionResponse(999)
+                : $this->regionResponse(100);
+        });
+
+        $client = new PdClient(
+            $grpc,
+            ['pd1:2379', 'pd2:2379'],
+            new NullLogger(),
+            expectedClusterId: 100,
+        );
+        $region = $client->getRegion('k');
+
+        $this->assertSame(42, $region->regionId);
+        $this->assertSame(['pd1:2379', 'pd2:2379'], $this->rpcCalls('GetRegion'));
+        $this->assertSame('pd2:2379', $client->currentPdAddress());
+    }
+
+    public function testClusterIdMismatchOnAllEndpointsRethrowsAfterOneAttemptEach(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturnCallback(function (string $address, string $service, string $method): Message {
+            $this->rpcLog[] = ['address' => $address, 'method' => $method];
+
+            if ($method === 'GetMembers') {
+                // Discovery itself serves the expected cluster, so it keeps
+                // pointing at pd1; only the GetRegion answers mismatch.
+                return $this->membersResponse(
+                    leaderId: 1,
+                    members: [[1, ['pd1:2379']], [2, ['pd2:2379']]],
+                );
+            }
+
+            return $this->regionResponse(999);
+        });
+
+        $client = new PdClient(
+            $grpc,
+            ['pd1:2379', 'pd2:2379'],
+            new NullLogger(),
+            expectedClusterId: 100,
+        );
+
+        try {
+            $client->getRegion('k');
+            $this->fail('Expected TiKvException when no endpoint serves the expected cluster');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 100, server reported 999',
+                $e->getMessage(),
+            );
+        }
+
+        // Each configured endpoint is attempted at most once: a mismatch
+        // never loops back to an address already marked bad.
+        $this->assertSame(['pd1:2379', 'pd2:2379'], $this->rpcCalls('GetRegion'));
+    }
+
+    public function testErrorStringMismatchSurvivingInnerRetryRotatesToAnotherEndpoint(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturnCallback(function (string $address, string $service, string $method): Message {
+            $this->rpcLog[] = ['address' => $address, 'method' => $method];
+
+            if ($method === 'GetMembers') {
+                return $this->membersResponse(
+                    leaderId: 1,
+                    members: [[1, ['pd1:2379']], [2, ['pd2:2379']]],
+                );
+            }
+
+            if ($address === 'pd1:2379') {
+                // The inner cluster-id retry sends a second request to pd1;
+                // this one fails the same way and must rotate instead of
+                // aborting the call (issue #819).
+                throw new GrpcException('mismatch cluster id, need 100 but got 0', 14);
+            }
+
+            return $this->regionResponse(100);
+        });
+
+        $client = new PdClient(
+            $grpc,
+            ['pd1:2379', 'pd2:2379'],
+            new NullLogger(),
+            expectedClusterId: 100,
+        );
+        $client->getRegion('k');
+
+        // First attempt on pd1, the inner retry also on pd1, then pd2.
+        $this->assertSame(['pd1:2379', 'pd1:2379', 'pd2:2379'], $this->rpcCalls('GetRegion'));
+        $this->assertSame('pd2:2379', $client->currentPdAddress());
+    }
+
+    public function testTimestampClusterIdMismatchRotatesToAnotherEndpoint(): void
+    {
+        $grpc = $this->createMock(GrpcClientInterface::class);
+        $grpc->method('call')->willReturnCallback(function (string $address, string $service, string $method): Message {
+            $this->rpcLog[] = ['address' => $address, 'method' => $method];
+
+            if ($method === 'GetMembers') {
+                return $this->membersResponse(
+                    leaderId: 1,
+                    members: [[1, ['pd1:2379']], [2, ['pd2:2379']]],
+                );
+            }
+
+            // TSO: pd1 reports another cluster, pd2 the expected one.
+            return $address === 'pd1:2379'
+                ? $this->tsoResponse(999)
+                : $this->tsoResponse(100);
+        });
+
+        $client = new PdClient(
+            $grpc,
+            ['pd1:2379', 'pd2:2379'],
+            new NullLogger(),
+            tsoPoolSize: 1,
+            expectedClusterId: 100,
+        );
+
+        try {
+            $client->getTimestamp();
+            $this->fail('Expected TiKvException for a mismatching TSO header');
+        } catch (TiKvException $e) {
+            $this->assertSame(
+                'Cluster ID mismatch: expected 100, server reported 999',
+                $e->getMessage(),
+            );
+        }
+
+        $this->assertSame('pd2:2379', $client->currentPdAddress());
+
+        // The next request does not blindly retry the endpoint that was
+        // marked bad by the TSO cluster-ID failure.
+        $client->getTimestamp();
+        $this->assertSame(['pd1:2379', 'pd2:2379'], $this->rpcCalls('Tso'));
+    }
+
     /**
      * @param list<array{0: int|string, 1: list<string>}> $members
      */
-    private function membersResponse(int|string $leaderId, array $members): GetMembersResponse
+    private function membersResponse(int|string $leaderId, array $members, int $clusterId = 100): GetMembersResponse
     {
         $response = new GetMembersResponse();
 
@@ -312,13 +471,13 @@ class PdClientFailoverTest extends TestCase
         $response->setMembers($protos);
 
         $header = new ResponseHeader();
-        $header->setClusterId(100);
+        $header->setClusterId($clusterId);
         $response->setHeader($header);
 
         return $response;
     }
 
-    private function regionResponse(): GetRegionResponse
+    private function regionResponse(int $clusterId = 100): GetRegionResponse
     {
         $epoch = new RegionEpoch();
         $epoch->setConfVer(1);
@@ -329,11 +488,28 @@ class PdClientFailoverTest extends TestCase
         $region->setRegionEpoch($epoch);
 
         $header = new ResponseHeader();
-        $header->setClusterId(100);
+        $header->setClusterId($clusterId);
 
         $response = new GetRegionResponse();
         $response->setHeader($header);
         $response->setRegion($region);
+
+        return $response;
+    }
+
+    private function tsoResponse(int $clusterId, int $logical = 5): TsoResponse
+    {
+        $timestamp = new \CrazyGoat\Proto\Pdpb\Timestamp();
+        $timestamp->setPhysical(1715000000000);
+        $timestamp->setLogical($logical);
+
+        $header = new ResponseHeader();
+        $header->setClusterId($clusterId);
+
+        $response = new TsoResponse();
+        $response->setHeader($header);
+        $response->setTimestamp($timestamp);
+        $response->setCount(1);
 
         return $response;
     }
