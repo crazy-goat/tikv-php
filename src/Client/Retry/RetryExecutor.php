@@ -48,6 +48,34 @@ final readonly class RetryExecutor
      */
     public const DEFAULT_RETRY_DEADLINE_MS = 30000;
 
+    /**
+     * Client-level classifier (issue #719), consulted when the per-call
+     * classifier has no opinion (Pass) and before the built-in
+     * {@see ErrorClassifier}. Normalised to a `\Closure` because `callable`
+     * is not a legal property type; the constructor accepts any callable.
+     *
+     * @var (\Closure(TiKvException): RetryVerdict)|null
+     */
+    private ?\Closure $classifier;
+
+    /**
+     * @param (callable(TiKvException): RetryVerdict)|null $classifier
+     *        Client-level classifier (issue #719), consulted when the
+     *        per-call classifier has no opinion (Pass) and before the
+     *        built-in {@see ErrorClassifier}: return
+     *        {@see RetryVerdict::retry()} to retry,
+     *        {@see RetryVerdict::fatal()} to stop, or
+     *        {@see RetryVerdict::pass()} to fall through to the built-in
+     *        classification. It is the executor-level seam through which
+     *        RawKvClient and TxnKvClient expose `options['retryClassifier']`
+     *        without requiring the caller to build an executor by hand.
+     *
+     *        A per-call classifier still wins over this one, so the library's
+     *        own call sites (for example a transaction's TxnRetryableException
+     *        handling) cannot be overridden by a user classifier. Any PHP
+     *        callable is accepted and wrapped with
+     *        {@see \Closure::fromCallable()}.
+     */
     public function __construct(
         private int $maxBackoffMs,
         private int $serverBusyBudgetMs,
@@ -64,6 +92,7 @@ final readonly class RetryExecutor
          * {@see self::beginOperation()} sets it; see {@see RetryBudget}.
          */
         private ?RetryBudget $budget = null,
+        ?callable $classifier = null,
     ) {
         if ($maxAttempts < 1) {
             throw new \InvalidArgumentException('maxAttempts must be >= 1');
@@ -71,16 +100,20 @@ final readonly class RetryExecutor
         if ($deadlineMs < 0) {
             throw new \InvalidArgumentException('deadlineMs must be >= 0');
         }
+        $this->classifier = $classifier !== null ? \Closure::fromCallable($classifier) : null;
     }
 
     /**
      * @template T
      * @param callable(): T $operation
-     * @param (callable(TiKvException): RetryVerdict)|null $classifier Custom
+     * @param (callable(TiKvException): RetryVerdict)|null $classifier Per-call
      *        error classifier (issue #534): return
      *        {@see RetryVerdict::retry()} to retry, {@see RetryVerdict::fatal()}
      *        to stop, or {@see RetryVerdict::pass()} to fall through to the
-     *        built-in classifier.
+     *        executor-level classifier and then the built-in one. A per-call
+     *        classifier wins over the constructor-level `$classifier`
+     *        (issue #719), so library-owned per-call classifiers cannot be
+     *        shadowed by a client-wide one.
      * @param (callable(): ?int)|null $targetStoreId Provider of the store ID
      *        the FAILED attempt was actually addressed to. Pass it for reads
      *        that may target a follower (`ReplicaReadPolicy`): a transport
@@ -390,6 +423,7 @@ final readonly class RetryExecutor
             $this->deadlineMs,
             $this->metrics,
             $this->newBudget(),
+            $this->classifier,
         );
     }
 
@@ -1063,8 +1097,23 @@ final readonly class RetryExecutor
         return BackoffType::NotLeader;
     }
 
+    /**
+     * Classify an error the per-call classifier had no opinion about.
+     *
+     * Order (issue #719): the executor-level classifier first, then the
+     * built-in {@see ErrorClassifier}. A Pass from the client-level
+     * classifier falls through, so `options['retryClassifier']` can extend
+     * the built-in table without having to reproduce it.
+     */
     private function classifyError(TiKvException $e): RetryVerdict
     {
+        if ($this->classifier instanceof \Closure) {
+            $verdict = ($this->classifier)($e);
+            if (!$verdict->isPass()) {
+                return $verdict;
+            }
+        }
+
         return ErrorClassifier::classify($e);
     }
 }
