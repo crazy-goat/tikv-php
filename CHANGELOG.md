@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- `TxnKvFanoutTest::testBatchGetDispatchesAllRegionsBeforeAwaitingAny()` now proves the batchGet fan-out with a relative timing comparison instead of an absolute millisecond bound (issue #676). The test measures a sequential control on the same fake with the same latency in the same run and requires the batched path to stay below two thirds of it, so scheduling noise on a loaded machine inflates both measurements and no longer flakes the suite; the structural assertion that every send is issued before the first wait is unchanged. (#676)
+
 ### Docs
 
 - The `docs/helpers/faq.md` entry on `unlink()` and directory permissions now quotes the errno and both platform messages: `unlink()` on a directory fails with `EISDIR` / "Is a directory" on Linux (where CI runs) and with `EPERM` / "Operation not permitted" on macOS and the BSDs, and the following `rmdir()` fails with `ENOTEMPTY` / "Directory not empty". The entry previously quoted only the macOS wording. (#666)
