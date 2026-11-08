@@ -602,10 +602,11 @@ $grpc->close();
 
 `options['grpcClient']` accepts a `GrpcClientInterface` (any implementation —
 `GrpcClient`, a test double, an application-specific transport). The client
-then uses it as it is and **never closes it**: the transport belongs to the
-application, so closing one client cannot break the other clients sharing it.
-A client that built its own transport (the normal case) closes it in
-`close()` as before.
+then uses it as it is and **never closes it** — neither in `close()` nor in
+`__destruct()`, which delegates to `close()`: the transport belongs to the
+application, so closing or destroying one client cannot break the other
+clients sharing it. A client that built its own transport (the normal case)
+closes it in `close()`, and therefore in `__destruct()` too.
 
 A `TxnKvClient` still owns the transactions it began when the transport is
 shared: `close()` rolls the still-active ones back before releasing its other
@@ -619,7 +620,9 @@ transport options (`tls`, `allowInsecure`, `maxChannels`, `idleTtlMs`,
 `grpc`) cannot be combined with it — they would configure a transport the
 factory does not build, so they are rejected with an
 `InvalidArgumentException` instead of being silently ignored. Configure them
-on the `GrpcClient` you pass in.
+on the `GrpcClient` you pass in. An explicit `'tls' => null` is the one
+exception: it means "no TLS configuration" everywhere else, so it is treated
+as absent rather than as a conflict (issue #695).
 
 One caveat of sharing: on a retryable transport error the client closes the
 channel of the affected address. With a shared transport that affects every
@@ -644,8 +647,21 @@ when the error is handled, and it runs only for `UNAVAILABLE`, not for a
 `options['metrics']` is a **client-side** option and is always applied: it
 backs the client-side counters (region cache, retries). The transport's own
 RPC counters follow the transport — with an injected transport they are the
-ones it was built with, so pass the same backend to the transport
-(`new GrpcClient(metrics: $metrics)`) to get them everywhere.
+ones it was built with, and `options['metrics']` is **not** forwarded to it.
+Pass the same backend to the transport (`new GrpcClient(metrics: $metrics)`)
+to get them everywhere.
+
+The `ConnectionBundle` that `ConnectionFactory::create()` returns — an
+internal value object, not part of the public client API — also reports the
+transport's TLS state. `ConnectionBundle::$tlsState` is
+`Connection\TlsState::Unknown` for a supplied transport, because the factory
+does not inspect its TLS configuration. For a transport the factory built it
+is `Connection\TlsState::Plaintext` when the configuration carries no TLS
+material (including an empty `'tls' => []`), and `Connection\TlsState::Tls`
+when `TlsConfig::isEnabled()` is true.
+`ConnectionBundle::$tlsConfig` alone cannot express that difference: it is
+`null` both for a factory-built plaintext transport and for an injected one,
+and non-null but disabled for an empty TLS configuration (issue #695).
 
 #### What the shared channel really is
 
@@ -796,11 +812,38 @@ $options = [
 ];
 ```
 
-When both forms are given for the same credential, the explicit file path wins:
-`caCertFile` takes priority over `caCertPem`, and a complete
-`clientCertFile` + `clientKeyFile` pair takes priority over
-`clientCertPem` + `clientKeyPem`. Supplying both is redundant rather than an
-error, but the file is the one that is read.
+### TLS Option Precedence
+
+`options['tls']` accepts the same credential in more than one form. When
+several forms are present, the factory uses exactly one of them and ignores
+the rest, in this order:
+
+| Credential | Precedence (highest first) |
+| --- | --- |
+| CA certificate | `caCertFile` → `caCertPem` → `caCert` (deprecated) |
+| Client certificate and key | `clientCertFile` + `clientKeyFile` → `clientCertPem` + `clientKeyPem` → `clientCert` + `clientKey` (deprecated) |
+
+The precedence is per credential, not per key:
+
+- A file form wins over the matching PEM form: `caCertFile` over
+  `caCertPem`, and the complete `clientCertFile` + `clientKeyFile` pair over
+  `clientCertPem` + `clientKeyPem`. Supplying both forms is redundant rather
+  than an error, but only the file is read — the PEM value is never parsed,
+  so an invalid PEM there does not fail the configuration.
+- The deprecated keys are the last fallback: `caCertPem` wins over `caCert`
+  even though the latter can also carry inline PEM, and a complete
+  `clientCertPem` + `clientKeyPem` pair wins over
+  `clientCert` + `clientKey`.
+- The client pair is chosen as a pair. Mixing the forms across the two
+  halves — for example `clientCertFile` with `clientKeyPem` — does not form
+  a pair. When no complete pair is present at all, that configuration is
+  rejected with `Incomplete client certificate pair` (see
+  [Troubleshooting](troubleshooting.md#tls-configuration-errors)) instead of
+  connecting in plaintext; when a complete lower-precedence pair is also
+  present, that pair is used and the mixed halves are ignored.
+
+The deprecated keys themselves are described in
+[Deprecated TLS Option Keys](#deprecated-tls-option-keys).
 
 ### Deprecated TLS Option Keys
 
@@ -838,8 +881,12 @@ use CrazyGoat\TiKV\Client\RawKv\RawKvClient;
 use CrazyGoat\TiKV\Client\Tls\TlsConfigBuilder;
 
 $builder = new TlsConfigBuilder();
-$builder->withCaCertFile('/path/to/ca.crt')
-    ->withClientCertFile('/path/to/client.crt', '/path/to/client.key');
+$builder->withCaCertFile('/etc/tikv/certs/ca.crt', '/etc/tikv/certs')
+    ->withClientCertFile(
+        '/etc/tikv/certs/client.crt',
+        '/etc/tikv/certs/client.key',
+        '/etc/tikv/certs',
+    );
 
 $tlsConfig = $builder->build();
 
@@ -862,6 +909,18 @@ $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
 $client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 ```
 
+Both file methods take an optional trailing `$baseDir` argument:
+`withCaCertFile($path, $baseDir = null)` and
+`withClientCertFile($certPath, $keyPath, $baseDir = null)`. It is the
+builder-level equivalent of `caCertBaseDir` / `clientCertBaseDir` and applies
+the same restriction: the base directory is canonicalized with `realpath()`
+(it must exist), and every file passed to that call must canonicalize to the
+base directory itself or lie beneath it. Omit the argument — or pass `null` —
+to disable the restriction. The client form applies the one base directory to
+both the certificate and the key. A path outside it throws
+`InvalidArgumentException` ("TLS file path is outside the allowed base
+directory"), like the matching option does.
+
 > **Note:** the manual path above is for the rare case where the client has
 > to be assembled by hand. `RawKvClient::create()` /
 > `TxnKvClient::create()` build the transport, the store cache and the PD
@@ -870,14 +929,22 @@ $client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 
 **Who closes the connections on the manual path.** The rule of
 [Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
-is "the connections belong to whoever created them", and it holds for the
-factory path. A client assembled by hand is *given* a transport and a PD
-client it did not create, so it does not own them: `close()` and the
-destructor leave both open (issue #204). That makes sharing safe — destroying
-one client cannot close the channels another one still uses. The client still
-clears its own region cache.
+is "the connections belong to whoever created them". A client assembled by
+hand is *given* a transport and a PD client it did not create, but the two
+clients do not treat them the same way today:
 
-If the application wants to hand ownership over instead, say so explicitly:
+- `RawKvClient` defaults `ownsGrpcClient` and `ownsPdClient` to `false`:
+  `close()` — and therefore `__destruct()`, which delegates to it — leaves
+  both open (issue #204). That makes sharing safe: destroying one client
+  cannot close the channels another one still uses. The client still clears
+  its own region cache.
+- `TxnKvClient` differs: `ownsGrpcClient` still defaults to `true`, and
+  `close()` closes the PD client unconditionally (there is no `ownsPdClient`
+  flag). Pass `ownsGrpcClient: false` to keep a shared transport open; the PD
+  client it is given is always closed. #990 tracks aligning the two clients.
+
+If the application wants to hand ownership over on a `RawKvClient`, say so
+explicitly:
 
 ```php
 $client = new RawKvClient(
@@ -888,10 +955,9 @@ $client = new RawKvClient(
 );
 ```
 
-With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
-matching dependency in `close()`; the defaults are `false` for a
-hand-assembled `RawKvClient`. `TxnKvClient` has the same `ownsGrpcClient`
-parameter but still defaults to `true`.
+With `ownsGrpcClient: true` / `ownsPdClient: true` the `RawKvClient` closes
+the matching dependency in `close()` (and in the destructor). `TxnKvClient`
+accepts `ownsGrpcClient` only, and still defaults it to `true`.
 
 ### Security: Fail-Closed TLS
 
@@ -1133,11 +1199,14 @@ puts no value into any log context or exception message, so there is nothing
 to redact on that side: only keys cross the log boundary, and only in their
 redacted form.
 
-**The channel the redactor does not cover: TiKV's own error text.** Two log
-lines copy the message of a `RegionException` into the log context — the
-aggregated prewrite-failure warning
-(`TwoPhaseCommitter::logPrewritePartialFailure()`) and the pessimistic-lock
-retry warning — and that message can be TiKV's own text:
+**The channel the redactor does not cover: TiKV's own error text.** Several
+log lines copy the message of a `RegionException` or another TiKV/gRPC
+exception into the log context — the fan-out aggregate warnings (prewrite,
+rollback, pessimistic rollback and secondary commit; the first three come
+from `TwoPhaseCommitter::logFanOutPartialFailure()`, the last from the
+secondary-commit summary), the per-region secondary-commit failure warning
+and the pessimistic-lock retry warning — and that message can be TiKV's own
+text:
 `RegionException::fromRegionError()` copies `errorpb.Error::getMessage()`
 into the exception message. That text is sanitised by
 [`ServerText::sanitise()`](../src/Client/Util/ServerText.php) — control

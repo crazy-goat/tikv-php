@@ -322,9 +322,19 @@ final class RawKvClient
      *        'grpc' (gRPC channel arguments) and 'grpcClient' (a transport
      *        built by the application — the client uses it and never closes
      *        it, so one transport can be shared with other clients).
+     *        'grpcClient' is mutually exclusive with the five options that
+     *        configure the transport the factory would otherwise build
+     *        ('tls', 'allowInsecure', 'maxChannels', 'idleTtlMs', 'grpc'):
+     *        when `grpcClient` is a `GrpcClientInterface`, combining it with
+     *        any of them throws `InvalidArgumentException`, because those
+     *        options configure a transport `create()` does not build, and
+     *        silently ignoring them would misrepresent the connection (for
+     *        example, a caller could believe TLS is enforced). Configure them
+     *        on the transport passed in.
      *
      * @throws InvalidArgumentException if PD endpoints array is empty or an
-     *         option value is invalid
+     *         option value is invalid, or if 'grpcClient' is combined with one
+     *         of the transport options listed above
      * @throws PdException When the API V2 keyspace lookup gets a PD
      *         application-level error
      * @throws GrpcException When the API V2 keyspace lookup fails at the
