@@ -3303,6 +3303,36 @@ class TransactionTest extends TestCase
         $this->assertSame([], $txn->batchGet([]));
     }
 
+    /**
+     * @return iterable<string, array{mixed, string}>
+     */
+    public static function nonStringNonIntBatchGetKeyProvider(): iterable
+    {
+        yield 'float' => [1.5, 'float'];
+        yield 'bool' => [true, 'bool'];
+        yield 'object' => [new \stdClass(), 'stdClass'];
+    }
+
+    /**
+     * `batchGet()` declares `array<array-key, string|int>`, but a caller can
+     * still pass another type at runtime. The reader must reject it with the
+     * public `InvalidArgumentException` before any RPC is sent (issue #782).
+     */
+    #[DataProvider('nonStringNonIntBatchGetKeyProvider')]
+    public function testBatchGetRejectsNonStringNonIntKeyBeforeAnyRpc(mixed $key, string $type): void
+    {
+        $txn = $this->createTransaction(['pessimistic' => false]);
+
+        $this->pdClient->expects($this->never())->method('getTimestamp');
+        $this->grpc->expects($this->never())->method('call');
+        $this->grpc->expects($this->never())->method('callAsync');
+
+        $this->expectException(\CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf('batchGet: keys must be strings or ints, %s given', $type));
+
+        $txn->batchGet([$key]); // @phpstan-ignore argument.type (the guard exists for runtime-invalid keys)
+    }
+
     public function testBatchGetLockedPairResolvesLockAndRetriesInsteadOfReturningNull(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
