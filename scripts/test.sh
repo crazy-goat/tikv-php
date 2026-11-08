@@ -42,23 +42,36 @@ if [ ! -d "vendor" ]; then
     composer install "${install_args[@]}"
 fi
 
-# Run Unit tests
+# Run Unit tests. `set -e` would abort the script before the summary block,
+# so the exit code is captured instead of letting the failure propagate.
 print_section "Running Unit Tests..."
-vendor/bin/phpunit --testsuite Unit --testdox --fail-on-empty-test-suite --no-coverage
-UNIT_EXIT=$?
+UNIT_EXIT=0
+vendor/bin/phpunit --testsuite Unit --testdox --fail-on-empty-test-suite --no-coverage || UNIT_EXIT=$?
 
-# Run Integration tests (if any)
+# Run Integration tests (if any). The same pattern keeps `set -e` from
+# aborting the script and from swallowing the suite's exit code.
 print_section "Running Integration Tests..."
-vendor/bin/phpunit --testsuite Integration --testdox --fail-on-empty-test-suite --no-coverage || true
+INTEGRATION_EXIT=0
+vendor/bin/phpunit --testsuite Integration --testdox --fail-on-empty-test-suite --no-coverage || INTEGRATION_EXIT=$?
 
 # Summary
 echo ""
 echo "=========================================="
-if [ $UNIT_EXIT -eq 0 ]; then
+if [ "$UNIT_EXIT" -eq 0 ]; then
     echo -e "${GREEN}Unit tests passed!${NC}"
 else
     echo -e "${RED}Unit tests failed!${NC}"
 fi
+if [ "$INTEGRATION_EXIT" -eq 0 ]; then
+    echo -e "${GREEN}Integration tests passed!${NC}"
+else
+    echo -e "${RED}Integration tests failed!${NC}"
+fi
 echo "=========================================="
 
-exit $UNIT_EXIT
+# Exit with the worse of the two codes: a failing suite is never masked by
+# the other one passing.
+if [ "$UNIT_EXIT" -gt "$INTEGRATION_EXIT" ]; then
+    exit "$UNIT_EXIT"
+fi
+exit "$INTEGRATION_EXIT"

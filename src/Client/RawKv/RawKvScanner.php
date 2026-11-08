@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\RawKv;
 
+use Closure;
 use CrazyGoat\Proto\Kvrpcpb\KeyRange;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
@@ -94,6 +95,13 @@ final readonly class RawKvScanner
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Client-level retry classifier (issue #719); null keeps the
+         * built-in classification.
+         *
+         * @var (\Closure(TiKvException): \CrazyGoat\TiKV\Client\Retry\RetryVerdict)|null
+         */
+        private ?Closure $retryClassifier = null,
     ) {
         if ($this->maxScanRows < 1) {
             throw new InvalidArgumentException('maxScanRows must be >= 1');
@@ -110,10 +118,10 @@ final readonly class RawKvScanner
      * Range scan over [startKey, endKey).
      *
      * `limit = 0` means "the whole range": the scan pages internally at
-     * {@see self::$scanPageSize} rows per RPC and buffers every row, so the
+     * {@see RawKvScanner::$scanPageSize} rows per RPC and buffers every row, so the
      * documented unbounded contract holds for ranges larger than one TiKV
      * page (issue #191). The accumulated buffer is capped by
-     * {@see self::$maxScanRows}; once the buffered rows exceed it a
+     * {@see RawKvScanner::$maxScanRows}; once the buffered rows exceed it a
      * {@see ScanLimitExceededException} is thrown instead of silently
      * truncating. The cap is checked per fetched page (page-granular), not per
      * row, so a page may be buffered in full before the throw.
@@ -154,7 +162,7 @@ final readonly class RawKvScanner
      * the last key of each full page (mirroring {@see ScanIterator}'s
      * {@see KeyOrder::successor()} continuation) and stopping on the first
      * short or empty page. Rows are buffered and guarded by
-     * {@see self::$maxScanRows}.
+     * {@see RawKvScanner::$maxScanRows}.
      *
      * @return array<array{key: string, value: ?string}>
      */
@@ -330,9 +338,9 @@ final readonly class RawKvScanner
      * order (`startKey` is the exclusive upper bound, `endKey` the lower).
      *
      * `limit = 0` means "the whole range": the scan pages internally at
-     * {@see self::$scanPageSize} rows per RPC, moving the descending upper
+     * {@see RawKvScanner::$scanPageSize} rows per RPC, moving the descending upper
      * bound down to the lowest key of each full page, and buffers every row
-     * (issue #191). The buffer is capped by {@see self::$maxScanRows}; once
+     * (issue #191). The buffer is capped by {@see RawKvScanner::$maxScanRows}; once
      * the buffered rows exceed it a {@see ScanLimitExceededException} is
      * thrown instead of silently truncating. Like the forward path, the cap
      * is checked per fetched page (page-granular), not per row.
@@ -343,7 +351,7 @@ final readonly class RawKvScanner
      * forward range is {@see self::scanIterator()}.
      *
      * An unbounded reverse scan fans the per-region reads of a page out
-     * concurrently, in windows of at most {@see self::$maxConcurrency}
+     * concurrently, in windows of at most {@see RawKvScanner::$maxConcurrency}
      * regions (issue #555); a bounded scan stays sequential.
      *
      * Regions are resolved from the upper bound downwards in bounded batches
@@ -594,7 +602,7 @@ final readonly class RawKvScanner
 
     /**
      * Fail closed after a fetched page pushes the accumulated row count past
-     * the configured {@see self::$maxScanRows} maximum (issue #191). Because
+     * the configured {@see RawKvScanner::$maxScanRows} maximum (issue #191). Because
      * a page is fetched (and may be fanned out across regions) before this
      * runs, the observed `$rows` can exceed `maxScanRows` by up to one page.
      *
@@ -612,7 +620,7 @@ final readonly class RawKvScanner
      *
      * A convenience wrapper around {@see self::scan()}, so it shares that
      * method's caps: `limit = 0` returns the whole prefix (paginated
-     * internally, guarded by {@see self::$maxScanRows}, which throws
+     * internally, guarded by {@see RawKvScanner::$maxScanRows}, which throws
      * {@see ScanLimitExceededException} instead of truncating), and a bounded
      * scan returns at most `limit` rows (issue #440). A negative `limit` is
      * rejected before any RPC (see {@see self::validateScanLimit()}). The
@@ -706,7 +714,7 @@ final readonly class RawKvScanner
 
     /**
      * Scan the clipped regions of an unbounded page concurrently, in bounded
-     * windows of at most {@see self::$maxConcurrency} regions (issues #293
+     * windows of at most {@see RawKvScanner::$maxConcurrency} regions (issues #293
      * and #555).
      *
      * Within a window every region's RawScan send is issued before any
@@ -990,7 +998,7 @@ final readonly class RawKvScanner
      * clips every range to each region's bounds, and sends one
      * `RawBatchScan` per region with all of that region's clipped ranges.
      * Requests to distinct regions are dispatched concurrently, bounded by
-     * {@see self::$maxConcurrency} (issue #295), and share one batch deadline
+     * {@see RawKvScanner::$maxConcurrency} (issue #295), and share one batch deadline
      * ({@see TimeoutConfig::$batchDeadlineMs}). For a range list that spans
      * N regions the call therefore costs N store round trips instead of one
      * `RawScan` per range per region, which is the point of the RPC.
@@ -2278,6 +2286,7 @@ final readonly class RawKvScanner
             $this->logger,
             deadlineMs: $this->retryDeadlineMs,
             metrics: $this->metrics,
+            classifier: $this->retryClassifier,
         );
     }
 

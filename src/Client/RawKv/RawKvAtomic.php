@@ -21,7 +21,6 @@ use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
 use CrazyGoat\TiKV\Client\Region\RegionResolver;
 use CrazyGoat\TiKV\Client\Region\RequestContextOptions;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
-use CrazyGoat\TiKV\Client\Retry\ErrorClassifier;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\Retry\RetryVerdict;
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
@@ -71,7 +70,12 @@ final readonly class RawKvAtomic
                 return RetryVerdict::fatal();
             }
 
-            return ErrorClassifier::classify($e);
+            // No opinion on everything else: fall through to the executor's
+            // client-level classifier (issue #719) and then the built-in
+            // classification. Returning ErrorClassifier::classify() here
+            // would be a per-call verdict and would shadow
+            // options['retryClassifier'] for CAS/putIfAbsent.
+            return RetryVerdict::pass();
         };
 
         $targetStoreId = null;
