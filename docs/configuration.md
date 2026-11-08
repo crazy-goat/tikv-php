@@ -2272,12 +2272,13 @@ RawKV and TxnKV scans read the region cache first:
   the cache. A contiguous cached run is served locally; PD is asked only for
   the uncovered gap, starting at the gap's first key, and the answer is cached
   for the next page and the next scan.
-- **RawKV `reverseScan()`** resolves regions from the upper bound downwards
+- **RawKV `reverseScan()`** and **TxnKV `Transaction::reverseScan()`** (or
+  `scan(..., reverse: true)`) resolve regions from the upper bound downwards
   through `RegionResolver::getRegionBelow()`: the cache answers the common
   case, and a miss asks PD for the region containing the cursor or, when the
   cursor sits exactly on a region boundary, for the adjacent region below it.
-  It does not use `RegionScanSource`, so its cache counters are labelled
-  `region_resolution` (per lookup), not `scan`.
+  They do not use `RegionScanSource`, so their cache counters are labelled
+  `region_resolution` (per lookup), not `scan` / `txn_scan`.
 - A split or merge the client has not seen yet is still handled by the usual
   region-error retry (the stale entry is invalidated from `EpochNotMatch`,
   then the retry re-resolves the gap through PD).
@@ -2552,7 +2553,7 @@ The library emits the following counter tags:
 | `rpcStarted()`                 | `'tikvpb.Tikv/KvGet'`      | One outbound gRPC call was dispatched             |
 | `rpcCompleted()`               | `'tikvpb.Tikv/KvGet'`      | gRPC call returned (success or error); carries duration (ms) |
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
-| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache. `region_resolution` is the per-lookup label (point reads and `reverseScan()`'s top-down resolver); the scan labels are emitted once per cache-served run of regions |
+| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache. `region_resolution` is the per-lookup label (point reads and the RawKV/TxnKV reverse scans' top-down resolver); the scan labels are emitted once per cache-served run of regions |
 | `regionCacheMiss()`            | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was not in the cache, had to query PD. `region_resolution` is the per-lookup label; the scan labels are emitted once per `ScanRegions` call |
 | `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'`, `'refresh'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), post-resolve cleanup in `LockResolver`, or a `refreshRegionCache()` tick that found PD no longer maps the entry's start key to its cached range (a refresh that supersedes the entry with a newer answer is a `put()` and emits nothing). Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
 

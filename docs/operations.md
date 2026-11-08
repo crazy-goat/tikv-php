@@ -612,6 +612,48 @@ rejected with `InvalidArgumentException` before any RPC instead of returning a
 silent empty array: the first argument must sort after the second. An empty
 `endKey` (the second argument) means "down to the start of the keyspace".
 
+### Transactional Reverse Scan and Range Deletion
+
+A transaction reads at its snapshot and observes its own buffered writes, so
+both operations below are consistent with the rest of the transaction.
+
+```php
+$txn = $txnClient->beginPessimistic();
+
+// Same bound convention as RawKvClient::reverseScan(): [lower, upper),
+// returned in descending key order.
+$latest = $txn->reverseScan('account;', 'account:', limit: 10);
+
+// The same call with a flag:
+$latest = $txn->scan('account;', 'account:', limit: 10, reverse: true);
+
+// Buffer a delete for every key in [start, end) atomically.
+$deleted = $txn->deleteRange('account:100', 'account:200');
+
+$txn->commit();
+```
+
+`Transaction::reverseScan()` walks the regions from the upper bound downwards
+(the same top-down resolver walk as the RawKV reverse scan), so a narrow
+reverse scan does not enumerate the rest of the range. It obeys the
+transactional scan cap: `limit: 0` returns the whole range up to
+`Transaction::MAX_SCAN_LIMIT` (10240) rows and throws
+`ScanLimitExceededException` when the range holds more, rather than returning
+a truncated result. Buffered sets and deletes are merged in descending order,
+so read-your-writes holds in both directions.
+
+`Transaction::deleteRange()` reads the range at the snapshot and buffers a
+tombstone for each key, so the deletion is **atomic with the transaction** —
+it becomes visible only at `commit()` and `rollback()` discards it. It is
+bounded by the same 10240-row scan cap and by the transaction's write-set
+limits (`maxTxnEntryCount`, `maxTxnEntrySize`, `maxTxnTotalSize`), and a
+failure before the scan completes buffers nothing, and the whole batch is
+validated against the write-set limits before any pessimistic lock is
+acquired, so an oversized range fails without buffering or locking anything.
+For an unbounded range,
+delete in explicit batches across several transactions, or use the raw,
+non-transactional `RawKvClient::deleteRange()`.
+
 ### Batch Scan
 
 Scan multiple non-contiguous ranges:
@@ -1218,7 +1260,8 @@ The client sends the sub-batches in parallel. A batch is not atomic. See [Batch 
 ### TxnKV
 
 The TxnKV client has no key or value size check of its own. The `MAX_KEY_SIZE` and `MAX_VALUE_SIZE` constants apply to RawKV only.
-A transactional scan has its own cap of 10240 rows. See [Scan](#scan).
+A transactional scan has its own cap of 10240 rows. See [Scan](#scan) and
+[Transactional Reverse Scan and Range Deletion](#transactional-reverse-scan-and-range-deletion).
 
 ## Connection lifecycle and process model
 

@@ -287,6 +287,48 @@ final class TransactionState
     }
 
     /**
+     * Validate that buffering a delete for every key would stay within the
+     * configured write-set limits, without applying any of them (issue #435).
+     *
+     * Unlike calling {@see assertWriteAllowed()} once per key, this accounts
+     * for the cumulative effect of the batch: keys already in the write set
+     * replace their entry, new keys add one, and every key contributes its key
+     * length (a delete has no value). A caller can therefore reject an
+     * oversized range before it acquires pessimistic locks.
+     *
+     * @param array<array-key, string|int> $keys
+     *
+     * @throws TransactionTooLargeException when the batch would exceed one of
+     *         the configured limits
+     */
+    public function assertDeletesFit(array $keys): void
+    {
+        $count = count($this->writeSet);
+        $bytes = $this->writeSetBytes;
+
+        // A duplicated key must be counted once: dedupe before projecting.
+        $uniqueKeys = array_values(array_unique(array_map(
+            static fn (string|int $key): string => (string) $key,
+            $keys,
+        )));
+
+        foreach ($uniqueKeys as $key) {
+            $entrySize = $this->entrySize($key, null);
+            $this->assertEntrySizeWithinLimit($entrySize);
+
+            if (array_key_exists($key, $this->writeSet)) {
+                $bytes -= $this->entrySize($key, $this->writeSet[$key] ?? null);
+            } else {
+                $count++;
+            }
+            $bytes += $entrySize;
+        }
+
+        $this->assertCountWithinLimit($count);
+        $this->assertTotalSizeWithinLimit($bytes);
+    }
+
+    /**
      * @throws TransactionTooLargeException when the write would exceed one
      *         of the configured limits (issue #430)
      */
