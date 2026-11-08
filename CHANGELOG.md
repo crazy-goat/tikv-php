@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Docs
+
+- `docs/helpers/faq.md` and `docs/helpers/decisions.md` now start with an index that lists every section in file order, and a new section is inserted directly below it (newest first) instead of at the end of the file (issue #679). Every branch that learned something non-obvious appended to the same last line, so any two of them conflicted there, and the last line repeatedly lost its trailing newline and added a `\ No newline at end of file` marker to the diff. `tests/Unit/Docs/HelpersIndexGuardTest.php` fails when the index and the `##` headings drift apart, when the index is not above the sections, or when a file does not end with exactly one newline; the convention is recorded in `docs/helpers/README.md`.
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
