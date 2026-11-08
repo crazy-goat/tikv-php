@@ -773,7 +773,8 @@ Each option restricts only the read it belongs to:
 
 Without a base directory the file is still canonicalized with `realpath()`, but
 nothing keeps it inside one particular directory. Certificate files must have a
-`.pem`, `.crt` or `.key` extension.
+`.pem`, `.crt` or `.key` extension; any other extension is rejected with
+`InvalidArgumentException` ("TLS file has disallowed extension ...").
 
 ### Using Certificate Content (Inline PEM)
 
@@ -831,14 +832,20 @@ The deprecated keys themselves are described in
 `caCert`, `clientCert` and `clientKey` are **deprecated**. They still work for
 backward compatibility, but they guess between a file path and inline PEM
 content from the value itself: a value containing a `-----BEGIN` header is read
-as inline PEM, anything else is read as a file path (a path that does not exist
-or is not readable throws `InvalidArgumentException`). For the client pair the
-guess is made for both values together — if either value looks like a file
-path, both are read as file paths — so mixing an inline PEM certificate with a
-file path (or the other way round) fails with `TLS file has disallowed
-extension ""`. The guess makes the same key mean two different things
-depending on the string, and — because the legacy keys have no base-directory
-counterpart — the `*BaseDir` restriction cannot be applied to them at all.
+as inline PEM, anything else is read as a file path. A single value that looks
+like a path but does not exist or is not readable throws
+`InvalidArgumentException` ("TLS value looks like a file path but the file does
+not exist or is not readable"). For the client pair the guess is made for both
+values together, so the two values must be given in the same form: a pair that
+mixes an inline PEM certificate with a file key (or the other way round) throws
+`InvalidArgumentException` ("TLS client certificate and key must be given in the
+same form, both file paths or both inline PEM"), whether or not the path half
+exists. A pair given as two file paths is read like
+`clientCertFile`/`clientKeyFile`, so a missing or unreadable file throws
+"Cannot read TLS file: file does not exist or is not readable". The guess makes
+the same key mean two different things depending on the string, and — because
+the legacy keys have no base-directory counterpart — the `*BaseDir` restriction
+cannot be applied to them at all.
 
 Use the explicit keys instead: `caCertFile`, `clientCertFile` + `clientKeyFile`
 (with `caCertBaseDir` / `clientCertBaseDir` if you want the path restriction),
