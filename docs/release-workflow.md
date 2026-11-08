@@ -68,8 +68,9 @@ In `CHANGELOG.md`:
   fails the unit suite on either drift.
 - Resolve the markdown links before merging:
   `tests/Unit/Docs/MarkdownLinksGuardTest.php` checks every relative target
-  and every `#anchor` of the tracked markdown files against the filesystem
-  and the target headings, so a renamed file or heading fails the suite.
+  and every `#anchor` of the markdown files in the checkout against the
+  filesystem and the target headings, so a renamed file or heading fails the
+  suite.
 
 - Update `README.md` ("Stability and versioning"): **every** version of the
   whole "Stability and versioning" section has to follow the release — the

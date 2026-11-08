@@ -41,8 +41,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class ClientOptionsTableGuardTest extends TestCase
 {
-    /** Heading of the options table, including its markdown level. */
-    private const OPTIONS_HEADING = "\n### Configuration Options\n";
+    /** Heading of the options table. */
+    private const OPTIONS_HEADING = '### Configuration Options';
 
     public function testEveryCreateOptionAppearsInTheReadmeTable(): void
     {
@@ -334,24 +334,63 @@ final class ClientOptionsTableGuardTest extends TestCase
     /**
      * The text of a markdown section, from its heading up to the next
      * heading of the same or a shallower level.
+     *
+     * The next-heading search is fence-aware: a `# Example` line inside a
+     * fenced code block is a sample, not a heading, so it cannot end the
+     * section early and hide the rows below it.
      */
     private function section(string $contents, string $heading): string
     {
-        $start = strpos($contents, $heading);
-        self::assertNotFalse($start, sprintf('No "%s" section found.', trim($heading)));
+        $lines = explode("\n", $contents);
+        $start = null;
+
+        foreach ($lines as $index => $line) {
+            if (trim($line) === $heading) {
+                $start = $index;
+                break;
+            }
+        }
+
+        self::assertNotNull($start, sprintf('No "%s" section found.', $heading));
 
         $level = 1;
-        if (preg_match('/^#+/', trim($heading), $matches) === 1) {
+        if (preg_match('/^#+/', $heading, $matches) === 1) {
             $level = strlen($matches[0]);
         }
 
-        $rest = substr($contents, $start + strlen($heading));
-        $end = strlen($rest);
-        if (preg_match('/\n#{1,' . $level . '} /', $rest, $matches, PREG_OFFSET_CAPTURE) === 1) {
-            $end = $matches[0][1];
+        $lineCount = count($lines);
+        $end = $lineCount;
+        $fenceCharacter = null;
+        $fenceLength = 0;
+
+        for ($index = $start + 1; $index < $lineCount; $index++) {
+            $trimmed = trim($lines[$index]);
+
+            if ($fenceCharacter !== null) {
+                if (
+                    preg_match('/^(`{3,}|~{3,})$/', $trimmed, $matches) === 1
+                    && $matches[1][0] === $fenceCharacter
+                    && strlen($matches[1]) >= $fenceLength
+                ) {
+                    $fenceCharacter = null;
+                }
+
+                continue;
+            }
+
+            if (preg_match('/^(`{3,}|~{3,})/', $trimmed, $matches) === 1) {
+                $fenceCharacter = $matches[1][0];
+                $fenceLength = strlen($matches[1]);
+                continue;
+            }
+
+            if (preg_match('/^#{1,' . $level . '}\s/', $lines[$index]) === 1) {
+                $end = $index;
+                break;
+            }
         }
 
-        return substr($rest, 0, $end);
+        return implode("\n", array_slice($lines, $start + 1, $end - $start - 1));
     }
 
     /**

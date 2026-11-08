@@ -1002,8 +1002,9 @@ Every user-facing capability of the library, taken from `src/Client/` — the
 `beginOptimistic()` / `beginPessimistic()` entry points), the `Transaction` and
 the client options. Lower-level utilities such as `KeyRedactor`,
 `TimeoutConfig`, `SlowLogConfig`, `TlsConfigBuilder`, `StoreCacheInterface`
-and `GrpcStatusCode` are extension points rather than operations; the
-[Public API](#public-api) table says what the stability promise covers.
+and `GrpcStatusCode` are not operations; the [Internal](#internal) section
+explains which of them are extension points and that the rest may change in
+any release.
 The list is cross-checked against `CHANGELOG.md` at release time, see
 [docs/release-workflow.md](docs/release-workflow.md).
 

@@ -8,29 +8,33 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Regression guard for issue #720: the relative links and the `#anchors` of
- * every tracked markdown file have to resolve.
+ * every markdown file of the checkout have to resolve.
  *
  * Documentation rots from the edges: a heading is renamed, a file moves, a
  * paragraph is split, and the link that pointed at it keeps looking valid
  * until a reader follows it. The README is the landing page, so a dead link
  * there is the first thing a new user sees.
  *
- * The guard is deliberately file-system based instead of a list of known
- * documents: `git ls-files '*.md'` covers the README, the docs tree, the
- * changelog, the workflow files and a future markdown file without touching
- * this test.
+ * The files are enumerated from the checkout, not with `git ls-files`: the
+ * project image has no `git` and `.dockerignore` drops `.git`, while
+ * `make test-unit` is documented to run in that image. The walk skips
+ * `vendor/`, `.git/`, the PHPUnit and agent caches, the docs-guard fixtures
+ * under `tests/Unit/Docs/fixtures/` (deliberately non-conforming inputs for a
+ * different guard) and the local `findings.md` / `review.md` scratch files.
  *
  * Two checks run over every file:
  *
- *  - a relative target (a path, an image source or a reference definition)
- *    must exist, resolved from the directory of the file that links it;
+ *  - a relative target (a markdown link, an image source, an HTML `href` /
+ *    `src`, or a reference definition) must exist, resolved from the
+ *    directory of the file that links it;
  *  - an anchor must name a heading or an explicit `<a name="…">` /
  *    `<a id="…">` of the target file, where a same-document `#anchor` checks
  *    the file itself.
  *
- * Links inside fenced code blocks and inline code spans are samples, not
- * links, so they are skipped. External targets (`http:`, `https:`, `mailto:`
- * and any other scheme) are not fetched — the guard is offline.
+ * Links inside fenced and 4-space-indented code blocks and inline code spans
+ * are samples, not links, so they are skipped. External targets (`http:`,
+ * `https:`, `mailto:` and any other scheme) are not fetched — the guard is
+ * offline.
  *
  * Anchor slugs follow GitHub's heading algorithm: lowercase, inline markup
  * removed, punctuation dropped, each whitespace character turned into a
@@ -40,6 +44,33 @@ use PHPUnit\Framework\TestCase;
  */
 final class MarkdownLinksGuardTest extends TestCase
 {
+    /**
+     * Directories that are generated, vendored, cached or local agent
+     * scratch, never documentation a reader follows.
+     */
+    private const EXCLUDED_DIRECTORIES = [
+        '.git',
+        '.idea',
+        '.infection-tmp',
+        '.opencode',
+        '.phpunit.cache',
+        '.pi-subagents',
+        '.tyci',
+        '.worktrees',
+        'coverage-html',
+        'node_modules',
+        'vendor',
+    ];
+
+    /**
+     * Git-ignored scratch files at the repository root. They exist only on a
+     * developer machine and must not make the suite depend on local notes.
+     */
+    private const EXCLUDED_ROOT_FILES = [
+        'findings.md',
+        'review.md',
+    ];
+
     /**
      * Anchors per file, so a link that points at a document many times does
      * not re-read and re-slug it for every hit.
@@ -121,45 +152,67 @@ final class MarkdownLinksGuardTest extends TestCase
     }
 
     /**
-     * Every tracked markdown file, as an absolute path.
+     * Every markdown file of the checkout, as an absolute path.
      *
      * @return list<string>
      */
     private function markdownFiles(): array
     {
-        $root = $this->repoRoot();
-        $command = sprintf(
-            'git -C %s ls-files -z -- %s',
-            escapeshellarg($root),
-            escapeshellarg('*.md'),
-        );
-
-        $output = [];
-        $exitCode = 0;
-        exec($command, $output, $exitCode);
-
-        self::assertSame(0, $exitCode, sprintf('git ls-files failed with exit code %d', $exitCode));
-
         $files = [];
-        foreach (explode("\0", implode("\n", $output)) as $file) {
-            if ($file !== '') {
-                $files[] = $root . '/' . $file;
-            }
-        }
-
+        $this->collectMarkdownFiles($this->repoRoot(), $files);
         sort($files);
 
-        self::assertNotEmpty($files, 'git ls-files returned no markdown file.');
+        self::assertNotEmpty($files, 'No markdown file was found — the guard would be vacuous.');
 
         return $files;
     }
 
     /**
+     * @param list<string> $files
+     */
+    private function collectMarkdownFiles(string $directory, array &$files): void
+    {
+        $entries = scandir($directory);
+        self::assertNotFalse($entries, sprintf('Unable to read directory %s', $directory));
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $path = $directory . '/' . $entry;
+
+            if (is_dir($path)) {
+                if (!in_array($entry, self::EXCLUDED_DIRECTORIES, true)) {
+                    $this->collectMarkdownFiles($path, $files);
+                }
+
+                continue;
+            }
+
+            if (!str_ends_with(strtolower($entry), '.md')) {
+                continue;
+            }
+
+            $relative = $this->relative($path);
+            if (in_array($relative, self::EXCLUDED_ROOT_FILES, true)) {
+                continue;
+            }
+            if (str_starts_with($relative, 'tests/Unit/Docs/fixtures/')) {
+                continue;
+            }
+
+            $files[] = $path;
+        }
+    }
+
+    /**
      * Every link of a markdown document, with the 1-based line it is on.
      *
-     * Fenced code blocks are skipped entirely, and inline code spans are
-     * removed before matching, so a documented `[text](target)` sample is
-     * not treated as a link. Reference definitions (`[id]: target`) are
+     * Fenced and 4-space-indented code blocks are skipped entirely, and
+     * inline code spans are removed before matching, so a documented
+     * `[text](target)` sample is not treated as a link. Reference
+     * definitions (`[id]: target`) and HTML `href` / `src` attributes are
      * links too and are included.
      *
      * @return list<array{line: int, target: string}>
@@ -167,27 +220,10 @@ final class MarkdownLinksGuardTest extends TestCase
     private function linksIn(string $contents): array
     {
         $links = [];
-        $fence = null;
-        $fenceLength = 0;
+        $codeLines = $this->codeLineNumbers($contents);
 
         foreach (explode("\n", $contents) as $index => $line) {
-            $trimmed = trim($line);
-
-            if ($fence !== null) {
-                if (
-                    preg_match('/^(`{3,}|~{3,})$/', $trimmed, $matches) === 1
-                    && $matches[1][0] === $fence
-                    && strlen($matches[1]) >= $fenceLength
-                ) {
-                    $fence = null;
-                }
-
-                continue;
-            }
-
-            if (preg_match('/^(`{3,}|~{3,})/', $trimmed, $matches) === 1) {
-                $fence = $matches[1][0];
-                $fenceLength = strlen($matches[1]);
+            if (isset($codeLines[$index + 1])) {
                 continue;
             }
 
@@ -209,30 +245,30 @@ final class MarkdownLinksGuardTest extends TestCase
             foreach ($matches[1] as $target) {
                 $links[] = ['line' => $index + 1, 'target' => $this->stripAngleBrackets($target)];
             }
+
+            $matches = [];
+            $found = preg_match_all(
+                '/\b(?:href|src)\s*=\s*["\']([^"\']+)["\']/i',
+                $withoutCode,
+                $matches,
+            );
+            self::assertIsInt($found);
+
+            foreach ($matches[1] as $target) {
+                $links[] = ['line' => $index + 1, 'target' => $this->stripAngleBrackets($target)];
+            }
         }
 
         return $links;
     }
 
     /**
-     * The anchors of a markdown file, cached by path.
-     *
-     * @return list<string>
-     */
-    private function anchorsForFile(string $path): array
-    {
-        $this->anchorCache[$path] ??= $this->anchorsIn($this->readFile($path));
-
-        return $this->anchorCache[$path];
-    }
-
-    /**
      * The anchors a markdown file exposes: the GitHub slugs of its headings
      * and its explicit HTML anchors.
      *
-     * Fenced code blocks are skipped, so a commented `# heading` sample does
-     * not invent an anchor. Repeated headings get GitHub's `-1`, `-2`, …
-     * suffixes.
+     * Fenced and indented code blocks are skipped, so a commented
+     * `# heading` sample does not invent an anchor. Repeated headings get
+     * GitHub's `-1`, `-2`, … suffixes.
      *
      * @return list<string>
      */
@@ -240,27 +276,10 @@ final class MarkdownLinksGuardTest extends TestCase
     {
         $anchors = [];
         $counts = [];
-        $fence = null;
-        $fenceLength = 0;
+        $codeLines = $this->codeLineNumbers($contents);
 
-        foreach (explode("\n", $contents) as $line) {
-            $trimmed = trim($line);
-
-            if ($fence !== null) {
-                if (
-                    preg_match('/^(`{3,}|~{3,})$/', $trimmed, $matches) === 1
-                    && $matches[1][0] === $fence
-                    && strlen($matches[1]) >= $fenceLength
-                ) {
-                    $fence = null;
-                }
-
-                continue;
-            }
-
-            if (preg_match('/^(`{3,}|~{3,})/', $trimmed, $matches) === 1) {
-                $fence = $matches[1][0];
-                $fenceLength = strlen($matches[1]);
+        foreach (explode("\n", $contents) as $index => $line) {
+            if (isset($codeLines[$index + 1])) {
                 continue;
             }
 
@@ -284,6 +303,101 @@ final class MarkdownLinksGuardTest extends TestCase
         }
 
         return $anchors;
+    }
+
+    /**
+     * The 1-based lines that belong to fenced or 4-space-indented code
+     * blocks.
+     *
+     * This mirrors the CommonMark-aware scanner of the sibling
+     * `TlsOptionKeysDocumentationGuardTest`: a fence closes only on a run of
+     * the same character at least as long as the opening one with nothing
+     * else on the line, and an indented run is code only after a blank line
+     * (otherwise it is a lazy continuation of a paragraph or list item).
+     *
+     * @return array<int, true>
+     */
+    private function codeLineNumbers(string $contents): array
+    {
+        $codeLines = [];
+        $fenceCharacter = null;
+        $fenceLength = 0;
+        $indented = false;
+        $afterBlankLine = true;
+
+        foreach (explode("\n", $contents) as $index => $line) {
+            $trimmed = trim($line);
+            $lineNumber = $index + 1;
+            $fenceRun = $this->fenceRun($trimmed);
+
+            if ($fenceCharacter !== null) {
+                $codeLines[$lineNumber] = true;
+                if (
+                    $fenceRun !== null
+                    && $fenceRun[0] === $fenceCharacter
+                    && strlen($fenceRun) >= $fenceLength
+                    && $fenceRun === $trimmed
+                ) {
+                    $fenceCharacter = null;
+                }
+
+                $afterBlankLine = false;
+                continue;
+            }
+
+            if ($fenceRun !== null) {
+                $fenceCharacter = $fenceRun[0];
+                $fenceLength = strlen($fenceRun);
+                $codeLines[$lineNumber] = true;
+                $afterBlankLine = false;
+                continue;
+            }
+
+            if (str_starts_with($line, '    ') || str_starts_with($line, "\t")) {
+                if (!$indented) {
+                    if (!$afterBlankLine) {
+                        continue;
+                    }
+
+                    $indented = true;
+                }
+
+                $codeLines[$lineNumber] = true;
+                continue;
+            }
+
+            $indented = false;
+            $afterBlankLine = $trimmed === '';
+        }
+
+        return $codeLines;
+    }
+
+    /**
+     * The run of backticks or tildes with which a line opens or closes a
+     * fenced block, or null when the line is not a fence at all.
+     */
+    private function fenceRun(string $trimmedLine): ?string
+    {
+        $matches = [];
+
+        if (preg_match('/^(?<run>`{3,}|~{3,})/', $trimmedLine, $matches) !== 1) {
+            return null;
+        }
+
+        return $matches['run'];
+    }
+
+    /**
+     * The anchors of a markdown file, cached by path.
+     *
+     * @return list<string>
+     */
+    private function anchorsForFile(string $path): array
+    {
+        $this->anchorCache[$path] ??= $this->anchorsIn($this->readFile($path));
+
+        return $this->anchorCache[$path];
     }
 
     /**
