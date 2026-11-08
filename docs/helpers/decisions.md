@@ -11,6 +11,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [Generated protobuf classes are never part of the stability promise (issue #734)](#generated-protobuf-classes-are-never-part-of-the-stability-promise-issue-734)
 - [The mutation score is enforced nightly, and it is a ratchet too (issue #363)](#the-mutation-score-is-enforced-nightly-and-it-is-a-ratchet-too-issue-363)
 - [`closeChannel()` forces a new connection; eviction does not (issue #717)](#closechannel-forces-a-new-connection-eviction-does-not-issue-717)
 - [Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)](#branch-naming-fixn-kebab-case-no-issue--prefix)
@@ -73,6 +74,20 @@ of the file.
 - [Workflows pin actions by commit SHA (issue #316, SEC-13)](#workflows-pin-actions-by-commit-sha-issue-316-sec-13)
 - [Resolved-lock tracking lives on the per-transaction LockResolver (issue #432, GAP-18)](#resolved-lock-tracking-lives-on-the-per-transaction-lockresolver-issue-432-gap-18)
 <!-- index:end -->
+
+## Generated protobuf classes are never part of the stability promise (issue #734)
+
+`src/Proto/` is regenerated with every protobuf bump and is excluded from
+lint, so a generated class cannot carry a promise the library is able to
+keep. A public property of a promised class is therefore typed with a
+library-owned value object, never with a generated message.
+
+`RegionException::$notLeader` is the case that forced the rule: it exposed
+`Errorpb\NotLeader` directly. It now carries `Exception\NotLeaderHint`
+(`regionId`, `leaderPeerId`, `leaderStoreId`), and the conversion from the
+oneof payload lives in `RegionException::fromRegionError()`. When another
+region-error payload becomes part of the promised surface, wrap it the same
+way instead of adding the generated class to the policy.
 
 ## The mutation score is enforced nightly, and it is a ratchet too (issue #363)
 
@@ -1732,10 +1747,10 @@ Two different failure modes share one issue, and they get two different defaults
    primary batch carries `use_async_commit` and the secondaries list, and it is prewritten last.
 5. **Size function:** a prewrite mutation is key length + value length, a commit key is key
    length. Request framing, `Context`, `primary_lock` and the async `secondaries` list are
-   deliberately excluded, matching the payload TiKV's `RaftEntryTooLarge` guard measures; an
-   async primary prewrite can therefore exceed the budget, and a single item larger than the
-   limit still forms its own batch so the server rejects it instead of the client silently
-   dropping it.
+   deliberately excluded: the bound covers only the key/value payload, not the full raft entry
+   that TiKV's `RaftEntryTooLarge` guard measures. An async primary prewrite can therefore
+   exceed the budget, and a single item larger than the limit still forms its own batch so the
+   server rejects it instead of the client silently dropping it.
 
 ## `is_first_lock` belongs to the batch that holds the primary lock (#225)
 

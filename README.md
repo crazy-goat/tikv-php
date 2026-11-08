@@ -184,7 +184,7 @@ that keeps existing, correct code working.
 | `RawKv\CasResult`, `RawKv\ChecksumResult`, `RawKv\KeyTtl` | the result DTOs of `compareAndSwap()`, `checksum()` and `getKeyTTLResult()` |
 | `RawKv\ScanIterator` | the iterator returned by `scanIterator()` and `scanPrefixIterator()` |
 | `TxnKv\TransactionStatus` | the enum returned by `Transaction::getStatus()` |
-| `Exception\*` | `TiKvException` and every subclass, plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
+| `Exception\*` | `TiKvException` and every subclass, `NotLeaderHint` (the value object behind `RegionException::$notLeader`), plus `InvalidArgumentException` (which extends PHP's `\InvalidArgumentException`, not `TiKvException`) |
 | `TxnKv\Exception\*` | the seven transaction exceptions: `DeadlockException`, `LockWaitTimeoutException`, `TransactionConflictException`, `TransactionTooLargeException`, `TxnAbortedByGcException`, `TxnRetryableException`, `UndeterminedCommitException` |
 | `Retry\RetryBudgetExhaustedException` | thrown when the internal retry budget is exhausted |
 | `Retry\ErrorKind` | the enum behind `RegionException::$errorKind` — the typed variant of a region error |
@@ -198,10 +198,10 @@ that keeps existing, correct code working.
 | `Region\ReplicaReadMode`, `Region\ReplicaReadPolicy` | the values you pass as `options['replicaRead']` |
 | the documented `options[]` keys | every key documented in the [configuration guide](docs/configuration.md) — `tls`, `timeout`, `metrics`, `tracer`, `apiVersion`, `keyspace`, `replicaRead`, `batchCommands`, `maxScanRows`, `maxConcurrency`, `tsoPoolSize`, … |
 
-The namespaces above are relative to `CrazyGoat\TiKV\Client\`. One class
-outside that namespace is part of the promise as well:
-`CrazyGoat\Proto\Errorpb\NotLeader`, the message behind
-`RegionException::$notLeader`.
+The namespaces above are relative to `CrazyGoat\TiKV\Client\`. No generated
+protobuf or gRPC class is part of the promise: a message such as
+`Errorpb\NotLeader` reaches consumers only through a library-owned value
+object (`Exception\NotLeaderHint` for `RegionException::$notLeader`).
 
 ### Internal
 
@@ -233,8 +233,8 @@ of the contract.
   `Retry\ErrorKind`, which the table above covers: `Retry\Backoff`,
   `Retry\BackoffType`, `Retry\ErrorClassifier`, `Retry\RetryBudget`,
   `Retry\RetryExecutor` and `Retry\RetryVerdict`;
-- the generated protobuf and gRPC classes under `src/Proto/` — except
-  `Errorpb\NotLeader`, which the promise covers.
+- the generated protobuf and gRPC classes under `src/Proto/` — no generated
+  class is part of the promise.
 
 The advanced extension points — `Retry\RetryExecutor`,
 `Retry\RetryVerdict` and `Retry\BackoffType` in
@@ -696,7 +696,7 @@ only logged. Always `commit()` or `rollback()` in your own code.
 
 #### Complete example
 
-This is `examples/txn.php` — run it verbatim against a TxnKV cluster:
+`examples/txn.php` defines this retry helper — run the script verbatim against a TxnKV cluster:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.txnkv.yml down -v
@@ -719,9 +719,8 @@ use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
  * startTs that has already lost the race, so re-running the same object can
  * never succeed.
  */
-function transfer(TxnKvClient $client, string $from, string $to, int $amount): void
-{
-    for ($attempt = 1; ; $attempt++) {
+$transfer = static function (TxnKvClient $client, string $from, string $to, int $amount): void {
+    for ($attempt = 1;; $attempt++) {
         $txn = $client->begin(); // pessimistic by default
         try {
             $fromBalance = (int) $txn->get($from);
@@ -736,7 +735,12 @@ function transfer(TxnKvClient $client, string $from, string $to, int $amount): v
             $txn->commit();
 
             return;
-        } catch (TransactionConflictException | DeadlockException | LockWaitTimeoutException | TxnRetryableException $e) {
+        } catch (
+            TransactionConflictException
+            | DeadlockException
+            | LockWaitTimeoutException
+            | TxnRetryableException $e
+        ) {
             if ($txn->getStatus() === TransactionStatus::Active) {
                 $txn->rollback();
             }
@@ -752,12 +756,13 @@ function transfer(TxnKvClient $client, string $from, string $to, int $amount): v
             throw $e;
         }
     }
-}
+};
 ```
 
-The `getStatus() === Active` guard matters: after an undetermined commit the
-transaction is closed, and calling `rollback()` on it would throw a second
-exception over the first.
+The helper is a closure so the script declares no global function next to the
+autoloader `require`. The `getStatus() === Active` guard matters: after an
+undetermined commit the transaction is closed, and calling `rollback()` on it
+would throw a second exception over the first.
 
 ### TLS/SSL Configuration
 
@@ -1077,7 +1082,7 @@ The list is cross-checked against `CHANGELOG.md` at release time, see
 ### Transaction Capabilities
 - ✅ **TxnKvClient / Transaction** — ACID transactions with snapshot reads and two-phase commit
 - ✅ **Pessimistic & Optimistic** — pessimistic locks by default; the primary lock of a pessimistic transaction is kept alive automatically, and `heartbeat()` remains for a transaction that waits without touching TiKV
-- ✅ **Transaction size limits and request batching** — `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` bound the write set and throw `TransactionTooLargeException` before any RPC; `trackReadSet` (default `false`) opts in to the read set populated by `get()`, `batchGet()`, `getForUpdate()` and `scan()`, and `maxReadSetEntries` / `maxReadSetTotalSize` bound it; `getWriteSetSize()` / `getWriteSetCount()` and `getReadSetSize()` / `getReadSetCount()` expose their sizes; `maxTxnBatchSize` / `maxTxnBatchCount` split prewrite and commit requests per region
+- ✅ **Transaction size limits and request batching** — `maxTxnEntryCount`, `maxTxnEntrySize` and `maxTxnTotalSize` bound the write set and throw `TransactionTooLargeException` before any RPC; `trackReadSet` (default `false`) opts in to the read set populated by `get()`, `batchGet()`, `getForUpdate()` and `scan()`, and `maxReadSetEntries` / `maxReadSetTotalSize` bound it; `getWriteSetSize()` / `getWriteSetCount()` and `getReadSetSize()` / `getReadSetCount()` expose their sizes; `maxTxnBatchSize` / `maxTxnBatchCount` split prewrite, pessimistic-lock, commit and rollback requests per region
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` is sent automatically when less than half of the lock TTL remains; `optimisticLockTtlMs` / `pessimisticLockTtlMs` set the lock TTLs
 - ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` of final transaction outcomes, and a per-transaction `ResolvedLockTracker` that classifies each resolution against the snapshot start ts and sends the disjoint `Context.resolved_locks` / `Context.committed_locks` sets
 - ✅ **Conflict retry** — typed `TransactionConflictException`, `DeadlockException`, `LockWaitTimeoutException`
@@ -1152,8 +1157,8 @@ locking at write time — the default — or at commit time), `lockWaitTimeMs`
 (pessimistic lock TTL, default 30000 ms), `maxTxnEntryCount` /
 `maxTxnEntrySize` / `maxTxnTotalSize` (write-set bounds, each 0 = unlimited),
 `trackReadSet` (read-set tracking, default false), `maxReadSetEntries` /
-`maxReadSetTotalSize` (read-set bounds, each 0 = unlimited), `maxTxnBatchSize` (bytes per prewrite/commit request per region, default
-16384) and `maxTxnBatchCount` (mutations/keys per prewrite/commit request per
+`maxReadSetTotalSize` (read-set bounds, each 0 = unlimited), `maxTxnBatchSize` (bytes per prewrite/pessimistic-lock/commit/rollback request per region, default
+16384) and `maxTxnBatchCount` (mutations/keys per prewrite/pessimistic-lock/commit/rollback request per
 region, default 512). `requestContext` is a `RequestContextOptions`
 object that replaces the client-level `options['requestContext']` for this
 transaction only; pass `null` to disable the client-level controls.
@@ -1368,7 +1373,7 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Batch auto-splitting by size/count**
 - ✅ **Batch lock resolution and resolved-status cache** — one `KvResolveLock` per (region, transaction), with a bounded `ResolvedTxnStatusCache` and a bounded per-transaction `ResolvedLockTracker` that feeds the disjoint `Context.resolved_locks` / `Context.committed_locks` sets
 - ✅ **Automatic primary-lock keepalive** — `TxnHeartBeat` when less than half of the lock TTL remains, with `optimisticLockTtlMs` / `pessimisticLockTtlMs`
-- ✅ **Transaction size limits and request batching** — write-set limits with `TransactionTooLargeException`, `getWriteSetSize()` / `getWriteSetCount()`, and prewrite/commit splitting by `maxTxnBatchSize` / `maxTxnBatchCount`
+- ✅ **Transaction size limits and request batching** — write-set limits with `TransactionTooLargeException`, `getWriteSetSize()` / `getWriteSetCount()`, and prewrite/pessimistic-lock/commit/rollback splitting by `maxTxnBatchSize` / `maxTxnBatchCount`
 - ✅ **Read-set limits and streaming SST ingest** — opt-in `trackReadSet` with `maxReadSetEntries` / `maxReadSetTotalSize`, `maxIngestSize`, and a generator-based `RawWrite` stream that no longer triple-buffers the payload
 - ✅ **Region-cache refresh, preload and cache-first scans** — `refreshRegionCache()`, `preloadRegions()` and `regionCacheRefreshMs`, with scan paths that serve cached regions and query PD only for the gaps
 - ✅ **The remaining `kvrpcpb.Context` control fields** — `RequestContextOptions` (isolation level, not-fill-cache, max execution duration, request source, resource group tag/name, busy threshold)
