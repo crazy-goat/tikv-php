@@ -136,7 +136,7 @@ of the file.
 - [Documenting a deprecated option key: guard the quoted form, check the premise, and describe the code as it is](#documenting-a-deprecated-option-key-guard-the-quoted-form-check-the-premise-and-describe-the-code-as-it-is)
 - [An audit issue's "this loop is sequential" premise expires — read the tree before re-implementing](#an-audit-issues-this-loop-is-sequential-premise-expires--read-the-tree-before-re-implementing)
 - [A region layout built from variable-width keys ("k1", "k10") makes the regions overlap — the cache then drops one of them](#a-region-layout-built-from-variable-width-keys-k1-k10-makes-the-regions-overlap--the-cache-then-drops-one-of-them)
-- [The `slowLog` option is RawKV-only, and its warning is written out five times](#the-slowlog-option-is-rawkv-only-and-its-warning-is-written-out-five-times)
+- [The `slowLog` option is RawKV-only](#the-slowlog-option-is-rawkv-only)
 - [Infection forces `stopOnDefect="true"` — one PHP warning truncates the whole mutation score](#infection-forces-stopondefecttrue--one-php-warning-truncates-the-whole-mutation-score)
 - [A relative timing control in a unit test needs a warmup, or protobuf autoload lands in the first measured phase](#a-relative-timing-control-in-a-unit-test-needs-a-warmup-or-protobuf-autoload-lands-in-the-first-measured-phase)
 - [A token-scanning guard test must recognise how `token_get_all()` spells a property, an operator and a keyword](#a-token-scanning-guard-test-must-recognise-how-token_get_all-spells-a-property-an-operator-and-a-keyword)
