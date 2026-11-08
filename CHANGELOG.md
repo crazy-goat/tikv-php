@@ -47,6 +47,8 @@ policy now classifies as internal.
 
 ### Docs
 
+- The "Future Architecture Improvements" section of `docs/architecture.md` no longer advertises shipped features as planned (issue #722). Connection pooling, the circuit breaker, metrics, `TxnHeartBeat`, read replicas, compression and batching are now marked as shipped with the issues that delivered them, and the section points at the [README roadmap](README.md#roadmap) as the single source of truth. Async API and Streaming have no tracking issue, so they are dropped from the list along with the untracked smart-routing research area; the roadmap's **Planned** list is empty as of v0.14.0.
+
 - The `docs/helpers/faq.md` entry on `unlink()` and directory permissions now quotes the errno and both platform messages: `unlink()` on a directory fails with `EISDIR` / "Is a directory" on Linux (where CI runs) and with `EPERM` / "Operation not permitted" on macOS and the BSDs, and the following `rmdir()` fails with `ENOTEMPTY` / "Directory not empty". The entry previously quoted only the macOS wording. (#666)
 
 ## [v0.14.0] - 2026-11-08
