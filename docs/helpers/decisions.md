@@ -1247,7 +1247,7 @@ to be unambiguous, and the answer is not "whoever calls `close()`":
    `close()` and in the destructor. `ownsGrpcClient: true` / `ownsPdClient:
    true` transfers ownership (issue #204). `TxnKvClient` still defaults
    `ownsGrpcClient` to `true` and closes its PD client unconditionally, pending
-   a follow-up issue.
+   the follow-up issue #990.
 
 The rule is published in three places, and a reader of any one of them has to
 find the same answer: `GrpcClientInterface::close()` (the API contract), the

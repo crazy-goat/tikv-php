@@ -600,10 +600,11 @@ $grpc->close();
 
 `options['grpcClient']` accepts a `GrpcClientInterface` (any implementation —
 `GrpcClient`, a test double, an application-specific transport). The client
-then uses it as it is and **never closes it**: the transport belongs to the
-application, so closing one client cannot break the other clients sharing it.
-A client that built its own transport (the normal case) closes it in
-`close()` as before.
+then uses it as it is and **never closes it** — neither in `close()` nor in
+`__destruct()`, which delegates to `close()`: the transport belongs to the
+application, so closing or destroying one client cannot break the other
+clients sharing it. A client that built its own transport (the normal case)
+closes it in `close()`, and therefore in `__destruct()` too.
 
 A `TxnKvClient` still owns the transactions it began when the transport is
 shared: `close()` rolls the still-active ones back before releasing its other
@@ -911,14 +912,22 @@ directory"), like the matching option does.
 
 **Who closes the connections on the manual path.** The rule of
 [Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
-is "the connections belong to whoever created them", and it holds for the
-factory path. A client assembled by hand is *given* a transport and a PD
-client it did not create, so it does not own them: `close()` and the
-destructor leave both open (issue #204). That makes sharing safe — destroying
-one client cannot close the channels another one still uses. The client still
-clears its own region cache.
+is "the connections belong to whoever created them". A client assembled by
+hand is *given* a transport and a PD client it did not create, but the two
+clients do not treat them the same way today:
 
-If the application wants to hand ownership over instead, say so explicitly:
+- `RawKvClient` defaults `ownsGrpcClient` and `ownsPdClient` to `false`:
+  `close()` — and therefore `__destruct()`, which delegates to it — leaves
+  both open (issue #204). That makes sharing safe: destroying one client
+  cannot close the channels another one still uses. The client still clears
+  its own region cache.
+- `TxnKvClient` differs: `ownsGrpcClient` still defaults to `true`, and
+  `close()` closes the PD client unconditionally (there is no `ownsPdClient`
+  flag). Pass `ownsGrpcClient: false` to keep a shared transport open; the PD
+  client it is given is always closed. #990 tracks aligning the two clients.
+
+If the application wants to hand ownership over on a `RawKvClient`, say so
+explicitly:
 
 ```php
 $client = new RawKvClient(
@@ -929,10 +938,9 @@ $client = new RawKvClient(
 );
 ```
 
-With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
-matching dependency in `close()`; the defaults are `false` for a
-hand-assembled `RawKvClient`. `TxnKvClient` has the same `ownsGrpcClient`
-parameter but still defaults to `true`.
+With `ownsGrpcClient: true` / `ownsPdClient: true` the `RawKvClient` closes
+the matching dependency in `close()` (and in the destructor). `TxnKvClient`
+accepts `ownsGrpcClient` only, and still defaults it to `true`.
 
 ### Security: Fail-Closed TLS
 
