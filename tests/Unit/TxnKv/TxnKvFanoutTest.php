@@ -8,9 +8,13 @@ use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Metapb\Store;
@@ -108,7 +112,7 @@ final class TxnKvFanoutTest extends TestCase
 
     /**
      * @param list<RegionInfo> $regions
-     * @param array{asyncCommit?: bool, onePc?: bool} $options
+     * @param array{asyncCommit?: bool, onePc?: bool, pessimistic?: bool, maxBackoffMs?: int} $options
      */
     private function createTransaction(
         array $regions,
@@ -136,13 +140,14 @@ final class TxnKvFanoutTest extends TestCase
         return new Transaction(
             txnId: 'fanout-txn',
             startTs: 1000,
-            pessimistic: false,
+            pessimistic: $options['pessimistic'] ?? false,
             priority: 0,
             pdClient: $this->pdClient,
             grpc: $grpc,
             regionCache: $regionCache,
             lockResolver: $lockResolver,
             regionResolver: $regionResolver,
+            maxBackoffMs: $options['maxBackoffMs'] ?? 20000,
             logger: $logger,
             timeoutConfig: $timeoutConfig,
             enable1Pc: $options['onePc'] ?? false,
@@ -436,6 +441,11 @@ final class TxnKvFanoutTest extends TestCase
      * BatchPartialFailureException aggregate. The error is the executor's
      * RetryBudgetExhaustedException, which carries the region's original
      * GrpcException as getPrevious().
+     *
+     * `Unknown` is a retryable gRPC status, so the prewrite is retried until
+     * the budget runs out. The transaction is built with a 200 ms budget
+     * (issue #692): the default 20 s made this the slowest test of the Unit
+     * suite by an order of magnitude while asserting nothing about the wait.
      */
     public function testFailingPrewriteSurfacesOriginalException(): void
     {
@@ -448,7 +458,7 @@ final class TxnKvFanoutTest extends TestCase
                 GrpcStatusCode::Unknown->value,
             ),
         );
-        $txn = $this->createTransaction($regions, $grpc);
+        $txn = $this->createTransaction($regions, $grpc, ['maxBackoffMs' => 200]);
 
         for ($i = 0; $i < 3; $i++) {
             $txn->set("k{$i}", "v{$i}");
@@ -462,6 +472,12 @@ final class TxnKvFanoutTest extends TestCase
             self::assertInstanceOf(GrpcException::class, $previous);
             self::assertStringContainsString('boom', $previous->getMessage());
         }
+
+        self::assertGreaterThan(
+            1,
+            $grpc->callCount,
+            'a retryable prewrite error must be retried before the budget is exhausted',
+        );
     }
 
     /**
@@ -683,6 +699,195 @@ final class TxnKvFanoutTest extends TestCase
     }
 
     /**
+     * Issue #691: the rollback fan-out reports the aggregate before the
+     * first-abort rethrow. The thrown error is still the first failing
+     * region's own exception, so the log is the only place the other
+     * regions' failures survive.
+     */
+    public function testAggregatedRollbackFailureNamesEveryFailingRegion(): void
+    {
+        $regions = $this->makeRegions(3);
+        $this->stubPdClient($regions);
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request): Message {
+                if ($method === 'KvBatchRollback') {
+                    $keys = self::requestKeys($request);
+                    foreach (['k1', 'k2'] as $failing) {
+                        if (in_array($failing, $keys, true)) {
+                            // A fatal gRPC status: the region is not retried.
+                            throw new GrpcException(
+                                "rollback failed on {$failing}",
+                                GrpcStatusCode::InvalidArgument->value,
+                            );
+                        }
+                    }
+                }
+
+                return match ($method) {
+                    'KvBatchRollback' => new BatchRollbackResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+        $logger = $this->recordingLogger();
+        $txn = $this->createTransaction($regions, $grpc, [], $logger);
+        for ($i = 0; $i < 3; $i++) {
+            $txn->set("k{$i}", "v{$i}");
+        }
+
+        try {
+            $txn->rollback();
+            self::fail('the failing rollback must propagate the first region error');
+        } catch (GrpcException $e) {
+            self::assertSame('gRPC error: rollback failed on k1', $e->getMessage());
+        }
+
+        $reports = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['message'] === 'Rollback fan-out failed for some regions',
+        ));
+        self::assertCount(1, $reports, 'the aggregated rollback failure must be reported once');
+
+        $context = $reports[0]['context'];
+        self::assertSame(2, $context['failedRegions']);
+        self::assertSame(3, $context['totalRegions']);
+        self::assertSame(
+            [
+                ['regionId' => 101, 'subBatchIndex' => 0, 'error' => 'gRPC error: rollback failed on k1'],
+                ['regionId' => 102, 'subBatchIndex' => 0, 'error' => 'gRPC error: rollback failed on k2'],
+            ],
+            $context['errors'],
+        );
+
+        // The rollback is terminal regardless of the failure (issue #231).
+        self::assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+    }
+
+    /**
+     * Issue #691: the pessimistic rollback fan-out reports its aggregate
+     * the same way as batchRollback().
+     */
+    public function testAggregatedPessimisticRollbackFailureNamesEveryFailingRegion(): void
+    {
+        $regions = $this->makeRegions(3);
+        $this->stubPdClient($regions);
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request): Message {
+                if ($method === 'KVPessimisticRollback') {
+                    $keys = self::requestKeys($request);
+                    foreach (['k1', 'k2'] as $failing) {
+                        if (in_array($failing, $keys, true)) {
+                            throw new GrpcException(
+                                "pessimistic rollback failed on {$failing}",
+                                GrpcStatusCode::InvalidArgument->value,
+                            );
+                        }
+                    }
+                }
+
+                return match ($method) {
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KVPessimisticRollback' => new PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new BatchRollbackResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+        $logger = $this->recordingLogger();
+        $txn = $this->createTransaction($regions, $grpc, ['pessimistic' => true], $logger);
+        $txn->lockKeys('k0', 'k1', 'k2');
+
+        try {
+            $txn->rollback();
+            self::fail('the failing pessimistic rollback must propagate the first region error');
+        } catch (GrpcException $e) {
+            self::assertSame('gRPC error: pessimistic rollback failed on k1', $e->getMessage());
+        }
+
+        $reports = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['message']
+                === 'Pessimistic rollback fan-out failed for some regions',
+        ));
+        self::assertCount(1, $reports, 'the aggregated pessimistic rollback failure must be reported once');
+
+        $context = $reports[0]['context'];
+        self::assertSame(2, $context['failedRegions']);
+        self::assertSame(3, $context['totalRegions']);
+        self::assertSame(
+            [
+                ['regionId' => 101, 'subBatchIndex' => 0, 'error' => 'gRPC error: pessimistic rollback failed on k1'],
+                ['regionId' => 102, 'subBatchIndex' => 0, 'error' => 'gRPC error: pessimistic rollback failed on k2'],
+            ],
+            $context['errors'],
+        );
+    }
+
+    /**
+     * Issue #691: the secondary-commit fan-out swallows each region's
+     * failure, so it must also log ONE summary naming every swallowed
+     * failure. The transaction outcome is unchanged: the primary is already
+     * committed, so commit() returns and the status stays Committed
+     * (issue #215, TXN-10).
+     */
+    public function testSecondaryCommitFailuresAreSummarisedOnce(): void
+    {
+        $regions = $this->makeRegions(3);
+        $this->stubPdClient($regions);
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request): Message {
+                if ($method === 'KvCommit') {
+                    $keys = self::requestKeys($request);
+                    foreach (['k1', 'k2'] as $failing) {
+                        if (in_array($failing, $keys, true)) {
+                            throw new GrpcException(
+                                "commit failed on {$failing}",
+                                GrpcStatusCode::InvalidArgument->value,
+                            );
+                        }
+                    }
+                }
+
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+        $logger = $this->recordingLogger();
+        $txn = $this->createTransaction($regions, $grpc, [], $logger);
+        for ($i = 0; $i < 3; $i++) {
+            $txn->set("k{$i}", "v{$i}");
+        }
+
+        $txn->commit();
+
+        self::assertSame(TransactionStatus::Committed, $txn->getStatus());
+
+        $reports = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['message']
+                === 'Secondary commit fan-out failed for some regions; locks will be resolved by readers',
+        ));
+        self::assertCount(1, $reports, 'the swallowed secondary-commit failures must be summarised once');
+
+        $context = $reports[0]['context'];
+        self::assertSame(2, $context['failedRegions']);
+        self::assertSame(2, $context['totalRegions']);
+        self::assertSame(
+            [
+                ['regionId' => 101, 'subBatchIndex' => 0, 'error' => 'gRPC error: commit failed on k1'],
+                ['regionId' => 102, 'subBatchIndex' => 0, 'error' => 'gRPC error: commit failed on k2'],
+            ],
+            $context['errors'],
+        );
+    }
+
+    /**
      * A TimeoutConfig whose 30 ms batch deadline passes the constructor check
      * (every per-call timeout is below it).
      */
@@ -813,6 +1018,24 @@ final class TxnKvFanoutTest extends TestCase
         }
 
         if ($request instanceof CommitRequest) {
+            $keys = [];
+            foreach ($request->getKeys() as $key) {
+                $keys[] = $key;
+            }
+
+            return $keys;
+        }
+
+        if ($request instanceof BatchRollbackRequest) {
+            $keys = [];
+            foreach ($request->getKeys() as $key) {
+                $keys[] = $key;
+            }
+
+            return $keys;
+        }
+
+        if ($request instanceof PessimisticRollbackRequest) {
             $keys = [];
             foreach ($request->getKeys() as $key) {
                 $keys[] = $key;
