@@ -11,18 +11,17 @@ use CrazyGoat\Proto\Kvrpcpb\GetRequest;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
-use CrazyGoat\Proto\Metapb\Store;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
-use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\ResourceControl;
 use CrazyGoat\TiKV\Client\TxnKv\Transaction;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionState;
 use CrazyGoat\TiKV\Client\TxnKv\TransactionStatus;
 use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
+use CrazyGoat\TiKV\Tests\Unit\Support\RegionFixtures;
 use PHPUnit\Framework\TestCase;
 
 class TxnKvClientTest extends TestCase
@@ -100,10 +99,8 @@ class TxnKvClientTest extends TestCase
 
     public function testTransactionsShareOneResolvedStatusCache(): void
     {
-        $region = new RegionInfo(1, 1, 1, 1, 1, '', '');
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
+        $region = RegionFixtures::region();
+        $store = RegionFixtures::store();
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(5000);
         $pdClient->method('getLowResolutionTimestamp')->willReturn(5000);
@@ -646,8 +643,8 @@ class TxnKvClientTest extends TestCase
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(4000);
         $pdClient->method('getClusterId')->willReturn(null);
-        $pdClient->method('getRegion')->willReturn($this->testRegion());
-        $pdClient->method('getStore')->willReturn($this->testStore());
+        $pdClient->method('getRegion')->willReturn(RegionFixtures::region());
+        $pdClient->method('getStore')->willReturn(RegionFixtures::store());
 
         $capturedRequests = [];
         $grpc = $this->createMock(GrpcClientInterface::class);
@@ -705,8 +702,8 @@ class TxnKvClientTest extends TestCase
         $pdClient = $this->createMock(PdClientInterface::class);
         $pdClient->method('getTimestamp')->willReturn(4000);
         $pdClient->method('getClusterId')->willReturn(null);
-        $pdClient->method('getRegion')->willReturn($this->testRegion());
-        $pdClient->method('getStore')->willReturn($this->testStore());
+        $pdClient->method('getRegion')->willReturn(RegionFixtures::region());
+        $pdClient->method('getStore')->willReturn(RegionFixtures::store());
 
         $capturedRequest = null;
         $grpc = $this->createMock(GrpcClientInterface::class);
@@ -748,29 +745,6 @@ class TxnKvClientTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage("begin() options['resourceGroup'] must be a string");
         $client->begin(['resourceGroup' => 42]); // @phpstan-ignore argument.type
-    }
-
-    private function testRegion(): RegionInfo
-    {
-        return new RegionInfo(
-            regionId: 1,
-            leaderPeerId: 1,
-            leaderStoreId: 1,
-            epochConfVer: 1,
-            epochVersion: 1,
-            startKey: '',
-            endKey: '',
-            peers: [],
-        );
-    }
-
-    private function testStore(): Store
-    {
-        $store = new Store();
-        $store->setId(1);
-        $store->setAddress('127.0.0.1:20160');
-
-        return $store;
     }
 
     public function testBeginWithoutPriorityStoresNormalOnTransaction(): void
