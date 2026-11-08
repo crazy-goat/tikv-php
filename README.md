@@ -128,8 +128,8 @@ migration note and needs no version bump of its own.
 
 ### Which version to require
 
-The current release is **v0.14.0**. Require the exact version, or allow patch
-releases inside the current minor line only:
+The current release is **v0.14.0**. Allow patch releases inside the current
+minor line only:
 
 ```json
 {
@@ -139,9 +139,9 @@ releases inside the current minor line only:
 }
 ```
 
-`~0.14.0` (equivalently `^0.14.0` or `0.14.*`) resolves to `>=0.14.0 <0.15.0`, so
-it never pulls `0.15.0` — and therefore never pulls a breaking change. Use
-`"0.14.0"` instead when you want a reproducible build.
+That constraint resolves to `>=0.14.0 <0.15.0`, so it never pulls `0.15.0` — and
+therefore never pulls a breaking change. Use `"0.14.0"` instead when you want a
+reproducible build.
 
 Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
 `~0.14` all resolve to a range that includes `0.15.0` and every later release.
