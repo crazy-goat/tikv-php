@@ -23,6 +23,8 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+## [v0.14.0] - 2026-11-08
+
 ### Added
 
 - Snapshot reads now send the locks they have already resolved back to TiKV (issue #432, GAP-18). `LockResolver` classifies each successful resolution against the snapshot's start ts and records it in a per-transaction, bounded `ResolvedLockTracker`: a rolled-back transaction, or one committed after the snapshot start ts, goes into `Context.resolved_locks` (TiKV can ignore it); a transaction committed at or before the snapshot start ts goes into `Context.committed_locks` (TiKV must read through it). The two sets are disjoint, because TiKV checks the bypass set first. `TxnReader` and `TwoPhaseCommitter` copy them onto later requests, so a reader that retries after resolving a lock (for example on another key of the same transaction or after a region cache invalidation) no longer pays the `CheckTxnStatus`/`ResolveLock` cycle again. Both sets are FIFO-bounded at 2048 entries, like the client-wide `ResolvedTxnStatusCache`, and an empty set leaves the Context fields unset. Documented in `docs/architecture.md` and `README.md`; covered by `tests/Unit/TxnKv/ResolvedLocksTest.php`. (#432)

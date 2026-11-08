@@ -119,7 +119,7 @@ covers where each transactional exception originates.
 The library is **pre-1.0**. It follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), but before `1.0.0`
 a breaking change bumps the **minor** version — so a `0.x` release may break
-your code, and `0.13.0 → 0.14.0` is not a safe upgrade on its own.
+your code, and `0.14.0 → 0.15.0` is not a safe upgrade on its own.
 
 [`CHANGELOG.md`](CHANGELOG.md) marks every breaking change of the public API
 below with a **BREAKING** prefix and a migration note. A change that breaks a
@@ -128,23 +128,23 @@ migration note and needs no version bump of its own.
 
 ### Which version to require
 
-The current release is **v0.13.0**. Require the exact version, or allow patch
+The current release is **v0.14.0**. Require the exact version, or allow patch
 releases inside the current minor line only:
 
 ```json
 {
     "require": {
-        "crazy-goat/tikv-client": "~0.13.0"
+        "crazy-goat/tikv-client": "~0.14.0"
     }
 }
 ```
 
-`~0.13.0` (equivalently `^0.13.0` or `0.13.*`) resolves to `>=0.13.0 <0.14.0`, so
-it never pulls `0.14.0` — and therefore never pulls a breaking change. Use
-`"0.13.0"` instead when you want a reproducible build.
+`~0.14.0` (equivalently `^0.14.0` or `0.14.*`) resolves to `>=0.14.0 <0.15.0`, so
+it never pulls `0.15.0` — and therefore never pulls a breaking change. Use
+`"0.14.0"` instead when you want a reproducible build.
 
 Avoid the constraints that *do* admit the next minor: `^0`, `0.*`, `*` and
-`~0.13` all resolve to a range that includes `0.14.0` and every later release.
+`~0.14` all resolve to a range that includes `0.15.0` and every later release.
 
 The versions above follow the releases: every one of them is updated in the
 same pull request as the changelog section of the release, because the guard
@@ -1341,6 +1341,8 @@ Shipped in the released versions — `CHANGELOG.md` has the details of each one.
 - ✅ **Peer-role awareness** — `PeerInfo` carries the TiKV role and a learner or witness can never be adopted as the leader ([#258](https://github.com/crazy-goat/tikv-php/issues/258))
 - ✅ **Prometheus exporter and tracing hooks** — a dependency-free `PrometheusMetrics` backend, the optional `DetailedMetricsInterface` metric set (backoff, per-store outcomes, lock resolution, 2PC timings) and a `TraceEventInterface` callback for bridging to OpenTelemetry ([#434](https://github.com/crazy-goat/tikv-php/issues/434))
 - ✅ **`RawBatchScan` for multi-range scans** — `batchScan()` groups the ranges by region and sends one `RawBatchScan` per region, with the per-range result shape unchanged ([#433](https://github.com/crazy-goat/tikv-php/issues/433))
+- ✅ **Transactional reverse scan and range deletion** — `Transaction::reverseScan()` walks regions top-down with read-your-writes, and `deleteRange()` deletes a range inside the transaction ([#435](https://github.com/crazy-goat/tikv-php/issues/435))
+- ✅ **Read-through locks for snapshot reads** — locks resolved by a transaction are sent as `resolved_locks`/`committed_locks` on later requests, split by the snapshot's `start_ts` ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
 
 ### Planned
 
@@ -1352,7 +1354,7 @@ are tracked in their own issues and are not part of the roadmap. A
 feature-gap issue whose work already shipped stays out of the list even while
 the issue is still open.
 
-- ⬜ **Read-through locks for snapshot reads** ([#432](https://github.com/crazy-goat/tikv-php/issues/432))
+Every roadmap feature gap has shipped as of v0.14.0; the list is empty.
 
 ## Contributing
 
