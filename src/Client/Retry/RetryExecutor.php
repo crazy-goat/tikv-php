@@ -980,6 +980,11 @@ final readonly class RetryExecutor
      * is unusable (issue #248), shared by the retryable and fatal paths
      * (issue #534).
      *
+     * The close is a *reconnect*: {@see GrpcClientInterface::closeChannel()}
+     * drops the cached handle and makes the next channel for that address a
+     * new connection, so the retry does not run on the connection that just
+     * failed (issue #717).
+     *
      * The exception carries the address the failed attempt was sent to (set by
      * GrpcClient / GrpcFuture at throw time). That is authoritative even when
      * the RPC was nested inside the retried operation — lock resolution talks

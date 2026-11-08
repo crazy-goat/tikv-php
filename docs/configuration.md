@@ -622,13 +622,21 @@ on the `GrpcClient` you pass in. An explicit `'tls' => null` is the one
 exception: it means "no TLS configuration" everywhere else, so it is treated
 as absent rather than as a conflict (issue #695).
 
-One caveat of sharing: on a retryable transport error the client closes the
-channel of the affected address. With a shared transport that affects every
-client using the same address — the channel is dropped from the cache and
-reopened on the next request, but a request in flight on it can be
-interrupted. The close does **not** force a reconnect, though: ext-grpc keeps
-the channel in its process-global persistent table, so the reopened channel is
-the same underlying channel and the same TCP connection (see below).
+One caveat of sharing: on a retryable transport error the client calls
+`closeChannel()` on the affected address. With a shared transport
+(`options['grpcClient']`) every client shares **one** `GrpcClient` and hence
+one channel cache: the close drops that transport's cached handle and arms the
+forced reconnect, and whichever client calls that store next consumes it — so
+every client using that transport reconnects to that store, not only the one
+whose call failed. A call already in flight on the old handle is not
+interrupted: the close is deferred while the channel is busy (issue #278) and
+ext-grpc reference-counts the channel. Other transports in the process are
+unaffected; they keep their own cache and their own persistent and subchannel
+pool entries.
+
+The replacement is built with `'force_new' => true` and
+`'grpc.use_local_subchannel_pool' => 1`, so it is a new underlying channel on
+a new subchannel and a new TCP connection (see below, issue #717).
 
 Sharing the transport shares the **channels** only. Every client keeps its own
 region cache and its own store-address cache, so the two clients do not warm
@@ -682,15 +690,30 @@ client holds — it only drops that client's own reference to it. Verified
 against the deployed extension (grpc 1.83.0; the persistent-channel code is
 unchanged in the oldest supported release, 1.57).
 
+The connection lives one layer below the channel. `grpc_channel_create()`
+builds a `ClientChannel`, and the `ClientChannel` takes its subchannel — the
+object that owns the TCP connection — from either a local pool or gRPC core's
+process-global subchannel pool (`client_channel.cc`, `GetSubchannelPool()`).
+The global pool is the default (`grpc.use_local_subchannel_pool` defaults to
+false) and shares subchannels among channels, so two distinct
+`grpc_channel` objects with the same target and channel arguments can still
+share one TCP connection. Resetting only the ext-grpc layer therefore does not
+reset the connection.
+
 The practical consequences for the API:
 
 - `close()` releases this client's handles; the TCP connection stays warm in
   the process (until the process ends or the per-target persist bound drops
   the entry). It does not tear the connection down.
-- `closeChannel()` drops the cached handle but does **not** force a
-  reconnect: the persistent entry survives, so the next call reuses the same
-  underlying channel and the same TCP connection. Forcing a real reconnect
-  needs a new persistent entry.
+- `closeChannel()` drops the cached handle and forces a new connection: the
+  replacement channel is created with `'force_new' => true` and
+  `'grpc.use_local_subchannel_pool' => 1`. `force_new` keeps it out of
+  ext-grpc's persistent table; the local subchannel pool keeps it out of gRPC
+  core's global subchannel pool, which would otherwise hand it the existing
+  subchannel and the same TCP connection (verified against grpc 1.83.0 by
+  counting accepted TCP connections; issue #717). The retry path is its
+  caller. The idle and the LRU evictions keep both pools and reuse the warm
+  connection.
 
 Two clients with **different** channel arguments (`options['grpc']`) or
 different credentials for the same store address do not share a channel: the
