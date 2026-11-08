@@ -103,6 +103,39 @@ time. See [Worktree-safe repositories](#worktree-safe-repositories).
   (`fix: handle empty response (#42)`). **Do not push.**
 - On a second or later round, first read `review.md` and fix every open point.
 
+### After a rebase or an amend
+
+A rebase onto a moving default branch rewrites the commit and can damage it
+silently: a sentence can disappear from the message, a conflict resolution can
+drop the final newline of a Markdown file or leave a conflict marker in it
+(PHPCS and PHPStan do not look at Markdown), and a squash/fixup can bring back
+a file that does not belong to the issue. Run all four checks after **every**
+rebase or amend, before pushing, and read their output:
+
+```bash
+git log -1 --format=%B                    # (a) the message, end to end
+git diff origin/master...HEAD | grep -n '^\\ No newline at end of file'   # (b)
+git diff --check origin/master...HEAD     # (b) whitespace errors and conflict markers
+git grep -n '^<<<<<<<'                    # (c) conflict markers in the worktree
+git diff --stat origin/master...HEAD      # (d) only the intended files changed
+```
+
+- (a) The message must still be the one you wrote. A rebase or a squash can
+  drop a sentence without any conflict.
+- (b) A `\ No newline at end of file` line means the conflict resolution dropped
+  the file's final newline. The marker line starts with a backslash and a space,
+  so the grep matches only that form and not a line that merely quotes the
+  phrase (this document does). Both commands compare the branch with
+  `origin/master`, because after a commit the working tree is clean and a plain
+  `git diff --check` would print nothing. `git diff --check` reports trailing
+  whitespace and leftover conflict markers in the diff. `grep` exits with
+  status 1 when it finds no marker, which is the good case; do not chain it
+  with `&&` in a script.
+- (c) `git grep -n '^<<<<<<<'` must print nothing. It exits with status 1 when
+  there is no match, so do not chain it with `&&` in a script.
+- (d) The stat must list only the files this issue changes. An unexpected file
+  means the rebase or the conflict resolution picked up someone else's work.
+
 **Coder output contract.** The coder always reports: (1) the changed files, (2) the
 biggest problem met on the way, and (3) every bug or weak spot noticed, **including ones
 outside this issue's scope**, each with `file:line` and a suggested fix. Items (2) and (3)
@@ -136,6 +169,9 @@ gh pr create --fill --body "Closes #<N>"
 gh pr checks --watch
 ```
 
+If you rebased or amended since the last check, run the
+[post-rebase checks](#after-a-rebase-or-an-amend) first.
+
 - The PR title is a Conventional Commit. With squash merge it becomes the commit message.
 - Use the PR template. Put `Closes #<N>` in the description.
 - The required check is `ci-ok`. If CI fails, read the log (`gh run view --log-failed`),
@@ -159,7 +195,8 @@ gh pr update-branch            # merges the default branch into the PR branch
 ```
 
 On a conflict, merge or rebase the default branch into the worktree branch, resolve the
-conflicts, run the checks, push, and go back to **step 5**.
+conflicts, run the [post-rebase checks](#after-a-rebase-or-an-amend) and the checks from
+`AGENTS.md`, push, and go back to **step 5**.
 
 When the branch is checked out in a linked worktree, the canonical
 `gh pr merge --squash --delete-branch` merges but fails at its local
@@ -257,6 +294,7 @@ Every repo must allow several worktrees to build and test at the same time.
 - [ ] Issue picked with `bin/pick-issue.sh`; it has `type:*`, `priority:*` and a milestone
 - [ ] Work done in a worktree (not the main checkout), branch `<type>/issue-<N>-<slug>`
 - [ ] Tests added, all checks pass in the worktree
+- [ ] After every rebase or amend: message, newlines, conflict markers and diff stat checked
 - [ ] `CHANGELOG.md` and docs updated
 - [ ] Committed but not pushed before the review accepted
 - [ ] `review.md`: every point answered, no open points

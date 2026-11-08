@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Docs
+
+- `docs/workflow.md` now requires post-rebase and post-amend verification (issue #678). After every rebase or amend, the coder reads `git log -1 --format=%B` end to end, checks `git diff origin/master...HEAD` for the `\ No newline at end of file` marker and runs `git diff --check origin/master...HEAD`, greps for conflict markers with `git grep -n '^<<<<<<<'`, and confirms `git diff --stat origin/master...HEAD` lists only the intended files. A rebase had silently dropped a sentence from a commit message and a conflict resolution had dropped a FAQ file's final newline, and nothing in the workflow asked for either to be re-read; the new step is referenced from the push and conflict-resolution steps and added to the checklist. `tests/Unit/Docs/PostRebaseVerificationGuardTest.php` pins the commands and the checklist item.
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
