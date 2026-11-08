@@ -14,7 +14,9 @@ use CrazyGoat\Proto\Kvrpcpb\RawPutRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawPutResponse;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
+use CrazyGoat\TiKV\Client\Grpc\SlowLog;
 use CrazyGoat\TiKV\Client\Grpc\SlowLogConfig;
+use CrazyGoat\TiKV\Client\Grpc\SlowLogOperation;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
 use CrazyGoat\TiKV\Client\Region\RegionErrorHandler;
@@ -74,7 +76,7 @@ final readonly class RawKvCrud
                 }
 
                 try {
-                    $response = $this->measure('read', $key, fn(): RawGetResponse => $this->grpc->call(
+                    $response = $this->measure(SlowLogOperation::Read, $key, fn(): RawGetResponse => $this->grpc->call(
                         $address,
                         'tikvpb.Tikv',
                         'RawGet',
@@ -148,7 +150,7 @@ final readonly class RawKvCrud
                     $request->setCf($columnFamily);
                 }
 
-                $response = $this->measure('write', $key, fn(): RawPutResponse => $this->grpc->call(
+                $response = $this->measure(SlowLogOperation::Write, $key, fn(): RawPutResponse => $this->grpc->call(
                     $address,
                     'tikvpb.Tikv',
                     'RawPut',
@@ -194,7 +196,7 @@ final readonly class RawKvCrud
                 $request->setCf($columnFamily);
             }
 
-            $response = $this->measure('write', $key, fn(): RawDeleteResponse => $this->grpc->call(
+            $response = $this->measure(SlowLogOperation::Write, $key, fn(): RawDeleteResponse => $this->grpc->call(
                 $address,
                 'tikvpb.Tikv',
                 'RawDelete',
@@ -241,14 +243,18 @@ final readonly class RawKvCrud
                 }
 
                 try {
-                    $response = $this->measure('read', $key, fn(): RawGetKeyTTLResponse => $this->grpc->call(
-                        $address,
-                        'tikvpb.Tikv',
-                        'RawGetKeyTTL',
-                        $request,
-                        RawGetKeyTTLResponse::class,
-                        $this->timeoutMs('read'),
-                    ));
+                    $response = $this->measure(
+                        SlowLogOperation::Read,
+                        $key,
+                        fn(): RawGetKeyTTLResponse => $this->grpc->call(
+                            $address,
+                            'tikvpb.Tikv',
+                            'RawGetKeyTTL',
+                            $request,
+                            RawGetKeyTTLResponse::class,
+                            $this->timeoutMs('read'),
+                        ),
+                    );
                     /** @var RawGetKeyTTLResponse $response */
                     RegionErrorHandler::check($response);
                 } catch (RegionException $e) {
@@ -293,30 +299,8 @@ final readonly class RawKvCrud
      * @param callable(): T $fn
      * @return T
      */
-    private function measure(string $operation, string $key, callable $fn): mixed
+    private function measure(SlowLogOperation $operation, string $key, callable $fn): mixed
     {
-        if (!$this->slowLogConfig instanceof SlowLogConfig) {
-            return $fn();
-        }
-
-        $threshold = $this->slowLogConfig->getThreshold($operation);
-        if ($threshold <= 0) {
-            return $fn();
-        }
-
-        $start = hrtime(true);
-        try {
-            return $fn();
-        } finally {
-            $durationMs = (hrtime(true) - $start) / 1_000_000;
-            if ($durationMs > $threshold) {
-                $this->logger->warning('Slow TiKV operation', [
-                    'operation' => $operation,
-                    'key' => \CrazyGoat\TiKV\Client\Util\KeyRedactor::redact($key),
-                    'duration_ms' => round($durationMs, 2),
-                    'threshold_ms' => $threshold,
-                ]);
-            }
-        }
+        return SlowLog::measure($this->slowLogConfig, $this->logger, $operation, $key, $fn);
     }
 }
