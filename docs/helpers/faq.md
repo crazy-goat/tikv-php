@@ -1854,9 +1854,13 @@ growing case list (issue #375). When documenting an enum or constant table,
 copy the cases and values straight from the source file (`baseMs()` /
 `capMs()` values) and link to the file as the source of truth, rather than
 paraphrasing. Related trap: `docs/configuration.md`'s custom-classifier
-example still returns a non-existent `BackoffType::Custom` case — doc
-examples that subclass and override must match the real class signatures
-(`classifyError()` lives on `ErrorClassifier`, not `RawKvClient`).
+example used to return a non-existent `BackoffType::Custom` case and to
+reference a `classifyError()` hook on `RawKvClient`; issue #719 replaced it
+with a working `options['retryClassifier']` example. Doc examples must match
+the real class signatures (`classifyError()` lives on `ErrorClassifier`, not
+`RawKvClient`), and a `create()` snippet must pass the options array through
+the named `options:` argument — the second positional parameter is the
+logger.
 
 ## PHPUnit mock `willReturnCallback` closures on PHP 8.5 must use explicit `use` — implicit capture yields null
 
