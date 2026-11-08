@@ -29,17 +29,23 @@ final class InjectedTransportMetricsTest extends TestCase
 {
     public function testMetricsBackendIsAppliedToTheClientSideWithAnInjectedTransport(): void
     {
+        $grpc = $this->createMock(GrpcClientInterface::class);
         $metrics = $this->createMock(MetricsInterface::class);
 
         $bundle = ConnectionFactory::create(
             ['127.0.0.1:2379'],
             options: [
-                'grpcClient' => $this->createMock(GrpcClientInterface::class),
+                'grpcClient' => $grpc,
                 'metrics' => $metrics,
             ],
         );
 
         $this->assertSame($metrics, $bundle->metrics);
+        $this->assertSame(
+            $grpc,
+            $bundle->grpc,
+            'the factory replaced the supplied transport instead of keeping it',
+        );
     }
 
     public function testTheMetricsSplitIsAnnouncedWhenTheOptionWasGiven(): void
