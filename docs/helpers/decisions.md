@@ -12,6 +12,7 @@ of the file.
 
 <!-- index:start -->
 - [Generated protobuf classes are never part of the stability promise (issue #734)](#generated-protobuf-classes-are-never-part-of-the-stability-promise-issue-734)
+- [The mutation score is enforced nightly, and it is a ratchet too (issue #363)](#the-mutation-score-is-enforced-nightly-and-it-is-a-ratchet-too-issue-363)
 - [`closeChannel()` forces a new connection; eviction does not (issue #717)](#closechannel-forces-a-new-connection-eviction-does-not-issue-717)
 - [Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)](#branch-naming-fixn-kebab-case-no-issue--prefix)
 - [Commit style: `type: subject (#N)`](#commit-style-type-subject-n)
@@ -87,6 +88,35 @@ library-owned value object, never with a generated message.
 oneof payload lives in `RegionException::fromRegionError()`. When another
 region-error payload becomes part of the promised surface, wrap it the same
 way instead of adding the generated class to the policy.
+
+## The mutation score is enforced nightly, and it is a ratchet too (issue #363)
+
+The second quality gate, next to the coverage floor, is the **mutation score** (MSI) measured by
+Infection. It lives in `infection.json` as `minMsi` and `minCoveredMsi`, both currently 72, and is
+applied by `composer mutation` (add `--show-mutations`, via `composer mutation:show`, to see the
+survivors). The scope is deliberately narrow — `src/Client/TxnKv/` and `src/Client/Region/` — so a
+run still finishes in tens of minutes even though every mutant re-runs the covering test file.
+
+Three decisions are worth keeping:
+
+1. **Mutation testing is a nightly ratchet, not a pull-request gate.** It runs from
+   `.github/workflows/mutation.yml` on a schedule and on demand, never on a pull request: a
+   mutation run is slow and non-deterministic enough in wall-clock time that it would dominate the
+   `ci-ok` gate, while the score only matters when it *drops*. A pull request that lowers the score
+   is caught by the next nightly run. `ci-ok` stays fast and deterministic.
+2. **The threshold is below the measurement, never above it.** Like the coverage floor,
+   `minMsi`/`minCoveredMsi` are set a little under the measured score and only move up. They are
+   the regression guard, not a target for a specific change.
+3. **The Infection constraint tracks the newest release that still supports PHP 8.2.** It is
+   `^0.32.6`: 0.32.7 was the first release to raise its own requirement to PHP `^8.3` (and every
+   later line kept it), so the constraint moves only when the project drops 8.2 (see the
+   PHP-support entry below). The current pin is therefore a floor imposed by the supported PHP
+   range, not by choice, and 0.32.6 also replaces the deprecated `SplObjectStorage::contains()`
+   call, so the notice that 0.31 printed on PHP 8.5 is gone.
+
+The report is uploaded as the `infection-report` artifact (`infection.log`, `infection-summary.log`)
+with `actions/upload-artifact`, on every run (`if: always()`) so a failed run still leaves the
+survivors behind.
 
 ## `closeChannel()` forces a new connection; eviction does not (issue #717)
 
@@ -200,7 +230,7 @@ Three decisions are worth keeping:
    `phpunit.xml` excludes the generated `src/Proto` classes from the `<source>` set. They are
    ~62 % of the executable lines of `src/`, they are not written by hand and nobody writes tests
    for them, so counting them would make the floor measure the generated code instead of the
-   client (the same tree measures 42 % with them and 87 % without). The issue's own baselines
+   client (the same tree measures 42 % with them). The issue's own baselines
    (58.4 % for `Unit`, 70.2 % for `Unit` + `Grpc`) are only reproducible on this metric — measured
    on the audit-time tree (2026-08-08) the whole-tree numbers were 14.6 % and 18.3 %.
 2. **The floor is checked in the existing `grpc-unit-tests` job, not in a new one.** That job
@@ -208,16 +238,21 @@ Three decisions are worth keeping:
    produce one report covering the whole client; the `unit-tests` matrix keeps running the `Unit`
    suite on every PHP version without coverage, so the matrix is not slowed down.
 3. **The threshold is below the measurement, never above it.** A floor above the current coverage
-   fails the build immediately; the shipped floor is 87.0 %, set against a measured 87.6 % (PCOV,
-   PHP 8.4 — the measurement moves with the tree, the floor only moves up). PCOV and Xdebug measure
+   fails the build immediately; the shipped floor is set a little below the measured coverage
+   (PCOV, PHP 8.4 — the measurement moves with the tree, the floor only moves up), and
+   `bin/check-coverage.php` prints the value it applied. PCOV and Xdebug measure
    the same metric within a few tenths of a point (0.3 points apart on the tree the floor was set
    on), so the same floor holds whichever driver a contributor has installed.
 
 The floor is deliberately *not* a quality target for new code: it is a regression guard. A change
 that drops the coverage fails CI until either the missing tests are added or the floor is
 explicitly lowered — and lowering it is a visible act, because the value lives in
-`bin/check-coverage.php` and `tests/Unit/Bin/CoverageFloorCheckTest.php` reads it back from there
-(a report a tenth of a point below it has to fail).
+`bin/check-coverage.php` and nothing else restates it: the check prints the floor it applied, and
+`tests/Unit/Bin/CoverageFloorCheckTest.php` reads the constant back and drives the check with it.
+That test therefore pins the comparison (a report a tenth of a point below the floor has to fail),
+not the value: every fixture is derived from the constant, so raising or lowering it — one-decimal
+steps included — keeps the suite green, and the ratchet is this documented convention plus a
+visible diff, not a machine check.
 
 ## PHP support: >= 8.2, CI matrix 8.2–8.4
 
