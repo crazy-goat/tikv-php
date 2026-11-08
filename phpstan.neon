@@ -4,6 +4,7 @@ parameters:
         - src/Client
         - tests
         - bin
+        - examples
     excludePaths:
         - src/Proto
     bootstrapFiles:

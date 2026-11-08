@@ -4,11 +4,15 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Tests\Unit\TxnKv;
 
+use CrazyGoat\Proto\Kvrpcpb\BatchRollbackRequest;
 use CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\CommitRequest;
 use CrazyGoat\Proto\Kvrpcpb\CommitResponse;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyError;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticLockResponse;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackRequest;
+use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Metapb\Store;
@@ -35,7 +39,9 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Issue #430 (GAP-16): transaction write-set limits, their queryability and
- * the size/count-bounded prewrite and commit requests.
+ * the size/count-bounded prewrite and commit requests. Issue #791 extends the
+ * suite to the two rollback paths, whose `KvBatchRollback` and
+ * `KVPessimisticRollback` requests use the same split.
  */
 final class TransactionSizeLimitTest extends TestCase
 {
@@ -51,6 +57,10 @@ final class TransactionSizeLimitTest extends TestCase
     private array $prewriteRequests = [];
     /** @var list<CommitRequest> */
     private array $commitRequests = [];
+    /** @var list<BatchRollbackRequest> */
+    private array $rollbackRequests = [];
+    /** @var list<PessimisticRollbackRequest> */
+    private array $pessimisticRollbackRequests = [];
 
     protected function setUp(): void
     {
@@ -68,6 +78,8 @@ final class TransactionSizeLimitTest extends TestCase
         );
         $this->prewriteRequests = [];
         $this->commitRequests = [];
+        $this->rollbackRequests = [];
+        $this->pessimisticRollbackRequests = [];
     }
 
     private function makeRegion(int $id = 1, string $startKey = '', string $endKey = ''): RegionInfo
@@ -389,18 +401,35 @@ final class TransactionSizeLimitTest extends TestCase
     {
         $state = new TransactionState(0, 0, 3, 0);
 
-        $this->expectException(TransactionTooLargeException::class);
-        $this->expectExceptionMessage('exceeding maxTxnEntrySize of 3 bytes');
-        $state->setWriteSet(['ab' => 'cd']);
+        try {
+            $state->setWriteSet(['ab' => 'cd']);
+            self::fail('The entry-size limit did not reject the write set');
+        } catch (TransactionTooLargeException $e) {
+            // "ab" + "cd" = 4 bytes against a 3-byte limit. The accessors must
+            // report the limit and the actual value separately: the message is
+            // built from the factory parameters and cannot tell them apart
+            // (issue #790).
+            self::assertSame('maxTxnEntrySize', $e->getLimitName());
+            self::assertSame(3, $e->getLimit());
+            self::assertSame(4, $e->getActual());
+            self::assertStringContainsString('exceeding maxTxnEntrySize of 3 bytes', $e->getMessage());
+        }
     }
 
     public function testSetWriteSetEnforcesTheTotalSizeLimit(): void
     {
         $state = new TransactionState(0, 0, 0, 3);
 
-        $this->expectException(TransactionTooLargeException::class);
-        $this->expectExceptionMessage('exceeding maxTxnTotalSize of 3 bytes');
-        $state->setWriteSet(['ab' => 'cd']);
+        try {
+            $state->setWriteSet(['ab' => 'cd']);
+            self::fail('The total-size limit did not reject the write set');
+        } catch (TransactionTooLargeException $e) {
+            // "ab" + "cd" = 4 bytes against a 3-byte limit (issue #790).
+            self::assertSame('maxTxnTotalSize', $e->getLimitName());
+            self::assertSame(3, $e->getLimit());
+            self::assertSame(4, $e->getActual());
+            self::assertStringContainsString('exceeding maxTxnTotalSize of 3 bytes', $e->getMessage());
+        }
     }
 
     public function testExceptionReportsTheLimitNameLimitAndActualValue(): void
@@ -533,11 +562,19 @@ final class TransactionSizeLimitTest extends TestCase
                 if ($request instanceof CommitRequest) {
                     $this->commitRequests[] = $request;
                 }
+                if ($request instanceof BatchRollbackRequest) {
+                    $this->rollbackRequests[] = $request;
+                }
+                if ($request instanceof PessimisticRollbackRequest) {
+                    $this->pessimisticRollbackRequests[] = $request;
+                }
 
                 return match ($method) {
                     'KvPrewrite' => $prewriteResponse,
                     'KvCommit' => new CommitResponse(),
                     'KvBatchRollback' => new BatchRollbackResponse(),
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KVPessimisticRollback' => new PessimisticRollbackResponse(),
                     default => throw new \RuntimeException('Unexpected method: ' . $method),
                 };
             },
@@ -565,6 +602,22 @@ final class TransactionSizeLimitTest extends TestCase
      * @return list<string>
      */
     private function commitKeys(array $requests): array
+    {
+        $keys = [];
+        foreach ($requests as $request) {
+            foreach ($request->getKeys() as $key) {
+                $keys[] = $key;
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * @param list<BatchRollbackRequest>|list<PessimisticRollbackRequest> $requests
+     * @return list<string>
+     */
+    private function rollbackKeys(array $requests): array
     {
         $keys = [];
         foreach ($requests as $request) {
@@ -712,6 +765,126 @@ final class TransactionSizeLimitTest extends TestCase
         self::assertCount(1, $this->commitRequests);
         self::assertSame(['abcde', 'fghij'], self::prewriteKeys($this->prewriteRequests));
         self::assertSame(['abcde', 'fghij'], self::commitKeys($this->commitRequests));
+    }
+
+    // ========================================================================
+    // Batching: rollback (issue #791)
+    // ========================================================================
+
+    public function testBatchRollbackIsSplitByCountPerBatch(): void
+    {
+        $this->stubSingleRegion($this->makeRegion());
+        $this->capturePrewriteAndCommit();
+
+        $txn = $this->makeTransaction(['maxTxnBatchCount' => 2]);
+        $keys = ['k1', 'k2', 'k3', 'k4', 'k5', 'k6'];
+        foreach ($keys as $index => $key) {
+            $txn->set($key, 'v' . $index);
+        }
+        $txn->rollback();
+
+        self::assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        self::assertCount(3, $this->rollbackRequests);
+        self::assertEqualsCanonicalizing($keys, $this->rollbackKeys($this->rollbackRequests));
+        foreach ($this->rollbackRequests as $request) {
+            self::assertLessThanOrEqual(2, count($request->getKeys()));
+        }
+    }
+
+    public function testBatchRollbackIsSplitByBytesPerBatch(): void
+    {
+        $this->stubSingleRegion($this->makeRegion());
+        $this->capturePrewriteAndCommit();
+
+        // A rollback request carries only keys, so each 5-byte key counts
+        // 5 payload bytes: a 10-byte budget holds two keys per request.
+        $txn = $this->makeTransaction(['maxTxnBatchSize' => 10]);
+        $keys = ['key01', 'key02', 'key03', 'key04', 'key05'];
+        foreach ($keys as $index => $key) {
+            $txn->set($key, 'v' . $index);
+        }
+        $txn->rollback();
+
+        self::assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        self::assertCount(3, $this->rollbackRequests);
+        self::assertEqualsCanonicalizing($keys, $this->rollbackKeys($this->rollbackRequests));
+        self::assertSame(['key01', 'key02'], iterator_to_array($this->rollbackRequests[0]->getKeys()));
+        self::assertSame(['key03', 'key04'], iterator_to_array($this->rollbackRequests[1]->getKeys()));
+        self::assertSame(['key05'], iterator_to_array($this->rollbackRequests[2]->getKeys()));
+    }
+
+    public function testBatchRollbackBatchesDoNotMixRegions(): void
+    {
+        $this->stubTwoRegions(
+            $this->makeRegion(1, '', 'm'),
+            $this->makeRegion(2, 'm', ''),
+        );
+        $this->capturePrewriteAndCommit();
+
+        // Alternating keys: a global split would produce [a1, m1] / [a2, m2]
+        // and mix regions, while the per-region grouping keeps each request
+        // inside one region.
+        $txn = $this->makeTransaction(['maxTxnBatchCount' => 2]);
+        $keys = ['a1', 'm1', 'a2', 'm2', 'a3'];
+        foreach ($keys as $index => $key) {
+            $txn->set($key, 'v' . $index);
+        }
+        $txn->rollback();
+
+        self::assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        // Left region: [a1, a2] + [a3]; right region: [m1, m2].
+        self::assertCount(3, $this->rollbackRequests);
+        self::assertEqualsCanonicalizing($keys, $this->rollbackKeys($this->rollbackRequests));
+        foreach ($this->rollbackRequests as $request) {
+            $requestKeys = array_values(iterator_to_array($request->getKeys()));
+            self::assertLessThanOrEqual(2, count($requestKeys));
+            $this->assertKeysBelongToOneRegion($requestKeys);
+        }
+    }
+
+    public function testPessimisticRollbackIsSplitByCountPerBatch(): void
+    {
+        $this->stubSingleRegion($this->makeRegion());
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+        $this->capturePrewriteAndCommit();
+
+        $txn = $this->makeTransaction(['pessimistic' => true, 'maxTxnBatchCount' => 2]);
+        $keys = ['k1', 'k2', 'k3', 'k4'];
+        $txn->lockKeys(...$keys);
+        $txn->rollback();
+
+        self::assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        self::assertCount(2, $this->pessimisticRollbackRequests);
+        self::assertEqualsCanonicalizing(
+            $keys,
+            $this->rollbackKeys($this->pessimisticRollbackRequests),
+        );
+        foreach ($this->pessimisticRollbackRequests as $request) {
+            self::assertLessThanOrEqual(2, count($request->getKeys()));
+        }
+    }
+
+    public function testPessimisticRollbackIsSplitByBytesPerBatch(): void
+    {
+        $this->stubSingleRegion($this->makeRegion());
+        $this->pdClient->method('getTimestamp')->willReturn(2000);
+        $this->capturePrewriteAndCommit();
+
+        // Every key is 5 bytes, so a 5-byte budget puts one key per request.
+        $txn = $this->makeTransaction(['pessimistic' => true, 'maxTxnBatchSize' => 5]);
+        $keys = ['key01', 'key02', 'key03'];
+        $txn->lockKeys(...$keys);
+        $txn->rollback();
+
+        self::assertSame(TransactionStatus::RolledBack, $txn->getStatus());
+        self::assertCount(3, $this->pessimisticRollbackRequests);
+        self::assertEqualsCanonicalizing(
+            $keys,
+            $this->rollbackKeys($this->pessimisticRollbackRequests),
+        );
+        foreach ($this->pessimisticRollbackRequests as $request) {
+            self::assertCount(1, $request->getKeys());
+        }
     }
 
     public function testOnePhaseCommitIsDisabledWhenTheRegionNeedsMultipleBatches(): void
