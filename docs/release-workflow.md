@@ -15,7 +15,7 @@ gh api repos/{owner}/{repo}/milestones --jq '.[] | select(.title=="vX.Y.Z") | {t
 ```
 
 - Open issues that will not make it: move them to the next milestone
-  (`gh issue edit <N> --milestone vX.Y.(Z+1)`).
+  (`gh issue edit <N> --milestone v0.10.0` when releasing `0.9.0`).
 - The default branch must have a green `ci-ok`.
 
 ## 2. Choose the version
@@ -73,13 +73,14 @@ In `CHANGELOG.md`:
   suite.
 
 - Update `README.md` ("Stability and versioning"): **every** version of the
-  whole "Stability and versioning" section has to follow the release — the
-  current release becomes `vX.Y.Z`, the recommended Composer constraint
-  becomes `~X.Y.Z`, the range that constraint resolves to becomes
-  `>=X.Y.Z <X.(Y+1).0`, and the next minor `X.(Y+1).0` replaces the old one
-  in the two paragraphs below the JSON block and in the intro of the section
-  (the intro names the pair `X.Y.Z → X.(Y+1).0`, and it is part of the
-  section too).
+  whole section has to follow the release. The section and the checklist name
+  the same versions; in a `0.9.0 → 0.10.0` release they are the current
+  release `v0.9.0` (also in the intro of the section, next to the release that
+  follows it), the recommended Composer constraint `~0.9.0`, the exact version
+  `"0.9.0"` for a reproducible build, the range that constraint resolves to
+  `>=0.9.0 <0.10.0`, the next minor `0.10.0` (in the two paragraphs below the
+  JSON block and in the intro of the section), and the two-segment form `~0.9`
+  of the avoid-list paragraph, which becomes `~0.10`.
   The stability guard test (`tests/Unit/Docs/StabilityPolicyGuardTest.php`)
   reads the latest released version from the changelog and fails while the
   section names another one — so the check follows the release instead of
@@ -154,11 +155,15 @@ Make sure the next milestone exists. Milestones in this repository are minor ver
 - [ ] README "Configuration Options" table and markdown links/anchors pass their guard tests
 
 - [ ] README.md "Stability and versioning" updated: **every** version of the
-      whole section follows the release — the current release `vX.Y.Z` (also in
-      the intro of the section, next to the previous one), the recommended
-      constraint `~X.Y.Z`, the exact version `"X.Y.Z"` recommended for a
-      reproducible build, the range `>=X.Y.Z <X.(Y+1).0` that constraint
-      resolves to, and the next minor `X.(Y+1).0`
+      whole section follows the release, and the versions it names match the
+      list in step 3 — for a `0.9.0 → 0.10.0` release: the current release
+      `v0.9.0` (also in the intro of the section, next to the release that
+      follows it), the recommended constraint `~0.9.0`, the exact version
+      `"0.9.0"` for a reproducible build, the range `>=0.9.0 <0.10.0` that
+      constraint resolves to, the next minor `0.10.0` (in the two paragraphs
+      below the JSON block and in the intro of the section), and the
+      two-segment form `~0.9` of the avoid-list paragraph, which becomes
+      `~0.10`
 - [ ] README "Installation" command and the install sections of `docs/README.md`
       and `docs/getting-started.md` name the new `~X.Y.Z` constraint
       (`InstallInstructionsGuardTest`)

@@ -487,6 +487,14 @@ and resolves only inside the compose network; on the host use the published PD p
 PD_ENDPOINTS=localhost:${PD_PORT:-2379} composer test:e2e:raw
 ```
 
+Before PHPUnit starts, each per-mode script checks that the cluster is in the
+storage mode its suite needs (`bin/cluster-mode.php`). A cluster in the wrong
+mode stops the run with `Wrong cluster mode` and exit code 2 instead of failing
+later with a TTL or API-version error from inside the client. The check is
+best-effort: when it cannot determine the mode — for example on a host that
+cannot reach the stores PD advertises by their compose service names — it
+warns and lets the suite run.
+
 The published PD and TiKV ports are bound to `127.0.0.1`, not to every host interface,
 because the development cluster has no authentication or transport security. The
 `localhost` form above is therefore the only host-side address that works; reaching the
@@ -761,6 +769,13 @@ version check.
 ### Debugging
 
 Enable verbose logging:
+
+> **Monolog is optional.** This snippet uses Monolog for illustration. It is a
+> **dev-only** dependency (`require-dev`), so `composer install` installs it but
+> `composer install --no-dev` does not and the snippet then fails with
+> `Class "Monolog\Logger" not found`. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
 
 ```php
 use Monolog\Logger;
