@@ -526,6 +526,123 @@ class TransactionTest extends TestCase
         ];
     }
 
+    /**
+     * A scan reads every row at the transaction's snapshot, so one TSO covers
+     * the whole scan and every returned key is a read of that snapshot: a
+     * later `set()` of a scanned key must lock at the scan's timestamp instead
+     * of minting a fresh one, or TiKV cannot see a commit that happened
+     * between the scan and the write (issue #724, the scan-side counterpart
+     * of the #209 protection for `get()`/`batchGet()`).
+     *
+     * Dropping the per-row `readTsByKey` assignment in `Transaction::scan()`
+     * makes this test fail: each write then fetches its own TSO (1200, 1300)
+     * and the locks carry those instead of the scan's 1100.
+     */
+    public function testEagerPessimisticWriteAfterScanReusesTheScansTimestamp(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+        $tsoCalls = 0;
+        $this->pdClient->method('getTimestamp')->willReturnCallback(
+            static function () use (&$tsoCalls): int {
+                $tsoCalls++;
+
+                return 1000 + (100 * $tsoCalls);
+            },
+        );
+
+        $scanResponse = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2']);
+        $lockRequests = [];
+        $forUpdateTsList = [];
+        $this->grpc->method('call')->willReturnCallback(
+            function (
+                string $addr,
+                string $service,
+                string $method,
+                mixed $request,
+            ) use (
+                &$lockRequests,
+                &$forUpdateTsList,
+                $scanResponse,
+            ): object {
+                if ($method === 'KvPessimisticLock' && $request instanceof PessimisticLockRequest) {
+                    $lockRequests[] = $request;
+                    $forUpdateTsList[] = $request->getForUpdateTs();
+                }
+
+                return match ($method) {
+                    'KvScan' => $scanResponse,
+                    'KvPessimisticLock' => new PessimisticLockResponse(),
+                    'KVPessimisticRollback' => new \CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse(),
+                    'KvBatchRollback' => new \CrazyGoat\Proto\Kvrpcpb\BatchRollbackResponse(),
+                    default => throw new \RuntimeException("Unexpected method: $method"),
+                };
+            },
+        );
+
+        $txn = $this->createTransaction([
+            'pessimistic' => true,
+            'eagerPessimisticLocks' => true,
+        ]);
+
+        $rows = $txn->scan('', '');
+        $this->assertSame([
+            ['key' => 'k1', 'value' => 'v1'],
+            ['key' => 'k2', 'value' => 'v2'],
+        ], $rows);
+        $this->assertSame(1, $tsoCalls, 'the scan is the only TSO fetch before the writes');
+
+        $txn->set('k1', 'v1-new');
+        $txn->set('k2', 'v2-new');
+
+        $this->assertCount(2, $lockRequests);
+        $this->assertSame(
+            [1100, 1100],
+            $forUpdateTsList,
+            'every scanned key must lock at the timestamp the scan read it',
+        );
+        $this->assertSame(1, $tsoCalls, 'the writes must reuse the scan timestamp');
+
+        $txn->rollback();
+    }
+
+    /**
+     * A scan is a read, so with `trackReadSet` its rows join the tracked read
+     * set like a `get()` call. A key the transaction hid with its own
+     * buffered write is not a snapshot read and stays out (issue #724).
+     */
+    public function testScanRecordsTheScannedKeysInTheTrackedReadSet(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->testRegion);
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->testRegion]);
+        $this->pdClient->method('getStore')->willReturn($this->makeStore());
+
+        $scanResponse = $this->makeScanResponse(['k1' => 'v1', 'k2' => 'v2', 'k3' => 'stale']);
+        $this->grpc->method('call')->willReturnCallback(
+            static fn (string $addr, string $service, string $method): object => match ($method) {
+                'KvScan' => $scanResponse,
+                default => throw new \RuntimeException("Unexpected method: $method"),
+            },
+        );
+
+        $txn = $this->createTransaction(['pessimistic' => false, 'trackReadSet' => true]);
+        $txn->set('k3', 'buffered');
+
+        $rows = $txn->scan('', '');
+
+        $this->assertSame([
+            ['key' => 'k1', 'value' => 'v1'],
+            ['key' => 'k2', 'value' => 'v2'],
+            ['key' => 'k3', 'value' => 'buffered'],
+        ], $rows);
+        $this->assertSame(['k1' => 'v1', 'k2' => 'v2'], $txn->getReadSet());
+        $this->assertSame(2, $txn->getReadSetCount());
+        $this->assertSame(8, $txn->getReadSetSize()); // "k1"+"v1"+"k2"+"v2"
+    }
+
     public function testPessimisticDeleteAcquiresLockBeforeReturning(): void
     {
         $this->regionCache->method('getByKey')->willReturn($this->testRegion);
