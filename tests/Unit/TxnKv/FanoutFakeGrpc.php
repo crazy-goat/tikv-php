@@ -34,6 +34,15 @@ final class FanoutFakeGrpc implements GrpcClientInterface
     public int $callCount = 0;
 
     /**
+     * Number of async calls dispatched but not yet received, and the peak it
+     * reached. Used by the issue #789 cap tests: the fan-out must never hold
+     * more un-awaited futures than its configured concurrency.
+     */
+    public int $inFlight = 0;
+
+    public int $maxInFlight = 0;
+
+    /**
      * Deadline passed to every call()/callAsync(), in call order.
      *
      * @var list<array{method: string, timeoutMs: ?int}>
@@ -96,14 +105,30 @@ final class FanoutFakeGrpc implements GrpcClientInterface
             }
         }
 
+        $this->inFlight++;
+        $this->maxInFlight = max($this->maxInFlight, $this->inFlight);
+
         $responder = $this->responder;
         $latencyMs = $this->latencyMs;
-        $waiter = function () use ($method, $request, $responder, $latencyMs, $dispatchAt): Message {
+        $settled = false;
+        $waiter = function () use (
+            $method,
+            $request,
+            $responder,
+            $latencyMs,
+            $dispatchAt,
+            &$settled,
+        ): Message {
             $this->waitLog[] = ['method' => $method, 'at' => microtime(true)];
             $elapsedMs = (microtime(true) - $dispatchAt) * 1000;
             $remainingMs = $latencyMs - $elapsedMs;
             if ($remainingMs > 0) {
                 usleep((int) ($remainingMs * 1000));
+            }
+
+            if (!$settled) {
+                $settled = true;
+                $this->inFlight--;
             }
 
             return $responder($method, $request);

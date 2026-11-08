@@ -18,6 +18,7 @@ use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
@@ -88,6 +89,38 @@ final class TxnKvFanoutTest extends TestCase
     }
 
     /**
+     * Regions that each own several keys, so batching (issue #430) can split
+     * one region's mutations into several requests. The index is zero-padded
+     * so "r01\xff" sorts before "r02": region i covers ["r{i}", "r{i}\xff")
+     * and its keys are "r{i}k0", "r{i}k1", ...
+     *
+     * @return array{0: list<RegionInfo>, 1: list<string>} regions and keys
+     */
+    private function makeWideRegions(int $regionCount, int $keysPerRegion): array
+    {
+        $regions = [];
+        $keys = [];
+        for ($i = 0; $i < $regionCount; $i++) {
+            $prefix = sprintf('r%02d', $i);
+            $regions[] = new RegionInfo(
+                regionId: 100 + $i,
+                leaderPeerId: 1,
+                leaderStoreId: 1000 + $i,
+                epochConfVer: 1,
+                epochVersion: 1,
+                startKey: $prefix,
+                endKey: $prefix . "\xff",
+                peers: [],
+            );
+            for ($j = 0; $j < $keysPerRegion; $j++) {
+                $keys[] = "{$prefix}k{$j}";
+            }
+        }
+
+        return [$regions, $keys];
+    }
+
+    /**
      * @param list<RegionInfo> $regions
      */
     private function stubPdClient(array $regions): void
@@ -121,6 +154,7 @@ final class TxnKvFanoutTest extends TestCase
      *     maxBackoffMs?: int,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     maxConcurrency?: int,
      * } $options
      */
     private function createTransaction(
@@ -163,6 +197,7 @@ final class TxnKvFanoutTest extends TestCase
             enableAsyncCommit: $options['asyncCommit'] ?? false,
             maxTxnBatchSize: $options['maxTxnBatchSize'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
             maxTxnBatchCount: $options['maxTxnBatchCount'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+            maxConcurrency: $options['maxConcurrency'] ?? BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
         );
     }
 
@@ -1107,6 +1142,170 @@ final class TxnKvFanoutTest extends TestCase
                 $this->records[] = ['message' => (string) $message, 'context' => $context];
             }
         };
+    }
+
+    /**
+     * Issue #789 (AC 1): request batching multiplies the prewrite/commit
+     * fan-out — each region contributes several sub-batches — so the
+     * secondary fan-outs must be windowed. With a cap of 2 and five
+     * secondary sub-batches, the peak number of dispatched-but-un-awaited
+     * futures is exactly 2 for the prewrite phase and 2 for the commit
+     * phase; an uncapped fan-out would peak at 5.
+     */
+    public function testPrewriteAndCommitFanOutRespectTheConfiguredConcurrencyCap(): void
+    {
+        [$regions, $keys] = $this->makeWideRegions(3, 4);
+        $this->stubPdClient($regions);
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static fn(string $method): Message => match ($method) {
+                'KvPrewrite' => new PrewriteResponse(),
+                'KvCommit' => new CommitResponse(),
+                default => throw new \RuntimeException("unexpected method $method"),
+            },
+        );
+        $txn = $this->createTransaction($regions, $grpc, [
+            'maxTxnBatchCount' => 2,
+            'maxConcurrency' => 2,
+        ]);
+
+        foreach ($keys as $index => $key) {
+            $txn->set($key, "v{$index}");
+        }
+        $txn->commit();
+
+        // 3 regions x 4 keys, 2 keys per request => 6 prewrite and 6 commit
+        // requests. The primary's batch is dispatched outside the fan-out,
+        // so the secondary windows hold 5 calls: 2 + 2 + 1.
+        $this->assertSame(6, $this->countMethod($grpc->dispatchLog, 'KvPrewrite'));
+        $this->assertSame(6, $this->countMethod($grpc->dispatchLog, 'KvCommit'));
+        $this->assertSame(
+            2,
+            $grpc->maxInFlight,
+            'prewrite/commit fan-out held more un-awaited futures than maxConcurrency',
+        );
+        $this->assertSame(0, $grpc->inFlight, 'every dispatched future must be awaited by the end of commit()');
+    }
+
+    /**
+     * Issue #789 (AC 3): with no per-transaction option the shared default
+     * is used. 19 secondary calls (20 regions, one key each) are dispatched
+     * in windows of {@see BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY}, so
+     * the peak is the default (16), not the 19 an uncapped fan-out would
+     * hold.
+     */
+    public function testPrewriteAndCommitFanOutUseTheDefaultConcurrencyCap(): void
+    {
+        [$regions, $keys] = $this->makeWideRegions(20, 1);
+        $this->stubPdClient($regions);
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 0.5,
+            responder: static fn(string $method): Message => match ($method) {
+                'KvPrewrite' => new PrewriteResponse(),
+                'KvCommit' => new CommitResponse(),
+                default => throw new \RuntimeException("unexpected method $method"),
+            },
+        );
+        $txn = $this->createTransaction($regions, $grpc);
+
+        foreach ($keys as $index => $key) {
+            $txn->set($key, "v{$index}");
+        }
+        $txn->commit();
+
+        $this->assertSame(20, $this->countMethod($grpc->dispatchLog, 'KvPrewrite'));
+        $this->assertSame(20, $this->countMethod($grpc->dispatchLog, 'KvCommit'));
+        $this->assertSame(
+            BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
+            $grpc->maxInFlight,
+            'the default cap must bound the fan-out below the 19 secondary calls',
+        );
+        $this->assertLessThan(19, $grpc->maxInFlight);
+    }
+
+    /**
+     * Issue #789: the partial-failure aggregate is window-scoped. With 19
+     * secondary calls, a cap of 6 and two failures in the second window,
+     * later windows are never dispatched: the aggregate's `totalRegions` is
+     * the failing window's size (6), not the 19 scheduled calls, and no
+     * prewrite reaches r13..r19. The first error in dispatch order still
+     * surfaces.
+     */
+    public function testPrewriteFailureInALaterWindowIsReportedForThatWindowOnly(): void
+    {
+        [$regions, $keys] = $this->makeWideRegions(20, 1);
+        $this->stubPdClient($regions);
+        $failing = ['r08k0', 'r10k0'];
+        /** @var list<string> $prewrites */
+        $prewrites = [];
+        $grpc = new FanoutFakeGrpc(
+            latencyMs: 1.0,
+            responder: static function (string $method, Message $request) use ($failing, &$prewrites): Message {
+                if ($method === 'KvPrewrite') {
+                    $requestKeys = self::requestKeys($request);
+                    $prewrites[] = $requestKeys[0] ?? '';
+                    foreach ($failing as $key) {
+                        if (in_array($key, $requestKeys, true)) {
+                            throw new GrpcException(
+                                "prewrite failed on {$key}",
+                                GrpcStatusCode::InvalidArgument->value,
+                            );
+                        }
+                    }
+                }
+
+                return match ($method) {
+                    'KvPrewrite' => new PrewriteResponse(),
+                    'KvCommit' => new CommitResponse(),
+                    default => throw new \RuntimeException("unexpected method $method"),
+                };
+            },
+        );
+        $logger = $this->recordingLogger();
+        $txn = $this->createTransaction($regions, $grpc, ['maxConcurrency' => 6], $logger);
+        foreach ($keys as $index => $key) {
+            $txn->set($key, "v{$index}");
+        }
+
+        try {
+            $txn->commit();
+            self::fail('the failing prewrite must abort the commit');
+        } catch (GrpcException $e) {
+            self::assertSame('gRPC error: prewrite failed on r08k0', $e->getMessage());
+        }
+
+        // Primary r00 + the first two windows (r01..r06, r07..r12). Windows
+        // r13..r18 and r19 were never dispatched.
+        self::assertContains('r12k0', $prewrites);
+        self::assertNotContains('r13k0', $prewrites);
+        self::assertNotContains('r19k0', $prewrites);
+        self::assertCount(13, $prewrites);
+        self::assertSame(6, $grpc->maxInFlight, 'the second window must fill the cap, and no more');
+
+        $reports = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['message'] === 'Prewrite fan-out failed for some regions',
+        ));
+        self::assertCount(1, $reports, 'the aggregated failure must be reported once');
+
+        $context = $reports[0]['context'];
+        self::assertSame(2, $context['failedRegions']);
+        self::assertSame(6, $context['totalRegions'], 'the aggregate covers the failing window, not the whole fan-out');
+        self::assertSame(
+            [
+                ['regionId' => 108, 'subBatchIndex' => 0, 'error' => 'gRPC error: prewrite failed on r08k0'],
+                ['regionId' => 110, 'subBatchIndex' => 0, 'error' => 'gRPC error: prewrite failed on r10k0'],
+            ],
+            $context['errors'],
+        );
+    }
+
+    /**
+     * @param list<array{method: string, at: float}> $log
+     */
+    private function countMethod(array $log, string $method): int
+    {
+        return count(array_filter($log, static fn(array $e): bool => $e['method'] === $method));
     }
 
     /**

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\TxnKv;
 
 use Closure;
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Cache\StoreCacheInterface;
@@ -265,6 +266,18 @@ final class TxnKvClient
     public const OPT_MAX_TXN_BATCH_COUNT = 'maxTxnBatchCount';
 
     /**
+     * options[] key for the maximum number of prewrite/commit requests in
+     * flight at once (issue #789). Request batching (issue #430) splits one
+     * region's mutations into several prewrite/commit requests, so the
+     * secondary fan-outs are windowed: at most this many sub-batches are
+     * dispatched before the window is awaited. Accepted by
+     * `TxnKvClient::create()` (client-wide) and `TxnKvClient::begin()`
+     * (per transaction; the `begin()` value wins). Default:
+     * {@see BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY} (16). Must be >= 1.
+     */
+    public const OPT_MAX_CONCURRENCY = 'maxConcurrency';
+
+    /**
      * options[] key for the maximum staleness (ms) of the low-resolution
      * TSO timestamp cache (issue #420, GAP-06). Used only by
      * staleness-tolerant consumers (lock resolution `current_ts`);
@@ -364,7 +377,10 @@ final class TxnKvClient
      *                                      Transaction defaults are accepted
      *                                      too, e.g. 'lockWaitTimeMs' (the
      *                                      client-wide pessimistic-lock wait
-     *                                      timeout, issue #229).
+     *                                      timeout, issue #229) and
+     *                                      'maxConcurrency' (the client-wide
+     *                                      cap on in-flight prewrite/commit
+     *                                      requests, issue #789).
      *                                      'retryClassifier' (a callable
      *                                      `TiKvException -> RetryVerdict`,
      *                                      issue #719) extends or overrides
@@ -419,6 +435,7 @@ final class TxnKvClient
             requestContext: self::resolveRequestContext($options),
             resourceControl: ResourceControl::fromOptions($options),
             lockWaitTimeMs: self::resolveLockWaitTimeMs($options, Transaction::DEFAULT_LOCK_WAIT_TIME_MS),
+            maxConcurrency: self::resolveMaxConcurrency($options),
             tracer: $bundle->tracer,
             retryClassifier: self::resolveRetryClassifier($options),
         );
@@ -516,6 +533,12 @@ final class TxnKvClient
          */
         private readonly int $lockWaitTimeMs = Transaction::DEFAULT_LOCK_WAIT_TIME_MS,
         /**
+         * Client-wide default for the maximum number of in-flight
+         * prewrite/commit requests (issue #789), inherited by every
+         * transaction and overridable per begin() call. Must be >= 1.
+         */
+        private readonly int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
+        /**
          * Optional structured tracing callback (issue #434, GAP-20),
          * inherited by every transaction and its lock resolver. The default
          * is the zero-cost no-op.
@@ -539,6 +562,9 @@ final class TxnKvClient
         }
         if ($this->lockWaitTimeMs < 0) {
             throw new InvalidArgumentException('lockWaitTimeMs must be >= 0');
+        }
+        if ($this->maxConcurrency < 1) {
+            throw new InvalidArgumentException('maxConcurrency must be >= 1');
         }
         // Arm the shutdown flag before any destructor can consult it; the
         // registered callback runs before PHP destroys the remaining
@@ -576,6 +602,33 @@ final class TxnKvClient
             );
         $this->regionCacheWarmer = $regionCacheWarmer
             ?? new RegionCacheWarmer($this->pdClient, $this->regionCache, $this->logger, $regionCacheRefreshMs);
+    }
+
+    /**
+     * Resolve options['maxConcurrency'] (see OPT_MAX_CONCURRENCY) for
+     * create(): the client-wide default for the number of in-flight
+     * prewrite/commit requests (issue #789). Must be an int >= 1.
+     *
+     * @param array<string, mixed> $options
+     */
+    private static function resolveMaxConcurrency(array $options): int
+    {
+        if (!array_key_exists(self::OPT_MAX_CONCURRENCY, $options)) {
+            return BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY;
+        }
+
+        $maxConcurrency = $options[self::OPT_MAX_CONCURRENCY];
+        if (!is_int($maxConcurrency)) {
+            throw new InvalidArgumentException(sprintf(
+                "options['maxConcurrency'] must be an int, %s given",
+                get_debug_type($maxConcurrency),
+            ));
+        }
+        if ($maxConcurrency < 1) {
+            throw new InvalidArgumentException("options['maxConcurrency'] must be >= 1");
+        }
+
+        return $maxConcurrency;
     }
 
     /**
@@ -744,6 +797,7 @@ final class TxnKvClient
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     maxConcurrency?: int,
      *     requestContext?: RequestContextOptions|null,
      * } $options
      *     `pessimistic` selects the transaction mode: true (the default)
@@ -774,7 +828,10 @@ final class TxnKvClient
      *     bound the tracked read set (issue #297);
      *     `maxTxnBatchSize` (default 16384 bytes) and `maxTxnBatchCount`
      *     (default 512) split each region's prewrite mutations and commit keys
-     *     into multiple requests. Exceeding a size limit throws
+     *     into multiple requests; `maxConcurrency` (default 16) bounds how
+     *     many of those prewrite/commit requests are in flight at once
+     *     (issue #789), defaulting to the client-wide value from `create()`.
+     *     Exceeding a size limit throws
      *     {@see \CrazyGoat\TiKV\Client\TxnKv\Exception\TransactionTooLargeException}
      *     from set()/delete() before any RPC is issued, and from
      *     get()/batchGet()/getForUpdate() before the fetched value is
@@ -826,6 +883,12 @@ final class TxnKvClient
             $options,
             self::OPT_MAX_TXN_BATCH_COUNT,
             TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+            1,
+        );
+        $maxConcurrency = $this->resolveIntOption(
+            $options,
+            self::OPT_MAX_CONCURRENCY,
+            $this->maxConcurrency,
             1,
         );
 
@@ -894,6 +957,7 @@ final class TxnKvClient
             maxTxnTotalSize: $maxTxnTotalSize,
             maxTxnBatchSize: $maxTxnBatchSize,
             maxTxnBatchCount: $maxTxnBatchCount,
+            maxConcurrency: $maxConcurrency,
             maxReadSetEntries: $maxReadSetEntries,
             maxReadSetTotalSize: $maxReadSetTotalSize,
             trackReadSet: $trackReadSet,
@@ -944,6 +1008,7 @@ final class TxnKvClient
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     maxConcurrency?: int,
      *     requestContext?: RequestContextOptions|null,
      * } $options
      */
@@ -987,6 +1052,7 @@ final class TxnKvClient
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     maxConcurrency?: int,
      *     requestContext?: RequestContextOptions|null,
      * } $options
      */
@@ -1021,6 +1087,7 @@ final class TxnKvClient
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     maxConcurrency?: int,
      *     requestContext?: RequestContextOptions|null,
      * } $options
      */

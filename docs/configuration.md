@@ -60,8 +60,11 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::INFO));
 $options = [
     // Concurrency cap for operations that fan out per-region/per-store RPCs
     // (an unbounded scan()/scanPrefix()/reverseScan() page, batchScan,
-    // deleteRange/deletePrefix/checksum, SST store-mode switches): at most
-    // this many units (ranges, regions or stores) are in flight at once.
+    // deleteRange/deletePrefix/checksum, SST store-mode switches) and for
+    // the TxnKV prewrite/commit sub-batch fan-out (issue #789): at most this
+    // many units (ranges, regions, stores or transactional sub-batches) are
+    // in flight at once. RawKV reads it on create(); TxnKV accepts it on
+    // create() as the client-wide default and on begin() per transaction.
     // Default: 16. Must be >= 1.
     'maxConcurrency' => 16,
     // Row cap for an unbounded scan (scan()/scanPrefix()/reverseScan() with
@@ -1780,6 +1783,7 @@ $txn = $client->begin([
     'maxReadSetTotalSize' => 8388608, // whole read set, 0 = unlimited
     'maxTxnBatchSize'  => 16384,   // bytes per prewrite/lock/commit/rollback request
     'maxTxnBatchCount' => 512,     // mutations/keys per request
+    'maxConcurrency'   => 16,      // prewrite/commit requests in flight
 ]);
 ```
 
@@ -1793,6 +1797,7 @@ $txn = $client->begin([
 | `maxReadSetTotalSize` | `0` (unlimited) | Maximum bytes of the whole tracked read set: key length plus value length per entry. A not-found read contributes the key length only. Has no effect unless `trackReadSet` is true. |
 | `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite, pessimistic-lock, commit or rollback request per region: key plus value length for a prewrite mutation, key length for a pessimistic-lock mutation, a commit key, or a `KvBatchRollback` / `KVPessimisticRollback` key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
 | `maxTxnBatchCount` | `512` | Maximum payload items — mutations (prewrite or pessimistic lock) or keys (commit, `KvBatchRollback` or `KVPessimisticRollback`) — of one request per region. Matches RawKV's `MAX_BATCH_LIMIT`. |
+| `maxConcurrency` | `16` | Maximum number of prewrite/commit requests in flight at once (issue #789). Accepted on `create()` (client-wide) and `begin()` (per transaction; the `begin()` value wins). Must be `>= 1`. |
 
 The size limits are **opt-in** (`0` = unlimited) because there is no single
 correct value for every application; set them for untrusted or unbounded
@@ -1843,7 +1848,8 @@ commit key or a rollback key, and item count. The bound does not cover request f
 prewrite can exceed `maxTxnBatchSize`; a single mutation larger than the budget
 still forms its own batch. The primary key's batch is still committed first;
 the remaining batches — including other batches of the primary's region — are
-secondary commits and are fanned out in parallel. Pessimistic-lock requests
+secondary commits and are fanned out in windows of at most `maxConcurrency`
+requests (issue #789). Pessimistic-lock requests
 use the same split, and `is_first_lock` is set only on the batch whose
 mutations contain the primary key, not on the first region batch (issue #225).
 Both rollback RPCs use the same split (issue #791): `KvBatchRollback` and
@@ -1858,9 +1864,21 @@ the commit point still fails the whole transaction; after the primary commit,
 secondary-batch failures are logged and the transaction stays committed,
 exactly as for whole secondary regions.
 
-Batching bounds each **request**, not the prewrite phase. The secondary
-batches of all regions are dispatched in parallel, and the prewrite heartbeat
-is checked only after the whole fan-out returns, so a smaller batch reduces
+Batching multiplies the number of requests per region, so the secondary
+prewrite and commit fan-outs are windowed by `maxConcurrency` (default 16,
+issue #789): each window dispatches at most that many requests before awaiting
+them, and the next window starts only after the current one is settled. This
+bounds the gRPC calls, serialized requests and futures a large write set holds
+at once. The batch deadline (`timeout.batchDeadlineMs`) is shared by all
+windows, so a longer write set cannot stretch the operation to N times the
+deadline. Within a window, a prewrite failure still aggregates every failing
+sub-batch and rethrows the first one in dispatch order; windows after the
+failing one are not dispatched. After the primary commit, secondary-commit
+failures (including a deadline hit between windows) are logged and the
+transaction stays committed, exactly as for whole secondary regions.
+
+Batching bounds each **request**, not the prewrite phase. The prewrite
+heartbeat is checked only after the whole fan-out returns, so a smaller batch reduces
 the duration of one `KvPrewrite` but does not add a heartbeat opportunity
 between batches. If a single request can take longer than the lock TTL, lower
 `writeTimeoutMs` or raise the lock TTL as well — see

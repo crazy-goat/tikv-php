@@ -11,6 +11,7 @@ use CrazyGoat\Proto\Kvrpcpb\GetRequest;
 use CrazyGoat\Proto\Kvrpcpb\GetResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\ClientClosedException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
@@ -940,6 +941,123 @@ class TxnKvClientTest extends TestCase
 
         $this->assertSame(250, $property->getValue($client));
         $client->close();
+    }
+
+    // ========================================================================
+    // begin() — prewrite/commit fan-out concurrency cap (issue #789)
+    // ========================================================================
+
+    public function testBeginForwardsTheMaxConcurrency(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->begin(['maxConcurrency' => 4]);
+        $property = new \ReflectionProperty(Transaction::class, 'maxConcurrency');
+
+        $this->assertSame(4, $property->getValue($txn));
+    }
+
+    public function testBeginWithoutMaxConcurrencyUsesTheDefault(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc);
+        $txn = $client->begin();
+        $property = new \ReflectionProperty(Transaction::class, 'maxConcurrency');
+
+        $this->assertSame(BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY, $property->getValue($txn));
+    }
+
+    public function testClientWideMaxConcurrencyIsInheritedByBegin(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc, maxConcurrency: 3);
+        $txn = $client->begin();
+        $property = new \ReflectionProperty(Transaction::class, 'maxConcurrency');
+
+        $this->assertSame(3, $property->getValue($txn));
+    }
+
+    public function testBeginMaxConcurrencyOverridesTheClientWideDefault(): void
+    {
+        $pdClient = $this->createMock(PdClientInterface::class);
+        $pdClient->method('getTimestamp')->willReturn(6000);
+        $grpc = $this->createMock(GrpcClientInterface::class);
+
+        $client = new TxnKvClient($pdClient, $grpc, maxConcurrency: 3);
+        $txn = $client->begin(['maxConcurrency' => 8]);
+        $property = new \ReflectionProperty(Transaction::class, 'maxConcurrency');
+
+        $this->assertSame(8, $property->getValue($txn));
+    }
+
+    public function testCreateForwardsTheClientWideMaxConcurrency(): void
+    {
+        $client = TxnKvClient::create(['pd:2379'], options: ['maxConcurrency' => 5]);
+        $property = new \ReflectionProperty(TxnKvClient::class, 'maxConcurrency');
+
+        $this->assertSame(5, $property->getValue($client));
+        $client->close();
+    }
+
+    public function testCreateRejectsANonPositiveMaxConcurrency(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['maxConcurrency'] must be >= 1");
+
+        TxnKvClient::create(['pd:2379'], options: ['maxConcurrency' => 0]);
+    }
+
+    public function testCreateRejectsANonIntMaxConcurrency(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['maxConcurrency'] must be an int");
+
+        TxnKvClient::create(['pd:2379'], options: ['maxConcurrency' => '16']);
+    }
+
+    public function testConstructorRejectsANonPositiveClientWideMaxConcurrency(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('maxConcurrency must be >= 1');
+
+        new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+            maxConcurrency: 0,
+        );
+    }
+
+    public function testBeginRejectsANonPositiveMaxConcurrency(): void
+    {
+        $client = new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['maxConcurrency'] must be >= 1");
+        $client->begin(['maxConcurrency' => 0]);
+    }
+
+    public function testBeginRejectsANonIntMaxConcurrency(): void
+    {
+        $client = new TxnKvClient(
+            $this->createMock(PdClientInterface::class),
+            $this->createMock(GrpcClientInterface::class),
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("options['maxConcurrency'] must be an int");
+        $client->begin(['maxConcurrency' => '4']); // @phpstan-ignore argument.type
     }
 
     private function countAndReturn(int &$counter, object $response): object

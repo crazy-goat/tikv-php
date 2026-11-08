@@ -16,6 +16,7 @@ use CrazyGoat\Proto\Kvrpcpb\PessimisticRollbackResponse;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteRequest;
 use CrazyGoat\Proto\Kvrpcpb\PrewriteResponse;
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
@@ -140,6 +141,7 @@ final class TransactionSizeLimitTest extends TestCase
      *     trackReadSet?: bool,
      *     maxTxnBatchSize?: int,
      *     maxTxnBatchCount?: int,
+     *     maxConcurrency?: int,
      *     enable1Pc?: bool,
      *     enableAsyncCommit?: bool,
      * } $options
@@ -164,6 +166,7 @@ final class TransactionSizeLimitTest extends TestCase
             maxTxnTotalSize: $options['maxTxnTotalSize'] ?? 0,
             maxTxnBatchSize: $options['maxTxnBatchSize'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_SIZE,
             maxTxnBatchCount: $options['maxTxnBatchCount'] ?? TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
+            maxConcurrency: $options['maxConcurrency'] ?? BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
             maxReadSetEntries: $options['maxReadSetEntries'] ?? 0,
             maxReadSetTotalSize: $options['maxReadSetTotalSize'] ?? 0,
             trackReadSet: $options['trackReadSet'] ?? false,
@@ -1147,6 +1150,7 @@ final class TransactionSizeLimitTest extends TestCase
      *         maxTxnTotalSize?: int,
      *         maxTxnBatchSize?: int,
      *         maxTxnBatchCount?: int,
+     *         maxConcurrency?: int,
      *     },
      *     string,
      * }>
@@ -1160,6 +1164,7 @@ final class TransactionSizeLimitTest extends TestCase
         yield 'negative read set total size' => [['maxReadSetTotalSize' => -1], 'maxReadSetTotalSize must be >= 0'];
         yield 'zero batch size' => [['maxTxnBatchSize' => 0], 'maxTxnBatchSize must be >= 1'];
         yield 'zero batch count' => [['maxTxnBatchCount' => 0], 'maxTxnBatchCount must be >= 1'];
+        yield 'zero concurrency' => [['maxConcurrency' => 0], 'maxConcurrency must be >= 1'];
     }
 
     /**

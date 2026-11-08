@@ -1126,7 +1126,7 @@ reference, with the defaults, is in [Configuration](docs/configuration.md).
 | `tracer` | A `TraceEventInterface` callback for structured trace events (gRPC calls, 2PC phases, lock resolution) |
 | `retryDeadlineMs` | Wall-clock bound on one retry loop |
 | `retryClassifier` | A callable `TiKvException -> RetryVerdict` consulted before the built-in classifier on every retry loop ([Custom Retry](docs/configuration.md#custom-retry-advanced)) |
-| `maxConcurrency` | Maximum number of in-flight requests in the batch and range fan-outs |
+| `maxConcurrency` | Maximum number of in-flight requests in the batch and range fan-outs; on TxnKV it caps the prewrite/commit sub-batch fan-out and is overridable per transaction on `begin()` |
 | `maxIngestSize` | Payload cap (keys plus values) for one `ingest()` call; `0` (default) = unlimited, exceeding it throws `IngestTooLargeException` |
 | `maxScanRows` | Row cap for an unbounded (`limit: 0`) scan; exceeding it throws `ScanLimitExceededException` |
 | `replicaRead` | A `ReplicaReadPolicy` object — `ReplicaReadMode::Leader`, `::Follower`, `::Mixed` or `::PreferLeader` ([Replica Reads](docs/configuration.md#replica-reads)) |
