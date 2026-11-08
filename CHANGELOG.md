@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Tests
+
+- `TxnKvFanoutTest::testBatchGetDispatchesAllRegionsBeforeAwaitingAny()` now proves the batchGet fan-out with a relative timing comparison instead of an absolute millisecond bound (issue #676). The test measures a sequential control on the same fake with the same latency in the same run and requires the batched path to stay below two thirds of it, so scheduling noise on a loaded machine inflates both measurements and no longer flakes the suite; the structural assertion that every send is issued before the first wait is unchanged. (#676)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
