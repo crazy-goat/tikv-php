@@ -762,6 +762,13 @@ version check.
 
 Enable verbose logging:
 
+> **Monolog is optional.** This snippet uses Monolog for illustration. It is a
+> **dev-only** dependency (`require-dev`), so `composer install` installs it but
+> `composer install --no-dev` does not and the snippet then fails with
+> `Class "Monolog\Logger" not found`. Install it with
+> `composer require monolog/monolog`, or pass any PSR-3 `LoggerInterface`
+> implementation instead — the client itself only depends on `psr/log`.
+
 ```php
 use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
