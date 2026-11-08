@@ -273,6 +273,9 @@ final readonly class BatchAsyncExecutor
      * @return array<int, mixed> results keyed by the original fan-out slot
      * @throws BatchPartialFailureException   If any region fails
      * @throws BatchDeadlineExceededException If $deadlineMs > 0 and dispatch+wait exceeds it
+     * @throws \CrazyGoat\TiKV\Client\Exception\ClientClosedException When
+     *         $ensureOpen raises it before a window is dispatched; no later
+     *         window runs and the exception is not wrapped
      * @throws \InvalidArgumentException      If $maxConcurrency < 1
      */
     public function executeParallelCapped(

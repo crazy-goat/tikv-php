@@ -439,6 +439,14 @@ final readonly class RawKvScanner
         $upper = $startKey;
 
         while (true) {
+            // Re-check the owner's lifecycle before fetching a new page: a
+            // close() from a callback during the previous page must stop the
+            // reverse scan here instead of opening another RawScan on a
+            // closed transport (issue #783).
+            if ($this->ensureOpen instanceof \Closure) {
+                ($this->ensureOpen)();
+            }
+
             $page = $this->reverseScanPage(
                 $executor,
                 $upper,
@@ -788,6 +796,15 @@ final readonly class RawKvScanner
         $startTimeMs = (int) (microtime(true) * 1000);
 
         for ($offset = 0; $offset < $segmentCount && $remaining > 0; $offset += $this->maxConcurrency) {
+            // Re-check the owner's lifecycle before starting a new region
+            // window: this runs outside the try below on purpose, because its
+            // catch (TiKvException) would swallow ClientClosedException and
+            // fall back to the sequential path, which would dispatch more
+            // calls after close() (issue #783).
+            if ($this->ensureOpen instanceof \Closure) {
+                ($this->ensureOpen)();
+            }
+
             // One batch deadline for ALL windows (issue #275): each window gets
             // what is left of it, so N windows cannot take N times the deadline.
             $windowDeadlineMs = $deadlineMs;

@@ -8,8 +8,10 @@ use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Kvrpcpb\KeyRange;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchDeleteResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetResponse;
+use CrazyGoat\Proto\Kvrpcpb\RawBatchPutResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchScanRequest;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchScanResponse;
 use CrazyGoat\Proto\Kvrpcpb\RawCASResponse;
@@ -1245,6 +1247,95 @@ class RawKvClientTest extends TestCase
         $this->assertSame(['dispatch', 'close'], $events);
     }
 
+    /** @return iterable<string, array{string}> */
+    public static function writeBatchGuardProvider(): iterable
+    {
+        yield 'batchPut' => ['batchPut'];
+        yield 'batchDelete' => ['batchDelete'];
+    }
+
+    #[DataProvider('writeBatchGuardProvider')]
+    public function testCloseDuringFirstWriteBatchWindowPreventsSecondWindowDispatch(string $operation): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            maxConcurrency: 1,
+            ownsGrpcClient: true,
+            ownsPdClient: true,
+        );
+
+        $closed = false;
+        // The first window's waiter closes the client. The second window must
+        // not be dispatched, so the write applied only the first region's
+        // sub-batch (issue #783).
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                    string $responseClass,
+                    ?int $timeoutMs = null,
+                ) use (
+                    $client,
+                    &$closed,
+                    $operation,
+                ): GrpcFuture {
+                    return GrpcFuture::fromWaiter(function () use ($client, &$closed, $operation): Message {
+                        if (!$closed) {
+                            $closed = true;
+                            $client->close();
+                        }
+
+                        return $operation === 'batchPut'
+                            ? new RawBatchPutResponse()
+                            : new RawBatchDeleteResponse();
+                    });
+                },
+            );
+
+        try {
+            if ($operation === 'batchPut') {
+                $client->batchPut(['a1' => 'v1', 'z1' => 'v2']);
+            } else {
+                $client->batchDelete(['a1', 'z1']);
+            }
+            $this->fail('Expected ClientClosedException was not thrown');
+        } catch (ClientClosedException) {
+        }
+
+        $this->assertTrue($closed);
+    }
+
     // ========================================================================
     // batchPut()
     // ========================================================================
@@ -1423,6 +1514,123 @@ class RawKvClientTest extends TestCase
             $this->fail('Expected ClientClosedException was not thrown');
         } catch (ClientClosedException) {
         }
+    }
+
+    public function testCloseDuringUnboundedReverseScanPreventsNextPageFetch(): void
+    {
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // Mirror of the forward test: a full reverse page makes
+        // reverseScanUnbounded() want the next page, which must not reach the
+        // wire after the first page closed the client (issue #783).
+        $pairs = [];
+        for ($i = 0; $i < RawKvScanner::MAX_SCAN_LIMIT; $i++) {
+            $pair = new KvPair();
+            $pair->setKey(sprintf('k%05d', $i));
+            $pair->setValue('v');
+            $pairs[] = $pair;
+        }
+        $fullPage = new RawScanResponse();
+        $fullPage->setKvs($pairs);
+
+        $this->grpc->expects($this->once())
+            ->method('call')
+            ->willReturnCallback(function () use ($fullPage): Message {
+                $this->client->close();
+
+                return $fullPage;
+            });
+
+        try {
+            $this->client->reverseScan('z', 'a', 0);
+            $this->fail('Expected ClientClosedException was not thrown');
+        } catch (ClientClosedException) {
+        }
+    }
+
+    public function testCloseDuringScanPageRegionWindowPreventsNextWindowDispatch(): void
+    {
+        $region1 = new RegionInfo(
+            regionId: 1,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: '',
+            endKey: 'm',
+        );
+        $region2 = new RegionInfo(
+            regionId: 2,
+            leaderPeerId: 1,
+            leaderStoreId: 1,
+            epochConfVer: 1,
+            epochVersion: 1,
+            startKey: 'm',
+            endKey: '',
+        );
+
+        $this->regionCache->method('getByKey')->willReturnCallback(
+            static fn(string $key): RegionInfo => KeyOrder::lt($key, 'm') ? $region1 : $region2,
+        );
+        $this->regionCache->method('put');
+        $this->pdClient->method('scanRegions')->willReturn([$region1, $region2]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+
+        // One limit-0 page spans both regions; maxConcurrency 1 splits the
+        // page into two execution windows. Closing during the first must stop
+        // the second before it resolves a region or opens a RawScan
+        // (issue #783).
+        $client = new RawKvClient(
+            $this->pdClient,
+            $this->grpc,
+            $this->regionCache,
+            maxConcurrency: 1,
+            ownsGrpcClient: true,
+            ownsPdClient: true,
+        );
+
+        $closed = false;
+        $this->grpc->expects($this->once())
+            ->method('callAsync')
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    string $service,
+                    string $method,
+                    Message $request,
+                    string $responseClass,
+                    ?int $timeoutMs = null,
+                ) use (
+                    $client,
+                    &$closed,
+                ): GrpcFuture {
+                    $response = new RawScanResponse();
+                    $pair = new KvPair();
+                    $pair->setKey('a1');
+                    $pair->setValue('v');
+                    $response->setKvs([$pair]);
+
+                    return GrpcFuture::fromWaiter(function () use ($response, $client, &$closed): Message {
+                        if (!$closed) {
+                            $closed = true;
+                            $client->close();
+                        }
+
+                        return $response;
+                    });
+                },
+            );
+
+        try {
+            $client->scan('a', 'z', 0);
+            $this->fail('Expected ClientClosedException was not thrown');
+        } catch (ClientClosedException) {
+        }
+
+        $this->assertTrue($closed);
     }
 
     // ========================================================================
