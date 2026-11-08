@@ -696,7 +696,7 @@ only logged. Always `commit()` or `rollback()` in your own code.
 
 #### Complete example
 
-This is `examples/txn.php` — run it verbatim against a TxnKV cluster:
+`examples/txn.php` defines this retry helper — run the script verbatim against a TxnKV cluster:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.txnkv.yml down -v
@@ -719,9 +719,8 @@ use CrazyGoat\TiKV\Client\TxnKv\TxnKvClient;
  * startTs that has already lost the race, so re-running the same object can
  * never succeed.
  */
-function transfer(TxnKvClient $client, string $from, string $to, int $amount): void
-{
-    for ($attempt = 1; ; $attempt++) {
+$transfer = static function (TxnKvClient $client, string $from, string $to, int $amount): void {
+    for ($attempt = 1;; $attempt++) {
         $txn = $client->begin(); // pessimistic by default
         try {
             $fromBalance = (int) $txn->get($from);
@@ -736,7 +735,12 @@ function transfer(TxnKvClient $client, string $from, string $to, int $amount): v
             $txn->commit();
 
             return;
-        } catch (TransactionConflictException | DeadlockException | LockWaitTimeoutException | TxnRetryableException $e) {
+        } catch (
+            TransactionConflictException
+            | DeadlockException
+            | LockWaitTimeoutException
+            | TxnRetryableException $e
+        ) {
             if ($txn->getStatus() === TransactionStatus::Active) {
                 $txn->rollback();
             }
@@ -752,12 +756,13 @@ function transfer(TxnKvClient $client, string $from, string $to, int $amount): v
             throw $e;
         }
     }
-}
+};
 ```
 
-The `getStatus() === Active` guard matters: after an undetermined commit the
-transaction is closed, and calling `rollback()` on it would throw a second
-exception over the first.
+The helper is a closure so the script declares no global function next to the
+autoloader `require`. The `getStatus() === Active` guard matters: after an
+undetermined commit the transaction is closed, and calling `rollback()` on it
+would throw a second exception over the first.
 
 ### TLS/SSL Configuration
 
