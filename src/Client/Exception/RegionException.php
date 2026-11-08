@@ -6,7 +6,6 @@ namespace CrazyGoat\TiKV\Client\Exception;
 
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
-use CrazyGoat\Proto\Errorpb\NotLeader;
 use CrazyGoat\Proto\Errorpb\StoreNotMatch;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Retry\ErrorKind;
@@ -15,6 +14,11 @@ use CrazyGoat\TiKV\Client\Util\ServerText;
 final class RegionException extends TiKvException
 {
     /**
+     * @param NotLeaderHint|null $notLeader The leader hint of a NotLeader
+     *     error, in the library's own types (issue #734). The generated
+     *     `Errorpb\NotLeader` message never leaves this class: it is
+     *     regenerated with every protobuf bump, so promising it would hand
+     *     consumers a type the library may change without a version break.
      * @param ErrorKind|null $errorKind The typed error variant detected from
      *     the proto Error oneof, or null when the error could not be mapped.
      *     When non-null the classifier can determine the correct BackoffType
@@ -40,7 +44,7 @@ final class RegionException extends TiKvException
     public function __construct(
         string $operation,
         string $message,
-        public readonly ?NotLeader $notLeader = null,
+        public readonly ?NotLeaderHint $notLeader = null,
         public readonly ?ErrorKind $errorKind = null,
         public readonly ?EpochNotMatch $epochNotMatch = null,
         public readonly ?RegionInfo $cachedRegion = null,
@@ -65,11 +69,17 @@ final class RegionException extends TiKvException
     public static function fromRegionError(Error $error, ?RegionInfo $cachedRegion = null): self
     {
         $kind = self::detectErrorKind($error);
+        $notLeader = $error->getNotLeader();
+        $leader = $notLeader?->getLeader();
 
         return new self(
             operation: 'RegionError',
             message: $error->getMessage(),
-            notLeader: $error->getNotLeader(),
+            notLeader: $notLeader === null ? null : new NotLeaderHint(
+                regionId: (int) $notLeader->getRegionId(),
+                leaderPeerId: $leader === null ? null : (int) $leader->getId(),
+                leaderStoreId: $leader === null ? null : (int) $leader->getStoreId(),
+            ),
             errorKind: $kind,
             epochNotMatch: $error->getEpochNotMatch(),
             cachedRegion: $cachedRegion,

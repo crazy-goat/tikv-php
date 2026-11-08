@@ -47,6 +47,17 @@ final class TxnReaderRegionBatchTest extends TestCase
     /** @var list<array{0: string, 1: string, 2: int}> the recorded scanRegions() calls */
     private array $scanRegionsCalls = [];
 
+    /** @var list<ScanRequest> the recorded KvScan requests */
+    private array $scanRequests = [];
+
+    /**
+     * When set, replaces the PD answer of the default region layout, so a
+     * test can drive the termination guards with a malformed or short page.
+     *
+     * @var (callable(string, string, int): list<RegionInfo>)|null
+     */
+    private $pdScanRegionsOverride;
+
     protected function setUp(): void
     {
         $this->pdClient = $this->createMock(PdClientInterface::class);
@@ -54,6 +65,8 @@ final class TxnReaderRegionBatchTest extends TestCase
         $this->shimCallAsync($this->grpc);
         $this->regionCache = $this->createMock(RegionCacheInterface::class);
         $this->scanRegionsCalls = [];
+        $this->scanRequests = [];
+        $this->pdScanRegionsOverride = null;
 
         $store = new Store();
         $store->setId(1);
@@ -111,6 +124,10 @@ final class TxnReaderRegionBatchTest extends TestCase
         $this->pdClient->method('scanRegions')->willReturnCallback(
             function (string $startKey, string $endKey, int $limit = 0) use ($regions): array {
                 $this->scanRegionsCalls[] = [$startKey, $endKey, $limit];
+
+                if ($this->pdScanRegionsOverride !== null) {
+                    return ($this->pdScanRegionsOverride)($startKey, $endKey, $limit);
+                }
 
                 $matches = [];
                 foreach ($regions as $region) {
@@ -181,6 +198,8 @@ final class TxnReaderRegionBatchTest extends TestCase
                 string $method,
                 ScanRequest $request,
             ) use ($regions): ScanResponse {
+                $this->scanRequests[] = $request;
+
                 $response = new ScanResponse();
 
                 foreach ($regions as $index => $region) {
@@ -265,5 +284,79 @@ final class TxnReaderRegionBatchTest extends TestCase
         $this->assertSame($this->boundary(RegionScanBatch::MAX_REGIONS), $secondStart);
         $this->assertSame('', $secondEnd);
         $this->assertSame(RegionScanBatch::MAX_REGIONS, $secondLimit);
+    }
+
+    /**
+     * An empty PD page ends the enumeration instead of asking PD again for
+     * the same cursor (issue #780).
+     */
+    public function testEmptyPdPageStopsTheScanAfterOneCall(): void
+    {
+        $this->pdScanRegionsOverride = static fn (): array => [];
+
+        $result = $this->transaction()->scan('k000', '', 10);
+
+        $this->assertSame([], $result);
+        $this->assertCount(1, $this->scanRegionsCalls);
+        $this->assertSame([], $this->scanRequests);
+    }
+
+    /**
+     * A last region whose end key does not advance the cursor would make the
+     * scan request the same page forever. The guard stops it after the first
+     * page, and the non-advancing region yields no scan row (issue #780).
+     */
+    public function testNonAdvancingLastRegionEndKeyStopsBeforeReaskingPd(): void
+    {
+        // The region ends exactly at the cursor, so the next PD call would
+        // use the same start key again.
+        $this->pdScanRegionsOverride = fn (): array => [
+            new RegionInfo(
+                regionId: 9001,
+                leaderPeerId: 1,
+                leaderStoreId: 1,
+                epochConfVer: 1,
+                epochVersion: 1,
+                startKey: 'k000',
+                endKey: 'k000',
+            ),
+        ];
+
+        // A row limit of 1 makes the PD batch size 1: the short-batch guard
+        // cannot mask the non-advancing-end-key guard under test.
+        $result = $this->transaction()->scan('k000', '', 1);
+
+        $this->assertSame([], $result);
+        $this->assertCount(1, $this->scanRegionsCalls);
+        $this->assertSame([], $this->scanRequests);
+    }
+
+    /**
+     * PD answering with fewer regions than requested means the range holds
+     * no more: the scan stops instead of issuing another PD call at the
+     * last region's end key (issue #780).
+     */
+    public function testShortRegionBatchStopsTheScanAfterThatBatch(): void
+    {
+        $this->pdScanRegionsOverride = fn (): array => [
+            new RegionInfo(
+                regionId: 1,
+                leaderPeerId: 1,
+                leaderStoreId: 1,
+                epochConfVer: 1,
+                epochVersion: 1,
+                startKey: 'k000',
+                endKey: 'k001',
+            ),
+        ];
+
+        // A row budget above the single region returned makes the requested
+        // region limit larger than the answer.
+        $result = $this->transaction()->scan('k000', '', 1000);
+
+        $this->assertSame([$this->keyOf(0)], array_column($result, 'key'));
+        $this->assertCount(1, $this->scanRegionsCalls);
+        $this->assertGreaterThan(1, $this->scanRegionsCalls[0][2]);
+        $this->assertCount(1, $this->scanRequests);
     }
 }
