@@ -9,6 +9,7 @@ use CrazyGoat\Proto\Kvrpcpb\RawGetResponse;
 use CrazyGoat\Proto\Metapb\Peer;
 use CrazyGoat\TiKV\Client\Cache\RegionCache;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
+use CrazyGoat\TiKV\Client\Exception\NotLeaderHint;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
@@ -83,8 +84,7 @@ class RetryExecutorInvalidationMetricsTest extends TestCase
         // NotLeader WITHOUT a hint: handleNotLeader() must drop the region
         // (reason 'not_leader'). The operation then succeeds, so the drop
         // happens exactly once for this execute() call.
-        $notLeader = new NotLeader();
-        $notLeader->setRegionId(42);
+        $notLeader = new NotLeaderHint(regionId: 42);
         $error = new RegionException(
             operation: 'KvGet',
             message: 'not leader',
@@ -117,12 +117,11 @@ class RetryExecutorInvalidationMetricsTest extends TestCase
 
         // Hint peer IS among the cached peers: only switchLeader() runs —
         // no invalidation, so regionInvalidated() must NOT be emitted.
-        $protoLeader = new Peer();
-        $protoLeader->setId(20);
-        $protoLeader->setStoreId(3);
-        $notLeader = new NotLeader();
-        $notLeader->setRegionId(42);
-        $notLeader->setLeader($protoLeader);
+        $notLeader = new NotLeaderHint(
+            regionId: 42,
+            leaderPeerId: 20,
+            leaderStoreId: 3,
+        );
         $error = new RegionException(
             operation: 'KvGet',
             message: 'not leader',

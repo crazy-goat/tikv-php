@@ -15,6 +15,7 @@ repomix-output.xml
 
 /.tyci/
 /coverage-html/
+/coverage/
 /coverage.xml
 /coverage-clover.xml
 /.infection-tmp/
