@@ -81,7 +81,10 @@ final class CiWorkflowGateTest extends TestCase
 
     /**
      * Changed paths that must reach the E2E jobs: a unit test, production
-     * code and an E2E test itself. The unit test is the case CI-08 named.
+     * code, an E2E test itself and markdown files the docs guards read. The
+     * unit test is the case CI-08 named; AGENTS.md and the pull-request
+     * template are read by `MarkdownLinksGuardTest`, so classifying them as
+     * docs-only would skip the suite that checks their links.
      *
      * @var list<string>
      */
@@ -89,6 +92,8 @@ final class CiWorkflowGateTest extends TestCase
         'tests/Unit/Ci/CiWorkflowGateTest.php',
         'src/Client/RawKv/RawKvClient.php',
         'tests/E2E/RawKvE2ETest.php',
+        'AGENTS.md',
+        '.github/pull_request_template.md',
     ];
 
     public function testTheWorkflowHasNoPathFilter(): void
