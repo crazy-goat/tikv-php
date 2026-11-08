@@ -78,6 +78,11 @@ from an operation:
   `KeyRedactor::redact()` call. This is a programming/bootstrap error: install
   the redactor and the salt before creating the first client. No RawKV or
   TxnKV operation calls these setters, so an operation cannot raise it.
+- `KeyRedactor::setSalt()` throws
+  `CrazyGoat\TiKV\Client\Exception\InvalidArgumentException` when a non-`null`
+  salt is shorter than `KeyRedactor::MIN_SALT_BYTES` (16 bytes). This is a
+  configuration error at bootstrap: lengthen the secret, pass `null` for the
+  default 32 random bytes, or use `KeyRedactor::generateSalt()`.
 - `KeyRedactor::redact()` throws `\Random\RandomException` when
   `random_bytes()` fails while generating the default salt on first use. This
   is an environment failure, not a TiKV operation failure. Configure a fixed

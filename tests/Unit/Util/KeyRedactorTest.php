@@ -96,18 +96,18 @@ class KeyRedactorTest extends TestCase
 
     public function testExplicitSaltProducesTheDocumentedDigest(): void
     {
-        KeyRedactor::setSalt('fixed-salt');
+        KeyRedactor::setSalt('fixed-salt-0123456789');
 
-        self::assertSame('#eeea7a862d5ed313 (8 bytes)', KeyRedactor::redact('user1234'));
+        self::assertSame('#48427d5e17002b65 (8 bytes)', KeyRedactor::redact('user1234'));
     }
 
     public function testDifferentSaltsProduceDifferentTokens(): void
     {
-        KeyRedactor::setSalt('salt-a');
+        KeyRedactor::setSalt('salt-a-0123456789');
         $first = KeyRedactor::redact('user1234');
 
         KeyRedactorState::reset();
-        KeyRedactor::setSalt('salt-b');
+        KeyRedactor::setSalt('salt-b-0123456789');
         $second = KeyRedactor::redact('user1234');
 
         self::assertNotSame($first, $second);
@@ -132,6 +132,58 @@ class KeyRedactorTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         KeyRedactor::setSalt('');
+    }
+
+    public function testOneByteSaltIsRejected(): void
+    {
+        // Issue #810: '1' is the shape of a placeholder or a truncated
+        // environment variable, and 256 candidate keys is no protection.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('at least 16 bytes');
+
+        KeyRedactor::setSalt('1');
+    }
+
+    public function testSaltOneByteBelowTheMinimumIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('at least 16 bytes');
+
+        KeyRedactor::setSalt(str_repeat('s', KeyRedactor::MIN_SALT_BYTES - 1));
+    }
+
+    public function testSaltOfTheMinimumLengthIsAccepted(): void
+    {
+        $salt = str_repeat('s', KeyRedactor::MIN_SALT_BYTES);
+        KeyRedactor::setSalt($salt);
+
+        self::assertSame(
+            '#' . substr(hash_hmac('sha256', 'user1234', $salt), 0, 16) . ' (8 bytes)',
+            KeyRedactor::redact('user1234'),
+        );
+    }
+
+    public function testNullSaltIsAcceptedAndSelectsTheDefault(): void
+    {
+        KeyRedactor::setSalt(null);
+
+        self::assertMatchesRegularExpression('/\A#[0-9a-f]{16} \(8 bytes\)\z/', KeyRedactor::redact('user1234'));
+    }
+
+    public function testGenerateSaltProducesAValidSalt(): void
+    {
+        $salt = KeyRedactor::generateSalt();
+
+        self::assertMatchesRegularExpression('/\A[0-9a-f]{64}\z/', $salt);
+        self::assertGreaterThanOrEqual(KeyRedactor::MIN_SALT_BYTES, strlen($salt));
+
+        KeyRedactor::setSalt($salt);
+        self::assertMatchesRegularExpression('/\A#[0-9a-f]{16} \(8 bytes\)\z/', KeyRedactor::redact('user1234'));
+    }
+
+    public function testGenerateSaltReturnsADifferentValueEachCall(): void
+    {
+        self::assertNotSame(KeyRedactor::generateSalt(), KeyRedactor::generateSalt());
     }
 
     public function testCustomRedactor(): void
@@ -187,7 +239,7 @@ class KeyRedactorTest extends TestCase
         KeyRedactor::redact('hello');
 
         $this->expectException(LogicException::class);
-        KeyRedactor::setSalt('fixed-salt');
+        KeyRedactor::setSalt('fixed-salt-0123456789');
     }
 
     public function testCustomRedactorCannotBeRemovedAfterFirstUse(): void

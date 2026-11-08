@@ -1197,17 +1197,25 @@ shape only: the actual digest depends on the process salt, so do not copy
 them as literal values.
 
 Configure a fixed salt when tokens must be comparable across processes or
-restarts. Use a high-entropy secret, for example 32 random bytes encoded as
-hex:
+restarts. It must be at least 16 bytes (128 bits); 32 random bytes are
+recommended. `KeyRedactor::generateSalt()` returns 64 hex characters (32
+random bytes), suitable for storing in an environment variable or a secret
+store:
 
 ```php
 use CrazyGoat\TiKV\Client\Util\KeyRedactor;
 
+// Once: echo KeyRedactor::generateSalt(); and store the value securely.
 KeyRedactor::setSalt(getenv('TIKV_LOG_REDACTION_SALT') ?: null);
 ```
 
-`setSalt(null)` restores the default (a fresh random salt per process); an empty
-string is rejected. Call it before the first redaction: `setSalt()` throws
+A non-`null` salt shorter than 16 bytes is rejected with
+`InvalidArgumentException` naming the minimum; the empty string is rejected the
+same way, because a short salt is cheap to brute-force and an empty one would
+turn the keyed hash into an unkeyed one. A placeholder such as
+`TIKV_LOG_REDACTION_SALT=1` therefore fails at bootstrap instead of silently
+weakening the digest. `setSalt(null)` restores the default (a fresh random salt
+per process). Call it before the first redaction: `setSalt()` throws
 `LogicException` once a key has been redacted, because changing the salt
 afterwards would break the in-process correlation the token exists for.
 
