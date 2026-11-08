@@ -385,8 +385,8 @@ its memory-comparable region-key encoding for region discovery, while
 `ApiV2GrpcClient` decorates the shared transport to add the V2 context and
 translate request/response keys for unary, async, streaming, and
 BatchCommands calls. API V2 supports only the `default` column family, so a
-RawKV request that carries a non-empty `cf`/`cf_name` is rejected with
-`InvalidArgumentException` instead of being rewritten silently.
+RawKV request that carries a `cf`/`cf_name` other than the default name is
+rejected with `InvalidArgumentException` instead of being rewritten silently.
 This keeps application-facing components in user-key space and makes the
 keyspace contract a transport concern rather than a per-operation special
 case.

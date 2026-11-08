@@ -74,6 +74,35 @@ final class ApiV2MessageTransformerTest extends TestCase
     }
 
     /**
+     * API V2 supports the default column family, which the proto can spell
+     * as the literal name "default" — SstIngestor always sends that for an
+     * empty setting, so rejecting it would make every V2 ingest() fail
+     * (issue #718 review, B1).
+     */
+    public function testDefaultColumnFamilyNameIsAccepted(): void
+    {
+        $codec = new CodecV2(Mode::Raw, 0x010203, 'tenant-a');
+        $transformer = new ApiV2MessageTransformer($codec, Mode::Raw);
+
+        $put = new RawPutRequest();
+        $put->setKey('key');
+        $put->setCf('default');
+        $encodedPut = $transformer->transformRequest($put, 'tikvpb.Tikv');
+        $this->assertInstanceOf(RawPutRequest::class, $encodedPut);
+        $this->assertSame('default', $encodedPut->getCf());
+
+        $meta = new SSTMeta();
+        $meta->setCfName('default');
+        $request = new RawWriteRequest();
+        $request->setMeta($meta);
+        $encodedWrite = $transformer->transformRequest($request, 'import_sstpb.ImportSST');
+        $this->assertInstanceOf(RawWriteRequest::class, $encodedWrite);
+        $encodedMeta = $encodedWrite->getMeta();
+        $this->assertInstanceOf(SSTMeta::class, $encodedMeta);
+        $this->assertSame('default', $encodedMeta->getCfName());
+    }
+
+    /**
      * SST ingest carries the column family on the nested SSTMeta (issue
      * #718): the ingest path must be rejected too, not only RawPut.
      */

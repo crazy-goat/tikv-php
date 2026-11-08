@@ -319,14 +319,19 @@ final readonly class ApiV2MessageTransformer
             return;
         }
 
-        // API V2 supports only the keyspace's default column family: it
-        // treats an explicitly populated cf as deprecated. Dropping the
-        // field silently would compute or import against a different column
-        // family than the caller asked for, so refuse instead (issue #718).
+        // API V2 supports only the keyspace's default column family, which
+        // the proto can spell either as an empty field or as the literal
+        // name "default" (SstIngestor sends the latter). A different name
+        // would silently answer for another column family, so refuse it
+        // (issue #718).
         $cf = method_exists($message, 'getCf') ? (string) $message->getCf() : '';
         $cfName = method_exists($message, 'getCfName') ? (string) $message->getCfName() : '';
-        $configured = $cf !== '' ? $cf : $cfName;
-        if ($configured !== '') {
+
+        foreach ([$cf, $cfName] as $configured) {
+            if ($configured === '' || $configured === 'default') {
+                continue;
+            }
+
             throw new InvalidArgumentException(sprintf(
                 'API V2 supports only the keyspace default column family, but %s carries "%s"; '
                 . 'use API V1 or leave the column family unset',

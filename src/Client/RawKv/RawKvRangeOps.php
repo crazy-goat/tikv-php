@@ -143,18 +143,20 @@ final readonly class RawKvRangeOps
      * (issue #190) is a cache hit on the first try.
      *
      * RawChecksum has no column-family field: the RPC always reads the
-     * default column family. A non-empty `$columnFamily` is therefore
+     * default column family. Both `''` and the literal `'default'` are
+     * accepted (they name the same CF); any other `$columnFamily` is
      * rejected instead of returning the default column family's checksum as
      * if it covered the configured one (issue #718).
      *
-     * @throws InvalidArgumentException When `$columnFamily` is not empty
+     * @throws InvalidArgumentException When `$columnFamily` is neither empty
+     *     nor `'default'`
      * @throws \CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException
      *     When a region's retry budget is exhausted or it returns a fatal
      *     region error
      */
     public function checksum(string $startKey, string $endKey, string $columnFamily = ''): ChecksumResult
     {
-        if ($columnFamily !== '') {
+        if ($columnFamily !== '' && $columnFamily !== 'default') {
             throw new InvalidArgumentException(sprintf(
                 'RawChecksum has no column-family field, so checksumming "%s" is not '
                 . 'supported; checksum() reads only the default column family',

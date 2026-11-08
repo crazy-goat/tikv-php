@@ -1597,27 +1597,31 @@ public function isAtomicForCAS(): bool;
 ```
 
 **Column family.** `setColumnFamily()` sets the TiKV column family of the
-client instance and `getColumnFamily()` reads it back. `''` — the default —
-means TiKV's default column family; the client does not send a `cf` field for an
-empty string. Any other value is sent verbatim as the `cf` field of every
-subsequent key/value request of that client: single-key CRUD, CAS, the batch
-operations, scans (including both iterators), delete-range operations and
-`ingest()` (as `SSTMeta.cf_name`). The setting is **per client instance**, not
-per call, so it applies to all later operations until it is changed.
-`setColumnFamily()` returns the client and performs no validation; TiKV rejects
-an unknown column family on the first request that uses it. The setting lives
-on the client instance: a new client instance starts at `''`, so re-apply it.
+client instance and `getColumnFamily()` reads it back. Both `''` (the default)
+and the literal `'default'` name TiKV's default column family. For the
+single-key CRUD, CAS, batch, scan (including both iterators) and delete-range
+requests, an empty setting sends no `cf` field while `'default'` is sent
+verbatim; every other value is sent verbatim as the `cf` field. `ingest()`
+always needs an explicit name in `SSTMeta.cf_name`, so it sends `'default'`
+when the setting is `''` or `'default'`, and the configured name otherwise.
+The setting is **per client instance**, not per call, so it applies to all
+later operations until it is changed. `setColumnFamily()` returns the client
+and performs no validation; TiKV rejects an unknown column family on the first
+request that uses it. The setting lives on the client instance: a new client
+instance starts at `''`, so re-apply it.
 
 `checksum()` is the exception: the `RawChecksum` RPC has no column-family
-field and always reads the default column family, so a non-empty setting makes
-`checksum()` throw `InvalidArgumentException` instead of returning the default
-column family's checksum as if it covered the configured one.
+field and always reads the default column family. It accepts `''` and
+`'default'`; any other setting makes `checksum()` throw
+`InvalidArgumentException` instead of returning the default column family's
+checksum as if it covered the configured one.
 
-With `options['apiVersion' => 2]` the transport refuses a non-empty column
-family with `InvalidArgumentException`: API V2 supports only the keyspace's
-default column family, and silently falling back to it would answer for data
-the caller did not ask about. Leave the column family at `''` on an API V2
-client, or use API V1 to select a column family.
+With `options['apiVersion' => 2]` the transport refuses a column family other
+than the default (`''` or `'default'`) with `InvalidArgumentException`: API V2
+supports only the keyspace's default column family, and silently falling back
+to it would answer for data the caller did not ask about. `ingest()` checks
+the same rule before switching any store into import mode. Leave the column
+family at `''` on an API V2 client, or use API V1 to select a column family.
 
 `scanIterator()` and `scanPrefixIterator()` capture the column family when they
 are created; after changing it, create a new iterator. `TxnKvClient` has no

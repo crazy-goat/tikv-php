@@ -1683,8 +1683,9 @@ final class RawKvClient
     /**
      * @throws ClientClosedException
      * @throws InvalidArgumentException When the range is reversed
-     *         (`$startKey` sorts after a non-empty `$endKey`) or the client
-     *         has a non-empty column family (`RawChecksum` has no `cf` field)
+     *         (`$startKey` sorts after a non-empty `$endKey`) or the client's
+     *         column family is neither `''` nor `'default'` (`RawChecksum`
+     *         has no `cf` field)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted
@@ -1744,8 +1745,10 @@ final class RawKvClient
      * @param int|null $ttl Time-to-live in seconds (null = no TTL)
      *
      * @throws ClientClosedException
-     * @throws InvalidArgumentException When a key is empty or a key/value
-     *         exceeds the configured size limit
+     * @throws InvalidArgumentException When a key is empty, a key/value
+     *         exceeds the configured size limit, or an API V2 client asks for
+     *         a column family other than the default (checked before any
+     *         store is switched into import mode)
      * @throws IngestTooLargeException When the payload exceeds
      *         `options['maxIngestSize']`, before any RPC is issued (issue #297)
      * @throws GrpcException
@@ -1774,6 +1777,23 @@ final class RawKvClient
 
         if ($keyValuePairs === []) {
             return;
+        }
+
+        // Fail before switchStoresMode(Import) fans out: API V2 supports only
+        // the keyspace default column family, and discovering that inside the
+        // transport would flap every store through import mode first
+        // (issue #718).
+        if (
+            $this->codec instanceof CodecV2
+            && $this->columnFamily !== ''
+            && $this->columnFamily !== 'default'
+        ) {
+            throw new InvalidArgumentException(sprintf(
+                'API V2 supports only the keyspace default column family, but '
+                . 'setColumnFamily("%s") is configured; use API V1 to ingest into '
+                . 'another column family',
+                $this->columnFamily,
+            ));
         }
 
         foreach ($keyValuePairs as $key => $value) {
