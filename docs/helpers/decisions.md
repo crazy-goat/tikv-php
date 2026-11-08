@@ -1172,13 +1172,13 @@ to be unambiguous, and the answer is not "whoever calls `close()`":
    `maxChannels`, `idleTtlMs`, `grpc`) are rejected next to it instead of
    ignored — an ignored `allowInsecure: false` would leave the caller
    believing TLS is enforced while the transport is used without it.
-3. **A client assembled by hand closes the transport it was given.** The public
-   constructors of `RawKvClient` / `TxnKvClient` default `ownsGrpcClient` to
-   `true`, so `new RawKvClient($pdClient, $grpc)` closes `$grpc` in `close()`
-   and in the destructor. `ownsGrpcClient: false` is the documented escape
-   hatch for an application that keeps the transport. Issue #204 tracks the
-   change (a client should close only what it owns); until it lands the flag is
-   the only way to say so.
+3. **A client assembled by hand does not own the connections it is given.** The
+   `RawKvClient` constructor defaults `ownsGrpcClient` and `ownsPdClient` to
+   `false`, so `new RawKvClient($pdClient, $grpc)` leaves both open in
+   `close()` and in the destructor. `ownsGrpcClient: true` / `ownsPdClient:
+   true` transfers ownership (issue #204). `TxnKvClient` still defaults
+   `ownsGrpcClient` to `true` and closes its PD client unconditionally, pending
+   a follow-up issue.
 
 The rule is published in three places, and a reader of any one of them has to
 find the same answer: `GrpcClientInterface::close()` (the API contract), the
@@ -1307,6 +1307,8 @@ The caller bounds the iteration (a row count, a deadline, `break`).
 answers an empty batch while the limit is unsatisfied and the scan would
 end there. The probe of `assertRangeNotTruncated()` is covered too: a
 transient empty probe would hide a truncated whole-range scan (#440).
+The reverse path (`executeReverseScanForRegion()`) applies the same rule to
+the reverse truncation probe (issue #435).
 Trade-offs:
 
 - `MAX_EMPTY_SCAN_REATTEMPTS = 1`, counted per sub-range: the counter
@@ -1787,3 +1789,63 @@ runs after the string exists and cannot prevent that allocation. It remains
 only as a post-allocation defence-in-depth assertion (it can skip the second,
 larger allocation performed by protobuf decoding when set tighter than the
 transport limit).
+
+## `TlsConfig` does not try to scrub credentials (SEC-12, issue #315)
+
+`TlsConfig::close()` was removed rather than made terminal. PHP strings are
+immutable and copy-on-write, so rebinding the property to `str_repeat("\0", ...)`
+leaves both the original buffer and the copy already passed to
+`ChannelCredentials::createSsl()` in memory — the advertised guarantee did not
+exist. Worse, the method was a live footgun: the transport rebuilds credentials
+from the same `TlsConfig` after an idle or LRU eviction, so a caller who followed
+the docblock would silently break every reconnection.
+
+Do not reintroduce a "zero the key" method. `TlsConfig` lives in the internal
+`Tls\` namespace (see the README stability policy), so removing it is not a
+public-API break. If credential lifetime ever becomes a real requirement, it has
+to be solved outside PHP string properties (for example by loading material into
+the gRPC core and dropping the PHP copy immediately), not by a scrubbing method
+that cannot deliver.
+
+## Workflows pin actions by commit SHA (issue #316, SEC-13)
+
+Every `uses:` reference in `.github/workflows/` names a full 40-character commit SHA and a
+trailing version comment (`actions/checkout@3d3c… # v7.0.1`). A major tag such as `@v7` is a
+mutable ref: whoever controls the action repository can force-move it and execute unreviewed
+code on the runner. The comment is not decoration — Dependabot's `github-actions` ecosystem
+uses it to rewrite the SHA and the comment together when a release is published.
+
+The two `crazy-goat/.github` reusable workflows are pinned the same way, but that repository
+has no release tags, so their `# main` pins are bumped by hand when the shared workflow changes;
+Dependabot cannot refresh them. Do not "simplify" any of these back to `@vN` or `@main`.
+
+The workflow keeps `permissions: contents: read` at the top level. Add a job-level scope only
+when that job genuinely needs it (the release workflow needs `contents: write` to create a
+release; the reusable `changes` workflow classifies files with `git diff` and needs no API
+scope). `tests/Unit/Ci/WorkflowSupplyChainGuardTest.php` fails the Unit suite on an unpinned
+reference, a missing version comment, a missing top-level read-only block, or a Dependabot
+configuration without the `github-actions` ecosystem.
+
+## Resolved-lock tracking lives on the per-transaction LockResolver (issue #432, GAP-18)
+
+`ResolvedLockTracker` is owned by `LockResolver`, not by `TransactionState` as
+the issue's implementation sketch suggested. `TxnKvClient::begin()` creates one
+`LockResolver` per transaction, so the tracker already has exactly the
+transaction's lifetime, and both collaborators that need it (`TxnReader` and
+`TwoPhaseCommitter`) already hold that resolver. Putting it on
+`TransactionState` would require threading the same object through their
+constructors and through the `begin()` wiring while adding no behaviour.
+
+Do not make the tracker client-wide: `Context.resolved_locks` describes what
+*this* snapshot has resolved, and leaking one transaction's resolutions into
+another would tell TiKV to ignore locks the second transaction has not
+resolved. Both sets are bounded FIFO (2048 entries, oldest evicted first);
+client-go's `TSSet` is unbounded, which is unsuitable for a long-lived PHP
+transaction under sustained contention.
+
+The two sets are disjoint, classified in `LockResolver` against its
+`callerStartTs`: a rolled-back transaction, or one committed after that
+timestamp, goes into `resolved_locks`; a transaction committed at or before it
+goes into `committed_locks`. Do not put a timestamp in both. TiKV checks the
+bypass set first, so a duplicate would be ignored instead of read through and
+could return the value from before the commit — a stale read.

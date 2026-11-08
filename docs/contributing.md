@@ -286,7 +286,7 @@ src/
 │   ├── Connection/      # PD client, connection factory, keyspace resolution
 │   ├── Exception/       # Custom exceptions
 │   ├── Grpc/            # gRPC wrappers for RawKV and API V2
-│   ├── Observability/   # Metrics and debug logging
+│   ├── Observability/   # Metrics and tracing
 │   ├── RawKv/           # RawKV client, scanner and SST ingest
 │   │   └── Dto/         # RawKV result and option DTOs
 │   ├── Region/          # Region routing, grouping and cache warming
@@ -335,7 +335,7 @@ tests/
 │   ├── Docs/            # Documentation guards
 │   ├── Exception/       # Exception behaviour
 │   ├── Grpc/            # gRPC-dependent tests (the Grpc suite)
-│   ├── Observability/   # Metrics and debug logging
+│   ├── Observability/   # Metrics and tracing
 │   ├── Phpstan/         # Fixtures for the custom PHPStan rules
 │   ├── RawKv/           # RawKV client and operations
 │   │   └── Dto/         # RawKV DTO tests

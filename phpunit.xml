@@ -15,6 +15,7 @@
             <exclude>tests/Unit/Grpc/GrpcClientChannelIsolationTest.php</exclude>
             <exclude>tests/Unit/Grpc/GrpcClientIdleSweepTest.php</exclude>
             <exclude>tests/Unit/Grpc/GrpcClientChannelCapTest.php</exclude>
+            <exclude>tests/Unit/Grpc/GrpcClientTlsReconnectTest.php</exclude>
             <exclude>tests/Unit/Grpc/RawKvBatchMetricsTest.php</exclude>
             <exclude>tests/Unit/Grpc/GrpcClientRpcCompletionTest.php</exclude>
             <exclude>tests/Unit/Grpc/GrpcClientStreamingTest.php</exclude>
@@ -43,6 +44,7 @@
             <file>tests/Unit/Grpc/GrpcClientChannelIsolationTest.php</file>
             <file>tests/Unit/Grpc/GrpcClientIdleSweepTest.php</file>
             <file>tests/Unit/Grpc/GrpcClientChannelCapTest.php</file>
+            <file>tests/Unit/Grpc/GrpcClientTlsReconnectTest.php</file>
             <file>tests/Unit/Grpc/RawKvBatchMetricsTest.php</file>
             <file>tests/Unit/Grpc/GrpcClientRpcCompletionTest.php</file>
             <file>tests/Unit/Grpc/GrpcClientStreamingTest.php</file>

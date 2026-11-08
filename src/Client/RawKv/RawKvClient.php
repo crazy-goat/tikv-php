@@ -135,6 +135,14 @@ final class RawKvClient
     public const OPT_SLOW_LOG = 'slowLog';
     public const OPT_METRICS = 'metrics';
 
+    /**
+     * Structured tracing callback (issue #434, GAP-20): an instance of
+     * {@see \CrazyGoat\TiKV\Client\Observability\TraceEventInterface}. The
+     * transport emits one event pair per gRPC call; RawKV has no client-side
+     * phase events of its own.
+     */
+    public const OPT_TRACER = 'tracer';
+
     /** API protocol version: 0/1 (V1, default) or 2 (keyspace-aware). */
     public const OPT_API_VERSION = 'apiVersion';
 
@@ -362,10 +370,32 @@ final class RawKvClient
             storeCache: $bundle->storeCache,
             requestContext: self::resolveRequestContext($options),
             resourceControl: self::resolveResourceControl($options),
+            // ConnectionFactory always builds the PD client, even when the
+            // transport is injected through options['grpcClient'], so
+            // create() owns it on every path. If the factory ever accepts an
+            // injected PD client, this flag must follow the bundle the way
+            // ownsGrpcClient does (issue #204).
+            ownsPdClient: true,
         );
     }
 
     /**
+     * Build a client from an existing PD client and transport.
+     *
+     * ## Connection ownership
+     *
+     * A client closes only the connections it owns. This constructor accepts
+     * connections the caller already created, so it treats them as externally
+     * owned and neither `close()` nor `__destruct()` closes them (issue #204).
+     * Sharing one `PdClientInterface` and one `GrpcClientInterface` between
+     * several clients is therefore safe: destroying one client cannot close
+     * the channels the others still use.
+     *
+     * Pass `ownsGrpcClient: true` and/or `ownsPdClient: true` to transfer
+     * ownership explicitly; the client then closes the matching dependency in
+     * `close()`. `RawKvClient::create()` builds the whole bundle itself and
+     * sets both flags accordingly.
+     *
      * @throws InvalidArgumentException When retryDeadlineMs, maxConcurrency or
      *         maxScanRows is out of range
      */
@@ -402,16 +432,14 @@ final class RawKvClient
         /**
          * Whether this client owns the gRPC transport and may close it.
          *
-         * true (the default) for a client that built the transport itself —
-         * and for a client assembled by hand, which therefore closes the
-         * transport it was given (issue #204 tracks the change to close only
-         * what a client owns).
-         * false when the transport was supplied by the application
-         * (options['grpcClient']): the application stays its owner, so the
-         * client never closes it and the same transport can be shared with
-         * other clients.
+         * false (the default) for a client assembled by hand: the caller
+         * supplied the transport, so the caller keeps it open and may share
+         * it with other clients. true when the client built the transport
+         * itself (or when the caller explicitly transfers ownership).
+         * A transport supplied through `options['grpcClient']` is never owned
+         * by the client, so the application stays its owner (issue #407).
          */
-        private readonly bool $ownsGrpcClient = true,
+        private readonly bool $ownsGrpcClient = false,
         /**
          * Key codec supplied by the construction path. `epochNotMatchCodec()`
          * derives the EpochNotMatch payload codec from it (issue #246): V1
@@ -458,6 +486,15 @@ final class RawKvClient
          * unchanged.
          */
         private readonly ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Whether this client owns the PD client and may close it.
+         *
+         * false (the default) for a client assembled by hand: the caller
+         * supplied the PD client, so the caller keeps it open and may share
+         * it with other clients. true when the client built the PD client
+         * itself (or when the caller explicitly transfers ownership).
+         */
+        private readonly bool $ownsPdClient = false,
     ) {
         if ($regionCacheRefreshMs < 0) {
             throw new InvalidArgumentException('regionCacheRefreshMs must be >= 0');
@@ -1540,15 +1577,22 @@ final class RawKvClient
     }
 
     /**
-     * Scan multiple non-contiguous ranges with a client-side loop of
-     * per-range `RawScan` requests; this is not the `RawBatchScan` RPC.
+     * Scan multiple non-contiguous ranges with one `RawBatchScan` request per
+     * region (issue #433, GAP-19).
      *
-     * The RPC count is linear in the number of ranges and the regions they
-     * cover, because every range resolves and scans its own regions. The
-     * per-range sends are fanned out concurrently, bounded by
-     * `options['maxConcurrency']`, so wall-clock latencies overlap without
-     * changing the total work. See
-     * {@see RawKvScanner::batchScan()} for the full cost model.
+     * The client groups the ranges by region, clips every range to each
+     * region's bounds, and sends one `RawBatchScan` per region, so the RPC
+     * count is the number of regions touched rather than one per range per
+     * region. Requests to distinct regions are dispatched concurrently,
+     * bounded by `options['maxConcurrency']`. A range that spans several
+     * regions is split across their requests and trimmed back to
+     * `$eachLimit` rows. Overlapping ranges, a region error, a transport
+     * failure or a missing store fall back to the per-range `RawScan` path.
+     * The batch deadline covers region enumeration as well as the store
+     * fan-out, and the fallback only gets the remaining budget. A PD failure
+     * during region enumeration is reported as a
+     * `BatchPartialFailureException`, like the pre-#433 per-range path.
+     * See {@see RawKvScanner::batchScan()} for the full cost model.
      *
      * Returns one entry per range, each a list of
      * `['key' => string, 'value' => ?string]` rows (`value` is `null` when
@@ -1566,7 +1610,7 @@ final class RawKvClient
      *     including a `RegionException`, a `GrpcException`, a region's
      *     exhausted retry budget or a missing store — is reported inside
      *     `getRegionErrors()`; it is wrapped, not thrown directly
-     * @throws BatchDeadlineExceededException When the range fan-out exceeds
+     * @throws BatchDeadlineExceededException When the region fan-out exceeds
      *     `options['timeout']['batchDeadlineMs']`
      */
     public function batchScan(array $ranges, int $eachLimit, bool $keyOnly = false): array
@@ -1747,9 +1791,13 @@ final class RawKvClient
 
     /**
      * Get the learned cluster ID, or null if not yet discovered.
+     *
+     * @throws ClientClosedException When the client has been closed
      */
     public function getClusterId(): ?int
     {
+        $this->ensureOpen();
+
         return $this->pdClient->getClusterId();
     }
 
@@ -1890,6 +1938,17 @@ final class RawKvClient
         return $this->regionCacheWarmer->preload($ranges);
     }
 
+    /**
+     * Release the resources this client owns.
+     *
+     * Idempotent and never throws. The region cache is always cleared (it is
+     * a cache, so dropping its entries cannot break another client), while
+     * the gRPC transport and the PD client are closed only when this client
+     * owns them — see the constructor's ownership rule (issue #204).
+     * `__destruct()` delegates here, so destroying a hand-assembled client
+     * leaves externally supplied connections open for the clients that still
+     * use them.
+     */
     public function close(): void
     {
         if ($this->closed) {
@@ -1919,7 +1978,11 @@ final class RawKvClient
         }
 
         try {
-            $this->pdClient->close();
+            // Same rule for the PD client: a hand-assembled client is given
+            // one it did not create and must not close it (issue #204).
+            if ($this->ownsPdClient) {
+                $this->pdClient->close();
+            }
         } catch (\Throwable $e) {
             SafeLogging::log($this->logger, 'error', 'Failed to close PD client', ['exception' => $e]);
         }

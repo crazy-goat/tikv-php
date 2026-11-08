@@ -334,7 +334,10 @@ has no +infinity sentinel. `reverseScan('', $lower)` with a non-empty lower
 bound is rejected with `InvalidArgumentException` before any RPC, while
 `reverseScan('', '')` is the documented empty range. To read from the top of
 a prefix, pass the prefix's end key as the upper bound (for example `log;`
-for the prefix `log:`).
+for the prefix `log:`). Compute it with
+`RawKvSplitter::calculatePrefixEndKey($prefix)` rather than hand-rolling
+`chr($lastByte + 1)`: the helper trims trailing `0xFF` bytes and increments
+the preceding byte, so it is also correct for `0xFF`-terminated prefixes.
 
 A **reversed** range is rejected with `InvalidArgumentException` before any PD
 or store RPC: `startKey > endKey` for the forward operations (`scan()`,
@@ -583,7 +586,9 @@ reverse scan does not enumerate the rest of the range.
 // reverseScan($startKey, $endKey) scans [$endKey, $startKey) descending, so the
 // FIRST argument is the UPPER bound and must sort AFTER the second one. To
 // cover every key with a prefix, bump the prefix's last byte: 'log:' -> 'log;'
-// (':' is 0x3A, the next byte ';' is 0x3B).
+// (':' is 0x3A, the next byte ';' is 0x3B). For a real prefix use
+// RawKvSplitter::calculatePrefixEndKey('log:'), which also handles a trailing
+// 0xFF where a naive byte bump wraps to 0x00 and inverts the range.
 $logs = $client->reverseScan('log;', 'log:', limit: 10);
 
 // Get the last 5 messages for a user, newest first.
@@ -606,6 +611,48 @@ Passing the bounds the other way round is the most common mistake here. It is
 rejected with `InvalidArgumentException` before any RPC instead of returning a
 silent empty array: the first argument must sort after the second. An empty
 `endKey` (the second argument) means "down to the start of the keyspace".
+
+### Transactional Reverse Scan and Range Deletion
+
+A transaction reads at its snapshot and observes its own buffered writes, so
+both operations below are consistent with the rest of the transaction.
+
+```php
+$txn = $txnClient->beginPessimistic();
+
+// Same bound convention as RawKvClient::reverseScan(): [lower, upper),
+// returned in descending key order.
+$latest = $txn->reverseScan('account;', 'account:', limit: 10);
+
+// The same call with a flag:
+$latest = $txn->scan('account;', 'account:', limit: 10, reverse: true);
+
+// Buffer a delete for every key in [start, end) atomically.
+$deleted = $txn->deleteRange('account:100', 'account:200');
+
+$txn->commit();
+```
+
+`Transaction::reverseScan()` walks the regions from the upper bound downwards
+(the same top-down resolver walk as the RawKV reverse scan), so a narrow
+reverse scan does not enumerate the rest of the range. It obeys the
+transactional scan cap: `limit: 0` returns the whole range up to
+`Transaction::MAX_SCAN_LIMIT` (10240) rows and throws
+`ScanLimitExceededException` when the range holds more, rather than returning
+a truncated result. Buffered sets and deletes are merged in descending order,
+so read-your-writes holds in both directions.
+
+`Transaction::deleteRange()` reads the range at the snapshot and buffers a
+tombstone for each key, so the deletion is **atomic with the transaction** —
+it becomes visible only at `commit()` and `rollback()` discards it. It is
+bounded by the same 10240-row scan cap and by the transaction's write-set
+limits (`maxTxnEntryCount`, `maxTxnEntrySize`, `maxTxnTotalSize`), and a
+failure before the scan completes buffers nothing, and the whole batch is
+validated against the write-set limits before any pessimistic lock is
+acquired, so an oversized range fails without buffering or locking anything.
+For an unbounded range,
+delete in explicit batches across several transactions, or use the raw,
+non-transactional `RawKvClient::deleteRange()`.
 
 ### Batch Scan
 
@@ -635,22 +682,40 @@ rows in ascending key order and carries `null` values when `keyOnly` is true.
 An empty `ranges` list returns `[]`, and a range that matches no rows
 contributes an empty inner list.
 
-> **Not the `RawBatchScan` RPC.** `batchScan` is a client-side loop: it
-> sends one `RawScan` per range (and one per region inside each range) and
-> assembles the answers. The RPC count is linear in the number of ranges and
-> in the regions they cover, and every range independently resolves its own
-> regions — fifty ranges cost roughly fifty scans, not one round trip per
-> region for the whole call. `eachLimit` is required and must be greater
-> than zero; unlike `scan()`, `batchScan()` cannot omit the per-range cap or
-> request an unbounded result set. Empty bounds are still allowed:
-> `batchScan([['', '']], eachLimit: 100)` scans the whole keyspace and
-> returns at most 100 rows.
+> **One `RawBatchScan` per region.** `batchScan` groups the requested
+> ranges by the regions that own them, clips every range to each region's
+> bounds, and sends one `RawBatchScan` request per region carrying all of
+> that region's clipped ranges (issue #433). The RPC count is therefore the
+> number of regions touched, not one `RawScan` per range per region: fifty
+> ranges that share a few regions cost a few round trips. `eachLimit` is
+> required and must be greater than zero; unlike `scan()`, `batchScan()`
+> cannot omit the per-range cap or request an unbounded result set. Empty
+> bounds are still allowed: `batchScan([['', '']], eachLimit: 100)` scans the
+> whole keyspace and returns at most 100 rows.
 >
-> **Performance Note:** the per-range sends are fanned out **concurrently**
-> — at most `options['maxConcurrency']` ranges (default **16**; must be
-> `>= 1`) are in flight at once, and each range's per-region scan RPCs are
-> all dispatched before any response is awaited, so server-side latencies
-> overlap. Concurrency bounds the wall-clock overlap, not the total work.
+> **Performance Note:** requests to distinct regions are fanned out
+> **concurrently** — at most `options['maxConcurrency']` regions (default
+> **16**; must be `>= 1`) are in flight at once, all dispatched before any
+> response is awaited, so server-side latencies overlap. TiKV applies
+> `each_limit` per region and per range, so a range that spans several
+> regions is trimmed to `eachLimit` after the responses are merged.
+>
+> **Fallbacks.** A `RawBatchScan` response is a flat `kvs` list without
+> per-range boundaries, so the per-range grouping is restored from the
+> clipped bounds only when the requested ranges are pairwise disjoint. A
+> call with overlapping ranges keeps the per-range `RawScan` path, and a
+> region error, transport failure or missing store falls back to it for the
+> whole call (reads are idempotent, and that path re-resolves and retries
+> each range with a fresh retry budget). This is a deliberate deviation from
+> a strict regroup-and-retry: the successful region responses are discarded
+> and re-read. A PD failure during region enumeration is reported as a
+> `BatchPartialFailureException`, matching the pre-#433 surface.
+>
+> **Batch deadline.** `options['timeout']['batchDeadlineMs']` is one
+> wall-clock budget for the whole call: it covers region enumeration as well
+> as the store fan-out, and the fallback only gets the remaining budget
+> rather than starting a second full one. An exhausted budget is rethrown as
+> `BatchDeadlineExceededException` instead of being retried.
 
 **Example:**
 
@@ -1195,7 +1260,8 @@ The client sends the sub-batches in parallel. A batch is not atomic. See [Batch 
 ### TxnKV
 
 The TxnKV client has no key or value size check of its own. The `MAX_KEY_SIZE` and `MAX_VALUE_SIZE` constants apply to RawKV only.
-A transactional scan has its own cap of 10240 rows. See [Scan](#scan).
+A transactional scan has its own cap of 10240 rows. See [Scan](#scan) and
+[Transactional Reverse Scan and Range Deletion](#transactional-reverse-scan-and-range-deletion).
 
 ## Connection lifecycle and process model
 
@@ -1231,18 +1297,18 @@ $client = new RawKvClient(
     $pdClient,
     $grpcClient,
     new RegionCache(ttlSeconds: 60),
-    ownsGrpcClient: false, // the transport is the application's
 );
 ```
 
-`create()` always builds the default. A hand-assembled client closes the
-transport it was given unless you pass `ownsGrpcClient: false` — see
+`create()` always builds the default. A hand-assembled client closes only
+the connections it owns: the transport and the PD client it is given stay
+open, so the application remains their owner and may share them with other
+clients (issue #204). Pass `ownsGrpcClient: true` and/or `ownsPdClient: true`
+to transfer ownership — see
 [Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients).
 A `RegionCache` passed to the constructor is still cleared by `close()` (the
 client has no ownership flag for it), so do not share one between clients
-that you close independently. The same applies to the `PdClient`: `close()`
-always closes it (there is no `ownsPdClient` flag), resetting its store
-cache, TSO pool and leader-discovery state.
+that you close independently.
 
 ### Long-running workers and CLI daemons (recommended)
 
@@ -1310,8 +1376,11 @@ userland state, and a live channel is not serializable.
 `close()` releases the client's resources in guarded steps: `TxnKvClient`
 first rolls back the transactions it began that are still active
 (`RawKvClient` has no transactions), then the client clears the region cache,
-closes the gRPC transport if the client owns it, and closes the PD client
-(always — there is no ownership flag for it). Outside PHP's shutdown
+closes the gRPC transport if the client owns it, and closes the PD client if
+it owns it too. `RawKvClient::create()` owns the PD client and the transport
+it built; a hand-assembled `RawKvClient` leaves both supplied connections open
+(see [Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients)).
+`TxnKvClient` still closes its PD client unconditionally. Outside PHP's shutdown
 sequence, the transaction rollback runs while the region cache, transport
 and PD client are still usable, so an abandoned transaction does not leave
 its locks behind until the TTL expires. Once PHP is shutting down, the
@@ -1342,8 +1411,10 @@ before calling `close()`, or expect them to fail. A client built with
 calls continue (and become the application's responsibility when it closes
 the transport).
 
-`__destruct()` calls `close()`, so a forgotten `close()` is not a leak: the
-caches and handles are released when the object is destroyed. In a
+`__destruct()` calls `close()`, so a client built by `create()` releases its
+caches, handles and connections when the object is destroyed. A client
+assembled by hand releases only its own caches: the transport and PD client
+it was given stay open, because the caller owns them (issue #204). In a
 long-running process, still call `close()` explicitly so resources are
 released at a known point instead of at an arbitrary destructor.
 
@@ -1362,8 +1433,11 @@ After `close()`, the client's own operations that talk to the cluster throw
 setters remain callable: `close()`, `reapIdleChannels()`,
 `refreshRegionCache()` / `preloadRegions()` (both no-ops after close),
 `getMetrics()`, `setAtomicForCAS()` / `isAtomicForCAS()`, `setColumnFamily()` /
-`getColumnFamily()` and `getClusterId()` (which returns `null` after close
-because the PD client resets the cached cluster ID). A `Transaction` obtained
+`getColumnFamily()`. On `RawKvClient`, `getClusterId()` is no longer a lifecycle
+getter: like its cluster operations it throws `ClientClosedException` after
+`close()` instead of returning the cache the closed PD client has reset.
+`TxnKvClient::getClusterId()` remains callable after close and returns the cached
+value (`null`). A `Transaction` obtained
 before `close()` holds the transport and the PD client directly and does not
 check the client's closed flag. Outside PHP's shutdown sequence,
 `TxnKvClient::close()` rolls back the transactions it began while they are
@@ -1402,8 +1476,10 @@ That is still not the contract:
 
 These methods report on the cluster the client is connected to and configure the
 client instance. None of them touches user data. `healthCheck()` is the only one
-that sends an RPC and the only one that can throw a library exception; the rest
-are local accessors and setters that throw nothing. `TxnKvClient` has
+that sends an RPC, and it throws `ClientClosedException` after `close()` on both
+clients. `RawKvClient::getClusterId()` does too; `TxnKvClient::getClusterId()`
+remains callable after close and returns the cached value. The remaining local
+accessors and setters throw nothing. `TxnKvClient` has
 the same cluster-level methods (`healthCheck()`, `getClusterId()` and
 `getMetrics()`) plus `pdClient()`, which exposes the PD connection it owns; the
 column-family and atomic-mode settings are RawKV-only.
@@ -1477,11 +1553,14 @@ individual store health; the state changes are visible through
 
 **`getClusterId()`** returns the cluster ID the client has already learned, or
 `null` when it has not learned one yet. It is a cached accessor: it sends no RPC
-and throws nothing. The ID is learned from the first PD response whose header
-carries a non-zero cluster ID, and every later response header must report the
-same ID (a different one throws `TiKvException` before the response is used), or
-explicitly by `healthCheck()`. After `close()` it returns `null` because
-closing the PD client resets the cache.
+and, while the client is open, throws nothing. The ID is learned from the first
+PD response whose header carries a non-zero cluster ID, and every later response
+header must report the same ID (a different one throws `TiKvException` before
+the response is used), or explicitly by `healthCheck()`.
+`RawKvClient::getClusterId()` throws `ClientClosedException` after `close()`,
+like the other cluster operations, instead of returning the cache the closed PD
+client has reset. `TxnKvClient::getClusterId()` has no open check: it remains
+callable and returns the cached value (`null` after `close()`).
 
 **`getMetrics()`** returns the metrics backend in use: the instance passed via
 `options['metrics']`, or the no-op default (`NoOpMetrics`) when none was

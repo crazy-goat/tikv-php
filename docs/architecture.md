@@ -160,7 +160,7 @@ final class TxnKvClient
     public static function create(array $pdEndpoints, ?LoggerInterface $logger = null, array $options = []): self;
     
     // Transaction lifecycle
-    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int), optimisticLockTtlMs (int), pessimisticLockTtlMs (int), requestContext (?RequestContextOptions)
+    public function begin(array $options = []): Transaction;  // options: pessimistic (bool, default true), priority (int), enable1Pc (bool), enableAsyncCommit (bool), eagerPessimisticLocks (bool), lockWaitTimeMs (int; overrides the client-wide create() default), optimisticLockTtlMs (int), pessimisticLockTtlMs (int), requestContext (?RequestContextOptions)
     public function beginOptimistic(array $options = []): Transaction;   // begin() with pessimistic = false
     public function beginPessimistic(array $options = []): Transaction;  // begin() with pessimistic = true
     public function close(): void;
@@ -258,9 +258,9 @@ throws `TransactionTooLargeException` before the write is buffered. The
 prewrite and commit requests are independently split per region by
 `maxTxnBatchSize` and `maxTxnBatchCount` (issue #430).
 
-Read-set tracking is **off by default** (`trackReadSet`): only `get()` and
-`batchGet()` would populate it, `scan()` never does, and nothing in the
-commit path consumes it. Opting in enables the public `getReadSet()` map and
+Read-set tracking is **off by default** (`trackReadSet`): only `get()`,
+`batchGet()` and `getForUpdate()` would populate it, `scan()` never does, and
+nothing in the commit path consumes it. Opting in enables the public `getReadSet()` map and
 the `maxReadSetEntries` / `maxReadSetTotalSize` bounds; an oversized read is
 rejected before the fetched value is retained, but the RPC has already
 returned, and a whole `KvBatchGet` response is materialised before the check.
@@ -602,6 +602,22 @@ undetermined status is never cached. `resolveLocks()` takes several locks,
 checks each transaction once, and sends one `ResolveLock` per region and
 transaction with all keys of that transaction in the region.
 
+A resolution is also remembered per transaction (`ResolvedLockTracker`, issue
+#432, GAP-18). The tracker keeps two bounded, **disjoint** FIFO sets of lock
+start timestamps, classified against the snapshot's start ts: a rolled-back
+transaction, or one whose commit ts is greater than the snapshot start ts,
+goes into `resolved_locks` (TiKV can ignore it); a transaction committed at or
+before the snapshot start ts goes into `committed_locks` (TiKV must read
+through it). The sets are disjoint because TiKV checks the bypass set first,
+so a timestamp present in both would be ignored and could hide a commit the
+snapshot must see. `TxnReader` and `TwoPhaseCommitter` copy the sets onto later
+requests as `Context.resolved_locks` and `Context.committed_locks`, so TiKV
+can ignore a lock the client has already resolved instead of making it run the
+full `CheckTxnStatus`/`ResolveLock` cycle again after a retry or a region cache
+invalidation. The resolver instance is created per transaction in
+`TxnKvClient::begin()`, so the tracker has the same lifetime as the snapshot;
+both sets are capped at 2048 entries and evict the oldest timestamp first.
+
 An errored status check is not a status. A region error, a gRPC failure or a
 `KeyError` in the `CheckTxnStatus` response is propagated as a retryable
 failure (`TxnRetryableException` with `BackoffType::TxnLock` for a `KeyError`)
@@ -845,6 +861,16 @@ boundary, for the adjacent region below it through `GetPrevRegion`. It no
 longer collects the whole chain before reading the top region. A region or
 transport error, or a region that split after enumeration, falls back to
 the sequential retrying path.
+
+The transactional reverse scan (`Transaction::reverseScan()`, issue #435)
+shares that top-down resolver walk: `TxnReader::reverseRegionBatches()` loads
+bounded region batches from the upper bound downwards and clips each with
+`RegionRangeClipper::clipReverse()`, then sends `KvScan` with `reverse = true`.
+Its result is merged with the transaction's write set in ascending order and
+flipped back to descending, so read-your-writes holds in both directions. The
+transactional `deleteRange()` builds on the forward scan: it reads the range
+at the snapshot and buffers a delete for each key, which keeps the deletion
+atomic with the transaction and bounded by the scan and write-set limits.
 
 ## Key Design Decisions
 

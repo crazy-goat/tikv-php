@@ -72,14 +72,21 @@ final readonly class RawKvAtomic
             return ErrorClassifier::classify($e);
         };
 
+        $targetStoreId = null;
+
         return $retryExecutor->execute($key, function () use (
             $key,
             $expectedValue,
             $newValue,
             $ttl,
             $columnFamily,
+            &$targetStoreId,
         ): CasResult {
+            // Reset per attempt: a failure inside getRegionInfo() must not
+            // report the previous attempt's store (issue #197, #434).
+            $targetStoreId = null;
             $region = $this->regionResolver->getRegionInfo($key);
+            $targetStoreId = $region->leaderStoreId;
             $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
             $request = new RawCASRequest();
@@ -147,7 +154,9 @@ final readonly class RawKvAtomic
                 swapped: $response->getSucceed(),
                 previousValue: $response->getPreviousNotExist() ? null : $response->getPreviousValue(),
             );
-        }, $classifier);
+        }, $classifier, targetStoreId: static function () use (&$targetStoreId): ?int {
+            return $targetStoreId;
+        });
     }
 
     /**

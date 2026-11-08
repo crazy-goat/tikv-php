@@ -37,6 +37,12 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\DetailedMetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
+use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
+use CrazyGoat\TiKV\Client\Observability\NoOpTracer;
+use CrazyGoat\TiKV\Client\Observability\TraceCategory;
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
 use CrazyGoat\TiKV\Client\RawKv\RawKvSplitter;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use CrazyGoat\TiKV\Client\Region\KeyErrorDescriber;
@@ -168,6 +174,19 @@ final readonly class TwoPhaseCommitter
     private const MIN_LOCK_RESOLUTION_BUDGET_MS = 11;
 
     /**
+     * Headroom kept between the server-side `wait_timeout` and the gRPC
+     * deadline of the same pessimistic-lock request (issue #229, TXN-24).
+     *
+     * TiKV must be able to answer with `KeyIsLocked` before the client
+     * cancels the call. Without the headroom a `lockWaitTimeMs` at or above
+     * the write timeout would let the server wait until after the deadline,
+     * so the caller would see a `GrpcException` (`DEADLINE_EXCEEDED`)
+     * instead of the lock error it asked for. 100 ms covers the
+     * request/response transit on a normal network.
+     */
+    private const LOCK_WAIT_DEADLINE_HEADROOM_MS = 100;
+
+    /**
      * Default pessimistic-lock wait timeout handed to TiKV
      * (issue #443, DIV-07). It matches TiKV's own
      * `pessimistic-txn.wait-for-lock-timeout` default (1 s), so the default
@@ -257,6 +276,15 @@ final readonly class TwoPhaseCommitter
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
         private ResourceControl $resourceControl = new ResourceControl(),
+        /**
+         * Metrics backend for the optional 2PC phase timings (issue #434,
+         * GAP-20). The base interface is frozen; the phase signals are
+         * emitted only when this backend also implements
+         * {@see DetailedMetricsInterface}.
+         */
+        private MetricsInterface $metrics = new NoOpMetrics(),
+        /** Optional structured tracing callback (issue #434, GAP-20). */
+        private TraceEventInterface $tracer = new NoOpTracer(),
     ) {
     }
 
@@ -281,12 +309,17 @@ final readonly class TwoPhaseCommitter
      */
     private function buildContext(RegionInfo $region): Context
     {
-        return RegionContextFactory::fromRegionInfo(
+        $context = RegionContextFactory::fromRegionInfo(
             $region,
             priority: $this->priority,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
         );
+        // Locks resolved before this request (for example during a prewrite
+        // conflict retry) are safe for TiKV to ignore (issue #432, GAP-18).
+        $this->lockResolver->applyResolvedLocks($context);
+
+        return $context;
     }
 
     private function nowMs(): int
@@ -296,6 +329,42 @@ final readonly class TwoPhaseCommitter
         }
 
         return (int) (microtime(true) * 1000);
+    }
+
+    private function elapsedMs(int $startNs): float
+    {
+        return (hrtime(true) - $startNs) / 1_000_000;
+    }
+
+    /**
+     * Emit a 2PC phase timing when the metrics backend opted into the
+     * extended interface (issue #434, GAP-20).
+     */
+    private function recordTwoPhasePhase(string $phase, int $startNs, bool $success): void
+    {
+        if (!$this->metrics instanceof DetailedMetricsInterface) {
+            return;
+        }
+
+        $this->metrics->twoPhasePhaseCompleted($phase, $this->elapsedMs($startNs), $success);
+    }
+
+    /**
+     * Emit a structured trace event. A tracer that throws is logged and
+     * swallowed: tracing is observability, never part of the data path.
+     *
+     * @param array<string, string|int|float|bool|null> $fields
+     */
+    private function trace(string $category, string $event, array $fields = []): void
+    {
+        try {
+            $this->tracer->traceEvent($category, $event, $fields);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Trace backend threw', [
+                'event' => $event,
+                'exception' => $e,
+            ]);
+        }
     }
 
     /**
@@ -646,51 +715,81 @@ final readonly class TwoPhaseCommitter
             }
         };
 
-        // Async commit (client-go parity): the primary region must be
-        // prewritten LAST — the primary's prewrite is the commit-decision
-        // barrier, and prewriting it first would let a concurrent reader
-        // observe a decided-looking primary while a secondary region's
-        // prewrite is still in flight. The secondary regions are fanned out
-        // in parallel (issue #291) and awaited before the primary's prewrite
-        // is even dispatched, preserving that barrier.
-        if ($async && count($keysByRegion) > 1) {
-            $prewriteSecondaries();
+        $prewritePhaseStartNs = hrtime(true);
+        $this->trace(TraceCategory::TXN_2PC, 'prewrite_started', [
+            'eventId' => (string) $prewritePhaseStartNs,
+            'startTs' => $this->startTs,
+            'mutationCount' => count($allKeys),
+            'regionCount' => count($keysByRegion),
+            'pessimistic' => $this->pessimistic,
+        ]);
 
-            $result = $prewritePrimary();
-            $maxMinCommitTs = max($maxMinCommitTs, $result['minCommitTs']);
-            $primaryMinCommitTs = $result['minCommitTs'];
-            $onePcCommitTs = $result['onePcCommitTs'];
-            // TiKV declines async commit by answering the primary
-            // prewrite with min_commit_ts = 0.
-            $asyncAccepted = $result['minCommitTs'] > 0;
-            $primaryLockWritten = true;
-            $maybeHeartbeat($primaryLockWritten);
-        } else {
-            // Optimistic / single-region / non-async path: the primary
-            // region is prewritten (and awaited) FIRST — its lock must be
-            // durably written before secondary locks exist (a secondary
-            // lock without the primary is unrecoverable) — then the
-            // secondary regions fan out in parallel (issue #291).
-            $result = $prewritePrimary();
-            $maxMinCommitTs = max($maxMinCommitTs, $result['minCommitTs']);
-            if ($primaryGroup !== null) {
+        try {
+            // Async commit (client-go parity): the primary region must be
+            // prewritten LAST — the primary's prewrite is the commit-decision
+            // barrier, and prewriting it first would let a concurrent reader
+            // observe a decided-looking primary while a secondary region's
+            // prewrite is still in flight. The secondary regions are fanned out
+            // in parallel (issue #291) and awaited before the primary's prewrite
+            // is even dispatched, preserving that barrier.
+            if ($async && count($keysByRegion) > 1) {
+                $prewriteSecondaries();
+
+                $result = $prewritePrimary();
+                $maxMinCommitTs = max($maxMinCommitTs, $result['minCommitTs']);
                 $primaryMinCommitTs = $result['minCommitTs'];
                 $onePcCommitTs = $result['onePcCommitTs'];
                 // TiKV declines async commit by answering the primary
                 // prewrite with min_commit_ts = 0.
                 $asyncAccepted = $result['minCommitTs'] > 0;
                 $primaryLockWritten = true;
-            }
-            $maybeHeartbeat($primaryLockWritten);
+                $maybeHeartbeat($primaryLockWritten);
+            } else {
+                // Optimistic / single-region / non-async path: the primary
+                // region is prewritten (and awaited) FIRST — its lock must be
+                // durably written before secondary locks exist (a secondary
+                // lock without the primary is unrecoverable) — then the
+                // secondary regions fan out in parallel (issue #291).
+                $result = $prewritePrimary();
+                $maxMinCommitTs = max($maxMinCommitTs, $result['minCommitTs']);
+                if ($primaryGroup !== null) {
+                    $primaryMinCommitTs = $result['minCommitTs'];
+                    $onePcCommitTs = $result['onePcCommitTs'];
+                    // TiKV declines async commit by answering the primary
+                    // prewrite with min_commit_ts = 0.
+                    $asyncAccepted = $result['minCommitTs'] > 0;
+                    $primaryLockWritten = true;
+                }
+                $maybeHeartbeat($primaryLockWritten);
 
-            $prewriteSecondaries();
-            $maybeHeartbeat($primaryLockWritten);
+                $prewriteSecondaries();
+                $maybeHeartbeat($primaryLockWritten);
+            }
+        } catch (\Throwable $e) {
+            $this->recordTwoPhasePhase('prewrite', $prewritePhaseStartNs, false);
+            $this->trace(TraceCategory::TXN_2PC, 'prewrite_completed', [
+                'eventId' => (string) $prewritePhaseStartNs,
+                'success' => false,
+                'durationMs' => $this->elapsedMs($prewritePhaseStartNs),
+            ]);
+            throw $e;
         }
+
+        $this->recordTwoPhasePhase('prewrite', $prewritePhaseStartNs, true);
+        $this->trace(TraceCategory::TXN_2PC, 'prewrite_completed', [
+            'eventId' => (string) $prewritePhaseStartNs,
+            'success' => true,
+            'durationMs' => $this->elapsedMs($prewritePhaseStartNs),
+        ]);
 
         if ($onePc && $onePcCommitTs > 0) {
             $state->setCommitTs($onePcCommitTs);
             $state->setStatus(TransactionStatus::Committed);
             $this->logger->debug('One-phase commit done', ['commitTs' => $onePcCommitTs]);
+            $this->trace(TraceCategory::TXN_2PC, 'one_pc_completed', [
+                'eventId' => (string) $prewritePhaseStartNs,
+                'commitTs' => $onePcCommitTs,
+            ]);
             return;
         }
         if ($onePc) {
@@ -713,25 +812,51 @@ final readonly class TwoPhaseCommitter
             $state->setCommitTs($commitTs);
             $state->setStatus(TransactionStatus::Committed);
             $this->logger->debug('Async commit done', ['commitTs' => $commitTs]);
+            $this->trace(TraceCategory::TXN_2PC, 'async_commit_completed', [
+                'eventId' => (string) $prewritePhaseStartNs,
+                'commitTs' => $commitTs,
+            ]);
             return;
         }
         if ($async) {
             $this->logger->info('TiKV declined async commit, falling back to two-phase');
         }
 
-        // Reuse an existing commit timestamp on retry: a second commit() after a failed
-        // commit phase must never allocate a new ts (issue #217). With TXN-10 the
-        // status is Committed at the commit point, so a second commit() is rejected
-        // by ensureActive() before reaching this line.
-        $commitTs = $state->getCommitTs() ?? $this->pdClient->getTimestamp();
-        $state->setCommitTs($commitTs);
+        $commitPhaseStartNs = hrtime(true);
+        try {
+            // Reuse an existing commit timestamp on retry: a second commit() after a failed
+            // commit phase must never allocate a new ts (issue #217). With TXN-10 the
+            // status is Committed at the commit point, so a second commit() is rejected
+            // by ensureActive() before reaching this line.
+            $commitTs = $state->getCommitTs() ?? $this->pdClient->getTimestamp();
+            $state->setCommitTs($commitTs);
+            $this->trace(TraceCategory::TXN_2PC, 'commit_started', [
+                'eventId' => (string) $commitPhaseStartNs,
+                'commitTs' => $commitTs,
+            ]);
 
-        // Primary commit failures are not retried here: transport failures
-        // leave the outcome undetermined, and post-commit-point errors must
-        // never trigger transaction rollback. Pass the primary derived above
-        // so the commit phase selects exactly the batch the prewrite phase
-        // treated as primary (issue #430 review, point 4).
-        $this->commitKeys($allKeys, $primary, $state, $retryExecutor, $classifier);
+            // Primary commit failures are not retried here: transport failures
+            // leave the outcome undetermined, and post-commit-point errors must
+            // never trigger transaction rollback. Pass the primary derived above
+            // so the commit phase selects exactly the batch the prewrite phase
+            // treated as primary (issue #430 review, point 4).
+            $this->commitKeys($allKeys, $primary, $state, $retryExecutor, $classifier);
+        } catch (\Throwable $e) {
+            $this->recordTwoPhasePhase('commit', $commitPhaseStartNs, false);
+            $this->trace(TraceCategory::TXN_2PC, 'commit_completed', [
+                'eventId' => (string) $commitPhaseStartNs,
+                'success' => false,
+                'durationMs' => $this->elapsedMs($commitPhaseStartNs),
+            ]);
+            throw $e;
+        }
+
+        $this->recordTwoPhasePhase('commit', $commitPhaseStartNs, true);
+        $this->trace(TraceCategory::TXN_2PC, 'commit_completed', [
+            'eventId' => (string) $commitPhaseStartNs,
+            'success' => true,
+            'durationMs' => $this->elapsedMs($commitPhaseStartNs),
+        ]);
     }
 
     // ---------------------------------------------------------------
@@ -2184,19 +2309,28 @@ final readonly class TwoPhaseCommitter
     /**
      * Effective `PessimisticLockRequest.wait_timeout` for one attempt
      * (issue #443, DIV-07). Mirrors client-go's `calculateEffectiveWaitTime`:
-     * the value handed to TiKV is `min(lockWaitTimeMs, remaining budget)`, so
-     * it never exceeds the budget and shrinks as the budget is consumed. The
+     * the value handed to TiKV is
+     * `min(lockWaitTimeMs, remaining budget, RPC deadline - headroom)`, so it
+     * never exceeds the budget and shrinks as the budget is consumed. The
      * budget counts the backoff sleeps, not the RPC time, so the total
      * occupancy of a contended key is the budget plus the server-side waits
      * of the attempts.
      *
+     * The RPC-deadline cap (issue #229, TXN-24) keeps the server's wait
+     * shorter than the gRPC deadline of the same request: TiKV must answer
+     * with `KeyIsLocked` before the client cancels the call, otherwise the
+     * configured wait escapes as a `GrpcException` (`DEADLINE_EXCEEDED`)
+     * instead of a lock error.
+     *
      * @param int $elapsedMs backoff already spent on this key group
+     * @param RetryBudget|null $budget live retry budget capping the RPC
+     *        deadline of the attempt
      */
-    private function effectiveLockWaitTimeoutMs(int $elapsedMs): int
+    private function effectiveLockWaitTimeoutMs(int $elapsedMs, ?RetryBudget $budget = null): int
     {
         if ($this->lockWaitTimeMs === 0) {
             // 0 is the protobuf's "use TiKV's own default timeout" — there
-            // is no client-side value to shrink.
+            // is no client-side value to shrink or cap.
             return 0;
         }
 
@@ -2207,7 +2341,16 @@ final readonly class TwoPhaseCommitter
             return self::LOCK_WAIT_NO_WAIT_MS;
         }
 
-        return min($this->lockWaitTimeMs, $remainingMs);
+        $rpcDeadlineMs = $this->timeoutMsWithinBudget($this->timeoutConfig->writeTimeoutMs, $budget);
+        $waitCapMs = $rpcDeadlineMs - self::LOCK_WAIT_DEADLINE_HEADROOM_MS;
+        if ($waitCapMs <= 0) {
+            // The RPC deadline is shorter than the headroom: any positive
+            // wait could only end in DEADLINE_EXCEEDED, so ask TiKV to answer
+            // immediately and let the loop decide on the lock error.
+            return self::LOCK_WAIT_NO_WAIT_MS;
+        }
+
+        return min($this->lockWaitTimeMs, $remainingMs, $waitCapMs);
     }
 
     /**
@@ -2443,7 +2586,7 @@ final readonly class TwoPhaseCommitter
                 $primary,
                 $forUpdateTs,
                 $isFirstLock,
-                $this->effectiveLockWaitTimeoutMs(0),
+                $this->effectiveLockWaitTimeoutMs(0, $budget),
                 $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                 $returnValues,
                 $budget,
@@ -2512,7 +2655,7 @@ final readonly class TwoPhaseCommitter
                                     $primary,
                                     $forUpdateTs,
                                     $isFirstLock && in_array($primary, $regionKeys, true),
-                                    $this->effectiveLockWaitTimeoutMs($elapsedMs),
+                                    $this->effectiveLockWaitTimeoutMs($elapsedMs, $budget),
                                     $this->ttlWithUptimeMs($state, $this->pessimisticLockTtlMs),
                                     $returnValues,
                                 );
@@ -2718,6 +2861,7 @@ final readonly class TwoPhaseCommitter
                         throw new LockWaitTimeoutException(
                             $regionKeys[0] ?? '',
                             $this->maxBackoffMs,
+                            $this->lockWaitTimeMs,
                         );
                     }
 

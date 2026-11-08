@@ -755,8 +755,11 @@ $client = RawKvClient::create(['tikv.example.com:2379'], options: $options);
 `caCertBaseDir` and `clientCertBaseDir` are optional and restrict **where the
 certificate files may live**. The path is canonicalized with `realpath()`
 before the comparison, so `..` segments and symlinks are resolved first, and
-the canonicalized path has to start with the canonicalized base directory — a
-path that does not is rejected with `InvalidArgumentException` ("TLS file path
+the canonicalized path must be the canonicalized base directory itself or lie
+beneath it — the check compares whole path components, not a string prefix, so
+a sibling directory whose name merely starts with the base name (for example
+`/etc/tikv-attacker` against a base of `/etc/tikv`) is rejected. A path outside
+the base directory is rejected with `InvalidArgumentException` ("TLS file path
 is outside the allowed base directory"). That is what stops a certificate path
 — or a symlink planted in the certificate directory — from loading a file you
 did not intend.
@@ -840,8 +843,9 @@ $grpc = new GrpcClient($logger, $tlsConfig);
 // request re-resolves the address through PD (issue #247).
 $storeCache = new StoreCache(logger: $logger);
 $pdClient = new PdClient($grpc, 'tikv.example.com:2379', $logger, $storeCache);
-// The client closes the transport it was given in close() — pass
-// ownsGrpcClient: false to keep the ownership with the application.
+// The client does not own the transport or the PD client it is given:
+// close() and the destructor leave both open. Pass ownsGrpcClient: true
+// and/or ownsPdClient: true to transfer ownership.
 // Pass the same storeCache, or a StoreNotMatch / transport failure cannot
 // drop the stale address: the client's resolver has no cache to invalidate
 // while PdClient keeps serving that entry. Omitting storeCache disables
@@ -855,24 +859,30 @@ $client = new RawKvClient($pdClient, $grpc, storeCache: $storeCache);
 > client for you, and accept the same TLS options through
 > `options['tls']` — see [Basic Configuration](#basic-configuration).
 
-**Who closes the transport on the manual path.** The rule of
+**Who closes the connections on the manual path.** The rule of
 [Sharing One Transport Between Clients](#sharing-one-transport-between-clients)
-is "the transport belongs to whoever created it", and it holds for the factory
-path. A client assembled by hand is *given* a transport it did not create and
-still closes it: `close()` (and the destructor) closes `$grpc`, exactly like a
-client built by `create()` closes the transport it built. If the application
-keeps the transport — to share it with a second client, or to close it later —
-say so explicitly:
+is "the connections belong to whoever created them", and it holds for the
+factory path. A client assembled by hand is *given* a transport and a PD
+client it did not create, so it does not own them: `close()` and the
+destructor leave both open (issue #204). That makes sharing safe — destroying
+one client cannot close the channels another one still uses. The client still
+clears its own region cache.
+
+If the application wants to hand ownership over instead, say so explicitly:
 
 ```php
-$client = new RawKvClient($pdClient, $grpc, ownsGrpcClient: false);
+$client = new RawKvClient(
+    $pdClient,
+    $grpc,
+    ownsGrpcClient: true,
+    ownsPdClient: true,
+);
 ```
 
-With `ownsGrpcClient: false` the client never closes the transport and the
-application stays its owner. The flag defaults to `true` today; issue #204
-tracks the change (a client should close only what it owns), so pass the flag
-explicitly whenever the ownership matters. `TxnKvClient` takes the same
-parameter.
+With `ownsGrpcClient: true` / `ownsPdClient: true` the client closes the
+matching dependency in `close()`; the defaults are `false` for a
+hand-assembled `RawKvClient`. `TxnKvClient` has the same `ownsGrpcClient`
+parameter but still defaults to `true`.
 
 ### Security: Fail-Closed TLS
 
@@ -1588,23 +1598,36 @@ so the per-RPC timeout guidance above applies to them too.
 
 A pessimistic-lock request tells TiKV how long it may block on a contended
 key before it answers with a "locked" error, which the client then retries
-inside its lock-wait budget (`maxBackoffMs`). The wait is configured per
-transaction, on `begin()` (issue #443, DIV-07):
+inside its lock-wait budget (`maxBackoffMs`). The wait is configured
+client-wide on `create()` and overridable per transaction on `begin()`
+(issue #443, DIV-07; client-wide default from issue #229, TXN-24):
 
 ```php
-$txn = $client->begin([
+// Client-wide default for every transaction this client begins
+$client = TxnKvClient::create(['127.0.0.1:2379'], options: [
     'lockWaitTimeMs' => 1000, // default; 0 = "let TiKV use its own default"
+]);
+
+// Per-transaction override
+$txn = $client->begin([
+    'lockWaitTimeMs' => 500,
 ]);
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
-| `lockWaitTimeMs` | `1000` (the same timeout TiKV applies by default, `pessimistic-txn.wait-for-lock-timeout`) | How long TiKV may wait for a contended key, in milliseconds. `0` means "use TiKV's own default timeout" — the only value that is not shrunk as the budget is consumed. Must be `>= 0`; anything else throws `InvalidArgumentException`. |
+| `lockWaitTimeMs` | `1000` (the same timeout TiKV applies by default, `pessimistic-txn.wait-for-lock-timeout`) | How long TiKV may wait for a contended key, in milliseconds. Accepted by `create()` (client-wide) and `begin()` (per transaction; the `begin()` value wins). `0` means "use TiKV's own default timeout" — the only value that is not shrunk or capped as the budget is consumed. Must be `>= 0`; anything else throws `InvalidArgumentException`. |
 
 The value is sent as `PessimisticLockRequest.wait_timeout` and is
-`min(lockWaitTimeMs, remaining lock-wait budget)`: it never exceeds the
-budget and shrinks as the budget is consumed (client-go's
-`calculateEffectiveWaitTime`). TiKV caps the wait at its own
+`min(lockWaitTimeMs, remaining lock-wait budget, RPC deadline - 100 ms)`: it
+never exceeds the budget and shrinks as the budget is consumed (client-go's
+`calculateEffectiveWaitTime`). The deadline cap keeps the server's wait
+shorter than the gRPC deadline of the same request, so TiKV can answer with
+`KeyIsLocked` before the client cancels the call; without it a
+`lockWaitTimeMs` at or above the write timeout would surface as a
+`GrpcException` (`DEADLINE_EXCEEDED`) instead of a lock error. When the RPC
+deadline is shorter than the 100 ms headroom the request carries the
+protobuf's "do not wait" value (`-1`) instead. TiKV caps the wait at its own
 `pessimistic-txn.wait-for-lock-timeout` (1000 ms by default), so a larger
 `lockWaitTimeMs` does not make the server wait longer. When the budget runs
 out, the transaction fails with `LockWaitTimeoutException` — it never
@@ -1643,7 +1666,7 @@ $txn = $client->begin([
 | `maxTxnEntryCount` | `0` (unlimited) | Maximum number of write-set entries. |
 | `maxTxnEntrySize` | `0` (unlimited) | Maximum bytes of one entry, measured as key length plus value length. A delete contributes the key length only. |
 | `maxTxnTotalSize` | `0` (unlimited) | Maximum bytes of the whole write set: the sum of every entry's key plus value length. |
-| `trackReadSet` | `false` | Opt in to the read set populated by `get()`/`batchGet()`. Disabled by default because nothing in the commit path consumes it. Must be a bool. |
+| `trackReadSet` | `false` | Opt in to the read set populated by `get()`/`batchGet()`/`getForUpdate()`. Disabled by default because nothing in the commit path consumes it. Must be a bool. |
 | `maxReadSetEntries` | `0` (unlimited) | Maximum number of tracked read-set entries. Has no effect unless `trackReadSet` is true. |
 | `maxReadSetTotalSize` | `0` (unlimited) | Maximum bytes of the whole tracked read set: key length plus value length per entry. A not-found read contributes the key length only. Has no effect unless `trackReadSet` is true. |
 | `maxTxnBatchSize` | `16384` | Maximum **payload** bytes of one prewrite, pessimistic-lock or commit request per region: key plus value length for a prewrite mutation, key length for a pessimistic-lock mutation or a commit key. Excludes request framing, `Context`, `primary_lock` and the async `secondaries` list; a single mutation larger than this still forms its own batch. Matches client-go's `DefTxnCommitBatchSize`. |
@@ -1655,9 +1678,9 @@ workloads. Exceeding one throws `TransactionTooLargeException`. A write is
 rejected from `set()`/`delete()` **before** it is buffered and before any RPC —
 in a pessimistic transaction that means before the eager lock request, so a
 rejected write leaves no server-side lock. A read is rejected from
-`get()`/`batchGet()` before the fetched value is retained in the read set; the
-RPC has already happened by then, because the value's size is only known after
-the response arrives. The bound applies to what the transaction **retains**,
+`get()`/`batchGet()`/`getForUpdate()` before the fetched value is retained in
+the read set; the RPC has already happened by then, because the value's size is
+only known after the response arrives. The bound applies to what the transaction **retains**,
 not to the peak of one call: a single `get()` response or a whole `KvBatchGet`
 response is received in full before the check runs, so the peak of one read can
 exceed `maxReadSetTotalSize` even though the value is not added to the map. The exception names the limit
@@ -1675,7 +1698,7 @@ Read-set tracking is **off by default**, so a transaction that only reads does
 not retain the read **values**. Memory can still grow slightly: a pessimistic
 transaction records one read timestamp per distinct key read
 (`readTsByKey`) until that key is written or the transaction ends.
-`get()` and `batchGet()` populate the read-set map only when
+`get()`, `batchGet()` and `getForUpdate()` populate the read-set map only when
 `trackReadSet` is true; `scan()` never populates it, so a scan-heavy
 transaction is not covered by the read-set limits at all (scans are bounded by
 `Transaction::MAX_SCAN_LIMIT` instead). For a long-lived worker that opts in and
@@ -2252,12 +2275,13 @@ RawKV and TxnKV scans read the region cache first:
   the cache. A contiguous cached run is served locally; PD is asked only for
   the uncovered gap, starting at the gap's first key, and the answer is cached
   for the next page and the next scan.
-- **RawKV `reverseScan()`** resolves regions from the upper bound downwards
+- **RawKV `reverseScan()`** and **TxnKV `Transaction::reverseScan()`** (or
+  `scan(..., reverse: true)`) resolve regions from the upper bound downwards
   through `RegionResolver::getRegionBelow()`: the cache answers the common
   case, and a miss asks PD for the region containing the cursor or, when the
   cursor sits exactly on a region boundary, for the adjacent region below it.
-  It does not use `RegionScanSource`, so its cache counters are labelled
-  `region_resolution` (per lookup), not `scan`.
+  They do not use `RegionScanSource`, so their cache counters are labelled
+  `region_resolution` (per lookup), not `scan` / `txn_scan`.
 - A split or merge the client has not seen yet is still handled by the usual
   region-error retry (the stale entry is invalidated from `EpochNotMatch`,
   then the retry re-resolves the gap through PD).
@@ -2504,23 +2528,25 @@ change rather than only as an uptime check.
 
 The library exposes an opt-in `MetricsInterface` for capturing operational
 counters (RPC counts and latency, retry counts, region-cache hit/miss,
-region-cache invalidations). The default is a zero-cost no-op, so callers
-that do not opt in pay a single empty-method dispatch per call site.
+region-cache invalidations). The default is a no-op backend, so callers
+that do not opt in pay one empty-method dispatch per RPC; the optional
+detailed signals add an `instanceof` probe and a timestamp on the 2PC and
+lock-resolution paths.
+`PrometheusMetrics` is a dependency-free adapter that renders the Prometheus
+text exposition format; no extra Composer package is required.
 
 ```php
-use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
-use CrazyGoat\TiKV\Client\Observability\InMemoryMetrics;
-
-class PrometheusMetrics implements MetricsInterface
-{
-    // ... your Prometheus / StatsD / OpenTelemetry adapter here ...
-}
+use CrazyGoat\TiKV\Client\Observability\PrometheusMetrics;
 
 $metrics = new PrometheusMetrics();   // or new InMemoryMetrics() for tests
 $client = RawKvClient::create(
     ['tikv.example.com:2379'],
     options: ['metrics' => $metrics],
 );
+
+// In the metrics endpoint:
+header('Content-Type: ' . PrometheusMetrics::CONTENT_TYPE);
+echo $metrics->render();
 ```
 
 The library emits the following counter tags:
@@ -2530,9 +2556,54 @@ The library emits the following counter tags:
 | `rpcStarted()`                 | `'tikvpb.Tikv/KvGet'`      | One outbound gRPC call was dispatched             |
 | `rpcCompleted()`               | `'tikvpb.Tikv/KvGet'`      | gRPC call returned (success or error); carries duration (ms) |
 | `retryAttempted()`             | `'NotLeader'`, `'ServerBusy'`, … | A retryable error triggered the next attempt |
-| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache. `region_resolution` is the per-lookup label (point reads and `reverseScan()`'s top-down resolver); the scan labels are emitted once per cache-served run of regions |
+| `regionCacheHit()`             | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was found in the cache. `region_resolution` is the per-lookup label (point reads and the RawKV/TxnKV reverse scans' top-down resolver); the scan labels are emitted once per cache-served run of regions |
 | `regionCacheMiss()`            | `'region_resolution'`, `'scan'`, `'txn_scan'` | Region was not in the cache, had to query PD. `region_resolution` is the per-lookup label; the scan labels are emitted once per `ScanRegions` call |
 | `regionInvalidated()`          | `'region_error:epoch_not_match'`, `'region_error'`, `'not_leader'`, `'retry_region_error:epoch_not_match'`, `'retry_region_error'`, `'fatal_region_error'`, `'lock_resolve'`, `'refresh'` | A region was actually removed from the cache — exactly once per actual drop, emitted from `RegionCache::invalidate()` with the caller's reason: top-level non-NotLeader **routing** region error handled by `RegionErrorHandler::check()`, tagged with its kind (`region_error:<kind>`; plain `region_error` for an unclassified error), NotLeader handling in the retry loop (hint peer unknown / no hint), pre-retry invalidation on a retryable **routing** error tagged with its kind (`retry_region_error:<kind>`), pre-retry invalidation on an unclassified retryable error (`retry_region_error`), a fatal routing error (e.g. `KeyNotInRegion`) dropped before the exception is rethrown (#233), post-resolve cleanup in `LockResolver`, or a `refreshRegionCache()` tick that found PD no longer maps the entry's start key to its cached range (a refresh that supersedes the entry with a newer answer is a `put()` and emits nothing). Both `RegionErrorHandler::check()` and the retry executor keep the cached region for non-routing errors (`ServerIsBusy`, `DiskFull`, `IsWitness`, `RecoveryInProgress`, …) and emit nothing for them. A successful `EpochNotMatch` `current_regions` refresh by the retry executor is a superseding `put()` and emits no `regionInvalidated()`; `RegionErrorHandler::check()`'s earlier drop at TxnKV call sites keeps its own `region_error:epoch_not_match`, and the executor's empty/unusable-payload fallback keeps `retry_region_error:epoch_not_match` only where the stale entry is still cached (e.g. RawKV; at TxnKV sites `check()` already dropped it) (issue #246). Invalidating an ID that is not cached emits nothing. |
+
+#### Extended metrics and tracing
+
+`MetricsInterface` is frozen: backends that can record more implement
+`DetailedMetricsInterface` **in addition** to it, so adding those signals
+never breaks an existing implementation. The client probes with
+`instanceof DetailedMetricsInterface` and records:
+
+- `backoffCompleted()` — one retry backoff, with its type, attempt and the
+  duration actually slept;
+- `storeAttemptCompleted()` — one RPC attempt against a store, with the
+  store ID, success flag and error kind;
+- `lockResolved()` — one lock-resolution attempt (`resolved`, `live` or
+  `error`) and its duration;
+- `twoPhasePhaseCompleted()` — one 2PC phase (`prewrite` or `commit`) with
+  its duration and success flag. 1PC and async commit emit only `prewrite`.
+
+`PrometheusMetrics` and `InMemoryMetrics` implement both interfaces.
+
+Tracing is configured separately through `options['tracer']`, which accepts
+a `TraceEventInterface` callback:
+
+```php
+use CrazyGoat\TiKV\Client\Observability\TraceEventInterface;
+
+final class MyTracer implements TraceEventInterface
+{
+    public function traceEvent(string $category, string $event, array $fields = []): void
+    {
+        // Bridge to OpenTelemetry, OpenTracing or your own spans.
+    }
+}
+
+$client = RawKvClient::create(
+    ['tikv.example.com:2379'],
+    options: ['tracer' => new MyTracer()],
+);
+```
+
+The client emits `kv_request` events from the transport (`rpc_started`,
+`rpc_completed`), `txn_2pc` events from commit (prewrite/commit/1PC/async) and
+`txn_lock_resolve` events from lock resolution; the category constants are in
+`TraceCategory`. A tracer that throws is logged and swallowed, so tracing
+never breaks the data path. See
+[Advanced → Tracing](advanced.md#tracing) for an OpenTelemetry bridge.
 
 For calls sent through `GrpcClient::callAsync()` (batch fan-outs, scans, range operations, SST ingest, prewrite/commit fan-outs), `rpcCompleted()` fires when the future settles: on `wait()`, on a failure, on `cancel()`, or from `__destruct`. The duration covers the time from dispatch to settle, including the time before `wait()` is called (for example queueing in a windowed fan-out).
 
@@ -2556,7 +2627,11 @@ the async-commit finalization (`resolveAsyncCommitLocks()`, issue #568).
 
 `InMemoryMetrics` ships the same counters in-process, suitable for tests
 and benchmarks — see `getRpcStarted()`, `getRpcSucceeded()`, `getRetries()`,
-`getCacheHits()`, `getInvalidations()`, `getMeanLatencyMs()`, and `reset()`.
+`getCacheHits()`, `getInvalidations()`, `getMeanLatencyMs()`,
+`getBackoffCount()`, `getStoreSuccesses()`, `getStoreFailures()`,
+`getStoreErrorKinds()`, `getLockResolutions()`, `getTwoPhaseCount()`,
+`getTwoPhaseFailures()`, and `reset()`. `InMemoryTracer` records the trace
+events in order for the same purpose.
 
 Inspect live counters at any time:
 
