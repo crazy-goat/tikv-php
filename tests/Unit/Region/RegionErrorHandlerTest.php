@@ -276,6 +276,24 @@ class RegionErrorHandlerTest extends TestCase
         RegionErrorHandler::check($response, null, 42);
     }
 
+    public function testNotLeaderWithoutCacheDoesNotThrowFromInvalidation(): void
+    {
+        $notLeader = new NotLeader();
+        $notLeader->setRegionId(42);
+
+        $error = new Error();
+        $error->setMessage('not leader');
+        $error->setNotLeader($notLeader);
+
+        $response = new RawGetResponse();
+        $response->setRegionError($error);
+
+        $this->expectException(RegionException::class);
+        $this->expectExceptionMessage('not leader');
+
+        RegionErrorHandler::check($response, null, 42, notLeaderOwnedByRetryExecutor: false);
+    }
+
     // ========================================================================
     // Stage 2 — top-level error string (RawBatchPut / RawBatchDelete)
     // ========================================================================
