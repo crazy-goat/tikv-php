@@ -12,6 +12,10 @@ class TlsConfigBuilderTest extends TestCase
 {
     private string $tempDir;
 
+    /** Issue #688: the single message a mixed client certificate/key pair raises. */
+    private const MIXED_CLIENT_PAIR_MESSAGE = 'TLS client certificate and key must be given in the same form, '
+        . 'both file paths or both inline PEM; got %s for the certificate and %s for the key';
+
     protected function setUp(): void
     {
         $this->tempDir = sys_get_temp_dir() . '/tikv-test-' . uniqid();
@@ -505,6 +509,79 @@ class TlsConfigBuilderTest extends TestCase
         $config = (new TlsConfigBuilder())->withCaCert($pem)->build();
 
         $this->assertSame($pem, $config->caCert);
+    }
+
+    // ========================================================================
+    // Issue #688: a mixed client pair raises one message, whatever the shape
+    // ========================================================================
+
+    public function testMixedClientPairWithInlineCertAndExistingFilePathThrows(): void
+    {
+        $keyPath = $this->tempDir . '/client.key';
+        file_put_contents($keyPath, '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----');
+
+        $certPem = '-----BEGIN CERTIFICATE-----\ninline-cert\n-----END CERTIFICATE-----';
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf(self::MIXED_CLIENT_PAIR_MESSAGE, 'inline PEM', 'a file path'));
+
+        (new TlsConfigBuilder())->withClientCert($certPem, $keyPath);
+    }
+
+    public function testMixedClientPairWithExistingFilePathAndInlineKeyThrows(): void
+    {
+        $certPath = $this->tempDir . '/client.crt';
+        file_put_contents($certPath, '-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----');
+
+        $keyPem = '-----BEGIN PRIVATE KEY-----\ninline-key\n-----END PRIVATE KEY-----';
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf(self::MIXED_CLIENT_PAIR_MESSAGE, 'a file path', 'inline PEM'));
+
+        (new TlsConfigBuilder())->withClientCert($certPath, $keyPem);
+    }
+
+    /**
+     * The message must not depend on whether the path half of the pair exists:
+     * before issue #688 a missing path raised the generic missing-file message
+     * while an existing one raised the disallowed-extension message.
+     */
+    public function testMixedClientPairWithMissingFilePathRaisesTheSameMessage(): void
+    {
+        $certPem = '-----BEGIN CERTIFICATE-----\ninline-cert\n-----END CERTIFICATE-----';
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf(self::MIXED_CLIENT_PAIR_MESSAGE, 'inline PEM', 'a file path'));
+
+        (new TlsConfigBuilder())->withClientCert($certPem, $this->tempDir . '/missing.key');
+    }
+
+    public function testMixedClientPairMessageDoesNotLeakThePath(): void
+    {
+        $certPem = '-----BEGIN CERTIFICATE-----\ninline-cert\n-----END CERTIFICATE-----';
+
+        try {
+            (new TlsConfigBuilder())->withClientCert($certPem, $this->tempDir . '/missing.key');
+            $this->fail('Expected InvalidArgumentException was not thrown');
+        } catch (InvalidArgumentException $e) {
+            $this->assertStringNotContainsString($this->tempDir, $e->getMessage());
+            $this->assertStringNotContainsString('missing.key', $e->getMessage());
+        }
+    }
+
+    public function testClientPairGivenAsTwoInlinePemValuesStillWorks(): void
+    {
+        $caPem = '-----BEGIN CERTIFICATE-----\ninline-ca\n-----END CERTIFICATE-----';
+        $certPem = '-----BEGIN CERTIFICATE-----\ninline-cert\n-----END CERTIFICATE-----';
+        $keyPem = '-----BEGIN PRIVATE KEY-----\ninline-key\n-----END PRIVATE KEY-----';
+
+        $config = (new TlsConfigBuilder())
+            ->withCaCertPem($caPem)
+            ->withClientCert($certPem, $keyPem)
+            ->build();
+
+        $this->assertSame($certPem, $config->clientCert);
+        $this->assertSame($keyPem, $config->clientKey);
     }
 
     // ========================================================================
