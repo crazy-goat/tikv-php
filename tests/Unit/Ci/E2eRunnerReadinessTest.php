@@ -16,6 +16,13 @@ use PHPUnit\Framework\TestCase;
  * tests drive it through a fake `docker` command, so they need neither
  * Docker nor a cluster.
  *
+ * The gate also waits for the region layout to settle (issue #713): a fresh
+ * cluster splits its bootstrap region and grows every region to its full
+ * replica set a few seconds *after* the stores report Up, and each step bumps
+ * the region epoch. A run that starts in between hands the client a region
+ * whose epoch TiKV has already rejected; a commit that straddles the bump is
+ * not retried, so the transaction fails with `EpochNotMatch`.
+ *
  * The fake answers the v1-compatible `ps --services --filter
  * status=running` shape and rejects `ps --format`, which Compose v1 does not
  * understand: a gate that regressed to the v2-only option would time out
@@ -38,6 +45,30 @@ final class E2eRunnerReadinessTest extends TestCase
         [$exitCode] = $this->runClusterReady($this->allRunning(), 2);
 
         self::assertSame(1, $exitCode, 'Running TiKV containers are not ready until PD sees every store Up');
+    }
+
+    /**
+     * A fresh cluster splits its bootstrap region and adds the remaining
+     * replicas several seconds after every store is Up. Both steps bump the
+     * region epoch, so a run that starts in between hands the client a region
+     * it will see rejected (issue #713).
+     */
+    public function testAClusterWhoseRegionPeersAreStillBeingAddedIsNotReady(): void
+    {
+        [$exitCode] = $this->runClusterReady($this->allRunning(), 3, false, [1, 1, 1, 1, 1]);
+
+        self::assertSame(
+            1,
+            $exitCode,
+            'A region that has not grown its full replica set can bump its epoch under the client',
+        );
+    }
+
+    public function testAClusterWithNoRegionsIsNotReady(): void
+    {
+        [$exitCode] = $this->runClusterReady($this->allRunning(), 3, false, []);
+
+        self::assertSame(1, $exitCode, 'A PD that reports no region has not bootstrapped the cluster');
     }
 
     public function testAClusterWithAStoppedServiceIsNotReady(): void
@@ -149,12 +180,19 @@ final class E2eRunnerReadinessTest extends TestCase
      * Runs `cluster_ready` against a fake compose command.
      *
      * @param array<string, string> $services service name => container state
+     * @param list<int> $regionPeerCounts the peer count of every region PD reports
      *
      * @return array{int, string} the exit code and the combined output
      */
-    private function runClusterReady(array $services, int $stores, bool $psFails = false): array
-    {
-        return $this->runHarness($this->harness($services, $stores, $psFails) . "\ncluster_ready");
+    private function runClusterReady(
+        array $services,
+        int $stores,
+        bool $psFails = false,
+        array $regionPeerCounts = [3],
+    ): array {
+        return $this->runHarness(
+            $this->harness($services, $stores, $psFails, $regionPeerCounts) . "\ncluster_ready",
+        );
     }
 
     /**
@@ -174,12 +212,17 @@ final class E2eRunnerReadinessTest extends TestCase
     /**
      * The bash harness: a fake `docker`, no real sleeping, and the libraries
      * under test. `compose ps` answers the v1-compatible service list (and
-     * rejects `--format`), `compose exec` answers PD's store list.
+     * rejects `--format`), `compose exec` answers PD's store and region lists.
      *
      * @param array<string, string> $services service name => container state
+     * @param list<int> $regionPeerCounts the peer count of every region PD reports
      */
-    private function harness(array $services, int $stores, bool $psFails = false): string
-    {
+    private function harness(
+        array $services,
+        int $stores,
+        bool $psFails = false,
+        array $regionPeerCounts = [3],
+    ): string {
         $running = [];
         foreach ($services as $service => $state) {
             if ($state === 'running') {
@@ -201,6 +244,24 @@ final class E2eRunnerReadinessTest extends TestCase
         }
         $storesJson = '{"stores":[' . implode(',', $storeEntries) . ']}';
 
+        $regionEntries = [];
+        foreach ($regionPeerCounts as $regionIndex => $peerCount) {
+            $peers = [];
+            for ($peer = 1; $peer <= $peerCount; $peer++) {
+                $peers[] = sprintf('{"role_name":"Voter","id":%d,"store_id":%d}', $peer, $peer);
+            }
+            $regionEntries[] = sprintf(
+                '{"id":%d,"peers":[%s],"leader":{"role_name":"Voter","id":1,"store_id":1}}',
+                $regionIndex + 1,
+                implode(',', $peers),
+            );
+        }
+        $regionsJson = sprintf(
+            '{"count":%d,"regions":[%s]}',
+            count($regionEntries),
+            implode(',', $regionEntries),
+        );
+
         $root = dirname(__DIR__, 3);
         $composeLibrary = escapeshellarg($root . '/scripts/lib/compose.sh');
         $readinessLibrary = escapeshellarg($root . '/scripts/lib/wait-for-cluster.sh');
@@ -220,7 +281,10 @@ docker() {
             {$psBody}
             ;;
         exec)
-            printf '%s' '{$storesJson}'
+            case "\$*" in
+                *regions*) printf '%s' '{$regionsJson}' ;;
+                *) printf '%s' '{$storesJson}' ;;
+            esac
             ;;
         *)
             return 1
