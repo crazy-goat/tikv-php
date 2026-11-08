@@ -1410,6 +1410,8 @@ final readonly class TxnReader
                 default => array_slice($tikvRows, 0, $limit),
             };
 
+            $this->recordScannedRows($state, $rows);
+
             return $reverse ? array_reverse($rows) : $rows;
         }
 
@@ -1466,7 +1468,32 @@ final readonly class TxnReader
             default => array_slice($merged, 0, $limit),
         };
 
+        $this->recordScannedRows($state, $rows);
+
         return $reverse ? array_reverse($rows) : $rows;
+    }
+
+    /**
+     * Record the rows a scan consumed in the transaction's tracked read set
+     * (issue #724).
+     *
+     * A scanned key that the transaction also wrote is skipped: the merge
+     * replaced its scanned value with the buffered one, so recording it would
+     * claim a snapshot read that never happened. `get()` follows the same
+     * rule — it returns the write-set value without touching the read set.
+     * `setReadValue()` is a no-op when `trackReadSet` is false.
+     *
+     * @param array<array{key: string, value: ?string}> $rows
+     */
+    private function recordScannedRows(TransactionState $state, array $rows): void
+    {
+        foreach ($rows as $row) {
+            if ($state->hasWriteSetKey($row['key'])) {
+                continue;
+            }
+
+            $state->setReadValue($row['key'], $row['value']);
+        }
     }
 
     private function timeoutMs(string $operationType): ?int

@@ -12,6 +12,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [A transactional scan is a read: one timestamp for every returned key](#a-transactional-scan-is-a-read-one-timestamp-for-every-returned-key)
 - [A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep](#a-lock-resolution-deadline-fix-starts-from-the-current-lockresolver-not-from-470s-ttl-sleep)
 - [RetryExecutor unit tests that need zero-sleep retries: use DataIsNotReady or an explicit classifier](#retryexecutor-unit-tests-that-need-zero-sleep-retries-use-dataisnotready-or-an-explicit-classifier)
 - [Sizing a retry-budget regression test under equal jitter: do the min-cumulative-sleep math](#sizing-a-retry-budget-regression-test-under-equal-jitter-do-the-min-cumulative-sleep-math)
@@ -154,6 +155,24 @@ of the file.
 - [The batch deadline is finite by default, and checked only between waits (#275)](#the-batch-deadline-is-finite-by-default-and-checked-only-between-waits-275)
 - [Destructors log best-effort and skip rollback during shutdown (#287)](#destructors-log-best-effort-and-skip-rollback-during-shutdown-287)
 <!-- index:end -->
+
+## A transactional scan is a read: one timestamp for every returned key
+
+`Transaction::scan()` used to record only the **write-set** keys in
+`$readTsByKey`, so a pessimistic `scan()` followed by a `set()` of a scanned
+key minted a fresh TSO as `for_update_ts` and TiKV could not see a commit that
+happened between the scan and the write — the lost update #209 prevents for
+`get()`/`batchGet()` (issue #724). A scan reads every row at the transaction's
+snapshot (`startTs`), so one timestamp taken before the RPC covers the whole
+scan: `Transaction::scan()` assigns it to every returned key after the reader
+returns, and `TxnReader::finalizeScanResults()` records the same rows in the
+tracked read set (skipping a key the transaction also wrote, which returns the
+buffered value, not a snapshot read). The assignment uses `??=`, so an earlier
+`get()` timestamp wins — it is the more conservative one, because any commit
+after it becomes a conflict. Pinned by
+`TransactionTest::testEagerPessimisticWriteAfterScanReusesTheScansTimestamp`
+and `::testScanRecordsTheScannedKeysInTheTrackedReadSet`; both fail when the
+per-row `readTsByKey` assignment or the `setReadValue()` loop is dropped.
 
 ## A lock-resolution deadline fix starts from the current LockResolver, not from #470's TTL sleep
 
