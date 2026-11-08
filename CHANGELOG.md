@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Fixed
+
+- The TxnKV rollback and secondary-commit fan-outs now report their aggregate instead of dropping it (issue #691). `batchRollback()` and `pessimisticRollbackAll()` log one warning naming every failed region (region ID, sub-batch index and error) before rethrowing the first region's exception, so the first-abort contract is unchanged but the other regions' failures are no longer lost. The secondary-commit fan-out keeps its per-region warnings and adds a single summary line, `Secondary commit fan-out failed for some regions; locks will be resolved by readers`, with the same `failedRegions` / `totalRegions` / `errors` context; the transaction still ends `Committed` because the primary is already durable (issue #215, TXN-10). The prewrite aggregate moved into the shared `logFanOutPartialFailure()` helper and keeps its `Prewrite fan-out failed for some regions` message. Covered by `tests/Unit/TxnKv/TxnKvFanoutTest.php`. (#691)
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
