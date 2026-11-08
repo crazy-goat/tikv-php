@@ -32,6 +32,7 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\BatchDeadlineExceededException;
 use CrazyGoat\TiKV\Client\Exception\BatchPartialFailureException;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
@@ -272,6 +273,13 @@ final readonly class TwoPhaseCommitter
         private int $maxTxnBatchSize = self::DEFAULT_TXN_BATCH_SIZE,
         /** Maximum mutations/keys of one prewrite/commit request per region (issue #430). */
         private int $maxTxnBatchCount = self::DEFAULT_TXN_BATCH_COUNT,
+        /**
+         * Maximum number of prewrite/commit requests in flight at once
+         * (issue #789). Batching turns one request per region into N, so the
+         * secondary prewrite and commit fans out are windowed instead of
+         * dispatching every sub-batch before awaiting any of them.
+         */
+        private int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
         /** Optional Context control fields applied to every request (issue #426). */
         private ?RequestContextOptions $requestContext = null,
         /** Resource-control metadata carried on every request (issue #427). */
@@ -286,6 +294,9 @@ final readonly class TwoPhaseCommitter
         /** Optional structured tracing callback (issue #434, GAP-20). */
         private TraceEventInterface $tracer = new NoOpTracer(),
     ) {
+        if ($this->maxConcurrency < 1) {
+            throw new InvalidArgumentException('maxConcurrency must be >= 1');
+        }
     }
 
     public function isPessimistic(): bool
@@ -594,19 +605,27 @@ final readonly class TwoPhaseCommitter
 
         /**
          * Prewrite the secondary region groups in parallel (issue #291):
-         * every region's first attempt is dispatched before any wait begins,
-         * so their server-side latencies overlap. The first failing region
-         * is rethrown in dispatch order, preserving the sequential
-         * "abort at the first failing region" exception semantics.
+         * each window's first attempts are dispatched before any wait
+         * begins, so their server-side latencies overlap. The fan-out is
+         * windowed by {@see TwoPhaseCommitter::$maxConcurrency} (issue
+         * #789): request batching (issue #430) turned one request per
+         * region into N per region, and an uncapped fan-out would open a
+         * gRPC call, a serialized request and a future per sub-batch.
          *
-         * A partial failure is aggregated, not truncated (issue #431,
-         * GAP-17): the executor waits for every in-flight region and
-         * collects each region's failure, so one region's error neither
-         * cancels its peers nor hides them. The aggregate is logged with a
-         * descriptor for every failed call — the real region ID and
-         * sub-batch index — and the error of the first failing group in
-         * dispatch order — the one the sequential loop would have thrown —
-         * is rethrown.
+         * The first failing region is rethrown in dispatch order,
+         * preserving the sequential "abort at the first failing region"
+         * exception semantics. A partial failure inside a window is
+         * aggregated, not truncated (issue #431, GAP-17): the executor
+         * waits for every in-flight region and collects each region's
+         * failure, so one region's error neither cancels its peers in the
+         * window nor hides them. The aggregate is logged with a descriptor
+         * for every failed call — the real region ID and sub-batch index —
+         * and the error of the first failing group in dispatch order — the
+         * one the sequential loop would have thrown — is rethrown. Windows
+         * after the failing one are not dispatched (the capped executor's
+         * fail-fast contract), so the aggregate names every failure among
+         * the calls that were sent, not every secondary group in the
+         * transaction.
          */
         $prewriteSecondaries = function () use (
             $secondaryGroups,
@@ -647,8 +666,9 @@ final readonly class TwoPhaseCommitter
 
             $batchExecutor = new BatchAsyncExecutor($this->logger);
             try {
-                $results = $batchExecutor->executeParallel(
+                $results = $batchExecutor->executeParallelCapped(
                     $regionCalls,
+                    $this->maxConcurrency,
                     $this->timeoutConfig->batchDeadlineMs,
                     $labels,
                 );
@@ -1722,11 +1742,13 @@ final readonly class TwoPhaseCommitter
 
         // Remove the primary batch from outstanding work; commit the
         // remaining batches — including other batches of the primary's
-        // region, which are secondary commits — in parallel (issue #291):
-        // every batch's first attempt is dispatched before any wait begins,
-        // so their server-side latencies overlap. The primary's commit has
-        // already been acknowledged above, which is the protocol's ordering
-        // requirement.
+        // region, which are secondary commits — in parallel (issue #291),
+        // in windows of at most $maxConcurrency (issue #789): every batch's
+        // first attempt in a window is dispatched before any wait begins, so
+        // their server-side latencies overlap, while request batching
+        // (issue #430) can no longer open one future per committed sub-batch.
+        // The primary's commit has already been acknowledged above, which is
+        // the protocol's ordering requirement.
         //
         // The per-region sub-batch ordinals are computed over the original
         // list, before the primary batch is removed, so a later batch of the
@@ -1794,17 +1816,19 @@ final readonly class TwoPhaseCommitter
         }
 
         $batchExecutor = new BatchAsyncExecutor($this->logger);
-        // Exception semantics (issues #291 and #275): the batch deadline is
-        // finite by default, so BatchDeadlineExceededException can occur
-        // here AFTER the status was set to Committed — the secondary
-        // commits were dispatched but not all awaited within the deadline.
+        // Exception semantics (issues #291, #275 and #789): the batch
+        // deadline is finite by default and is shared by every window, so
+        // BatchDeadlineExceededException can occur here AFTER the status was
+        // set to Committed — the secondary commits were dispatched but not
+        // all awaited within the deadline.
         // The primary is durably committed (the commit point), so the
         // transaction IS committed. Throwing would invite a retrying caller
         // to apply it twice. Log it like any other secondary-commit failure
         // and return; leftover secondary locks are resolved by readers.
         try {
-            $batchExecutor->executeParallel(
+            $batchExecutor->executeParallelCapped(
                 $regionCalls,
+                $this->maxConcurrency,
                 $this->timeoutConfig->batchDeadlineMs,
                 $labels,
             );

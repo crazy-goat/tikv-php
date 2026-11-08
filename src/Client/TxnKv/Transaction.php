@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CrazyGoat\TiKV\Client\TxnKv;
 
+use CrazyGoat\TiKV\Client\Batch\BatchAsyncExecutor;
 use CrazyGoat\TiKV\Client\Cache\RegionCacheInterface;
 use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
@@ -179,6 +180,11 @@ final class Transaction
          */
         private readonly int $maxTxnBatchCount = TwoPhaseCommitter::DEFAULT_TXN_BATCH_COUNT,
         /**
+         * Maximum number of prewrite/commit requests in flight at once
+         * (issue #789); see {@see TxnKvClient::OPT_MAX_CONCURRENCY}.
+         */
+        private readonly int $maxConcurrency = BatchAsyncExecutor::DEFAULT_MAX_CONCURRENCY,
+        /**
          * Maximum number of read-set entries; 0 = unlimited (issue #297).
          */
         private readonly int $maxReadSetEntries = 0,
@@ -246,6 +252,7 @@ final class Transaction
             [
                 'maxTxnBatchSize' => $this->maxTxnBatchSize,
                 'maxTxnBatchCount' => $this->maxTxnBatchCount,
+                'maxConcurrency' => $this->maxConcurrency,
             ] as $name => $limit
         ) {
             if ($limit < 1) {
@@ -317,6 +324,7 @@ final class Transaction
             pessimisticLockTtlMs: $this->pessimisticLockTtlMs,
             maxTxnBatchSize: $this->maxTxnBatchSize,
             maxTxnBatchCount: $this->maxTxnBatchCount,
+            maxConcurrency: $this->maxConcurrency,
             requestContext: $this->requestContext,
             resourceControl: $this->resourceControl,
             metrics: $this->metrics,
