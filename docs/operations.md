@@ -1308,12 +1308,15 @@ $client = new RawKvClient(
 );
 ```
 
-`create()` always builds the default. A hand-assembled client closes only
-the connections it owns: the transport and the PD client it is given stay
+`create()` always builds the default. A hand-assembled `RawKvClient` closes
+only the connections it owns: the transport and the PD client it is given stay
 open, so the application remains their owner and may share them with other
 clients (issue #204). Pass `ownsGrpcClient: true` and/or `ownsPdClient: true`
 to transfer ownership — see
 [Sharing One Transport Between Clients](configuration.md#sharing-one-transport-between-clients).
+A hand-assembled `TxnKvClient` is the exception: its `ownsGrpcClient` defaults
+to `true` and it always closes its PD client, so pass `ownsGrpcClient: false`
+to keep a shared transport open; #990 tracks aligning it with `RawKvClient`.
 A `RegionCache` passed to the constructor is still cleared by `close()` (the
 client has no ownership flag for it), so do not share one between clients
 that you close independently.
@@ -1420,9 +1423,11 @@ calls continue (and become the application's responsibility when it closes
 the transport).
 
 `__destruct()` calls `close()`, so a client built by `create()` releases its
-caches, handles and connections when the object is destroyed. A client
-assembled by hand releases only its own caches: the transport and PD client
-it was given stay open, because the caller owns them (issue #204). In a
+caches, handles and connections when the object is destroyed. A hand-assembled
+`RawKvClient` releases only its own caches: the transport and PD client it was
+given stay open, because the caller owns them (issue #204). A hand-assembled
+`TxnKvClient` is the exception — its `ownsGrpcClient` still defaults to `true`,
+so it closes the transport unless you pass `ownsGrpcClient: false`. In a
 long-running process, still call `close()` explicitly so resources are
 released at a known point instead of at an arbitrary destructor.
 

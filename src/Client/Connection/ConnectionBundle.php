@@ -32,10 +32,13 @@ final readonly class ConnectionBundle
      * @param (Closure(string): bool)|null $storeHostPolicy
      * @param list<string> $pdEndpoints
      * @param list<int>|null $allowedStorePorts null = unrestricted
-     * @param TlsConfig|null $tlsConfig null when the transport was injected
-     *        through `options['grpcClient']` — the TLS configuration of an
-     *        injected transport is its own, and the factory builds none
-     *        (issue #283).
+     * @param TlsConfig|null $tlsConfig the TLS configuration the factory
+     *        built; `null` when no TLS was configured **or** when the
+     *        transport was injected through `options['grpcClient']` — the
+     *        TLS configuration of an injected transport is its own, and the
+     *        factory builds none (issue #283). Use {@see self::$tlsState} to
+     *        tell those two cases apart: a supplied transport is
+     *        {@see TlsState::Unknown}, not plaintext (issue #695).
      * @param MetricsInterface $metrics the client-side metrics backend
      *        (region cache, retries). With an injected transport the
      *        transport's own RPC counters follow that transport — the factory
@@ -66,6 +69,12 @@ final readonly class ConnectionBundle
          * transport.
          */
         public TraceEventInterface $tracer = new NoOpTracer(),
+        /**
+         * TLS state of {@see self::$grpc} (issue #695). {@see TlsState::Unknown}
+         * when the application supplied the transport, because the factory
+         * does not inspect it; otherwise derived from {@see self::$tlsConfig}.
+         */
+        public TlsState $tlsState = TlsState::Unknown,
     ) {
     }
 }
