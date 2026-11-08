@@ -140,7 +140,10 @@ Make sure the next milestone exists. Milestones in this repository are minor ver
 
 ## 7. After the release
 
-- Check that install instructions work with the new version (Packagist: `crazy-goat/tikv-client`).
+- Check that the install instructions work with the new version. The package is
+  not on Packagist yet: the three documents add the
+  `https://github.com/crazy-goat/tikv-php` VCS repository and require
+  `crazy-goat/tikv-client:~X.Y.Z`.
 - If something is wrong, do not move the tag. Fix forward with a patch release.
 
 ## Checklist
@@ -155,7 +158,11 @@ Make sure the next milestone exists. Milestones in this repository are minor ver
       the intro of the section, next to the previous one), the recommended
       constraint `~X.Y.Z`, the exact version `"X.Y.Z"` recommended for a
       reproducible build, the range `>=X.Y.Z <X.(Y+1).0` that constraint
-      resolves to, and the next minor `X.(Y+1).0`- [ ] Release PR merged
+      resolves to, and the next minor `X.(Y+1).0`
+- [ ] README "Installation" command and the install sections of `docs/README.md`
+      and `docs/getting-started.md` name the new `~X.Y.Z` constraint
+      (`InstallInstructionsGuardTest`)
+- [ ] Release PR merged
 - [ ] Annotated tag `vX.Y.Z` pushed
 - [ ] GitHub Release exists with the CHANGELOG notes
 - [ ] Milestone closed, next milestone exists
