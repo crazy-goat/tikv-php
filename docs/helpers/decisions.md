@@ -11,6 +11,7 @@ branches that learn something at the same time from conflicting at the end
 of the file.
 
 <!-- index:start -->
+- [Generated protobuf classes are never part of the stability promise (issue #734)](#generated-protobuf-classes-are-never-part-of-the-stability-promise-issue-734)
 - [Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)](#branch-naming-fixn-kebab-case-no-issue--prefix)
 - [Commit style: `type: subject (#N)`](#commit-style-type-subject-n)
 - [Issues are tracked in version milestones; work proceeds bottom-up](#issues-are-tracked-in-version-milestones-work-proceeds-bottom-up)
@@ -71,6 +72,20 @@ of the file.
 - [Workflows pin actions by commit SHA (issue #316, SEC-13)](#workflows-pin-actions-by-commit-sha-issue-316-sec-13)
 - [Resolved-lock tracking lives on the per-transaction LockResolver (issue #432, GAP-18)](#resolved-lock-tracking-lives-on-the-per-transaction-lockresolver-issue-432-gap-18)
 <!-- index:end -->
+
+## Generated protobuf classes are never part of the stability promise (issue #734)
+
+`src/Proto/` is regenerated with every protobuf bump and is excluded from
+lint, so a generated class cannot carry a promise the library is able to
+keep. A public property of a promised class is therefore typed with a
+library-owned value object, never with a generated message.
+
+`RegionException::$notLeader` is the case that forced the rule: it exposed
+`Errorpb\NotLeader` directly. It now carries `Exception\NotLeaderHint`
+(`regionId`, `leaderPeerId`, `leaderStoreId`), and the conversion from the
+oneof payload lives in `RegionException::fromRegionError()`. When another
+region-error payload becomes part of the promised surface, wrap it the same
+way instead of adding the generated class to the policy.
 
 ## Branch naming: `fix/<N>-<kebab-case>` (no `issue-` prefix)
 

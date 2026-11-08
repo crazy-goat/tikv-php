@@ -74,27 +74,13 @@ class StabilityPolicyGuardTest extends TestCase
         \CrazyGoat\TiKV\Client\TxnKv\TransactionStatus::class,
         \CrazyGoat\TiKV\Client\Exception\TiKvException::class,
         \CrazyGoat\TiKV\Client\Exception\InvalidArgumentException::class,
+        \CrazyGoat\TiKV\Client\Exception\NotLeaderHint::class,
         \CrazyGoat\TiKV\Client\Retry\RetryBudgetExhaustedException::class,
         \CrazyGoat\TiKV\Client\Retry\ErrorKind::class,
         \CrazyGoat\TiKV\Client\Observability\MetricsInterface::class,
         \CrazyGoat\TiKV\Client\Observability\InMemoryMetrics::class,
         \CrazyGoat\TiKV\Client\Region\ReplicaReadMode::class,
         \CrazyGoat\TiKV\Client\Region\ReplicaReadPolicy::class,
-    ];
-
-    /**
-     * The classes the policy promises outside src/Client/ — the generated
-     * ones. A generated class is the type of a public property of a
-     * promised class (`RegionException::$notLeader`), so a consumer writes
-     * against it and the promise has to cover it. It is named in the
-     * paragraph below the table of the policy, not in the table itself.
-     *
-     * The constant is resolved by the static analysis: a class that is
-     * renamed or removed makes PHPStan report "class not found" before the
-     * test even runs.
-     */
-    private const PUBLIC_API_OUTSIDE_CLIENT = [
-        \CrazyGoat\Proto\Errorpb\NotLeader::class,
     ];
 
     /**
@@ -152,23 +138,6 @@ class StabilityPolicyGuardTest extends TestCase
                 $exception,
                 $table,
                 'The stability policy does not mention the transaction exception ' . $exception . '.',
-            );
-        }
-
-        foreach (self::PUBLIC_API_OUTSIDE_CLIENT as $class) {
-            self::assertTrue(
-                class_exists($class),
-                $class . ' is part of the promised public API but does not exist any more. '
-                . 'A rename or a removal is a breaking change: update README.md, the policy '
-                . 'in this test and CHANGELOG.md (with a **BREAKING** prefix and a migration note).',
-            );
-
-            $shortName = substr($class, (int) strrpos($class, '\\') + 1);
-            self::assertStringContainsString(
-                $shortName,
-                $this->policySection(),
-                'The stability policy does not mention ' . $shortName . ', which it promises as '
-                . 'part of the public API surface.',
             );
         }
     }
