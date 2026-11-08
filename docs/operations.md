@@ -1601,21 +1601,23 @@ client instance and `getColumnFamily()` reads it back. `''` — the default —
 means TiKV's default column family; the client does not send a `cf` field for an
 empty string. Any other value is sent verbatim as the `cf` field of every
 subsequent key/value request of that client: single-key CRUD, CAS, the batch
-operations, scans (including both iterators) and delete-range operations. The
-setting is **per client instance**, not per call, so it applies to all later
-operations until it is changed. `setColumnFamily()` returns the client and
-performs no validation; TiKV rejects an unknown column family on the first
-request that uses it. The setting lives on the client instance: a new client
-instance starts at `''`, so re-apply it.
+operations, scans (including both iterators), delete-range operations and
+`ingest()` (as `SSTMeta.cf_name`). The setting is **per client instance**, not
+per call, so it applies to all later operations until it is changed.
+`setColumnFamily()` returns the client and performs no validation; TiKV rejects
+an unknown column family on the first request that uses it. The setting lives
+on the client instance: a new client instance starts at `''`, so re-apply it.
 
-Two exceptions to "every operation":
+`checksum()` is the exception: the `RawChecksum` RPC has no column-family
+field and always reads the default column family, so a non-empty setting makes
+`checksum()` throw `InvalidArgumentException` instead of returning the default
+column family's checksum as if it covered the configured one.
 
-- `checksum()` and `ingest()` have no column-family parameter and always
-  operate on the default column family.
-- With `options['apiVersion' => 2]` the transport clears the `cf` field on every
-  RawKV request (API V2 treats an explicit column family as deprecated and uses
-  the keyspace's default), so `setColumnFamily()` has no effect on an API V2
-  client.
+With `options['apiVersion' => 2]` the transport refuses a non-empty column
+family with `InvalidArgumentException`: API V2 supports only the keyspace's
+default column family, and silently falling back to it would answer for data
+the caller did not ask about. Leave the column family at `''` on an API V2
+client, or use API V1 to select a column family.
 
 `scanIterator()` and `scanPrefixIterator()` capture the column family when they
 are created; after changing it, create a new iterator. `TxnKvClient` has no

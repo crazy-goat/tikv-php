@@ -100,6 +100,8 @@ final readonly class SstIngestor
      *
      * @param array<string, string> $keyValuePairs Key-value pairs (sorted or unsorted)
      * @param int|null $ttl Time-to-live in seconds (null = no TTL)
+     * @param string $columnFamily Column family the SST is written into; an
+     *        empty string selects TiKV's default column family (issue #718)
      *
      * @throws GrpcException On gRPC transport error
      * @throws RegionException On region error
@@ -118,7 +120,7 @@ final readonly class SstIngestor
      *     region's retry loop exhausted its attempt cap or deadline before any
      *     region group was applied (issue #197)
      */
-    public function ingest(array $keyValuePairs, ?int $ttl = null): void
+    public function ingest(array $keyValuePairs, ?int $ttl = null, string $columnFamily = ''): void
     {
         if ($keyValuePairs === []) {
             return;
@@ -175,6 +177,7 @@ final readonly class SstIngestor
                         $regionKeys,
                         $keyValuePairs,
                         $ttl,
+                        $columnFamily,
                         $failedRegionId,
                     );
                 } catch (TiKvException $e) {
@@ -402,13 +405,21 @@ final readonly class SstIngestor
         array $keys,
         array $keyValuePairs,
         ?int $ttl,
+        string $columnFamily,
         int &$lastResolvedRegionId,
     ): int {
         $targetStoreId = null;
 
         return $executor->execute(
             $keys[0],
-            function () use ($keys, $keyValuePairs, $ttl, &$targetStoreId, &$lastResolvedRegionId): int {
+            function () use (
+                $keys,
+                $keyValuePairs,
+                $ttl,
+                $columnFamily,
+                &$targetStoreId,
+                &$lastResolvedRegionId,
+            ): int {
                 // Reset per attempt: a failure inside getRegionInfo() must
                 // not report the previous attempt's store (issue #197).
                 $targetStoreId = null;
@@ -418,7 +429,7 @@ final readonly class SstIngestor
                 $region = $this->regionResolver->getRegionInfo($keys[0]);
                 $targetStoreId = $region->leaderStoreId;
                 $lastResolvedRegionId = $region->regionId;
-                $this->ingestRegionKeys($region, $keys, $keyValuePairs, $ttl);
+                $this->ingestRegionKeys($region, $keys, $keyValuePairs, $ttl, $columnFamily);
 
                 return $region->regionId;
             },
@@ -446,6 +457,7 @@ final readonly class SstIngestor
         array $keys,
         array $keyValuePairs,
         ?int $ttl,
+        string $columnFamily = '',
     ): void {
         $address = $this->regionResolver->resolveStoreAddress($region->leaderStoreId);
 
@@ -467,7 +479,9 @@ final readonly class SstIngestor
         $sstMeta = new SSTMeta();
         $sstMeta->setUuid($uuid);
         $sstMeta->setRange($range);
-        $sstMeta->setCfName('default');
+        // An empty string means TiKV's default column family; the SST meta
+        // still needs the explicit name (issue #718).
+        $sstMeta->setCfName($columnFamily !== '' ? $columnFamily : 'default');
         $sstMeta->setRegionId($region->regionId);
         $sstMeta->setRegionEpoch($regionEpoch);
         $sstMeta->setEndKeyExclusive(false);

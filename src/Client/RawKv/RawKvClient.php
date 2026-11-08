@@ -1683,7 +1683,8 @@ final class RawKvClient
     /**
      * @throws ClientClosedException
      * @throws InvalidArgumentException When the range is reversed
-     *         (`$startKey` sorts after a non-empty `$endKey`)
+     *         (`$startKey` sorts after a non-empty `$endKey`) or the client
+     *         has a non-empty column family (`RawChecksum` has no `cf` field)
      * @throws RegionException
      * @throws GrpcException
      * @throws BatchPartialFailureException A region whose retry loop exhausted
@@ -1698,7 +1699,7 @@ final class RawKvClient
     {
         $this->ensureOpen();
 
-        return $this->rangeOps->checksum($startKey, $endKey);
+        return $this->rangeOps->checksum($startKey, $endKey, $this->columnFamily);
     }
 
     // ========================================================================
@@ -1713,7 +1714,9 @@ final class RawKvClient
      * loads.
      *
      * The key-value pairs are sorted by key, grouped by region, and written
-     * as SST files via the TiKV ImportSST service. All TiKV stores are
+     * as SST files via the TiKV ImportSST service into the client's column
+     * family (TiKV's default column family when `setColumnFamily('')` is in
+     * effect). All TiKV stores are
      * switched to import mode during the operation and switched back to
      * normal mode on completion, including on any exception. Process death
      * (OOM kill, deploy restart, `kill -9`) bypasses that `finally` and
@@ -1782,7 +1785,7 @@ final class RawKvClient
             $this->validateValueSize($value, 'ingest');
         }
 
-        $this->ingestor->ingest($keyValuePairs, $ttl);
+        $this->ingestor->ingest($keyValuePairs, $ttl, $this->columnFamily);
     }
 
     // ========================================================================

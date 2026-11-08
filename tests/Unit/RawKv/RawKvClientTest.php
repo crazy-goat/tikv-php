@@ -6,6 +6,10 @@ namespace CrazyGoat\TiKV\Tests\Unit\RawKv;
 
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\NotLeader;
+use CrazyGoat\Proto\ImportSstpb\IngestResponse;
+use CrazyGoat\Proto\ImportSstpb\RawWriteResponse;
+use CrazyGoat\Proto\ImportSstpb\SSTMeta;
+use CrazyGoat\Proto\ImportSstpb\SwitchModeResponse;
 use CrazyGoat\Proto\Kvrpcpb\KeyRange;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\RawBatchGetRequest;
@@ -3073,6 +3077,26 @@ class RawKvClientTest extends TestCase
         $this->assertSame(100, $result->totalBytes);
     }
 
+    /**
+     * Regression test for issue #718: checksum() used to call
+     * RawKvRangeOps::checksum() without the configured column family, so a
+     * client with a non-default CF returned the default CF's checksum.
+     * RawChecksum has no column-family field, so the only correct answer is
+     * to refuse instead of returning a checksum of different data.
+     */
+    public function testChecksumWithAColumnFamilyIsRejected(): void
+    {
+        $this->client->setColumnFamily('write');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'RawChecksum has no column-family field, so checksumming "write" is not supported; '
+            . 'checksum() reads only the default column family'
+        );
+
+        $this->client->checksum('a', 'z');
+    }
+
     public function testChecksumWithEmptyEndKeyCoversTheFinalRegion(): void
     {
         $first = new RegionInfo(1, 1, 1, 1, 1, 'a', 'm');
@@ -4175,6 +4199,52 @@ class RawKvClientTest extends TestCase
         $this->grpc->expects($this->never())->method('call');
 
         $this->client->ingest([]);
+    }
+
+    /**
+     * Regression test for issue #718: ingest() did not pass the client's
+     * column family to SstIngestor, so every SST landed in the default CF.
+     */
+    public function testIngestWithColumnFamilySetsCfNameOnSstMeta(): void
+    {
+        $this->client->setColumnFamily('write');
+
+        $this->pdClient->method('getAllStores')->willReturn([$this->defaultStore()]);
+        $this->pdClient->method('scanRegions')->willReturn([$this->defaultRegion()]);
+        $this->pdClient->method('getStore')->willReturn($this->defaultStore());
+        $this->regionCache->method('getByKey')->willReturn($this->defaultRegion());
+        $this->regionCache->method('put');
+
+        $this->grpc->method('callAsync')
+            ->willReturn(GrpcFuture::completed(new SwitchModeResponse()));
+        $this->grpc->method('call')->willReturn(new IngestResponse());
+
+        $writeResponse = new RawWriteResponse();
+        $writeResponse->setMetas([new SSTMeta()]);
+
+        $captured = null;
+        $this->grpc->method('callStreaming')
+            ->willReturnCallback(function (
+                string $address,
+                string $service,
+                string $method,
+                iterable $requests,
+            ) use (
+                $writeResponse,
+                &$captured,
+            ): Message {
+                $captured = $requests;
+
+                return $writeResponse;
+            });
+
+        $this->client->ingest(['key' => 'value']);
+
+        self::assertNotNull($captured);
+        $requests = iterator_to_array($captured, false);
+        $meta = $requests[0]->getMeta();
+        self::assertNotNull($meta);
+        self::assertSame('write', $meta->getCfName());
     }
 
     public function testIngestAcceptsNumericStringKey(): void

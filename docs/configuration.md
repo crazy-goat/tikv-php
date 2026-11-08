@@ -201,8 +201,9 @@ API V2 prefixes RawKV keys with `r` and transactional keys with `x`, followed
 by the three-byte keyspace ID. Region lookups use the same prefix with
 memory-comparable encoding. Response keys are decoded back to user keys, and a
 response containing a key from another keyspace raises
-`KeyOutOfBoundsException`. API V2 RawKV always uses the `default` column
-family, regardless of a configured legacy column-family setting.
+`KeyOutOfBoundsException`. API V2 RawKV supports only the keyspace's `default`
+column family: a non-empty `setColumnFamily()` value makes the next request
+fail with `InvalidArgumentException` instead of silently using the default.
 
 The TiKV cluster must be started with `[storage] api-version = 2` and
 `enable-ttl = true`. API V2 cannot be disabled after the server is enabled.

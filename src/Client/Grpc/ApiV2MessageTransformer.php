@@ -6,6 +6,7 @@ namespace CrazyGoat\TiKV\Client\Grpc;
 
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use Google\Protobuf\Internal\Message;
 use Google\Protobuf\Internal\RepeatedField;
 
@@ -97,7 +98,7 @@ final readonly class ApiV2MessageTransformer
 
         if ($request) {
             $this->setContext($message);
-            $this->forceDefaultColumnFamily($message);
+            $this->rejectColumnFamily($message);
             $this->transformRequestRange($message);
         }
 
@@ -312,19 +313,26 @@ final readonly class ApiV2MessageTransformer
         $message->setContext($context);
     }
 
-    private function forceDefaultColumnFamily(Message $message): void
+    private function rejectColumnFamily(Message $message): void
     {
         if ($this->mode !== Mode::Raw) {
             return;
         }
-        if (method_exists($message, 'getCf') && method_exists($message, 'setCf')) {
-            // API V2 treats an explicitly populated cf as deprecated. An
-            // empty proto3 scalar is omitted on the wire, which selects the
-            // server's required default column family.
-            $message->setCf('');
-        }
-        if (method_exists($message, 'getCfName') && method_exists($message, 'setCfName')) {
-            $message->setCfName('');
+
+        // API V2 supports only the keyspace's default column family: it
+        // treats an explicitly populated cf as deprecated. Dropping the
+        // field silently would compute or import against a different column
+        // family than the caller asked for, so refuse instead (issue #718).
+        $cf = method_exists($message, 'getCf') ? (string) $message->getCf() : '';
+        $cfName = method_exists($message, 'getCfName') ? (string) $message->getCfName() : '';
+        $configured = $cf !== '' ? $cf : $cfName;
+        if ($configured !== '') {
+            throw new InvalidArgumentException(sprintf(
+                'API V2 supports only the keyspace default column family, but %s carries "%s"; '
+                . 'use API V1 or leave the column family unset',
+                $message::class,
+                $configured,
+            ));
         }
     }
 }

@@ -7,6 +7,8 @@ namespace CrazyGoat\TiKV\Tests\Unit\Grpc;
 use CrazyGoat\Proto\Errorpb\EpochNotMatch;
 use CrazyGoat\Proto\Errorpb\Error;
 use CrazyGoat\Proto\Errorpb\KeyNotInRegion;
+use CrazyGoat\Proto\ImportSstpb\RawWriteRequest;
+use CrazyGoat\Proto\ImportSstpb\SSTMeta;
 use CrazyGoat\Proto\Kvrpcpb\Context;
 use CrazyGoat\Proto\Kvrpcpb\KvPair;
 use CrazyGoat\Proto\Kvrpcpb\Mutation;
@@ -22,19 +24,19 @@ use CrazyGoat\Proto\Tikvpb\BatchCommandsRequest;
 use CrazyGoat\Proto\Tikvpb\BatchCommandsResponse;
 use CrazyGoat\TiKV\Client\Codec\CodecV2;
 use CrazyGoat\TiKV\Client\Codec\Mode;
+use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\KeyOutOfBoundsException;
 use CrazyGoat\TiKV\Client\Grpc\ApiV2MessageTransformer;
 use PHPUnit\Framework\TestCase;
 
 final class ApiV2MessageTransformerTest extends TestCase
 {
-    public function testRawRequestEncodesKeyContextAndForcesDefaultCf(): void
+    public function testRawRequestEncodesKeyAndContext(): void
     {
         $codec = new CodecV2(Mode::Raw, 0x010203, 'tenant-a');
         $transformer = new ApiV2MessageTransformer($codec, Mode::Raw);
         $request = new RawPutRequest();
         $request->setKey("\x00\xFFkey");
-        $request->setCf('custom');
 
         $encoded = $transformer->transformRequest($request, 'tikvpb.Tikv');
 
@@ -47,6 +49,47 @@ final class ApiV2MessageTransformerTest extends TestCase
         $this->assertSame(2, $context->getApiVersion());
         $this->assertSame('tenant-a', $context->getKeyspaceName());
         $this->assertSame(0x010203, $context->getKeyspaceId());
+    }
+
+    /**
+     * API V2 has only the keyspace's default column family. Silently
+     * clearing a configured cf would answer for a different column family
+     * than the caller asked about (issue #718).
+     */
+    public function testRawRequestWithANonDefaultColumnFamilyIsRejected(): void
+    {
+        $codec = new CodecV2(Mode::Raw, 0x010203, 'tenant-a');
+        $transformer = new ApiV2MessageTransformer($codec, Mode::Raw);
+        $request = new RawPutRequest();
+        $request->setKey('key');
+        $request->setCf('custom');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'API V2 supports only the keyspace default column family, but '
+            . RawPutRequest::class . ' carries "custom"'
+        );
+
+        $transformer->transformRequest($request, 'tikvpb.Tikv');
+    }
+
+    /**
+     * SST ingest carries the column family on the nested SSTMeta (issue
+     * #718): the ingest path must be rejected too, not only RawPut.
+     */
+    public function testSstMetaWithANonDefaultColumnFamilyIsRejected(): void
+    {
+        $codec = new CodecV2(Mode::Raw, 0x010203, 'tenant-a');
+        $transformer = new ApiV2MessageTransformer($codec, Mode::Raw);
+        $meta = new SSTMeta();
+        $meta->setCfName('custom');
+        $request = new RawWriteRequest();
+        $request->setMeta($meta);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('carries "custom"');
+
+        $transformer->transformRequest($request, 'import_sstpb.ImportSST');
     }
 
     public function testTransactionNestedKeysAreEncoded(): void
