@@ -23,6 +23,10 @@ policy now classifies as internal.
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking change:** `TwoPhaseCommitter::getPriority()` has been removed (issue #685). The accessor had no caller anywhere in `src/`, `tests/`, `examples/` or `benchmarks/`: `Transaction::getPriority()` is the accessor callers use, and the committer reads its own readonly `$priority` property directly when it builds the `Context` of every request, so the method was dead public surface. **Migration:** call `Transaction::getPriority()` instead; `TwoPhaseCommitter` is an internal collaborator behind the entry points (see the stability policy in `README.md`), so the removal needs no version bump. The priority carried on the `Context` of every transaction RPC is unchanged.
+
 ## [v0.14.0] - 2026-11-08
 
 ### Added
