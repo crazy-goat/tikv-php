@@ -140,7 +140,7 @@ final class GrpcClient implements GrpcClientInterface
     private array $forceNewChannels = [];
 
     /**
-     * Maximum number of channels kept open at the same time.
+     * Default soft cap on the number of channels kept open at the same time.
      *
      * The client is meant to be long-lived and shared: the channel cache is
      * only worth its memory when the same transport serves many requests.
@@ -215,9 +215,19 @@ final class GrpcClient implements GrpcClientInterface
     public const DEFAULT_TIMEOUT_MS = 30000;
 
     /**
-     * @param int $maxChannels Maximum number of channels kept open at the same
-     *                        time (default 64). The least recently used channel
-     *                        is evicted when the cap is reached. Must be >= 1.
+     * @param int $maxChannels Soft cap on the number of cached channels (default 64).
+     *                        The least recently used channel is evicted when the cap
+     *                        is reached, but the cache may exceed it while every
+     *                        cached channel has in-flight calls: a channel with live
+     *                        calls is never closed, because closing it would destroy
+     *                        those calls (issue #278). Exceeding the cap is logged at
+     *                        warning level — raise the cap when the log shows up, it
+     *                        means the workload touches more stores than the cap
+     *                        allows. Both `RawKvClient::create()` and
+     *                        `TxnKvClient::create()` forward `options['maxChannels']`
+     *                        and `options['idleTtlMs']` to this constructor, so the
+     *                        pool is sized through `create()` like any other transport
+     *                        option. Must be >= 1.
      * @param int $idleTtlMs Idle time (ms) after which an unused channel is
      *                       evicted (default 10 minutes). A channel that is
      *                       evicted is reopened on the next request. Idle
@@ -229,16 +239,6 @@ final class GrpcClient implements GrpcClientInterface
      *                            an InvalidStateException is thrown if no TLS credentials
      *                            are available. Set this to false to ensure all connections
      *                            use TLS.
-     * @param int $maxChannels Soft cap on the number of cached channels (default 64).
-     *                         The cache may exceed it while every cached channel
-     *                         has in-flight calls: a channel with live calls is never
-     *                         closed, because closing it would destroy those calls
-     *                         (issue #278). Exceeding the cap is logged at warning
-     *                         level — raise the cap when the log shows up, it means
-     *                         the workload touches more stores than the cap allows.
-     *                         The cap is a constructor argument, so only a directly
-     *                         built client can raise it: a client built by
-     *                         `RawKvClient::create()` uses the default of 64.
      * @param int $maxReceiveMessageBytes grpc.max_receive_message_length channel argument
      *                                    in bytes (default 64 MB). The gRPC C core default
      *                                    is 4 MB, which scans/batch reads at MAX_SCAN_LIMIT

@@ -37,6 +37,7 @@ use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\HealthCheckException;
 use CrazyGoat\TiKV\Client\Exception\InvalidArgumentException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\Exception\NotLeaderHint;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\ScanLimitExceededException;
 use CrazyGoat\TiKV\Client\Exception\StoreNotFoundException;
@@ -3734,7 +3735,7 @@ class RawKvClientTest extends TestCase
                 $this->throwException(new RegionException(
                     'test',
                     'NotLeader',
-                    notLeader: new NotLeader(),
+                    notLeader: new NotLeaderHint(regionId: 1),
                     errorKind: ErrorKind::NotLeader,
                 )),
                 $response,
