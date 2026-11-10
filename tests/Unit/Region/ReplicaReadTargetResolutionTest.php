@@ -118,15 +118,47 @@ class ReplicaReadTargetResolutionTest extends TestCase
 
     public function testMixedModeMayTargetAnyPeer(): void
     {
+        // Issue #817: drive the candidate pick through the internal
+        // randomInt seam so every peer is visited deterministically instead
+        // of hoping 20 random_int() draws cover all three (0.09% flake).
+        $draw = -1;
+        $randomInt = static function (int $min, int $max) use (&$draw): int {
+            ++$draw;
+
+            return $min + ($draw % ($max - $min + 1));
+        };
+
         $storeIds = [];
         for ($i = 0; $i < 20; $i++) {
             $target = RegionContextFactory::resolveTarget(
                 $this->region(),
                 new ReplicaReadPolicy(mode: ReplicaReadMode::Mixed),
                 $this->storeLookup(),
+                randomInt: $randomInt,
             );
             $storeIds[] = $target->storeId;
+            self::assertContains($target->storeId, [3, 4, 5]);
             self::assertTrue($target->context->getReplicaRead() || $target->storeId === 3);
+        }
+
+        self::assertContains(3, $storeIds);
+        self::assertContains(4, $storeIds);
+        self::assertContains(5, $storeIds);
+    }
+
+    public function testMixedModeUsesRandomPickWhenNoSeamIsSupplied(): void
+    {
+        // The default path must stay random_int()-driven (issue #817):
+        // with the seam absent, repeated draws must still be able to land
+        // on the leader and on followers.
+        $storeIds = [];
+        for ($i = 0; $i < 64; $i++) {
+            $target = RegionContextFactory::resolveTarget(
+                $this->region(),
+                new ReplicaReadPolicy(mode: ReplicaReadMode::Mixed),
+                $this->storeLookup(),
+            );
+            $storeIds[] = $target->storeId;
         }
 
         self::assertContains(3, $storeIds);
