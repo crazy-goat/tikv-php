@@ -60,7 +60,12 @@ interface MetricsInterface
      * Increment the region-cache hit counter for a given operation type.
      *
      * Called when RegionCache::getByKey() returns a non-null region
-     * without falling back to PD.
+     * without falling back to PD. The retry executor also uses it for the
+     * one success signal that is not a lookup: a successful `EpochNotMatch`
+     * `current_regions` cache refresh emits it once with the
+     * `'epoch_not_match_refresh'` operation tag (issue #858), which is how
+     * a dashboard tells a payload refresh from a fallback to PD — the
+     * fallback emits no hit under that tag.
      */
     public function regionCacheHit(string $operation): void;
 

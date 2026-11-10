@@ -701,9 +701,9 @@ The interface has seven methods (full reference with emitted tag examples:
 | `rpcStarted()`         | An outbound gRPC call is dispatched                       |
 | `rpcCompleted()`       | The call returns — carries duration in ms + success flag  |
 | `retryAttempted()`     | A retryable error triggers another attempt                |
-| `regionCacheHit()`     | A region was served from the client's region cache        |
+| `regionCacheHit()`     | A region was served from the client's region cache — or, tagged `epoch_not_match_refresh`, refreshed from an `EpochNotMatch` payload (#858) |
 | `regionCacheMiss()`    | The cache missed and PD had to be queried                 |
-| `regionInvalidated()`  | A region was dropped from the cache (e.g. `region_error:epoch_not_match`, `retry_region_error:epoch_not_match`, `fatal_region_error`); non-routing errors keep the entry, and a successful executor-side `EpochNotMatch` `current_regions` refresh is a superseding `put()` that emits nothing of its own (issue #246) |
+| `regionInvalidated()`  | A region was dropped from the cache (e.g. `region_error:epoch_not_match`, `retry_region_error:epoch_not_match`, `fatal_region_error`); non-routing errors keep the entry, and a successful executor-side `EpochNotMatch` `current_regions` refresh is a superseding `put()` that emits no `regionInvalidated()` of its own (issue #246) — it is counted by `regionCacheHit('epoch_not_match_refresh')` instead (issue #858) |
 | `storeHealthChanged()` | A store entered its failure cooldown or recovered from one (issue #424) |
 
 For calls sent through `callAsync()`, `rpcCompleted()` fires when the future settles (`wait()`, failure, `cancel()`, also from `__destruct`). The duration covers dispatch to settle, including time before `wait()` is called (queueing in windowed fan-outs).

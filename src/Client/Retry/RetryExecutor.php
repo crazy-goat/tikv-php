@@ -656,7 +656,10 @@ final readonly class RetryExecutor
      * charge. The cache update itself is not an error-driven drop: `put()`
      * removes the superseded overlapping entries silently, exactly as for a
      * PD scan (issue #238), so no regionInvalidated() metric is emitted for
-     * a successful refresh. A fallback still uses
+     * a successful refresh — that success is reported instead by ONE
+     * regionCacheHit('epoch_not_match_refresh') counter, emitted only here,
+     * so a dashboard can tell "refreshed from the payload" from "fell back
+     * to PD" (issue #858). A fallback still uses
      * 'retry_region_error:epoch_not_match'.
      */
     private function refreshRegionCacheFromEpochNotMatch(TiKvException $e, string $key): bool
@@ -703,6 +706,15 @@ final readonly class RetryExecutor
         foreach ($regions as $region) {
             $this->regionCache->put($region);
         }
+
+        // Issue #858: the refresh path used to be observability-silent while
+        // the invalidation preceding it was counted, so a dashboard could not
+        // separate "refreshed from the payload" (PD round trip saved) from
+        // "fell back to PD". Exactly one positive counter marks the success
+        // path; the refresh stays a superseding put(), so it emits no
+        // regionInvalidated() reason of its own, and the fallback path keeps
+        // 'retry_region_error:epoch_not_match'.
+        $this->metrics->regionCacheHit('epoch_not_match_refresh');
 
         $this->logger->info('Region cache refreshed from EpochNotMatch current_regions', [
             'key' => KeyRedactor::redact($key),

@@ -34,6 +34,12 @@ use Psr\Log\NullLogger;
  * Issue #246 (REG-15): TiKV's EpochNotMatch carries the regions that now
  * cover the stale range. The retry must refresh the region cache from that
  * payload instead of invalidating the entry and paying a PD GetRegion.
+ *
+ * Issue #858 (OBS): the same paths pin the observability split — a
+ * successful refresh emits exactly ONE positive counter,
+ * regionCacheHit('epoch_not_match_refresh'), and no invalidation of its
+ * own, while every fallback keeps 'retry_region_error:epoch_not_match'
+ * and emits no hit under that tag.
  */
 class RetryExecutorEpochNotMatchTest extends TestCase
 {
@@ -189,6 +195,11 @@ class RetryExecutorEpochNotMatchTest extends TestCase
             $metrics->getInvalidations('retry_region_error:epoch_not_match'),
             'a cache refresh from current_regions is not an error-driven invalidation',
         );
+        self::assertSame(
+            1,
+            $metrics->getCacheHits('epoch_not_match_refresh'),
+            'a successful payload refresh must emit exactly one positive counter (issue #858)',
+        );
 
         $right = $cache->getByKey('m');
         self::assertInstanceOf(RegionInfo::class, $right);
@@ -230,6 +241,11 @@ class RetryExecutorEpochNotMatchTest extends TestCase
         self::assertSame(self::REGION_ID, $result->regionId, 'the left half keeps the original region ID');
         self::assertSame(2, $result->epochVersion, 'the refreshed left half carries the newer epoch');
         self::assertSame(0, $metrics->getInvalidations('retry_region_error:epoch_not_match'));
+        self::assertSame(
+            1,
+            $metrics->getCacheHits('epoch_not_match_refresh'),
+            'the split-shaped refresh must emit the positive counter too (issue #858)',
+        );
 
         $right = $cache->getByKey('m');
         self::assertInstanceOf(RegionInfo::class, $right);
@@ -280,6 +296,11 @@ class RetryExecutorEpochNotMatchTest extends TestCase
             $metrics->getInvalidations('retry_region_error:epoch_not_match'),
             'the boundary payload must fall back to the #245 invalidation path',
         );
+        self::assertSame(
+            0,
+            $metrics->getCacheHits('epoch_not_match_refresh'),
+            'a fallback must not report a refresh (issue #858)',
+        );
     }
 
     public function testEmptyCurrentRegionsStillInvalidateAndFallBackToPd(): void
@@ -315,6 +336,11 @@ class RetryExecutorEpochNotMatchTest extends TestCase
             $metrics->getInvalidations('retry_region_error:epoch_not_match'),
             'the empty-payload fallback must keep the #245 invalidation metric',
         );
+        self::assertSame(
+            0,
+            $metrics->getCacheHits('epoch_not_match_refresh'),
+            'a fallback must not report a refresh (issue #858)',
+        );
     }
 
     public function testCurrentRegionsThatDoNotCoverTheKeyFallBackToPd(): void
@@ -349,6 +375,11 @@ class RetryExecutorEpochNotMatchTest extends TestCase
         self::assertSame(9, $result->regionId, 'the PD answer must be used when the payload does not cover the key');
         self::assertNull($cache->getById(2), 'an unusable payload must not be cached');
         self::assertSame(1, $metrics->getInvalidations('retry_region_error:epoch_not_match'));
+        self::assertSame(
+            0,
+            $metrics->getCacheHits('epoch_not_match_refresh'),
+            'a fallback must not report a refresh (issue #858)',
+        );
     }
 
     public function testOlderEpochForTheSameRegionIdFallsBackToPd(): void
@@ -385,6 +416,11 @@ class RetryExecutorEpochNotMatchTest extends TestCase
         self::assertSame(2, $calls);
         self::assertSame(9, $result->regionId);
         self::assertSame(1, $metrics->getInvalidations('retry_region_error:epoch_not_match'));
+        self::assertSame(
+            0,
+            $metrics->getCacheHits('epoch_not_match_refresh'),
+            'a fallback must not report a refresh (issue #858)',
+        );
     }
 
     public function testCheckCapturesThePayloadAndStaleRegionBeforeInvalidating(): void
@@ -435,6 +471,16 @@ class RetryExecutorEpochNotMatchTest extends TestCase
 
         self::assertSame(2, $calls);
         self::assertSame(2, $result->regionId);
+        self::assertSame(
+            1,
+            $metrics->getInvalidations('region_error:epoch_not_match'),
+            'check() keeps its single drop — the refresh adds no invalidation (issue #858)',
+        );
+        self::assertSame(
+            1,
+            $metrics->getCacheHits('epoch_not_match_refresh'),
+            'the refresh after check() must still emit the positive counter (issue #858)',
+        );
     }
 
     public function testRegionsFromEpochNotMatchDecodesTxnRegionBoundaries(): void
