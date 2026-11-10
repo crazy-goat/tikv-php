@@ -761,7 +761,10 @@ Notes:
   newer epoch, and at least one returned region contains the key; otherwise
   the ordinary invalidate-and-resolve-through-PD fallback runs. A successful
   refresh is a superseding `put()`, not an error-driven invalidation, so the
-  retry executor emits no `regionInvalidated()` metric for it. At TxnKV call
+  retry executor emits no `regionInvalidated()` metric for it — it emits one
+  positive counter instead, `regionCacheHit('epoch_not_match_refresh')`, which
+  is how a dashboard separates a payload refresh from a PD fallback (issue
+  #858). At TxnKV call
   sites `RegionErrorHandler::check()` has already dropped the stale entry and
   emitted `region_error:epoch_not_match` before the executor sees the
   exception; its empty/unusable-payload fallback keeps

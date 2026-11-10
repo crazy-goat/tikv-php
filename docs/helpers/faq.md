@@ -2623,7 +2623,8 @@ Two more traps in the same path:
   does not contain the key is also a fallback, not a reason to cache the
   partial payload. A successful executor-side refresh is a superseding
   `put()`, so it emits no `regionInvalidated()` metric of its own (issue
-  #238); the `check()` drop above is counted separately. The executor's
+  #238); it is counted once as `regionCacheHit('epoch_not_match_refresh')`
+  (#858), and the `check()` drop above is counted separately. The executor's
   fallback emits `retry_region_error:epoch_not_match` only where the stale
   entry is still cached (e.g. RawKV); at TxnKV sites `check()` already
   dropped it, so only `region_error:epoch_not_match` is emitted.
