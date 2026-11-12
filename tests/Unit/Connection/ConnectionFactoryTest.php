@@ -66,6 +66,30 @@ class ConnectionFactoryTest extends TestCase
         $this->assertNull($bundle->allowedStorePorts);
     }
 
+    public function testEmptyStringEndpointIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('PD endpoint at index 0 must be a non-empty string');
+
+        ConnectionFactory::create(['']);
+    }
+
+    public function testNullEndpointIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('PD endpoint at index 0 must be a non-empty string');
+
+        ConnectionFactory::create([null]);
+    }
+
+    public function testInvalidEndpointAfterAValidOneIsRejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('PD endpoint at index 1 must be a non-empty string');
+
+        ConnectionFactory::create(['pd:2379', '']);
+    }
+
     public function testApiVersionRejectsUnsupportedValue(): void
     {
         $this->expectException(InvalidArgumentException::class);

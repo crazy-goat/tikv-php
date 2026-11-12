@@ -98,7 +98,8 @@ final class ConnectionFactory
      *        API V2 resolves options['keyspace'] through PD before creating
      *        the final codec. An omitted/empty keyspace selects DEFAULT.
      *
-     * @throws InvalidArgumentException if PD endpoints array is empty
+     * @throws InvalidArgumentException if PD endpoints array is empty, or if
+     *         any endpoint is not a non-empty string
      */
     public static function create(
         array $pdEndpoints,
@@ -109,6 +110,19 @@ final class ConnectionFactory
     ): ConnectionBundle {
         if ($pdEndpoints === []) {
             throw new InvalidArgumentException('PD endpoints array must not be empty');
+        }
+
+        // Validate every entry here, before anything is built from the list:
+        // PdClient silently drops non-strings and empty strings and then
+        // throws the global \InvalidArgumentException when nothing usable
+        // remains, which escapes the documented client exception hierarchy
+        // that create() callers are told to catch.
+        foreach ($pdEndpoints as $index => $endpoint) {
+            if (! \is_string($endpoint) || $endpoint === '') {
+                throw new InvalidArgumentException(
+                    \sprintf('PD endpoint at index %d must be a non-empty string', $index),
+                );
+            }
         }
 
         $resolvedLogger = $logger ?? new NullLogger();
