@@ -1124,14 +1124,17 @@ $logger->pushHandler(new StreamHandler('php://stderr', Logger::DEBUG));
 $logger->pushHandler(new StreamHandler('/var/log/tikv.log', Logger::WARNING));
 ```
 
-The region cache asks the logger **once** whether it can emit a `debug`
+The client asks the logger **once** whether it can emit a `debug`
 record at all, and it builds the log context of a debug record only when the
 answer is yes. A logger that discards the debug records — the default
 `NullLogger`, a Monolog logger above the `DEBUG` level, or any logger that
 answers "no" to Monolog's `isHandling()` — therefore costs nothing on the hot
-path, where the context of a region-cache record carries a redacted key. The
-other components (the lock resolver, the transaction committer, the store
-cache) still build their context unconditionally.
+path. The guard covers the region cache, the store cache, the lock resolver,
+the transaction committer and the reader's scan path — the components whose
+context carries a redacted key — and the debug records of PD RPCs, channel
+management, the TSO pool, batch execution, the SST import mode switch and the
+optional region-cache warmer. `ConnectionFactory`'s two construction-time
+records stay unconditional: they fire once per client.
 
 A logger that cannot be asked (a plain PSR-3 logger without a level API) is
 assumed to handle `debug`, so a record is never lost. A `NullLogger`
@@ -1143,7 +1146,7 @@ it receives.
 The answer is taken **once**, when the client is built, and it is not
 re-examined afterwards. A logger that is reconfigured at runtime — a Monolog
 handler whose level is lowered to `DEBUG`, say — keeps the answer the client
-was given: the cache stays quiet, and a logger that was at `DEBUG` and is
+was given: the client stays quiet, and a logger that was at `DEBUG` and is
 raised to `INFO` keeps building a context that is discarded. Configure the
 logger's level and handlers **before** you create the client, and create a
 new client after you change them.

@@ -18,6 +18,7 @@ use CrazyGoat\TiKV\Client\Connection\PdClientInterface;
 use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Client\Observability\DetailedMetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
@@ -40,6 +41,19 @@ use Psr\Log\NullLogger;
 
 final readonly class LockResolver
 {
+    /**
+     * Whether this resolver emits its debug records at all.
+     *
+     * Every lock-resolution attempt logs the locked key, and the record
+     * redacts it (`KeyRedactor::redact()` is a `hash_hmac` + `substr` +
+     * `sprintf`, plus the lazy salt on first use). A logger that discards
+     * the record makes that work pointless, so {@see DebugLogging} asks the
+     * logger once, at construction (issue #715). The answer is frozen with
+     * the flag: reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private bool $debugEnabled;
+
     /**
      * @param TimeoutConfig $timeoutConfig deadlines for the lock-resolution
      *        RPCs (`lockResolveTimeoutMs`) and for the TSO fetch
@@ -79,6 +93,7 @@ final readonly class LockResolver
          */
         private ResolvedLockTracker $resolvedLocks = new ResolvedLockTracker(),
     ) {
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     /**
@@ -130,10 +145,12 @@ final readonly class LockResolver
 
         try {
             $deadlineAtMs = $this->absoluteDeadlineMs($remainingDeadlineMs);
-            $this->logger->debug('Resolving lock', [
-                'key' => KeyRedactor::redact((string) $lock->getKey()),
-                'lockTs' => $lockTs,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Resolving lock', [
+                    'key' => KeyRedactor::redact((string) $lock->getKey()),
+                    'lockTs' => $lockTs,
+                ]);
+            }
 
             $status = $this->resolveStatus(
                 $primaryLock,
@@ -204,10 +221,12 @@ final readonly class LockResolver
 
             foreach ($byTxn as $lockTs => $txnLocks) {
                 $first = $txnLocks[0];
-                $this->logger->debug('Resolving locks of one transaction', [
-                    'lockTs' => $lockTs,
-                    'lockCount' => count($txnLocks),
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('Resolving locks of one transaction', [
+                        'lockTs' => $lockTs,
+                        'lockCount' => count($txnLocks),
+                    ]);
+                }
 
                 $status = $this->resolveStatus(
                     $this->primaryOf($first),
@@ -312,11 +331,13 @@ final readonly class LockResolver
                 // executor's own deadline check stops the retry loop with
                 // RetryBudgetExhaustedException when the budget is spent
                 // (issue #569).
-                $this->logger->debug('Lock still active, retrying operation', [
-                    'key' => KeyRedactor::redact((string) $lock->getKey()),
-                    'ttl' => $ttl,
-                    'remainingDeadlineMs' => $this->remainingDeadlineMs($deadlineAtMs),
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('Lock still active, retrying operation', [
+                        'key' => KeyRedactor::redact((string) $lock->getKey()),
+                        'ttl' => $ttl,
+                        'remainingDeadlineMs' => $this->remainingDeadlineMs($deadlineAtMs),
+                    ]);
+                }
                 throw new TxnRetryableException(
                     'Lock is still active; retrying operation',
                     BackoffType::TxnLock,
@@ -420,10 +441,12 @@ final readonly class LockResolver
     ): array {
         $cached = $this->statusCache->get($lockTs);
         if ($cached !== null) {
-            $this->logger->debug('Transaction status cache hit', [
-                'lockTs' => $lockTs,
-                'commitTs' => $cached,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Transaction status cache hit', [
+                    'lockTs' => $lockTs,
+                    'commitTs' => $cached,
+                ]);
+            }
             return ['commitTs' => $cached, 'lockTtl' => 0, 'final' => true];
         }
 
@@ -479,10 +502,12 @@ final readonly class LockResolver
         ));
         $request->setRollbackIfNotExist(true);
 
-        $this->logger->debug('CheckTxnStatus', [
-            'primaryKey' => KeyRedactor::redact($primaryKey),
-            'lockTs' => $lockTs,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('CheckTxnStatus', [
+                'primaryKey' => KeyRedactor::redact($primaryKey),
+                'lockTs' => $lockTs,
+            ]);
+        }
 
         /** @var CheckTxnStatusResponse $response */
         $response = $this->grpc->call(
@@ -607,10 +632,12 @@ final readonly class LockResolver
             $request->setKeys($regionKeys);
             $request->setStartVersion((int) $lock->getLockVersion());
 
-            $this->logger->debug('CheckSecondaryLocks', [
-                'regionId' => $region->regionId,
-                'keyCount' => count($regionKeys),
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('CheckSecondaryLocks', [
+                    'regionId' => $region->regionId,
+                    'keyCount' => count($regionKeys),
+                ]);
+            }
 
             /** @var CheckSecondaryLocksResponse $response */
             $response = $this->grpc->call(
@@ -727,12 +754,14 @@ final readonly class LockResolver
             $request->setStartVersion($lockTs);
             $request->setCommitVersion($commitTs);
 
-            $this->logger->debug('Async-commit resolve locks', [
-                'regionId' => $region->regionId,
-                'keyCount' => count($regionData['keys']),
-                'lockTs' => $lockTs,
-                'commitTs' => $commitTs,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Async-commit resolve locks', [
+                    'regionId' => $region->regionId,
+                    'keyCount' => count($regionData['keys']),
+                    'lockTs' => $lockTs,
+                    'commitTs' => $commitTs,
+                ]);
+            }
 
             /** @var ResolveLockResponse $response */
             $response = $this->grpc->call(
@@ -788,12 +817,14 @@ final readonly class LockResolver
             $request->setCommitVersion($commitTs);
             $request->setKeys($regionData['keys']);
 
-            $this->logger->debug('Batch resolve locks', [
-                'regionId' => $region->regionId,
-                'keyCount' => count($regionData['keys']),
-                'lockTs' => $lockTs,
-                'commitTs' => $commitTs,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Batch resolve locks', [
+                    'regionId' => $region->regionId,
+                    'keyCount' => count($regionData['keys']),
+                    'lockTs' => $lockTs,
+                    'commitTs' => $commitTs,
+                ]);
+            }
 
             /** @var ResolveLockResponse $response */
             $response = $this->grpc->call(
@@ -827,11 +858,13 @@ final readonly class LockResolver
         bool $notLeaderOwnedByRetryExecutor = true,
     ): void {
         $key = (string) $lock->getKey();
-        $this->logger->debug('Resolving lock as committed', [
-            'key' => KeyRedactor::redact($key),
-            'lockTs' => $lockTs,
-            'commitTs' => $commitTs,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Resolving lock as committed', [
+                'key' => KeyRedactor::redact($key),
+                'lockTs' => $lockTs,
+                'commitTs' => $commitTs,
+            ]);
+        }
 
         $region = $this->regionResolver->getRegionInfo(
             $key,
@@ -876,10 +909,12 @@ final readonly class LockResolver
         bool $notLeaderOwnedByRetryExecutor = true,
     ): void {
         $key = (string) $lock->getKey();
-        $this->logger->debug('Resolving lock as rolled back', [
-            'key' => KeyRedactor::redact($key),
-            'lockTs' => $lockTs,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Resolving lock as rolled back', [
+                'key' => KeyRedactor::redact($key),
+                'lockTs' => $lockTs,
+            ]);
+        }
 
         $region = $this->regionResolver->getRegionInfo(
             $key,

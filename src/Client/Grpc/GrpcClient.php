@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\Grpc;
 use CrazyGoat\TiKV\Client\Batch\GrpcFuture;
 use CrazyGoat\TiKV\Client\Exception\GrpcException;
 use CrazyGoat\TiKV\Client\Exception\InvalidStateException;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Observability\NoOpTracer;
@@ -91,6 +92,18 @@ use Psr\Log\NullLogger;
  */
 final class GrpcClient implements GrpcClientInterface
 {
+    /**
+     * Whether this transport emits its debug records at all.
+     *
+     * Every channel open, close and eviction logs an address context array,
+     * and a client that talks to many stores opens channels repeatedly. A
+     * logger that discards the record makes that work pointless, so
+     * {@see DebugLogging} asks the logger once, at construction (issue
+     * #715). Reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private readonly bool $debugEnabled;
+
     /**
      * Cached channels, keyed by address.
      *
@@ -349,6 +362,8 @@ final class GrpcClient implements GrpcClientInterface
                 'initialWindowSizeBytes must be greater than or equal to 0',
             );
         }
+
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     public function call(
@@ -782,7 +797,9 @@ final class GrpcClient implements GrpcClientInterface
             return;
         }
 
-        SafeLogging::log($this->logger, 'debug', 'Channel closed', ['address' => $address]);
+        if ($this->debugEnabled) {
+            SafeLogging::log($this->logger, 'debug', 'Channel closed', ['address' => $address]);
+        }
         $this->closeChannelObject($address, $entry['channel']);
     }
 
@@ -889,10 +906,12 @@ final class GrpcClient implements GrpcClientInterface
             }
 
             if ($entry['lastUsed'] < $idleThreshold) {
-                $this->logger->debug('Evicting idle channel', [
-                    'address' => $address,
-                    'idleSeconds' => round($now - $entry['lastUsed'], 1),
-                ]);
+                if ($this->debugEnabled) {
+                    $this->logger->debug('Evicting idle channel', [
+                        'address' => $address,
+                        'idleSeconds' => round($now - $entry['lastUsed'], 1),
+                    ]);
+                }
                 $this->evictChannel($address);
             }
         }
@@ -961,10 +980,12 @@ final class GrpcClient implements GrpcClientInterface
                 return;
             }
 
-            $this->logger->debug('Evicting LRU channel to enforce max channels', [
-                'address' => $lruAddress,
-                'maxChannels' => $this->maxChannels,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Evicting LRU channel to enforce max channels', [
+                    'address' => $lruAddress,
+                    'maxChannels' => $this->maxChannels,
+                ]);
+            }
             $this->evictChannel($lruAddress);
         }
 
@@ -1029,10 +1050,12 @@ final class GrpcClient implements GrpcClientInterface
             'inFlight' => $entry['inFlight'],
         ];
 
-        SafeLogging::log($this->logger, 'debug', 'Channel close deferred until in-flight calls settle', [
-            'address' => $address,
-            'inFlight' => $entry['inFlight'],
-        ]);
+        if ($this->debugEnabled) {
+            SafeLogging::log($this->logger, 'debug', 'Channel close deferred until in-flight calls settle', [
+                'address' => $address,
+                'inFlight' => $entry['inFlight'],
+            ]);
+        }
     }
 
     /**
@@ -1114,10 +1137,12 @@ final class GrpcClient implements GrpcClientInterface
     {
         $tlsEnabled = $this->tlsConfig instanceof TlsConfig && $this->tlsConfig->isEnabled();
 
-        $this->logger->debug('Opening gRPC channel', [
-            'address' => $address,
-            'tls' => $tlsEnabled,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Opening gRPC channel', [
+                'address' => $address,
+                'tls' => $tlsEnabled,
+            ]);
+        }
 
         if ($tlsEnabled) {
             $credentials = $this->createTlsCredentials();

@@ -33,6 +33,11 @@ use CrazyGoat\TiKV\Client\Retry\BackoffType;
 use CrazyGoat\TiKV\Client\Retry\RetryExecutor;
 use CrazyGoat\TiKV\Client\TxnKv\Exception\TxnRetryableException;
 use CrazyGoat\TiKV\Client\TxnKv\LockResolver;
+use CrazyGoat\TiKV\Client\Util\KeyRedactor;
+use CrazyGoat\TiKV\Tests\Unit\Support\KeyRedactorState;
+use CrazyGoat\TiKV\Tests\Unit\Support\LevelFilteredLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\PlainLogger;
+use CrazyGoat\TiKV\Tests\Unit\Support\SpyRedactor;
 use CrazyGoat\TiKV\Tests\Unit\Support\ThrowingTracer;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -100,6 +105,7 @@ class LockResolverTest extends TestCase
         ?callable $tso = null,
         ?InMemoryMetrics $metrics = null,
         ?TraceEventInterface $tracer = null,
+        ?LoggerInterface $logger = null,
     ): LockResolver {
         $regionResolver = new RegionResolver($this->pdClient, $this->regionCache);
 
@@ -116,7 +122,7 @@ class LockResolverTest extends TestCase
             $this->regionCache,
             $this->pdClient,
             $callerStartTs,
-            logger: $this->logger,
+            logger: $logger ?? $this->logger,
             metrics: $metrics ?? new InMemoryMetrics(),
             tracer: $tracer ?? new InMemoryTracer(),
         );
@@ -350,6 +356,54 @@ class LockResolverTest extends TestCase
         $request = $this->resolveLockRequests[0];
         $this->assertSame(1, (int) $request->getCommitVersion(), 'committed lock must carry the real commitTs');
         $this->assertSame(self::LOCK_TS, (int) $request->getStartVersion());
+    }
+
+    public function testResolveLockDoesNotRedactTheKeyWhenDebugLoggingIsOff(): void
+    {
+        KeyRedactorState::reset();
+        $spy = new SpyRedactor();
+        KeyRedactor::setRedactor($spy);
+
+        try {
+            $this->regionCache->method('getByKey')->willReturn($this->region);
+            $this->pdClient->method('getStore')->willReturn($this->makeStore());
+            $this->mockGrpcCallsAndCaptureResolve($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+            $resolver = $this->createResolver(logger: new LevelFilteredLogger());
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+            self::assertSame(
+                0,
+                $spy->calls,
+                'A logger that filters the debug level out must not pay for the redaction',
+            );
+        } finally {
+            KeyRedactorState::reset();
+        }
+    }
+
+    public function testResolveLockRedactsTheKeyWhenDebugLoggingIsOn(): void
+    {
+        KeyRedactorState::reset();
+        $spy = new SpyRedactor();
+        KeyRedactor::setRedactor($spy);
+
+        try {
+            $this->regionCache->method('getByKey')->willReturn($this->region);
+            $this->pdClient->method('getStore')->willReturn($this->makeStore());
+            $this->mockGrpcCallsAndCaptureResolve($this->makeCheckTxnStatusResponse(commitVersion: 1));
+
+            $resolver = $this->createResolver(logger: new PlainLogger());
+            $resolver->resolveLock(self::TEST_KEY, $this->makeLockInfo());
+
+            self::assertGreaterThan(
+                0,
+                $spy->calls,
+                'A logger that may record debug must still get the redacted key',
+            );
+        } finally {
+            KeyRedactorState::reset();
+        }
     }
 
     public function testResolveLockRecordsDetailedMetricsAndTrace(): void

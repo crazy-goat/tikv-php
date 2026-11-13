@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CrazyGoat\TiKV\Client\Cache;
 
 use CrazyGoat\Proto\Metapb\Store;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -16,17 +17,33 @@ class StoreCache implements StoreCacheInterface
     /** @var array<int, true> least recently used store first */
     private array $lruOrder = [];
 
+    /**
+     * Whether this cache emits its debug records at all.
+     *
+     * A store lookup runs on every region resolution, and the debug context
+     * of a hit, a miss and an eviction is an array that a level-filtered
+     * logger discards. {@see DebugLogging} asks the logger once, at
+     * construction, whether it handles the debug level (issue #715); the
+     * answer is frozen with the flag, so reconfigure the logger before the
+     * client is built — see `docs/configuration.md`.
+     */
+    private readonly bool $debugEnabled;
+
     public function __construct(
         private readonly int $ttlSeconds = 600,
         private readonly int $jitterSeconds = 60,
         private readonly int $maxEntries = 128,
         private readonly LoggerInterface $logger = new NullLogger(),
-    ) {}
+    ) {
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
+    }
 
     public function get(int $storeId): ?Store
     {
         if (!isset($this->entries[$storeId])) {
-            $this->logger->debug('Store cache miss', ['storeId' => $storeId]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Store cache miss', ['storeId' => $storeId]);
+            }
             return null;
         }
 
@@ -34,14 +51,18 @@ class StoreCache implements StoreCacheInterface
 
         if ($this->now() >= $entry->expiresAt) {
             $this->remove($storeId);
-            $this->logger->debug('Store cache expired', ['storeId' => $storeId]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Store cache expired', ['storeId' => $storeId]);
+            }
             return null;
         }
 
         // Mark as recently used
         $this->touch($storeId);
 
-        $this->logger->debug('Store cache hit', ['storeId' => $storeId]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Store cache hit', ['storeId' => $storeId]);
+        }
         return $entry->store;
     }
 
@@ -62,10 +83,12 @@ class StoreCache implements StoreCacheInterface
         );
         $this->touch($storeId);
 
-        $this->logger->debug('Store cached', [
-            'storeId' => $storeId,
-            'ttl' => $this->ttlSeconds + $jitter,
-        ]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Store cached', [
+                'storeId' => $storeId,
+                'ttl' => $this->ttlSeconds + $jitter,
+            ]);
+        }
     }
 
     public function invalidate(int $storeId): void
@@ -126,7 +149,9 @@ class StoreCache implements StoreCacheInterface
             return;
         }
 
-        $this->logger->debug('Evicting LRU store from cache', ['storeId' => $lruId]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Evicting LRU store from cache', ['storeId' => $lruId]);
+        }
         $this->remove($lruId);
     }
 }

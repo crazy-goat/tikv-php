@@ -30,6 +30,7 @@ use CrazyGoat\TiKV\Client\Exception\RegionException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Client\Observability\MetricsInterface;
 use CrazyGoat\TiKV\Client\Observability\NoOpMetrics;
 use CrazyGoat\TiKV\Client\Region\RegionContextFactory;
@@ -58,6 +59,17 @@ final readonly class SstIngestor
      * still forms its own chunk (issue #297).
      */
     private const INGEST_CHUNK_BYTES = 4 * 1024 * 1024;
+
+    /**
+     * Whether this ingestor emits its debug records at all.
+     *
+     * Every store that switches to import mode logs a context array, once
+     * per store and mode change. A logger that discards the record makes
+     * that work pointless, so {@see DebugLogging} asks the logger once, at
+     * construction (issue #715); reconfigure the logger before the client
+     * is built — see `docs/configuration.md`.
+     */
+    private bool $debugEnabled;
 
     public function __construct(
         private GrpcClientInterface $grpc,
@@ -101,6 +113,7 @@ final readonly class SstIngestor
         if ($maxIngestSize < 0) {
             throw new InvalidArgumentException('maxIngestSize must be >= 0');
         }
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     /**
@@ -320,9 +333,11 @@ final readonly class SstIngestor
         }
 
         foreach (array_keys($calls) as $storeId) {
-            $this->logger->debug('Switched store to ' . $modeName . ' mode', [
-                'storeId' => $storeId,
-            ]);
+            if ($this->debugEnabled) {
+                $this->logger->debug('Switched store to ' . $modeName . ' mode', [
+                    'storeId' => $storeId,
+                ]);
+            }
         }
     }
 

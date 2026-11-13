@@ -7,6 +7,7 @@ namespace CrazyGoat\TiKV\Client\Connection;
 use CrazyGoat\Proto\Pdpb\GetGCSafePointRequest;
 use CrazyGoat\Proto\Pdpb\GetGCSafePointResponse;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -34,6 +35,17 @@ final class SafePointCache
     private ?int $cachedSafePoint = null;
     private int $cachedAtMs = 0;
 
+    /**
+     * Whether this cache emits its debug records at all.
+     *
+     * A refresh happens at most once per interval but still builds a
+     * context array a level-filtered logger discards.
+     * {@see DebugLogging} asks the logger once, at construction (issue
+     * #715); reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private readonly bool $debugEnabled;
+
     public function __construct(
         /** @var \Closure(): int fetches the current GC safe point from PD (injected so the cache does not depend on PdClient itself) */
         private readonly \Closure $fetchSafePoint,
@@ -43,6 +55,7 @@ final class SafePointCache
         if ($refreshIntervalMs < 1) {
             throw new \InvalidArgumentException('refreshIntervalMs must be >= 1');
         }
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
     }
 
     /**
@@ -68,7 +81,9 @@ final class SafePointCache
             throw new TiKvException(sprintf('PD returned invalid GC safe point: %d', $safePoint));
         }
 
-        $this->logger->debug('Refreshed GC safe point', ['safePoint' => $safePoint]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('Refreshed GC safe point', ['safePoint' => $safePoint]);
+        }
         $this->cachedSafePoint = $safePoint;
         $this->cachedAtMs = $nowMs;
 

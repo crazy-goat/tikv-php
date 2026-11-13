@@ -35,6 +35,7 @@ use CrazyGoat\TiKV\Client\Exception\PdException;
 use CrazyGoat\TiKV\Client\Exception\TiKvException;
 use CrazyGoat\TiKV\Client\Grpc\GrpcClientInterface;
 use CrazyGoat\TiKV\Client\Grpc\TimeoutConfig;
+use CrazyGoat\TiKV\Client\Observability\DebugLogging;
 use CrazyGoat\TiKV\Client\RawKv\Dto\RegionInfoMapper;
 use CrazyGoat\TiKV\Client\Region\Dto\RegionInfo;
 use Google\Protobuf\Internal\Message;
@@ -54,6 +55,18 @@ final class PdClient implements PdClientInterface
     private readonly array $pdAddresses;
     /** Address currently used for PD RPCs (leader when discovery succeeded). */
     private string $currentAddress;
+
+    /**
+     * Whether this client emits its debug records at all.
+     *
+     * Every PD RPC logs its method and address, and the regions of a cold
+     * cache issue many of them. A logger that discards the record makes the
+     * context array pointless, so {@see DebugLogging} asks the logger once,
+     * at construction (issue #715). The answer is frozen with the flag:
+     * reconfigure the logger before the client is built — see
+     * `docs/configuration.md`.
+     */
+    private readonly bool $debugEnabled;
 
     /**
      * @param string|list<string> $pdAddresses one PD address or a list of
@@ -103,6 +116,7 @@ final class PdClient implements PdClientInterface
         }
         $this->pdAddresses = $addresses;
         $this->currentAddress = $addresses[0];
+        $this->debugEnabled = DebugLogging::handlesDebug($logger);
         $this->clusterIdGuard = new ClusterIdGuard(
             $this->getClusterId(...),
             $this->setClusterId(...),
@@ -926,7 +940,9 @@ final class PdClient implements PdClientInterface
         ?int $timeoutMs = null,
     ): Message {
         $deadlineMs = $timeoutMs ?? $this->timeoutConfig->pdTimeoutMs;
-        $this->logger->debug('PD gRPC call', ['method' => $method, 'address' => $this->currentAddress]);
+        if ($this->debugEnabled) {
+            $this->logger->debug('PD gRPC call', ['method' => $method, 'address' => $this->currentAddress]);
+        }
         try {
             $response = $this->grpc->call(
                 $this->currentAddress,
